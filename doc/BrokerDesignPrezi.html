@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EventBroker &amp; RequestBroker — Logos Messaging</title>
+
+  <!-- RevealJS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/theme/black.min.css" />
+  <!-- highlight.js theme -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+
+  <style>
+    /* ── Logos brand palette ───────────────────────── */
+    :root {
+      --logos-bg:          #08090c;
+      --logos-surface:     #111318;
+      --logos-surface2:    #1b1d26;
+      --logos-border:      #252830;
+      --logos-blue:        #5c9cf5;
+      --logos-blue-dim:    #3a6dcc;
+      --logos-green:       #64f4ac;
+      --logos-green-dim:   #3ab87a;
+      --logos-orange:      #f9882a;
+      --logos-red:         #f45c74;
+      --logos-text:        #e8eaf0;
+      --logos-muted:       #7a7f91;
+      --logos-code-bg:     #131520;
+      --logos-hl:          rgba(92,156,245,0.15);
+    }
+
+    /* Override reveal defaults — scale-friendly sizing */
+    .reveal-viewport { background: var(--logos-bg) !important; }
+    .reveal .slides section { text-align: left; }
+    .reveal .slides { font-size: 62.5%; }
+    .reveal { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; color: var(--logos-text); }
+    .reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+      color: #ffffff;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-transform: none;
+    }
+    .reveal h1 { font-size: 2em; line-height: 1.1; }
+    .reveal h2 { font-size: 1.4em; border-bottom: 1px solid var(--logos-border); padding-bottom: 0.2em; margin-bottom: 0.5em; }
+    .reveal h3 { font-size: 1.05em; color: var(--logos-blue); margin-bottom: 0.3em; }
+    .reveal p, .reveal li { font-size: 0.78em; line-height: 1.55; color: var(--logos-text); }
+    .reveal ul { margin-left: 1em; }
+    .reveal ul li { margin-bottom: 0.2em; }
+
+    /* ── Code blocks — projector-friendly ── */
+    .reveal pre {
+      background: var(--logos-code-bg) !important;
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      margin: 0.35em auto;
+      width: 100%;
+      font-size: 0.88em !important;
+    }
+    .reveal pre code {
+      background: transparent !important;
+      padding: 0.6em 0.8em !important;
+      max-height: none;
+      overflow: visible !important;
+    }
+    /* Scroll bar styling (for the rare overflow) */
+    .reveal pre code::-webkit-scrollbar { width: 4px; height: 4px; }
+    .reveal pre code::-webkit-scrollbar-track { background: transparent; }
+    .reveal pre code::-webkit-scrollbar-thumb { background: var(--logos-border); border-radius: 2px; }
+
+    /* Utility chips / badges */
+    .chip {
+      display: inline-block;
+      padding: 0.18em 0.6em;
+      border-radius: 4px;
+      font-size: 0.65em;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      vertical-align: middle;
+      margin-right: 0.3em;
+    }
+    .chip-blue   { background: rgba(92,156,245,0.18); color: var(--logos-blue); border: 1px solid var(--logos-blue-dim); }
+    .chip-green  { background: rgba(100,244,172,0.12); color: var(--logos-green); border: 1px solid var(--logos-green-dim); }
+    .chip-orange { background: rgba(249,136,42,0.18); color: var(--logos-orange); border: 1px solid #b35f10; }
+    .chip-red    { background: rgba(244,92,116,0.15); color: var(--logos-red); border: 1px solid #a02040; }
+
+    /* Callout boxes */
+    .callout {
+      background: var(--logos-surface);
+      border-left: 3px solid var(--logos-blue);
+      border-radius: 0 6px 6px 0;
+      padding: 0.45em 0.7em;
+      margin: 0.4em 0;
+      font-size: 0.72em;
+    }
+    .callout.warn  { border-color: var(--logos-orange); }
+    .callout.good  { border-color: var(--logos-green); }
+    .callout.bad   { border-color: var(--logos-red); }
+    .callout p { margin: 0; font-size: 1em; }
+
+    /* Two-column layout */
+    .cols { display: grid; gap: 1.2em; align-items: start; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .col-6040 { grid-template-columns: 0.6fr 0.4fr; }
+    .col-4060 { grid-template-columns: 0.4fr 0.6fr; }
+
+    /* Title slide */
+    .title-slide { text-align: center !important; }
+    .title-slide h1 { font-size: 2.2em; margin-bottom: 0.3em; }
+    .title-slide .subtitle {
+      font-size: 0.95em;
+      color: var(--logos-muted);
+      margin-bottom: 1.2em;
+    }
+    .logos-wordmark {
+      font-weight: 800; font-size: 1.1em; letter-spacing: 0.12em;
+      color: var(--logos-text); text-transform: uppercase;
+      line-height: 1.3;
+      overflow: visible;
+    }
+    .logos-wordmark .wm-lambda {
+      text-transform: none;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+      display: inline;
+    }
+    .section-header {
+      text-align: center !important;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%;
+    }
+    .section-header .num {
+      font-size: 4em; font-weight: 900; color: var(--logos-border);
+      line-height: 1; margin-bottom: 0.1em;
+    }
+    .section-header h2 { border: none; font-size: 1.7em; }
+
+    /* Diagram boxes */
+    .diag-box {
+      background: var(--logos-surface2);
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      padding: 0.5em 0.8em;
+      text-align: center;
+      font-size: 0.62em;
+      color: var(--logos-text);
+    }
+    .diag-box.accent { border-color: var(--logos-blue); color: var(--logos-blue); }
+    .diag-box.green  { border-color: var(--logos-green); color: var(--logos-green); }
+    .diag-box.bad    { border-color: var(--logos-red);   color: var(--logos-red); }
+
+    .arrow {
+      text-align: center; font-size: 1.2em; color: var(--logos-muted);
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* Highlight lines inside code */
+    .hl-line { background: var(--logos-hl); }
+
+    /* Table */
+    .reveal table {
+      font-size: 0.62em;
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .reveal table th {
+      background: var(--logos-surface2);
+      color: var(--logos-blue);
+      padding: 0.5em 0.8em;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--logos-border);
+    }
+    .reveal table td {
+      padding: 0.4em 0.8em;
+      border-bottom: 1px solid var(--logos-border);
+      color: var(--logos-text);
+    }
+    .reveal table tr:last-child td { border-bottom: none; }
+
+    /* Fragment transitions */
+    .reveal .fragment { opacity: 0; transition: opacity 0.4s; }
+    .reveal .fragment.visible { opacity: 1; }
+    .reveal .fragment.highlight-blue { color: var(--logos-blue) !important; }
+    .reveal .fragment.highlight-green { color: var(--logos-green) !important; }
+
+    /* File path label */
+    .filepath {
+      font-family: monospace;
+      font-size: 0.6em;
+      color: var(--logos-muted);
+      margin-bottom: 0.15em;
+      display: block;
+    }
+
+    /* Inline code */
+    .reveal code:not(pre code) {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background: var(--logos-surface2);
+      color: var(--logos-green);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+      font-size: 0.85em;
+    }
+
+    /* Slide number / progress */
+    .reveal .progress { height: 2px; color: var(--logos-blue); }
+    .reveal .slide-number {
+      background: transparent;
+      color: var(--logos-muted);
+      font-size: 0.6em;
+    }
+
+    /* ── Persistent footer ── */
+    .slide-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      background: linear-gradient(180deg, transparent 0%, rgba(8,9,12,0.9) 35%);
+      z-index: 30;
+      pointer-events: none;
+    }
+    .slide-footer .footer-inner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      opacity: 0.7;
+    }
+    .slide-footer .footer-lambda {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+    }
+    .slide-footer .footer-text {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--logos-text);
+      letter-spacing: 0.06em;
+    }
+    /* ── Top-right domain badge ── */
+    .top-right-domain {
+      position: fixed;
+      top: 16px;
+      right: 24px;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--logos-muted);
+      letter-spacing: 0.04em;
+      opacity: 0.7;
+      z-index: 30;
+      pointer-events: none;
+    }
+
+    /* auto-animate highlights */
+    [data-id="code-highlight"] {
+      transition: all 0.5s ease;
+    }
+
+    /* Vertical-nav hint arrow */
+    .reveal .controls .navigate-down { color: var(--logos-blue); }
+  </style>
+</head>
+
+<body>
+
+<!-- ── Top-right domain ── -->
+<div class="top-right-domain">Logos.co</div>
+
+<!-- ── Persistent footer ── -->
+<div class="slide-footer">
+  <div class="footer-inner">
+    <span class="footer-lambda">&lambda;</span>
+    <span class="footer-text">Logos · Messaging</span>
+  </div>
+</div>
+
+<div class="reveal">
+<div class="slides">
+
+<!-- ══════════════════════════════════════════════════
+     TITLE (standalone horizontal slide)
+══════════════════════════════════════════════════ -->
+<section class="title-slide">
+  <div style="margin-bottom:0.6em">
+    <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue);"><span class="wm-lambda">&lambda;</span>ogos · Messaging</div>
+  </div>
+  <h1>Event &amp; Request<br>Broker Design</h1>
+  <p class="subtitle">Architecture · Guarantees · Usage Patterns</p>
+  <div style="display:flex; justify-content:center; gap:0.8em; margin-top:1em; flex-wrap:wrap;">
+    <span class="chip chip-blue">EventBroker</span>
+    <span class="chip chip-green">RequestBroker</span>
+    <span class="chip chip-orange">MultiRequestBroker</span>
+    <span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);">BrokerContext</span>
+  </div>
+  <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 1 — THE PROBLEM (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 1.0  Section header -->
+  <section class="section-header">
+    <div class="num">01</div>
+    <h2>The Problem</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Tight coupling through raw callback pointers</p>
+  </section>
+
+  <!-- 1.1  Callback types -->
+  <section>
+    <h2>Callbacks Wired at Init Time</h2>
+    <p>A raw function pointer is captured during construction and stored without lifetime management.</p>
+
+    <div class="cols cols-2" style="margin-top:0.6em; align-items:start;">
+      <div>
+        <span class="filepath">waku/waku_core/subscription/push_handler.nim</span>
+        <pre><code class="language-nim" data-trim>
+type FilterPushHandler* =
+  proc(pubsubTopic: PubsubTopic,
+       message: WakuMessage)
+    {.async, gcsafe, closure.}
+        </code></pre>
+
+        <span class="filepath">waku/waku_core/subscription/subscription_manager.nim</span>
+        <pre><code class="language-nim" data-trim>
+type SubscriptionManager* = object
+  subscriptions:
+    TableRef[(string, ContentTopic),
+              FilterPushHandler]   # raw proc pointer
+
+proc registerSubscription*(m, pubsubTopic,
+    contentTopic, handler: FilterPushHandler) =
+  m.subscriptions[(pubsubTopic, contentTopic)]
+    = handler   # stored forever, no cleanup API
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout bad">
+          <p><strong style="color:var(--logos-red);">Problems</strong></p>
+        </div>
+        <ul style="margin-top:0.5em;">
+          <li class="fragment">Handler stored in a table with <em>no expiry</em></li>
+          <li class="fragment">If the owner is destroyed, the closure becomes a <strong>dangling capture</strong></li>
+          <li class="fragment"><code>SubscriptionManager</code> must be threaded through every layer</li>
+          <li class="fragment">Init order matters — register too early and the sender doesn't exist yet</li>
+          <li class="fragment">Hard to test in isolation</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1.2  Filter client push handlers — code -->
+  <section>
+    <h2>Raw Push Handlers in the Filter Client</h2>
+
+    <span class="filepath">waku/waku_filter_v2/client.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-10|12-18">
+type WakuFilterClient* = ref object of LPProtocol
+  rng: ref HmacDrbgContext
+  peerManager: PeerManager
+  pushHandlers: seq[FilterPushHandler] # &larr; raw list
+
+# Anyone wiring up the node must call this
+proc registerPushHandler*(
+    wfc: WakuFilterClient,
+    handler: FilterPushHandler) =
+  wfc.pushHandlers.add(handler)     # add and forget
+
+# Deep inside recv_service initialization:
+node.wakuFilterClient
+  .registerPushHandler(
+    proc(pubsubTopic: PubsubTopic,
+         message: WakuMessage) {.async, closure.} =
+      recvService.recentReceivedMsgs.add(...)
+  )
+    </code></pre>
+  </section>
+
+  <!-- 1.2b  Filter client push handlers — problems -->
+  <section>
+    <h2>Raw Push Handlers — What Goes Wrong</h2>
+
+    <div class="callout bad" style="margin-bottom:0.6em;">
+      <p><code>pushHandlers</code> is a plain <code>seq</code>. No way to <em>remove</em> a handler — not even when the owning service stops.</p>
+    </div>
+    <div class="callout bad" style="margin-bottom:0.6em;">
+      <p><code>recvService</code> is captured by the closure. If <code>RecvService</code> is destroyed first, the closure holds a stale reference.</p>
+    </div>
+    <div class="callout bad" style="margin-bottom:0.6em;">
+      <p>Adding a new subscriber means touching <strong>filter client construction code</strong> — import dependency in both directions.</p>
+    </div>
+  </section>
+
+  <!-- 1.3  Coupling chain diagram -->
+  <section>
+    <h2>The Coupling Chain</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Every new subscriber forces a new dependency across the entire init hierarchy.</p>
+
+    <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; align-items:center; gap:0.4em; margin:1em 0;">
+      <div class="diag-box bad">WakuNode<br><small>creates</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">FilterClient<br><small>holds seq[Handler]</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">RecvService<br><small>registers handler</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">Closure<br><small>captures recvService</small></div>
+    </div>
+
+    <div class="cols cols-2" style="margin-top:0.6em;">
+      <div class="callout bad">
+        <p><strong>Direct dependency:</strong> <code>RecvService</code> must know about <code>WakuFilterClient</code> just to receive events.</p>
+      </div>
+      <div class="callout bad">
+        <p><strong>No cleanup contract:</strong> <code>stopRecvService</code> cannot deregister — the callback lives as long as <code>WakuFilterClient</code> does.</p>
+      </div>
+    </div>
+
+    <div class="fragment callout" style="margin-top:0.7em;">
+      <p><strong>The goal:</strong> modules should talk to each other without importing or knowing about each other. That's what the Broker pattern delivers.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 1 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 2 — EVENTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 2.0  Section header -->
+  <section class="section-header">
+    <div class="num">02</div>
+    <h2 style="color:var(--logos-blue);">EventBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Reactive · Pub/Sub · Many emitters &rarr; Many listeners</p>
+  </section>
+
+  <!-- 2.1  Overview -->
+  <section>
+    <h2>EventBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li>A Nim <strong>macro</strong> that generates a type-safe, thread-local pub/sub broker for a single event type</li>
+          <li class="fragment">Emitters call <code>emit()</code> — <em>zero</em> knowledge of who is listening</li>
+          <li class="fragment">Listeners register with <code>listen()</code> and receive a <strong>handle</strong> for unregistering</li>
+          <li class="fragment">Any number of listeners, any number of emitters</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Generated API</h3>
+        <pre><code class="language-nim" data-trim>
+-- Declare once:
+EventBroker:
+  type MyEvent = object
+    field: string
+
+-- Anywhere in your code:
+MyEvent.listen(handler)        # register
+MyEvent.listen(ctx, handler)   # context-aware
+MyEvent.emit(event)            # fire
+MyEvent.emit(ctx, field = "x") # shorthand ctor
+MyEvent.dropListener(handle)   # cleanup
+MyEvent.dropAllListeners()
+        </code></pre>
+      </div>
+    </div>
+
+    <div class="fragment cols cols-3" style="margin-top:0.7em;">
+      <div class="callout good"><p><strong>Thread-local storage</strong> — no locks needed</p></div>
+      <div class="callout good"><p><strong>Async dispatch</strong> — listeners run as independent tasks</p></div>
+      <div class="callout good"><p><strong>Handle-based</strong> — explicit, safe cleanup</p></div>
+    </div>
+  </section>
+
+  <!-- 2.2  Step 1 — Declare events -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Events</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">One macro call per event type — can live in a shared events module.</p>
+
+    <span class="filepath">waku/events/delivery_events.nim</span>
+    <pre data-id="event-decl"><code class="language-nim" data-trim data-id="event-code">
+import waku/common/broker/event_broker
+
+EventBroker:
+  type DeliveryFeedbackEvent* = ref object
+    success*:  DeliverySuccess
+    dir*:      DeliveryDirection
+    comment*:  string
+    msgHash*:  WakuMessageHash
+    msg*:      WakuMessage
+
+EventBroker:
+  type OnFilterSubscribeEvent* = object
+    pubsubTopic*:   string
+    contentTopics*: seq[string]
+
+EventBroker:
+  type OnFilterUnSubscribeEvent* = object
+    pubsubTopic*:   string
+    contentTopics*: seq[string]
+    </code></pre>
+
+    <div class="callout" style="margin-top:0.4em;">
+      <p>The macro exports the type <em>plus</em> a companion broker — both live in thread-local storage. No global state, no locks.</p>
+    </div>
+  </section>
+
+  <!-- 2.3  Step 2 — Emit (part A) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Emit Events</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">The emitter doesn't import or know about any listener.</p>
+
+    <span class="filepath">waku/waku_filter_v2/client.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-6|8-13">
+proc subscribe*(wfc: WakuFilterClient, ...) {.async.} =
+  # ... network call ...
+  ?await wfc.sendSubscribeRequest(peer, req)
+
+  # Fire-and-forget: no knowledge of RecvService
+  OnFilterSubscribeEvent.emit(
+    wfc.brokerCtx, pubsubTopic, contentTopicSeq)
+
+proc unsubscribe*(wfc: WakuFilterClient, ...) {.async.} =
+  # ... network call ...
+  ?await wfc.sendSubscribeRequest(peer, req)
+
+  OnFilterUnSubscribeEvent.emit(
+    wfc.brokerCtx, pubsubTopic, contentTopicSeq)
+    </code></pre>
+
+    <div class="callout good" style="margin-top:0.4em;">
+      <p><code>emit()</code> spawns async tasks for each listener. The emitter returns immediately — no blocking, no coupling.</p>
+    </div>
+  </section>
+
+  <!-- 2.4  Step 2 — Emit (part B: delivery feedback) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Emit Events <span style="color:var(--logos-muted); font-size:0.6em;">(continued)</span></h2>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+proc performDeliveryFeedback(
+    self: RecvService,
+    success: DeliverySuccess,
+    dir: DeliveryDirection,
+    comment: string,
+    msgHash: WakuMessageHash,
+    msg: WakuMessage,
+) {.gcsafe, raises: [].} =
+  info "recv monitor performDeliveryFeedback",
+    success, dir, comment,
+    msg_hash = shortLog(msgHash)
+
+  DeliveryFeedbackEvent.emit(
+    brokerCtx = self.brokerCtx,
+    success   = success,
+    dir       = dir,
+    comment   = comment,
+    msgHash   = msgHash,
+    msg       = msg,
+  )
+    </code></pre>
+
+    <div class="callout">
+      <p>The <strong>inline constructor</strong> overload (<code>emit(brokerCtx, field = value, ...)</code>) is auto-generated for <code>object</code> types — no manual construction needed.</p>
+    </div>
+  </section>
+
+  <!-- 2.5  Step 3 — Listen (registration) -->
+  <section data-auto-animate>
+    <h2>Step 3 · Listen &amp; Clean Up</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;"><code>RecvService</code> manages its own listeners — zero coupling with the filter client.</p>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+type RecvService* = ref object of RootObj
+  brokerCtx:             BrokerContext
+  onSubscribeListener:   OnFilterSubscribeEventListener
+  onUnsubscribeListener: OnFilterUnSubscribeEventListener
+
+proc startRecvService*(self: RecvService) =
+  self.onSubscribeListener =
+    OnFilterSubscribeEvent.listen(
+      self.brokerCtx,
+      proc(ev: OnFilterSubscribeEvent)
+          {.async: (raises: []).} =
+        self.onSubscribe(
+          ev.pubsubTopic, ev.contentTopics)
+    ).valueOr:
+      error "Failed to set listener"
+      quit(QuitFailure)
+    </code></pre>
+  </section>
+
+  <!-- 2.5b  Step 3 — Listen (continued + cleanup) -->
+  <section data-auto-animate>
+    <h2>Step 3 · Listen &amp; Clean Up <span style="color:var(--logos-muted); font-size:0.6em;">(continued)</span></h2>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+  self.onUnsubscribeListener =
+    OnFilterUnSubscribeEvent.listen(
+      self.brokerCtx,
+      proc(ev: OnFilterUnSubscribeEvent)
+          {.async: (raises: []).} =
+        self.onUnsubscribe(
+          ev.pubsubTopic, ev.contentTopics)
+    ).valueOr:
+      error "Failed to set listener"
+      quit(QuitFailure)
+
+proc stopRecvService*(self: RecvService) {.async.} =
+  OnFilterSubscribeEvent.dropListener(
+    self.brokerCtx, self.onSubscribeListener)
+  OnFilterUnSubscribeEvent.dropListener(
+    self.brokerCtx, self.onUnsubscribeListener)
+    </code></pre>
+
+    <div class="callout good" style="margin-top:0.4em;">
+      <p>Symmetric <code>start</code>/<code>stop</code> — handles stored on the owner, cleanup is explicit and complete.</p>
+    </div>
+  </section>
+
+  <!-- 2.6  Guarantees -->
+  <section>
+    <h2>EventBroker Guarantees</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Lifetime safety</h3>
+        <ul>
+          <li><code>listen()</code> returns a typed <strong>handle</strong></li>
+          <li>Owner stores the handle as a field — lifetime tied to the object</li>
+          <li><code>dropListener(handle)</code> removes exactly that registration</li>
+          <li>No stale closure surprises after the owner is destroyed</li>
+        </ul>
+      </div>
+
+      <div>
+        <h3>Error isolation</h3>
+        <ul>
+          <li>Each listener runs as an independent <code>asyncSpawn</code> task</li>
+          <li>A panicking listener is caught and logged — others still fire</li>
+          <li>Emitter never awaits listener completion — never blocks</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="cols cols-3" style="margin-top:0.8em;">
+      <div class="callout fragment">
+        <p><strong>No import cycle:</strong> emitter and listener only share the event <em>type declaration</em> module.</p>
+      </div>
+      <div class="callout fragment">
+        <p><strong>Thread-local:</strong> broker state per event-loop thread — no mutex for dispatch.</p>
+      </div>
+      <div class="callout good fragment">
+        <p><strong>Type safety:</strong> handler signature enforced at compile time via generated proc type.</p>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 2 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 3 — REQUESTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 3.0  Section header -->
+  <section class="section-header">
+    <div class="num">03</div>
+    <h2 style="color:var(--logos-green);">RequestBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Proactive · Request/Response · Many requesters &rarr; One provider</p>
+  </section>
+
+  <!-- 3.1  Overview -->
+  <section>
+    <h2>RequestBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li>Decoupled <strong>request/response</strong> — one provider answers many requesters</li>
+          <li class="fragment">Provider registers itself; requesters call the broker — neither imports the other</li>
+          <li class="fragment">Signature <strong>compile-time enforced</strong> via a <code>proc signature</code> declaration</li>
+          <li class="fragment">Two modes: <code>async</code> (default) and <code>sync</code> for simple state accessors</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Generated API</h3>
+        <pre><code class="language-nim" data-trim>
+-- Declare once:
+RequestBroker:        # or RequestBroker(sync):
+  type MyData = object
+    value: string
+  proc signature*():
+    Future[Result[MyData, string]]
+
+-- Provider side (e.g. in WakuNode):
+MyData.setProvider(
+  proc(): Future[...] {.async.} =
+    ok(MyData(value: "hello")))
+
+-- Requester side (anywhere):
+let data = await MyData.request()
+        </code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3.2  Step 1 — Declare requests (sync) -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Requests</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Sync variants — simple state accessors, no <code>Future</code>.</p>
+
+    <span class="filepath">waku/requests/health_requests.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-13">
+# Zero-arg sync: simple state accessor
+RequestBroker(sync):
+  type RequestConnectionStatus* = object
+    connectionStatus*: ConnectionStatus
+
+# Arg-based sync: parameterised lookup
+RequestBroker(sync):
+  type RequestContentTopicsHealth* = object
+    contentTopicHealth*:
+      seq[tuple[topic: ContentTopic,
+                health: TopicHealth]]
+  proc signature(topics: seq[ContentTopic]):
+    Result[RequestContentTopicsHealth, string]
+    </code></pre>
+  </section>
+
+  <!-- 3.2b  Step 1 — Declare requests (async) -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Requests <span style="color:var(--logos-muted); font-size:0.6em;">(async)</span></h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Async variants — for IO-bound operations.</p>
+
+    <span class="filepath">waku/requests/health_requests.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-13">
+# Zero-arg async: may involve IO
+RequestBroker:
+  type RequestHealthReport* = object
+    healthReport*: HealthReport
+
+# Arg-based async: query a specific protocol
+RequestBroker:
+  type RequestProtocolHealth* = object
+    healthStatus*: ProtocolHealth
+  proc signature(protocol: WakuProtocol):
+    Future[Result[RequestProtocolHealth, string]]
+    </code></pre>
+
+    <div class="callout" style="margin-top:0.4em;">
+      <p>The <code>proc signature</code> declaration enforces the provider's type at <strong>compile time</strong>. If omitted, a zero-arg form is generated automatically.</p>
+    </div>
+  </section>
+
+  <!-- 3.3  Step 2 — Register provider (sync) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(sync)</span></h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Provider registers at startup — requesters don't need to know who provides.</p>
+
+    <span class="filepath">waku/factory/waku.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Sync provider — zero-arg, no IO involved
+RequestConnectionStatus.setProvider(
+  globalBrokerContext(),
+  proc(): Result[RequestConnectionStatus, string] =
+    try:
+      let report = waku[].healthMonitor
+                         .getSyncNodeHealthReport()
+      ok(RequestConnectionStatus(
+        connectionStatus: report.connectionStatus))
+    except:
+      err("Failed: " & getCurrentExceptionMsg()),
+).isOkOr:
+  error "Failed to set provider"
+    </code></pre>
+  </section>
+
+  <!-- 3.3b  Step 2 — Register provider (async) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(async)</span></h2>
+
+    <span class="filepath">waku/factory/waku.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Async provider — may perform IO
+RequestHealthReport.setProvider(
+  globalBrokerContext(),
+  proc(): Future[
+      Result[RequestHealthReport, string]]
+      {.async.} =
+    try:
+      let report = await waku[].healthMonitor
+                               .getNodeHealthReport()
+      ok(RequestHealthReport(healthReport: report))
+    except:
+      err("Failed: " & getCurrentExceptionMsg()),
+).isOkOr:
+  error "Failed to set provider"
+    </code></pre>
+  </section>
+
+  <!-- 3.4  Step 2 — Register provider (arg-based) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(arg-based)</span></h2>
+
+    <span class="filepath">waku/node/waku_node.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Arg-based sync provider
+RequestShardTopicsHealth.setProvider(
+  node.brokerCtx,
+  proc(topics: seq[PubsubTopic]):
+      Result[RequestShardTopicsHealth, string] =
+    var response: RequestShardTopicsHealth
+
+    for shard in topics:
+      var healthStatus = TopicHealth.UNHEALTHY
+
+      if not node.wakuRelay.isNil:
+        healthStatus = node.wakuRelay.topicsHealth
+          .getOrDefault(shard, TopicHealth.NOT_SUBSCRIBED)
+
+      response.topicHealth.add((shard, healthStatus))
+
+    return ok(response),
+).isOkOr:
+  error "Can't set provider for RequestShardTopicsHealth",
+    error = error
+    </code></pre>
+  </section>
+
+  <!-- 3.5  Step 3 — Make a request -->
+  <section data-auto-animate>
+    <h2>Step 3 · Make a Request</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Any module can request without knowing who provides — or even if a provider is registered.</p>
+
+    <div class="cols cols-2">
+      <div>
+        <pre data-id="req-call"><code class="language-nim" data-trim data-line-numbers="1-6|8-12|14-19">
+## Sync request — no await needed
+let statusRes =
+  RequestConnectionStatus.request()
+statusRes.isOkOr:
+  error "No connection status provider"
+  return
+echo statusRes.get().connectionStatus
+
+## Sync with args
+let healthRes =
+  RequestShardTopicsHealth.request(topics)
+healthRes.isOkOr:
+  error "Shard health unavailable"; return
+
+## Async request
+let reportRes =
+  await RequestHealthReport.request()
+reportRes.isOkOr:
+  error "Health report unavailable"; return
+let report = reportRes.get().healthReport
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout good">
+          <p>If no provider is registered, <code>request()</code> returns <code>err(...)</code> — never panics.</p>
+        </div>
+        <div class="callout good" style="margin-top:0.5em;">
+          <p>Provider exceptions are caught and converted to <code>err</code> — requester always gets a <code>Result</code>.</p>
+        </div>
+        <div class="fragment callout" style="margin-top:0.5em;">
+          <p><strong>One provider per context:</strong> calling <code>setProvider</code> twice returns an error — no silent overwrites.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 3 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 4 — MULTIREQUESTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 4.0  Section header -->
+  <section class="section-header">
+    <div class="num">04</div>
+    <h2 style="color:var(--logos-orange);">MultiRequestBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Fan-out · Collect all · Many providers &rarr; One result set</p>
+  </section>
+
+  <!-- 4.1  Design — code -->
+  <section>
+    <h2>MultiRequestBroker — Code</h2>
+
+    <pre><code class="language-nim" data-trim data-line-numbers="1-6|8-15|17-22|24-27">
+MultiRequestBroker:
+  type CollectedStatus* = object
+    label*: string
+
+  proc signature*():
+    Future[Result[CollectedStatus, string]]
+
+# Register N providers:
+let h1 = CollectedStatus.setProvider(
+  proc(): Future[...]
+      {.async: (raises: []).} =
+    ok(CollectedStatus(label: "relay")))
+
+let h2 = CollectedStatus.setProvider(
+  proc(): Future[...]
+      {.async: (raises: []).} =
+    ok(CollectedStatus(label: "filter")))
+
+# Request fans out — returns seq[T]:
+let results = await CollectedStatus.request()
+# Result[seq[CollectedStatus], string]
+#   @["relay", "filter"]
+
+# Remove individual provider via handle:
+CollectedStatus.removeProvider(h1)
+# or clear all:
+CollectedStatus.clearProviders()
+    </code></pre>
+  </section>
+
+  <!-- 4.1b  Design — explanation -->
+  <section>
+    <h2>MultiRequestBroker — Use Case</h2>
+
+    <ul>
+      <li>Collecting status/metrics from <em>multiple independent subsystems</em></li>
+      <li class="fragment">Each subsystem registers itself — no central orchestrator</li>
+      <li class="fragment">All providers called <strong>concurrently</strong> via <code>allFinished</code></li>
+      <li class="fragment">Succeeds only if <em>all</em> providers succeed — one failure short-circuits</li>
+    </ul>
+
+    <div class="fragment callout warn" style="margin-top:0.7em;">
+      <p>Unlike <code>RequestBroker</code>, <code>setProvider</code> returns a <strong>handle</strong> (not just ok/err) so providers can be removed individually.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 4 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 5 — BROKERCONTEXT (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 5.0  Section header + why -->
+  <section>
+    <h2>Why We Needed BrokerContext</h2>
+
+    <div class="callout warn" style="margin-bottom:0.7em;">
+      <p><strong>Scenario:</strong> two <code>WakuNode</code> instances on the <em>same thread</em> (integration tests, embedded usage). Both need their own listeners for <code>OnFilterSubscribeEvent</code>. Without context isolation, the single thread-local broker merges them — node A's events fire node B's listeners.</p>
+    </div>
+
+    <h3>How it works</h3>
+    <ul>
+      <li>Every broker stores listeners in <strong>buckets</strong>, keyed by <code>BrokerContext</code></li>
+      <li class="fragment">Bucket 0 is always <code>DefaultBrokerContext</code> — used when no context is specified</li>
+      <li class="fragment">Each component instance calls <code>NewBrokerContext()</code> and stores as field</li>
+      <li class="fragment">Context is propagated to submodules at init time</li>
+    </ul>
+
+    <div class="fragment callout good" style="margin-top:0.5em;">
+      <p>Context isolation is <strong>opt-in</strong>: omit the <code>brokerCtx</code> argument and the default context is used transparently.</p>
+    </div>
+  </section>
+
+  <!-- 5.0b  BrokerContext code -->
+  <section>
+    <h2>BrokerContext Implementation</h2>
+
+    <span class="filepath">waku/common/broker/broker_context.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-3|5-8|10-16|18-23">
+type BrokerContext* = distinct uint32
+
+const DefaultBrokerContext* =
+  BrokerContext(0xCAFFE14E'u32)
+
+proc NewBrokerContext*(): BrokerContext =
+  # Atomically increment global counter
+  BrokerContext(
+    gContextCounter.fetchAdd(1, moRelaxed))
+
+# In component initialization:
+type WakuNode* = ref object
+  brokerCtx: BrokerContext  # unique per instance
+
+proc new*(T: type WakuNode, ...): T =
+  WakuNode(
+    brokerCtx: NewBrokerContext(), ...)
+
+# Thread-local lock for sync emission:
+template lockGlobalBrokerContext*(
+    brokerCtx: BrokerContext,
+    body: untyped) =
+  await noCancel(
+    globalBrokerContextLock.acquire())
+  globalBrokerContextValue = brokerCtx
+  try: body
+  finally: restore + release
+    </code></pre>
+  </section>
+
+  <!-- 5.1  Context isolation — code -->
+  <section>
+    <h2>Context Isolation — Code</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Two nodes, same thread</p>
+
+    <pre><code class="language-nim" data-trim data-line-numbers="1-5|7-16|18-22">
+let nodeA = WakuNode.new(...)  # ctx = 0x0001
+let nodeB = WakuNode.new(...)  # ctx = 0x0002
+
+let recvA = RecvService.new(nodeA, ...)
+let recvB = RecvService.new(nodeB, ...)
+
+# recvA registers under nodeA's context:
+OnFilterSubscribeEvent.listen(
+  nodeA.brokerCtx,
+  proc(ev: ...) {.async.} =
+    recvA.onSubscribe(...))
+
+# recvB registers under nodeB's context:
+OnFilterSubscribeEvent.listen(
+  nodeB.brokerCtx,
+  proc(ev: ...) {.async.} =
+    recvB.onSubscribe(...))
+
+# Emit from nodeA — only recvA fires:
+OnFilterSubscribeEvent.emit(
+  nodeA.brokerCtx,
+  pubsubTopic, contentTopics)
+    </code></pre>
+  </section>
+
+  <!-- 5.1b  Context isolation — bucket diagram -->
+  <section>
+    <h2>Context Isolation — Bucket Structure</h2>
+
+    <div style="max-width:80%; margin:0 auto;">
+      <div class="diag-box accent" style="margin-bottom:0.6em; font-size:0.75em;">
+        <strong>Thread-local Broker (OnFilterSubscribeEvent)</strong>
+      </div>
+      <div class="cols cols-3" style="gap:0.5em; margin-top:0.5em;">
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 0</strong><br><small style="color:var(--logos-muted);">DefaultBrokerContext</small><br>
+          <small style="color:var(--logos-blue);">listeners: [ ]</small>
+        </div>
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 1</strong><br><small style="color:var(--logos-muted);">nodeA.brokerCtx</small><br>
+          <small style="color:var(--logos-green);">listeners: [recvA]</small>
+        </div>
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 2</strong><br><small style="color:var(--logos-muted);">nodeB.brokerCtx</small><br>
+          <small style="color:var(--logos-green);">listeners: [recvB]</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:0.8em;">
+      <p>Bucket cleanup is automatic: <code>dropAllListeners(ctx)</code> with a non-default context removes the bucket entirely.</p>
+    </div>
+    <div class="callout good" style="margin-top:0.4em;">
+      <p>Emit from <code>nodeA.brokerCtx</code> &rarr; only Bucket 1 listeners fire. Node B is completely unaffected.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 5 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 6 — SUMMARY (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 6.0  Comparison table -->
+  <section>
+    <h2>Broker Family: Quick Reference</h2>
+
+    <table style="margin-top:0.5em;">
+      <thead>
+        <tr>
+          <th>Aspect</th>
+          <th><span class="chip chip-blue">EventBroker</span></th>
+          <th><span class="chip chip-green">RequestBroker</span></th>
+          <th><span class="chip chip-orange">MultiRequestBroker</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Pattern</td>
+          <td>Reactive pub/sub</td>
+          <td>Proactive req/resp</td>
+          <td>Proactive fan-out</td>
+        </tr>
+        <tr>
+          <td>Direction</td>
+          <td>N emitters &rarr; N listeners</td>
+          <td>N requesters &rarr; 1 provider</td>
+          <td>N requesters &rarr; N providers</td>
+        </tr>
+        <tr>
+          <td>Return type</td>
+          <td><code>void</code> per listener</td>
+          <td><code>Result[T, string]</code></td>
+          <td><code>Result[seq[T], string]</code></td>
+        </tr>
+        <tr>
+          <td>Mode</td>
+          <td>Always async</td>
+          <td>Async <em>or</em> Sync</td>
+          <td>Always async</td>
+        </tr>
+        <tr>
+          <td>Providers / Listeners</td>
+          <td>Unlimited, handle per reg</td>
+          <td>Exactly 1 per context</td>
+          <td>Unlimited, handle per reg</td>
+        </tr>
+        <tr>
+          <td>Context-aware</td>
+          <td>Yes</td>
+          <td>Yes</td>
+          <td>Yes</td>
+        </tr>
+        <tr>
+          <td>Use when</td>
+          <td>Something happened; notify who cares</td>
+          <td>Query from one authoritative source</td>
+          <td>Gather data from multiple subsystems</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 6.1  Before vs After -->
+  <section>
+    <h2>Before vs After</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout bad" style="margin-bottom:0.4em;">
+          <p style="font-size:0.9em;"><strong style="color:var(--logos-red);">Before — Raw callbacks</strong></p>
+        </div>
+        <ul>
+          <li>Callback stored in <code>seq</code> with no cleanup path</li>
+          <li>Sender must import receiver's types</li>
+          <li>Init order matters — wire-up at the right moment</li>
+          <li>Stale captures after owner destruction</li>
+          <li>Adding a subscriber &rarr; modifying unrelated code</li>
+        </ul>
+      </div>
+      <div>
+        <div class="callout good" style="margin-bottom:0.4em;">
+          <p style="font-size:0.9em;"><strong style="color:var(--logos-green);">After — Brokers</strong></p>
+        </div>
+        <ul>
+          <li>Handle stored on owner; cleanup explicit (<code>start</code>/<code>stop</code>)</li>
+          <li>Emitter and listener share only the <em>event module</em></li>
+          <li>Register/provide <em>after</em> construction — order doesn't matter</li>
+          <li>No stale captures — handle tracks registration</li>
+          <li>Adding a subscriber &rarr; one <code>listen()</code> in its own module</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="fragment callout good" style="margin-top:0.7em; text-align:center;">
+      <p>Modules interact through a <strong>shared vocabulary of typed events and requests</strong> — not through direct references or init-time wiring.</p>
+    </div>
+  </section>
+
+  <!-- 6.2  Opportunities -->
+  <section>
+    <h2 style="color:var(--logos-green);">Opportunities!</h2>
+    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">What brokers are good for beyond decoupling&hellip;</p>
+
+    <ul style="font-size:0.88em; line-height:1.7;">
+      <li class="fragment"><strong>Define API contracts for modules</strong> — strict compile-time enforcement</li>
+      <li class="fragment"><strong>Easy mocking for testing</strong> — swap <code>setProvider</code> with a stub, no rewiring</li>
+      <li class="fragment"><strong>Serializable out of the box</strong> — event &amp; request types are plain objects</li>
+      <li class="fragment"><strong>IPC between threads or processes</strong> — broker boundary is a natural serialization seam</li>
+      <li class="fragment"><strong>FFI &amp; plugin interface</strong> — with CBOR / JSON / Protobuf serialization it&rsquo;s straightforward to implement the same interface in other languages</li>
+    </ul>
+
+    <div class="fragment callout good" style="margin-top:0.8em; text-align:center;">
+      <p>Brokers turn internal module boundaries into <strong>portable, testable, language-agnostic interfaces</strong>.</p>
+    </div>
+  </section>
+
+  <!-- 6.3  Thank you / Q&A -->
+  <section class="title-slide">
+    <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue); margin-bottom:0.8em;">LOGOS · MESSAGING</div>
+    <h2 style="font-size:2em; margin-bottom:0.4em;">Questions?</h2>
+    <p style="color:var(--logos-muted); font-size:0.8em; margin-bottom:0.8em;">
+      Source:
+    </p>
+    <div style="text-align:center; margin-bottom:1em;">
+      <code style="color:var(--logos-green); font-size:0.78em;">
+        <a href="https://github.com/logos-messaging/logos-delivery/tree/master/waku/common/broker"
+           style="color:var(--logos-green); text-decoration:underline;">
+           logos-messaging/logos-delivery &rarr; master/waku/common/broker/
+        </a>
+      </code>
+    </div>
+    <div style="display:flex; justify-content:center; gap:0.6em; flex-wrap:wrap;">
+      <span class="chip chip-blue">event_broker.nim</span>
+      <span class="chip chip-green">request_broker.nim</span>
+      <span class="chip chip-orange">multi_request_broker.nim</span>
+      <span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);">broker_context.nim</span>
+    </div>
+  </section>
+
+</section><!-- /Section 6 -->
+
+</div><!-- /.slides -->
+</div><!-- /.reveal -->
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/highlight/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/notes/notes.min.js"></script>
+
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c.v',
+    progress: true,
+    transition: 'fade',
+    transitionSpeed: 'fast',
+    backgroundTransition: 'none',
+    autoAnimateEasing: 'ease',
+    autoAnimateDuration: 0.5,
+    autoAnimateUnmatched: false,
+    width: 1400,
+    height: 900,
+    margin: 0.04,
+    minScale: 0.1,
+    maxScale: 3.0,
+    // Vertical navigation — arrow keys for sections + sub-slides
+    navigationMode: 'default',
+    plugins: [ RevealHighlight, RevealNotes ],
+    highlight: {
+      beforeHighlight: (hljs) => {
+        // Register Nim syntax
+        hljs.registerLanguage('nim', function(hljs) {
+          const KEYWORDS = {
+            keyword:
+              'addr and as asm bind block break case cast concept const continue ' +
+              'converter defer discard distinct div do elif else end enum except ' +
+              'export finally for from func generic if import in include interface ' +
+              'is isnot iterator let macro method mixin mod nil not notin object of ' +
+              'or out proc ptr raise ref return shl shr static template try tuple ' +
+              'type using var when while xor yield',
+            built_in:
+              'int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 ' +
+              'float float32 float64 bool char string seq array openarray ' +
+              'Future Result err ok async await asyncSpawn',
+            literal: 'true false nil'
+          };
+          return {
+            name: 'Nim',
+            aliases: ['nim'],
+            keywords: KEYWORDS,
+            contains: [
+              hljs.HASH_COMMENT_MODE,
+              { className: 'string', begin: '"', end: '"', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'string', begin: '\'', end: '\'', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'number', begin: '\\b\\d[\\d_]*(\\.\\d[\\d_]*)?([eE][+-]?\\d+)?\\b' },
+              { className: 'comment', begin: '#\\[', end: '\\]#', relevance: 10 },
+              {
+                className: 'type',
+                begin: '\\b[A-Z][a-zA-Z0-9_]*\\b',
+                relevance: 0
+              },
+            ]
+          };
+        });
+      }
+    }
+  });
+</script>
+</body>
+</html>

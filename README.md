@@ -186,6 +186,10 @@ To inspect generated AST during compilation:
 nim c -d:brokerDebug ...
 ```
 
+## Prezentation slides  
+
+[available here](https://nagyzoltanpeter.github.io/nim-brokers/BrokerDesignPrezi.html).
+
 ## License
 
 MIT
