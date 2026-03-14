@@ -161,8 +161,9 @@ from std/sequtils import keepItIf
 import chronos
 import results
 import ./helper/broker_utils, ./broker_context
+import ./mt_request_broker
 
-export results, chronos, keepItIf, broker_context
+export results, chronos, keepItIf, broker_context, mt_request_broker
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
   ## Build a future that is already completed with an error result.
@@ -173,6 +174,7 @@ proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
 type RequestBrokerMode = enum
   rbAsync
   rbSync
+  rbMultiThread
 
 proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
   ## Accept Future[Result[TypeIdent, string]] as the contract.
@@ -201,7 +203,7 @@ proc isSyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
 
 proc isReturnTypeValid(returnType, typeIdent: NimNode, mode: RequestBrokerMode): bool =
   case mode
-  of rbAsync:
+  of rbAsync, rbMultiThread:
     isAsyncReturnTypeValid(returnType, typeIdent)
   of rbSync:
     isSyncReturnTypeValid(returnType, typeIdent)
@@ -214,7 +216,7 @@ proc makeProcType(
   for param in params:
     formal.add(param)
   case mode
-  of rbAsync:
+  of rbAsync, rbMultiThread:
     let pragmas = newTree(nnkPragma, ident("async"))
     newTree(nnkProcTy, formal, pragmas)
   of rbSync:
@@ -233,8 +235,10 @@ proc parseMode(modeNode: NimNode): RequestBrokerMode =
     rbSync
   of "async":
     rbAsync
+  of "mt":
+    rbMultiThread
   else:
-    error("RequestBroker mode must be `sync` or `async` (default is async)", modeNode)
+    error("RequestBroker mode must be `sync`, `async` or `mt`", modeNode)
 
 proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   when defined(brokerDebug):
@@ -277,7 +281,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
       let returnType = params[0]
       if not isReturnTypeValid(returnType, typeIdent, mode):
         case mode
-        of rbAsync:
+        of rbAsync, rbMultiThread:
           error(
             "Signature must return Future[Result[`" & $typeIdent & "`, string]]", stmt
           )
@@ -325,7 +329,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
   let returnType =
     case mode
-    of rbAsync:
+    of rbAsync, rbMultiThread:
       quote:
         Future[Result[`typeIdent`, string]]
     of rbSync:
@@ -471,7 +475,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
           )
     )
     case mode
-    of rbAsync:
+    of rbAsync, rbMultiThread:
       result.add(
         quote do:
           proc request*(
@@ -642,7 +646,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
     let requestPragmas =
       case mode
-      of rbAsync:
+      of rbAsync, rbMultiThread:
         quote:
           {.async: (raises: []).}
       of rbSync:
@@ -657,7 +661,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
     var requestBody = newStmtList()
     case mode
-    of rbAsync:
+    of rbAsync, rbMultiThread:
       requestBody.add(
         quote do:
           return await `forwardCall`
@@ -733,7 +737,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     )
 
     case mode
-    of rbAsync:
+    of rbAsync, rbMultiThread:
       requestBodyKeyed.add(
         quote do:
           let catchedRes = catch:
@@ -838,4 +842,12 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
   ##   RequestBroker(sync):
   ##     type Foo = object
   ##     proc signature*(): Result[Foo, string]
-  generateRequestBroker(body, parseMode(mode))
+  ##   RequestBroker(mt):
+  ##     type Foo = object
+  ##     proc signature*(arg: string): Future[Result[Foo, string]] {.async.}
+  let m = parseMode(mode)
+  case m
+  of rbMultiThread:
+    generateMtRequestBroker(body)
+  of rbAsync, rbSync:
+    generateRequestBroker(body, m)
