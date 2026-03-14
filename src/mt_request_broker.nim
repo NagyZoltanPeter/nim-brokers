@@ -423,11 +423,16 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `tvNoArgCtxIdent`.add(DefaultBrokerContext)
           `tvNoArgHandlerIdent`.add(handler)
           withLock(`globalLockIdent`):
-            # Check if bucket already exists (e.g., other sig registered first)
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                return ok()
-            # Create new bucket
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                  return ok() # Same thread, other sig registered first
+                else:
+                  `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
+                  `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
+                  return err(
+                    "RequestBroker(" & `typeNameLit` &
+                      "): provider already set from another thread")
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
             let chan = cast[ptr AsyncChannel[`requestMsgName`]](
@@ -467,7 +472,15 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                return ok()
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                  return ok()
+                else:
+                  `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
+                  `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
+                  return err(
+                    "RequestBroker(" & `typeNameLit` &
+                      "): provider already set from another thread for context " &
+                      $brokerCtx)
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
             let chan = cast[ptr AsyncChannel[`requestMsgName`]](
@@ -502,7 +515,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                return ok()
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                  return ok()
+                else:
+                  `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
+                  `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
+                  return err(
+                    "RequestBroker(" & `typeNameLit` &
+                      "): provider already set from another thread")
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
             let chan = cast[ptr AsyncChannel[`requestMsgName`]](
@@ -542,7 +562,15 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                return ok()
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                  return ok()
+                else:
+                  `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
+                  `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
+                  return err(
+                    "RequestBroker(" & `typeNameLit` &
+                      "): provider already set from another thread for context " &
+                      $brokerCtx)
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
             let chan = cast[ptr AsyncChannel[`requestMsgName`]](
