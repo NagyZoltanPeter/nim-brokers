@@ -209,15 +209,25 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
                 break
             break
 
-          # Prune completed futures
+          # Prune completed futures — await marks them as consumed so Chronos
+          # does not warn about unresolved futures.  The await is instant
+          # because the future has already finished.
           var j = 0
           while j < inFlight.len:
             if inFlight[j].finished():
+              try:
+                await inFlight[j]      # instant — consumes the future
+              except CatchableError:
+                discard                # notifyListener is raises:[], but Chronos needs the guard
               inFlight.del(j)
             else:
               inc j
 
-          # Dispatch to all local listeners for this context
+          # Dispatch to all local listeners for this context.
+          # Calling the async proc schedules it on the event loop and returns
+          # a Future immediately — no asyncSpawn needed.  We track the future
+          # in inFlight so we can (a) consume it on prune and (b) drain it
+          # on shutdown.
           var idx = -1
           for i in 0 ..< `tvListenerCtxIdent`.len:
             if `tvListenerCtxIdent`[i] == `loopCtxIdent`:
@@ -228,8 +238,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             for cb in `tvListenerHandlersIdent`[idx].values:
               callbacks.add(cb)
             for cb in callbacks:
+              # Schedule listener — returns Future, already on the event loop.
               let fut = `listenerTaskIdent`(cb, msg.event)
-              asyncSpawn fut
               inFlight.add(fut)
   )
 
