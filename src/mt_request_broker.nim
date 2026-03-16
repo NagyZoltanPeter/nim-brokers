@@ -21,23 +21,8 @@ import results
 import asyncchannels
 import ./helper/broker_utils, ./broker_context
 
-export results, chronos, broker_context, asyncchannels
-
-# ---------------------------------------------------------------------------
-# Runtime helpers (not generated — used by generated code)
-# ---------------------------------------------------------------------------
-
-var mtThreadIdMarker* {.threadvar.}: bool
-  ## Each thread gets its own copy; `addr mtThreadIdMarker` is a unique thread id.
-
-template currentMtThreadId*(): pointer =
-  addr mtThreadIdMarker
-
-template blockingAwait*[T](f: Future[T]): T =
-  ## Blocking await for use inside non-async `{.thread.}` procs.
-  ## Use this instead of `await` (which conflicts with chronos's async-only
-  ## `await`) or call `waitFor` directly.
-  waitFor(f)
+import ./mt_broker_common
+export results, chronos, broker_context, asyncchannels, mt_broker_common
 
 # ---------------------------------------------------------------------------
 # Macro code generator

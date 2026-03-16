@@ -22,13 +22,13 @@ task test, "Run all tests":
     for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
       test opt, f
 
-  let mtTests = ["test_multi_thread_request_broker"]
+  let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on"]:
       test opt, f
 
 task perftest, "Run performance and stress tests":
-  let mtTests = ["perf_test_multi_thread_request_broker"]
+  let mtTests = ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on"]:
       test opt, f

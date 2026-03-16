@@ -84,13 +84,27 @@
 ## CounterEvent.emit(CounterEvent(42))
 ## ```
 
-import std/[macros, tables]
+import std/[macros, strutils, tables]
 import chronos, chronicles, results
 import ./helper/broker_utils, ./broker_context
+import ./mt_event_broker
 
-export chronicles, results, chronos, broker_context
+export chronicles, results, chronos, broker_context, mt_event_broker
 
-macro EventBroker*(body: untyped): untyped =
+type EventBrokerMode = enum
+  ebDefault
+  ebMultiThread
+
+proc parseEventBrokerMode(modeNode: NimNode): EventBrokerMode =
+  let raw = ($modeNode).strip().toLowerAscii()
+  case raw
+  of "mt":
+    ebMultiThread
+  else:
+    error("Unknown EventBroker mode: " & $modeNode & ". Expected: mt", modeNode)
+    ebDefault
+
+proc generateEventBroker(body: NimNode): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
   let parsed = parseSingleTypeDef(body, "EventBroker", collectFieldInfo = true)
@@ -410,3 +424,20 @@ macro EventBroker*(body: untyped): untyped =
 
   when defined(brokerDebug):
     echo result.repr
+
+macro EventBroker*(body: untyped): untyped =
+  ## Default (single-thread) mode.
+  generateEventBroker(body)
+
+macro EventBroker*(mode: untyped, body: untyped): untyped =
+  ## Explicit mode selector.
+  ## Example:
+  ##   EventBroker(mt):
+  ##     type MyEvent = object
+  ##       value*: int
+  let m = parseEventBrokerMode(mode)
+  case m
+  of ebMultiThread:
+    generateMtEventBroker(body)
+  of ebDefault:
+    generateEventBroker(body)

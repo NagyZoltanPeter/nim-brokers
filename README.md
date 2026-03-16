@@ -180,6 +180,58 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 See [Multi-Thread RequestBroker](doc/MultiThread_RequestBroker.md) for architecture diagrams, call sequences, and memory layout details. Run `nimble perftest` for benchmarks.
 
+### EventBroker (multi-thread)
+
+Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** thread; events emitted from **any** thread are broadcast to all registered listeners. Same-thread delivery uses `asyncSpawn` (no channel); cross-thread delivery uses `AsyncChannel` per listener-thread.
+
+```nim
+import brokers/event_broker
+
+EventBroker(mt):
+  type Alert = object
+    level*: int
+    message*: string
+
+# ── Listener on main thread ────────────────────────────
+proc main() {.async.} =
+  let handle = Alert.listen(
+    proc(evt: Alert): Future[void] {.async: (raises: []).} =
+      echo "Alert [", evt.level, "]: ", evt.message
+  )
+  check handle.isOk()
+
+  var done: Atomic[bool]
+  proc worker() {.thread.} =
+    Alert.emit(Alert(level: 1, message: "from worker"))
+    done.store(true)
+
+  var t: Thread[void]
+  t.createThread(worker)
+  while not done.load():
+    await sleepAsync(chronos.milliseconds(1))
+  t.joinThread()
+  Alert.dropAllListeners()
+
+waitFor main()
+```
+
+Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
+
+**Key differences from single-thread EventBroker:**
+
+- `emit()` is **synchronous** (not async) — works from `{.thread.}` procs with no event loop.
+- `dropListener` must be called from the **registering thread** (enforced at runtime).
+- `dropAllListeners` can be called from **any thread** — sends shutdown to all listener threads and drains in-flight listener tasks before cleanup.
+
+**Performance considerations:**
+
+- **Same-thread path** bypasses channels entirely — events dispatch directly via `asyncSpawn`.
+- **Cross-thread path** uses `sendSync` to each listener thread's channel (~20-160 µs debug, sub-millisecond release).
+- Broadcast fan-out: one channel per (BrokerContext, listener-thread) pair.
+- For high-throughput scenarios, prefer `--mm:orc` and `-d:release`.
+
+See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
+
 ## BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
