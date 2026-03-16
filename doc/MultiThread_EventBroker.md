@@ -58,7 +58,7 @@ proc main() {.async.} =
   )
 
   proc worker() {.thread.} =
-    ChatMsg.emit(ChatMsg(user: "Alice", text: "Hello from worker!"))
+    waitFor ChatMsg.emit(ChatMsg(user: "Alice", text: "Hello from worker!"))
 
   var t: Thread[void]
   t.createThread(worker)
@@ -76,16 +76,15 @@ Compile with `--threads:on`.
 
 ## Important Notices
 
-### `emit()` is synchronous
+### `emit()` is async
 
-Unlike single-thread `EventBroker` where `emit()` wraps `asyncSpawn`, the multi-thread
-`emit()` is a **synchronous** `{.gcsafe.}` proc. This is essential for use from
-`{.thread.}` procs that have no event loop:
+The multi-thread `emit()` is an **async** proc (`{.async: (raises: []).}`):
 
-- **Same-thread listeners**: dispatched via `asyncSpawn` (requires an event loop on
-  the calling thread — which listener threads always have).
-- **Cross-thread listeners**: delivered via `sendSync` (blocking channel send, no
-  event loop required on the emitting thread).
+- In async contexts (e.g. inside `{.async.}` procs): use `await emit(...)`.
+- In `{.thread.}` procs with no event loop: use `waitFor emit(...)` — this creates
+  a temporary event loop for the duration of the call.
+- **Same-thread listeners**: dispatched via `asyncSpawn` (fire-and-forget).
+- **Cross-thread listeners**: delivered via `sendSync` (brief blocking channel send).
 
 ### Thread procs cannot be closures
 
@@ -121,15 +120,15 @@ Each thread that registers listeners for a `BrokerContext` gets its own `AsyncCh
 and `processLoop`. This enables broadcast fan-out:
 
 ```
-Emitter Thread                 Listener Thread A            Listener Thread B
-┌──────────────┐              ┌──────────────────┐         ┌──────────────────┐
-│   emit(evt)  │─sendSync──▶ │  AsyncChannel A   │        │  AsyncChannel B   │
-│              │─sendSync──▶ │                    │        │                    │
-└──────────────┘              │  processLoop A    │        │  processLoop B    │
-                              │    ↓ recv         │        │    ↓ recv         │
-                              │  listener1(evt)   │        │  listener3(evt)   │
-                              │  listener2(evt)   │        │                    │
-                              └──────────────────┘         └──────────────────┘
+Emitter Thread                 Listener Thread A           Listener Thread B
+┌──────────────┐              ┌──────────────────┐        ┌──────────────────┐
+│   emit(evt)  │──sendSync───▶│  AsyncChannel A  │        │  AsyncChannel B  │
+│              │──sendSync────│                  │───────▶│                  │
+└──────────────┘              │  processLoop A   │        │  processLoop B   │
+                              │    ↓ recv        │        │    ↓ recv        │
+                              │  listener1(evt)  │        │  listener3(evt)  │
+                              │  listener2(evt)  │        │                  │
+                              └──────────────────┘        └──────────────────┘
 ```
 
 ### Call Sequence: Cross-Thread Emit

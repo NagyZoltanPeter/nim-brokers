@@ -202,7 +202,7 @@ proc main() {.async.} =
 
   var done: Atomic[bool]
   proc worker() {.thread.} =
-    Alert.emit(Alert(level: 1, message: "from worker"))
+    waitFor Alert.emit(Alert(level: 1, message: "from worker"))
     done.store(true)
 
   var t: Thread[void]
@@ -219,7 +219,7 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 **Key differences from single-thread EventBroker:**
 
-- `emit()` is **synchronous** (not async) — works from `{.thread.}` procs with no event loop.
+- `emit()` is **async** — use `await` in async contexts or `waitFor` from `{.thread.}` procs.
 - `dropListener` must be called from the **registering thread** (enforced at runtime).
 - `dropAllListeners` can be called from **any thread** — sends shutdown to all listener threads and drains in-flight listener tasks before cleanup.
 

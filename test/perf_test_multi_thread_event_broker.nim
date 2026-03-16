@@ -80,7 +80,7 @@ proc atomicMax(a: var Atomic[int64], val: int64) =
 proc stressEmitter() {.thread.} =
   let payload = makePayload()
   for i in 0 ..< EventsPerThread:
-    PerfEvt.emit(PerfEvt(
+    waitFor PerfEvt.emit(PerfEvt(
       tag: "stress",
       payload: payload,
       seqNum: i,
@@ -189,7 +189,7 @@ suite "Multi-thread EventBroker — performance":
 
     for i in 0 ..< TotalCrossThreadEvents:
       let t0 = getMonoTime()
-      PerfEvt.emit(PerfEvt(
+      await PerfEvt.emit(PerfEvt(
         tag: "local",
         payload: payload,
         seqNum: i,

@@ -33,17 +33,17 @@ var gListenerReady: Atomic[bool]
 # ── Thread procs (module-level, no closures) ─────────────────────────────
 
 proc emitterThread() {.thread.} =
-  MtEvt.emit(MtEvt(value: 42, label: "cross"))
+  waitFor MtEvt.emit(MtEvt(value: 42, label: "cross"))
 
 proc emitterThreadMulti() {.thread.} =
   for i in 1 .. 3:
-    MtEvt.emit(MtEvt(value: i, label: "multi"))
+    waitFor MtEvt.emit(MtEvt(value: i, label: "multi"))
 
 proc emitterThreadCtxA() {.thread.} =
-  MtEvt.emit(gCtxA, MtEvt(value: 100, label: "ctxA"))
+  waitFor MtEvt.emit(gCtxA, MtEvt(value: 100, label: "ctxA"))
 
 proc emitterThreadCtxB() {.thread.} =
-  MtEvt.emit(gCtxB, MtEvt(value: 200, label: "ctxB"))
+  waitFor MtEvt.emit(gCtxB, MtEvt(value: 200, label: "ctxB"))
 
 # A thread that listens, signals ready, then keeps event loop alive.
 proc listenerThread() {.thread.} =
@@ -80,13 +80,13 @@ proc listenerThreadNoDrop() {.thread.} =
 
 # Multiple concurrent emitters
 proc concurrentEmitter1() {.thread.} =
-  MtEvt.emit(MtEvt(value: 10, label: "c1"))
+  waitFor MtEvt.emit(MtEvt(value: 10, label: "c1"))
 
 proc concurrentEmitter2() {.thread.} =
-  MtEvt.emit(MtEvt(value: 20, label: "c2"))
+  waitFor MtEvt.emit(MtEvt(value: 20, label: "c2"))
 
 proc concurrentEmitter3() {.thread.} =
-  MtEvt.emit(MtEvt(value: 30, label: "c3"))
+  waitFor MtEvt.emit(MtEvt(value: 30, label: "c3"))
 
 # ── Test suite ────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ suite "EventBroker macro (multi-thread mode)":
       await sleepAsync(chronos.milliseconds(1))
 
     # Now emit from main thread (tests both same-thread and cross-thread delivery)
-    MtEvt.emit(MtEvt(value: 7, label: "fanout"))
+    await MtEvt.emit(MtEvt(value: 7, label: "fanout"))
 
     # Wait for both listeners (main + worker) to receive
     while gReceivedCount.load() < 2:
@@ -188,7 +188,7 @@ suite "EventBroker macro (multi-thread mode)":
     )
     check handle.isOk()
 
-    MtEvt.emit(MtEvt(value: 99, label: "local"))
+    await MtEvt.emit(MtEvt(value: 99, label: "local"))
 
     # Same-thread: after a brief yield, the listener should have run
     await sleepAsync(chronos.milliseconds(10))
@@ -199,7 +199,7 @@ suite "EventBroker macro (multi-thread mode)":
 
   asyncTest "emit with no listeners (no crash)":
     # No listeners registered — emit should be a no-op
-    MtEvt.emit(MtEvt(value: 999, label: "nobody"))
+    await MtEvt.emit(MtEvt(value: 999, label: "nobody"))
     await sleepAsync(chronos.milliseconds(10))
     # Just verifying no crash / no assertion
 
@@ -223,7 +223,7 @@ suite "EventBroker macro (multi-thread mode)":
     # Drop first listener
     MtEvt.dropListener(h1.get())
 
-    MtEvt.emit(MtEvt(value: 1, label: "partial"))
+    await MtEvt.emit(MtEvt(value: 1, label: "partial"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
@@ -246,7 +246,7 @@ suite "EventBroker macro (multi-thread mode)":
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
-    MtEvt.emit(MtEvt(value: 1, label: "gone"))
+    await MtEvt.emit(MtEvt(value: 1, label: "gone"))
     await sleepAsync(chronos.milliseconds(10))
     check gReceivedCount.load() == 0
 
@@ -263,7 +263,7 @@ suite "EventBroker macro (multi-thread mode)":
       await sleepAsync(chronos.milliseconds(1))
 
     # Emit to confirm listener works
-    MtEvt.emit(MtEvt(value: 5, label: "before"))
+    await MtEvt.emit(MtEvt(value: 5, label: "before"))
     await sleepAsync(chronos.milliseconds(50))
     check gReceivedCount.load() >= 1
 
@@ -274,7 +274,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     # Verify no more delivery
     gReceivedCount.store(0)
-    MtEvt.emit(MtEvt(value: 999, label: "after"))
+    await MtEvt.emit(MtEvt(value: 999, label: "after"))
     await sleepAsync(chronos.milliseconds(10))
     check gReceivedCount.load() == 0
 
@@ -300,14 +300,14 @@ suite "EventBroker macro (multi-thread mode)":
     )
 
     # Emit only to ctxA
-    MtEvt.emit(gCtxA, MtEvt(value: 10, label: "onlyA"))
+    await MtEvt.emit(gCtxA, MtEvt(value: 10, label: "onlyA"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 10
 
     # Emit only to ctxB
-    MtEvt.emit(gCtxB, MtEvt(value: 20, label: "onlyB"))
+    await MtEvt.emit(gCtxB, MtEvt(value: 20, label: "onlyB"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 2
@@ -387,7 +387,7 @@ suite "EventBroker macro (multi-thread mode)":
     )
     check handle.isOk()
 
-    MtEvt.emit(value = 77, label = "ctor")
+    await MtEvt.emit(value = 77, label = "ctor")
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1

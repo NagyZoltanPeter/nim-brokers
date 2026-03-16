@@ -309,16 +309,15 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   )
 
   # ── emit impl ─────────────────────────────────────────────────────────
-  # emit is a synchronous proc so it can be called from any thread,
-  # including {.thread.} procs with no event loop.
-  # - Cross-thread: sendSync (blocking, no event loop needed)
-  # - Same-thread: asyncSpawn to local listeners (needs event loop,
-  #   which the listener thread must have running)
+  # emit is an async proc. Callers in async contexts use `await`;
+  # callers in {.thread.} procs with no event loop use `waitFor`.
+  # - Cross-thread: async channel send (non-blocking on event loop)
+  # - Same-thread: asyncSpawn to local listeners (fire-and-forget)
   result.add(
     quote do:
       proc `emitImplIdent`(
           brokerCtx: BrokerContext, event: `typeIdent`
-      ) {.gcsafe.} =
+      ) {.async: (raises: []).} =
         `initProcIdent`()
 
         when compiles(event.isNil()):
@@ -361,7 +360,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               for cb in callbacks:
                 asyncSpawn `listenerTaskIdent`(cb, event)
           else:
-            # Cross-thread: send via channel (blocking, brief)
+            # Cross-thread: send via channel (sendSync is brief — buffer + signal)
             let msg = `eventMsgName`(isShutdown: false, event: event)
             target.eventChan[].sendSync(msg)
   )
@@ -369,22 +368,35 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   # ── Public emit ───────────────────────────────────────────────────────
   result.add(
     quote do:
-      proc emit*(event: `typeIdent`) =
-        `emitImplIdent`(DefaultBrokerContext, event)
+      proc emit*(event: `typeIdent`) {.async: (raises: []).} =
+        await `emitImplIdent`(DefaultBrokerContext, event)
 
-      proc emit*(_: typedesc[`typeIdent`], event: `typeIdent`) =
-        `emitImplIdent`(DefaultBrokerContext, event)
+      proc emit*(_: typedesc[`typeIdent`], event: `typeIdent`) {.async: (raises: []).} =
+        await `emitImplIdent`(DefaultBrokerContext, event)
 
       proc emit*(
           _: typedesc[`typeIdent`], brokerCtx: BrokerContext, event: `typeIdent`
-      ) =
-        `emitImplIdent`(brokerCtx, event)
+      ) {.async: (raises: []).} =
+        await `emitImplIdent`(brokerCtx, event)
   )
 
   # ── Field-constructor emit overloads (for inline object types) ────────
   if hasInlineFields:
     let typedescParamType =
       newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
+
+    # Async pragma: {.async: (raises: []).}
+    let asyncPragma = newTree(
+      nnkPragma,
+      newTree(
+        nnkExprColonExpr,
+        ident("async"),
+        newTree(
+          nnkTupleConstr,
+          newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+        ),
+      ),
+    )
 
     # Default context
     var emitCtorParams = newTree(nnkFormalParams, newEmptyNode())
@@ -412,7 +424,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
     let emitCtorCallDefault =
       newCall(copyNimTree(emitImplIdent), ident("DefaultBrokerContext"), emitCtorExpr)
     let emitCtorBodyDefault = quote:
-      `emitCtorCallDefault`
+      await `emitCtorCallDefault`
 
     let typedescEmitProcDefault = newTree(
       nnkProcDef,
@@ -420,7 +432,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       newEmptyNode(),
       newEmptyNode(),
       emitCtorParams,
-      newEmptyNode(),
+      copyNimTree(asyncPragma),
       newEmptyNode(),
       emitCtorBodyDefault,
     )
@@ -449,7 +461,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         copyNimTree(emitImplIdent), ident("brokerCtx"), copyNimTree(emitCtorExpr)
       )
     let emitCtorBodyCtx = quote:
-      `emitCtorCallCtx`
+      await `emitCtorCallCtx`
 
     let typedescEmitProcCtx = newTree(
       nnkProcDef,
@@ -457,7 +469,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       newEmptyNode(),
       newEmptyNode(),
       emitCtorParamsCtx,
-      newEmptyNode(),
+      copyNimTree(asyncPragma),
       newEmptyNode(),
       emitCtorBodyCtx,
     )
