@@ -134,11 +134,12 @@ proc main() =
   MyType.clearProvider()
 ```
 
-### 2. Thread procs cannot be closures
+### 2. Thread procs cannot be closures — but provider handlers can
 
 Nim's `{.thread.}` pragma requires `nimcall` convention (no captured
-variables). Use module-level procs with global `Atomic` variables for
-synchronization:
+variables). This applies to procs passed to `createThread`, i.e. your
+**worker/requester thread procs**. Use module-level procs with global
+`Atomic` variables for synchronization:
 
 ```nim
 var gDone: Atomic[bool]
@@ -147,6 +148,22 @@ proc worker() {.thread.} =
   let res = waitFor MyType.request("data")
   doAssert res.isOk()
   gDone.store(true)
+```
+
+**Provider handlers** are not affected by this restriction. The handler
+closure passed to `setProvider` is stored in a `threadvar` on the provider
+thread and called locally by `processLoop` — it never crosses a thread
+boundary. Capturing variables from the provider thread's scope is safe:
+
+```nim
+proc main() {.async.} =
+  var requestCount = 0
+
+  check MyType.setProvider(
+    proc(input: string): Future[Result[MyType, string]] {.async.} =
+      requestCount += 1          # ✅ captured — runs on provider thread
+      ok(MyType(value: input))
+  ).isOk()
 ```
 
 ### 3. One provider per BrokerContext, one thread owns it
@@ -536,8 +553,9 @@ response. This is a deliberate tradeoff:
 - **Pro:** No risk of response mismatch between concurrent requesters
 - **Con:** `createShared` + `deallocShared` per request (~200 bytes)
 
-For high-throughput scenarios (>10,000 requests/sec), consider pooling
+For high-throughput scenarios (>10,000 requests/sec), we may consider pooling
 response channels or batching requests at the application level.
+This certainly an optiomization point as we can expect requests from one thread are squential for RequestBroker and broker-context wise, so we can reuse the same channel for multiple requests.
 
 ### Scaling Characteristics
 
