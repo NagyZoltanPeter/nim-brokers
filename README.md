@@ -126,6 +126,60 @@ Info.removeProvider(handle.get())
 Info.clearProviders()
 ```
 
+### RequestBroker (multi-thread)
+
+Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via async channels. Same-thread requests bypass channels entirely for near-zero overhead.
+
+```nim
+import brokers/request_broker
+
+RequestBroker(mt):
+  type Weather = object
+    city*: string
+    tempC*: float
+
+  proc signature*(city: string): Future[Result[Weather, string]] {.async.}
+
+# ── Provider thread (main) ──────────────────────────
+proc main() {.async.} =
+  check Weather.setProvider(
+    proc(city: string): Future[Result[Weather, string]] {.async.} =
+      ok(Weather(city: city, tempC: 21.5))
+  ).isOk()
+
+  var done: Atomic[bool]
+  proc worker() {.thread.} =
+    let res = waitFor Weather.request("Berlin")
+    doAssert res.isOk()
+    done.store(true)
+
+  var t: Thread[void]
+  t.createThread(worker)
+  while not done.load():
+    await sleepAsync(chronos.milliseconds(1))
+  t.joinThread()
+  Weather.clearProvider()
+
+waitFor main()
+```
+
+Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
+
+**When to choose multi-thread mode:**
+
+- Your provider lives on a dedicated thread (e.g. main/UI loop) and workers need to query it.
+- You want a typed, decoupled interface across thread boundaries without manual channel wiring.
+- You need multiple independent contexts (`BrokerContext`) served by different threads.
+
+**Performance considerations:**
+
+- **Same-thread path** adds only a mutex + threadvar scan (~25 µs debug, sub-microsecond release).
+- **Cross-thread path** allocates a one-shot response channel per request (~187 µs debug / ~2-5 µs release with ORC). `--mm:refc` is ~2-3x slower due to deep-copy semantics on `sendSync`.
+- The provider serves requests sequentially on its event loop; throughput is bounded by handler execution time.
+- For high-throughput scenarios (>10K req/s), consider batching at the application level or using `--mm:orc`.
+
+See [Multi-Thread RequestBroker](doc/MultiThread_RequestBroker.md) for architecture diagrams, call sequences, and memory layout details. Run `nimble perftest` for benchmarks.
+
 ## BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
