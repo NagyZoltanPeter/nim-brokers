@@ -131,6 +131,8 @@ Info.clearProviders()
 Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via async channels. Same-thread requests bypass channels entirely for near-zero overhead.
 
 ```nim
+import std/atomics, std/threads
+import chronos
 import brokers/request_broker
 
 RequestBroker(mt):
@@ -140,18 +142,21 @@ RequestBroker(mt):
 
   proc signature*(city: string): Future[Result[Weather, string]] {.async.}
 
+var done: Atomic[bool]
+
+proc worker() {.thread.} =
+  let res = waitFor Weather.request("Berlin")
+  doAssert res.isOk()
+  done.store(true)
+
 # ── Provider thread (main) ──────────────────────────
 proc main() {.async.} =
-  check Weather.setProvider(
+  initAtomic(done, false)
+
+  doAssert Weather.setProvider(
     proc(city: string): Future[Result[Weather, string]] {.async.} =
       ok(Weather(city: city, tempC: 21.5))
   ).isOk()
-
-  var done: Atomic[bool]
-  proc worker() {.thread.} =
-    let res = waitFor Weather.request("Berlin")
-    doAssert res.isOk()
-    done.store(true)
 
   var t: Thread[void]
   t.createThread(worker)
@@ -186,11 +191,18 @@ Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** t
 
 ```nim
 import brokers/event_broker
+import std/atomics
 
 EventBroker(mt):
   type Alert = object
     level*: int
     message*: string
+
+var doneFlag {.global.}: Atomic[bool]
+
+proc worker() {.thread.} =
+  waitFor Alert.emit(Alert(level: 1, message: "from worker"))
+  doneFlag.store(true, moRelaxed)
 
 # ── Listener on main thread ────────────────────────────
 proc main() {.async.} =
@@ -198,16 +210,11 @@ proc main() {.async.} =
     proc(evt: Alert): Future[void] {.async: (raises: []).} =
       echo "Alert [", evt.level, "]: ", evt.message
   )
-  check handle.isOk()
-
-  var done: Atomic[bool]
-  proc worker() {.thread.} =
-    waitFor Alert.emit(Alert(level: 1, message: "from worker"))
-    done.store(true)
+  doAssert handle.isOk()
 
   var t: Thread[void]
   t.createThread(worker)
-  while not done.load():
+  while not doneFlag.load(moRelaxed):
     await sleepAsync(chronos.milliseconds(1))
   t.joinThread()
   Alert.dropAllListeners()

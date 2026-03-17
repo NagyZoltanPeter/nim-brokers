@@ -555,7 +555,7 @@ response. This is a deliberate tradeoff:
 
 For high-throughput scenarios (>10,000 requests/sec), we may consider pooling
 response channels or batching requests at the application level.
-This certainly an optiomization point as we can expect requests from one thread are squential for RequestBroker and broker-context wise, so we can reuse the same channel for multiple requests.
+This is certainly an optimization point, as we can expect requests from one thread to be sequential for RequestBroker- and broker-context-wise, so we can reuse the same channel for multiple requests.
 
 ### Scaling Characteristics
 

@@ -262,7 +262,7 @@ lower latencies.*
 |---------|---------------|-------------------|
 | Cross-thread emit | ✗ | ✓ |
 | Cross-thread listen | ✗ | ✓ |
-| `emit()` return type | void (asyncSpawn) | void (sync) |
+| `emit()` return type | void (asyncSpawn) | Future[void] (async) |
 | Channel overhead | None | Per listener-thread |
 | `dropListener` scope | Any (thread-local broker) | Must be from registering thread |
 | `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends shutdown) |
