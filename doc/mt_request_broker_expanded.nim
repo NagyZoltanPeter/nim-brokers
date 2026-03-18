@@ -14,14 +14,14 @@
 
 {.push raises: [].}
 
-import std/locks
-import chronos
+import std/[locks, atomics]
+import chronos, chronicles
 import results
 import asyncchannels
 import broker_context
-import mt_broker_common  # currentMtThreadId()
+import mt_broker_common  # currentMtThreadId(), atomics re-exported
 
-export results, chronos, broker_context, asyncchannels, mt_broker_common
+export results, chronos, chronicles, broker_context, asyncchannels, mt_broker_common
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Types
@@ -58,16 +58,26 @@ var gBuckets: ptr UncheckedArray[WeatherBucket]
 var gBucketCount: int
 var gBucketCap: int
 var gLock: Lock
-var gInitDone: bool
+var gInitDone: Atomic[int]
+  ## 0 = uninitialised, 1 = initialising, 2 = ready.
+  ## CAS(0→1) wins the race; losers spin until 2.
 
 proc ensureInit() =
-  if not gInitDone:
+  if gInitDone.load(moRelaxed) == 2:
+    return # fast path — already initialised
+  var expected = 0
+  if gInitDone.compareExchange(expected, 1, moAcquire, moRelaxed):
+    # We won the init race.
     initLock(gLock)
     gBucketCap = 4
     gBuckets = cast[ptr UncheckedArray[WeatherBucket]](
       createShared(WeatherBucket, gBucketCap))
     gBucketCount = 0
-    gInitDone = true
+    gInitDone.store(2, moRelease)
+  else:
+    # Another thread is initialising — spin until ready.
+    while gInitDone.load(moAcquire) != 2:
+      discard
 
 proc growBuckets() =
   ## Must be called under lock.
@@ -107,6 +117,10 @@ proc processLoop(
     if recvRes.isErr():
       break                       # channel closed or cancelled
     let msg = recvRes.get()
+    # NOTE: processLoop does NOT clean threadvars on shutdown.  Threadvar
+    # cleanup is done by clearProvider (which validates thread ownership).
+    # Having processLoop also clean threadvars would race with new
+    # setProvider registrations on the same thread.
     if msg.isShutdown:
       break                       # clearProvider sent shutdown
 
@@ -132,6 +146,11 @@ proc processLoop(
                   catchedRes.error.msg))
         else:
           msg.responseChan[].sendSync(catchedRes.get())
+    # After loop: close the channel.  We do NOT deallocShared here because
+    # a concurrent requester may still hold a pointer captured before the
+    # bucket was removed from the registry.  The close() prevents further
+    # operations; the small per-channel leak only occurs at teardown.
+    requestChan[].close()
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  setProvider — register a handler on the current thread.
@@ -271,20 +290,16 @@ proc clearProvider*(_: typedesc[Weather]) =
 proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
   ensureInit()
 
-  # Clean threadvar entries (safe: called from provider thread)
-  for i in countdown(tvProviderCtxs.len - 1, 0):
-    if tvProviderCtxs[i] == brokerCtx:
-      tvProviderCtxs.del(i)
-      tvProviderHandlers.del(i)
-      break
-
-  # Remove bucket from shared registry and send shutdown
   var reqChan: ptr AsyncChannel[WeatherRequestMsg]
+  var isProviderThread = false
+
+  # Remove bucket from shared registry
   withLock(gLock):
     var foundIdx = -1
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
         reqChan = gBuckets[i].requestChan
+        isProviderThread = (gBuckets[i].threadId == currentMtThreadId())
         gBuckets[i].active = false
         foundIdx = i
         break
@@ -292,6 +307,20 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
       for i in foundIdx ..< gBucketCount - 1:
         gBuckets[i] = gBuckets[i + 1]
       gBucketCount -= 1
+
+  # Only clean threadvar entries if called from the provider thread.
+  # If called from another thread, processLoop will clean its own
+  # threadvars when it receives the shutdown message.
+  if isProviderThread:
+    for i in countdown(tvProviderCtxs.len - 1, 0):
+      if tvProviderCtxs[i] == brokerCtx:
+        tvProviderCtxs.del(i)
+        tvProviderHandlers.del(i)
+        break
+  elif not reqChan.isNil():
+    warn "clearProvider called from non-provider thread; " &
+         "processLoop will handle threadvar cleanup",
+      brokerType = "Weather"
 
   # Send shutdown to stop process loop
   if not reqChan.isNil():

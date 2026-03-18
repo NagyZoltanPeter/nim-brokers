@@ -12,12 +12,12 @@
 
 {.push raises: [].}
 
-import std/[locks, tables]
+import std/[locks, tables, atomics]
 import chronos, chronicles
 import results
 import asyncchannels
 import broker_context
-import mt_broker_common  # currentMtThreadId()
+import mt_broker_common  # currentMtThreadId(), atomics re-exported
 
 export results, chronos, broker_context, asyncchannels, chronicles, mt_broker_common
 
@@ -61,16 +61,26 @@ var gBuckets: ptr UncheckedArray[AlertBucket]
 var gBucketCount: int
 var gBucketCap: int
 var gLock: Lock
-var gInitDone: bool
+var gInitDone: Atomic[int]
+  ## 0 = uninitialised, 1 = initialising, 2 = ready.
+  ## CAS(0→1) wins the race; losers spin until 2.
 
 proc ensureInit() =
-  if not gInitDone:
+  if gInitDone.load(moRelaxed) == 2:
+    return # fast path — already initialised
+  var expected = 0
+  if gInitDone.compareExchange(expected, 1, moAcquire, moRelaxed):
+    # We won the init race.
     initLock(gLock)
     gBucketCap = 4
     gBuckets = cast[ptr UncheckedArray[AlertBucket]](
       createShared(AlertBucket, gBucketCap))
     gBucketCount = 0
-    gInitDone = true
+    gInitDone.store(2, moRelease)
+  else:
+    # Another thread is initialising — spin until ready.
+    while gInitDone.load(moAcquire) != 2:
+      discard
 
 proc growBuckets() =
   ## Must be called under lock.
@@ -182,6 +192,11 @@ proc processLoop(
         # Schedule listener — returns Future, already on the event loop.
         let fut = notifyAlertListener(cb, msg.event)
         inFlight.add(fut)
+    # After loop: close the channel.  We do NOT deallocShared here because
+    # a concurrent emitter may still hold a pointer captured before the
+    # bucket was removed from the registry.  The close() prevents further
+    # operations; the small per-channel leak only occurs at teardown.
+    eventChan[].close()
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  listen — register a listener on the current thread.

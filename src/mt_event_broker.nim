@@ -111,21 +111,31 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       var `globalBucketCountIdent`: int
       var `globalBucketCapIdent`: int
       var `globalLockIdent`: Lock
-      var `globalInitIdent`: bool
+      var `globalInitIdent`: Atomic[int]
+        ## 0 = uninitialised, 1 = initialising, 2 = ready.
+        ## CAS(0→1) wins the race; losers spin until 2.
   )
 
-  # ── Init helper ───────────────────────────────────────────────────────
+  # ── Init helper (thread-safe via atomic CAS) ───────────────────────────
   result.add(
     quote do:
       proc `initProcIdent`() =
-        if not `globalInitIdent`:
+        if `globalInitIdent`.load(moRelaxed) == 2:
+          return # fast path — already initialised
+        var expected = 0
+        if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
+          # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
           `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
             createShared(`bucketName`, `globalBucketCapIdent`)
           )
           `globalBucketCountIdent` = 0
-          `globalInitIdent` = true
+          `globalInitIdent`.store(2, moRelease)
+        else:
+          # Another thread is initialising — spin until ready.
+          while `globalInitIdent`.load(moAcquire) != 2:
+            discard
   )
 
   # ── Grow helper ───────────────────────────────────────────────────────
@@ -241,6 +251,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               # Schedule listener — returns Future, already on the event loop.
               let fut = `listenerTaskIdent`(cb, msg.event)
               inFlight.add(fut)
+        # After loop: close the channel.  We do NOT deallocShared here because
+        # a concurrent emitter may still hold a pointer captured before the
+        # bucket was removed from the registry.  The close() prevents further
+        # operations; the small per-channel leak only occurs at teardown.
+        `ecIdent`[].close()
   )
 
   # ── listen impl ──────────────────────────────────────────────────────

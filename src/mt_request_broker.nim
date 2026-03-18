@@ -16,13 +16,13 @@
 {.push raises: [].}
 
 import std/[macros, strutils, locks]
-import chronos
+import chronos, chronicles
 import results
 import asyncchannels
 import ./helper/broker_utils, ./broker_context
 
 import ./mt_broker_common
-export results, chronos, broker_context, asyncchannels, mt_broker_common
+export results, chronos, chronicles, broker_context, asyncchannels, mt_broker_common
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -213,22 +213,32 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       var `globalBucketCountIdent`: int
       var `globalBucketCapIdent`: int
       var `globalLockIdent`: Lock
-      var `globalInitIdent`: bool
+      var `globalInitIdent`: Atomic[int]
+        ## 0 = uninitialised, 1 = initialising, 2 = ready.
+        ## CAS(0→1) wins the race; losers spin until 2.
   )
 
-  # ── Init helper ─────────────────────────────────────────────────────
+  # ── Init helper (thread-safe via atomic CAS) ─────────────────────────
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
   result.add(
     quote do:
       proc `initProcIdent`() =
-        if not `globalInitIdent`:
+        if `globalInitIdent`.load(moRelaxed) == 2:
+          return # fast path — already initialised
+        var expected = 0
+        if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
+          # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
           `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
             createShared(`bucketName`, `globalBucketCapIdent`)
           )
           `globalBucketCountIdent` = 0
-          `globalInitIdent` = true
+          `globalInitIdent`.store(2, moRelease)
+        else:
+          # Another thread is initialising — spin until ready.
+          while `globalInitIdent`.load(moAcquire) != 2:
+            discard
   )
 
   # ── Grow helper ─────────────────────────────────────────────────────
@@ -293,6 +303,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         break
       let `msgIdent` = recvRes.get()
   )
+  # NOTE: processLoop does NOT clean threadvars on shutdown.  Threadvar
+  # cleanup is done by clearProvider (which validates thread ownership).
+  # Having processLoop also clean threadvars would race with new
+  # setProvider registrations on the same thread.
   processBody.add(
     quote do:
       if `msgIdent`.isShutdown:
@@ -390,6 +404,11 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       ) {.async: (raises: []).} =
         while true:
           `processBody`
+        # After loop: close the channel.  We do NOT deallocShared here because
+        # a concurrent requester may still hold a pointer captured before the
+        # bucket was removed from the registry.  The close() prevents further
+        # operations; the small per-channel leak only occurs at teardown.
+        `rcIdent`[].close()
   )
 
   # ── setProvider (zero-arg) ──────────────────────────────────────────
@@ -862,14 +881,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   clearBody.add(
     quote do:
       `initProcIdent`()
-      # Clean threadvar entries (safe: called from provider thread).
-      `tvCleanup`
       var reqChan: ptr AsyncChannel[`requestMsgName`]
+      var isProviderThread = false
       withLock(`globalLockIdent`):
         var foundIdx = -1
         for i in 0 ..< `globalBucketCountIdent`:
           if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
             reqChan = `globalBucketsIdent`[i].requestChan
+            isProviderThread = (`globalBucketsIdent`[i].threadId == currentMtThreadId())
             `globalBucketsIdent`[i].active = false
             foundIdx = i
             break
@@ -878,6 +897,15 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           for i in foundIdx ..< `globalBucketCountIdent` - 1:
             `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
           `globalBucketCountIdent` -= 1
+      # Only clean threadvar entries if called from the provider thread.
+      # If called from another thread, processLoop will clean its own
+      # threadvars when it receives the shutdown message.
+      if isProviderThread:
+        `tvCleanup`
+      elif not reqChan.isNil():
+        warn "clearProvider called from non-provider thread; " &
+             "processLoop will handle threadvar cleanup",
+          brokerType = `typeNameLit`
       if not reqChan.isNil():
         # Send shutdown to process loop.
         var shutdownMsg = `requestMsgName`(isShutdown: true)

@@ -6,7 +6,8 @@
 {.push raises: [].}
 
 import chronos
-export chronos
+import std/atomics
+export chronos, atomics
 
 # ---------------------------------------------------------------------------
 # Thread identity
