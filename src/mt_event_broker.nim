@@ -251,11 +251,12 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               # Schedule listener — returns Future, already on the event loop.
               let fut = `listenerTaskIdent`(cb, msg.event)
               inFlight.add(fut)
-        # After loop: close the channel.  We do NOT deallocShared here because
-        # a concurrent emitter may still hold a pointer captured before the
-        # bucket was removed from the registry.  The close() prevents further
-        # operations; the small per-channel leak only occurs at teardown.
-        `ecIdent`[].close()
+        # After loop: we do NOT close or deallocShared the channel here.
+        # A concurrent emitter may still hold a pointer captured before the
+        # bucket was removed from the registry, and sendSync on a closed
+        # channel is undefined behavior. Leaving it open is safe: the channel
+        # is drained, nobody reads from it, and the small per-channel leak
+        # only occurs at teardown.
   )
 
   # ── listen impl ──────────────────────────────────────────────────────
@@ -290,6 +291,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         # Ensure a bucket + channel exists for (brokerCtx, this thread)
         let myThreadId = currentMtThreadId()
         var bucketExists = false
+        var spawnChan: ptr AsyncChannel[`eventMsgName`]
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
@@ -312,7 +314,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               active: true,
             )
             `globalBucketCountIdent` += 1
-            asyncSpawn `processLoopIdent`(chan, brokerCtx)
+            spawnChan = chan
+        # asyncSpawn outside lock to prevent potential deadlock if
+        # processLoop or its listeners acquire the same lock.
+        if not bucketExists:
+          asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
 
         return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
   )

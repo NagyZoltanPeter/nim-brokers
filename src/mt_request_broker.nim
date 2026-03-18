@@ -265,9 +265,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       var `timeoutVarIdent`*: Duration = chronos.seconds(5)
         ## Default timeout for cross-thread requests. Same-thread requests
         ## bypass this (they call the provider directly).
+        ## NOTE: Set during initialization before spawning worker threads.
+        ## Reading from multiple threads is safe on x86-64 (aligned int64),
+        ## but concurrent writes are not guaranteed atomic on all platforms.
 
       proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
         ## Set the cross-thread request timeout for this broker type.
+        ## Call this during initialization before spawning worker threads.
         `timeoutVarIdent` = timeout
 
       proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
@@ -363,7 +367,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       err(Result[`typeIdent`, string],
                           "RequestBroker(" & `typeNameLit` &
                             "): provider returned nil result"))
-                    return
+                    continue
               `msgIdent`.responseChan[].sendSync(providerRes)
     )
 
@@ -406,7 +410,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       err(Result[`typeIdent`, string],
                           "RequestBroker(" & `typeNameLit` &
                             "): provider returned nil result"))
-                    return
+                    continue
               `msgIdent`.responseChan[].sendSync(providerRes)
     )
 
@@ -439,10 +443,25 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           # Check if already registered on this thread
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == DefaultBrokerContext:
-              return err("Zero-arg provider already set")
+              # Verify entry is still backed by a global bucket.
+              # If not, it's stale from a cross-thread clearProvider — remove it.
+              var isStale = true
+              withLock(`globalLockIdent`):
+                for j in 0 ..< `globalBucketCountIdent`:
+                  if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                    isStale = false
+                    break
+              if isStale:
+                `tvNoArgCtxIdent`.del(i)
+                `tvNoArgHandlerIdent`.del(i)
+                break  # removed stale entry, proceed with registration
+              else:
+                return err("Zero-arg provider already set")
           # Store in threadvar
           `tvNoArgCtxIdent`.add(DefaultBrokerContext)
           `tvNoArgHandlerIdent`.add(handler)
+          var spawnChan: ptr AsyncChannel[`requestMsgName`]
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
@@ -456,19 +475,20 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       "): provider already set from another thread")
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`requestMsgName`]](
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
               createShared(AsyncChannel[`requestMsgName`], 1)
             )
-            discard chan[].open()
+            discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: DefaultBrokerContext,
-              requestChan: chan,
+              requestChan: spawnChan,
               threadId: currentMtThreadId(),
               active: true,
             )
             `globalBucketCountIdent` += 1
-            asyncSpawn `processLoopIdent`(chan, DefaultBrokerContext)
+          # asyncSpawn outside lock to prevent potential deadlock.
+          asyncSpawn `processLoopIdent`(spawnChan, DefaultBrokerContext)
           return ok()
     )
 
@@ -484,12 +504,26 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == brokerCtx:
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): zero-arg provider already set for broker context " & $brokerCtx
-              )
+              # Verify entry is still backed by a global bucket.
+              var isStale = true
+              withLock(`globalLockIdent`):
+                for j in 0 ..< `globalBucketCountIdent`:
+                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                    isStale = false
+                    break
+              if isStale:
+                `tvNoArgCtxIdent`.del(i)
+                `tvNoArgHandlerIdent`.del(i)
+                break
+              else:
+                return err(
+                  "RequestBroker(" & `typeNameLit` &
+                    "): zero-arg provider already set for broker context " & $brokerCtx
+                )
           `tvNoArgCtxIdent`.add(brokerCtx)
           `tvNoArgHandlerIdent`.add(handler)
+          var spawnChan: ptr AsyncChannel[`requestMsgName`]
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -504,19 +538,20 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       $brokerCtx)
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`requestMsgName`]](
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
               createShared(AsyncChannel[`requestMsgName`], 1)
             )
-            discard chan[].open()
+            discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
-              requestChan: chan,
+              requestChan: spawnChan,
               threadId: currentMtThreadId(),
               active: true,
             )
             `globalBucketCountIdent` += 1
-            asyncSpawn `processLoopIdent`(chan, brokerCtx)
+          # asyncSpawn outside lock to prevent potential deadlock.
+          asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
           return ok()
     )
 
@@ -530,9 +565,23 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == DefaultBrokerContext:
-              return err("Provider already set")
+              # Verify entry is still backed by a global bucket.
+              var isStale = true
+              withLock(`globalLockIdent`):
+                for j in 0 ..< `globalBucketCountIdent`:
+                  if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                    isStale = false
+                    break
+              if isStale:
+                `tvWithArgCtxIdent`.del(i)
+                `tvWithArgHandlerIdent`.del(i)
+                break
+              else:
+                return err("Provider already set")
           `tvWithArgCtxIdent`.add(DefaultBrokerContext)
           `tvWithArgHandlerIdent`.add(handler)
+          var spawnChan: ptr AsyncChannel[`requestMsgName`]
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
@@ -546,19 +595,21 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       "): provider already set from another thread")
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`requestMsgName`]](
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
               createShared(AsyncChannel[`requestMsgName`], 1)
             )
-            discard chan[].open()
+            discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: DefaultBrokerContext,
-              requestChan: chan,
+              requestChan: spawnChan,
               threadId: currentMtThreadId(),
               active: true,
             )
             `globalBucketCountIdent` += 1
-            asyncSpawn `processLoopIdent`(chan, DefaultBrokerContext)
+          # asyncSpawn outside lock to prevent potential deadlock.
+          if not spawnChan.isNil:
+            asyncSpawn `processLoopIdent`(spawnChan, DefaultBrokerContext)
           return ok()
     )
 
@@ -574,12 +625,26 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == brokerCtx:
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): provider already set for broker context " & $brokerCtx
-              )
+              # Verify entry is still backed by a global bucket.
+              var isStale = true
+              withLock(`globalLockIdent`):
+                for j in 0 ..< `globalBucketCountIdent`:
+                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                    isStale = false
+                    break
+              if isStale:
+                `tvWithArgCtxIdent`.del(i)
+                `tvWithArgHandlerIdent`.del(i)
+                break
+              else:
+                return err(
+                  "RequestBroker(" & `typeNameLit` &
+                    "): provider already set for broker context " & $brokerCtx
+                )
           `tvWithArgCtxIdent`.add(brokerCtx)
           `tvWithArgHandlerIdent`.add(handler)
+          var spawnChan: ptr AsyncChannel[`requestMsgName`]
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -594,19 +659,21 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                       $brokerCtx)
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`requestMsgName`]](
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
               createShared(AsyncChannel[`requestMsgName`], 1)
             )
-            discard chan[].open()
+            discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
-              requestChan: chan,
+              requestChan: spawnChan,
               threadId: currentMtThreadId(),
               active: true,
             )
             `globalBucketCountIdent` += 1
-            asyncSpawn `processLoopIdent`(chan, brokerCtx)
+          # asyncSpawn outside lock to prevent potential deadlock.
+          if not spawnChan.isNil:
+            asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
           return ok()
     )
 
@@ -683,19 +750,27 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             let recvFut = respChan.recv()
             let completedRes = catch:
               await withTimeout(recvFut, `timeoutVarIdent`)
-            respChan[].close()
-            deallocShared(respChan)
             if completedRes.isErr():
+              # withTimeout itself threw — provider may still hold respChan pointer.
+              respChan[].close()
+              # Do NOT deallocShared: provider may still sendSync into it.
               return err(
                 "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                   completedRes.error.msg
               )
             if not completedRes.get():
+              # Timed out — provider may still be running and will sendSync later.
+              respChan[].close()
+              # Do NOT deallocShared: provider holds a raw pointer from the request msg.
+              # Intentional leak (same strategy as request channels).
               return err(
                 "RequestBroker(" & `typeNameLit` &
                   "): cross-thread request timed out after " &
                   $`timeoutVarIdent`
               )
+            # Success: provider already sent response. Safe to close + dealloc.
+            respChan[].close()
+            deallocShared(respChan)
             # Future completed — read the value
             let recvRes = catch:
               recvFut.read()
@@ -863,19 +938,27 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           let recvFut = `respChanIdent`.recv()
           let completedRes = catch:
             await withTimeout(recvFut, `timeoutVarIdent`)
-          `respChanIdent`[].close()
-          deallocShared(`respChanIdent`)
           if completedRes.isErr():
+            # withTimeout itself threw — provider may still hold respChan pointer.
+            `respChanIdent`[].close()
+            # Do NOT deallocShared: provider may still sendSync into it.
             return err(
               "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                 completedRes.error.msg
             )
           if not completedRes.get():
+            # Timed out — provider may still be running and will sendSync later.
+            `respChanIdent`[].close()
+            # Do NOT deallocShared: provider holds a raw pointer from the request msg.
+            # Intentional leak (same strategy as request channels).
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): cross-thread request timed out after " &
                 $`timeoutVarIdent`
             )
+          # Success: provider already sent response. Safe to close + dealloc.
+          `respChanIdent`[].close()
+          deallocShared(`respChanIdent`)
           # Future completed — read the value
           let recvRes = catch:
             recvFut.read()
@@ -951,7 +1034,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         `tvCleanup`
       elif not reqChan.isNil():
         warn "clearProvider called from non-provider thread; " &
-             "processLoop will handle threadvar cleanup",
+             "threadvar entries on provider thread are stale but harmless " &
+             "(next setProvider will detect and clean them)",
           brokerType = `typeNameLit`
       if not reqChan.isNil():
         # Send shutdown to process loop.

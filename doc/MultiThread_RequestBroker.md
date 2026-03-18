@@ -238,9 +238,11 @@ if res.isErr() and "timed out" in res.error():
   the provider directly and are not affected by the timeout setting.
 - The timeout variable is per-type, module-level — it is shared across all threads
   and all `BrokerContext` instances for that broker type.
-- When a timeout occurs, the one-shot response channel is closed and deallocated
-  normally. The provider's in-flight handler continues running but its response is
-  discarded.
+- When a timeout occurs, the one-shot response channel is closed but **not
+  deallocated** — this is an intentional leak. The provider thread may still hold a
+  raw pointer to the response channel and will call `sendSync` after its handler
+  completes. Freeing the channel would cause a use-after-free. The same strategy is
+  used for request channels at teardown.
 
 ### 8. Compile with `--threads:on`
 

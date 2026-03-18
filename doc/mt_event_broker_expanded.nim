@@ -192,11 +192,12 @@ proc processLoop(
         # Schedule listener — returns Future, already on the event loop.
         let fut = notifyAlertListener(cb, msg.event)
         inFlight.add(fut)
-    # After loop: close the channel.  We do NOT deallocShared here because
-    # a concurrent emitter may still hold a pointer captured before the
-    # bucket was removed from the registry.  The close() prevents further
-    # operations; the small per-channel leak only occurs at teardown.
-    eventChan[].close()
+  # NOTE: We do NOT close the channel here. A concurrent emitter may still
+  # hold a pointer captured before the bucket was removed from the registry.
+  # sendSync on a closed channel is undefined behavior; sendSync on an
+  # open-but-drained channel is safe (brief block, then return).
+  # The channel memory is intentionally leaked (no deallocShared) to prevent
+  # use-after-free.
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  listen — register a listener on the current thread.
@@ -241,6 +242,7 @@ proc listen*(
   # Ensure a bucket + channel exists for (brokerCtx, this thread)
   let myThreadId = currentMtThreadId()
   var bucketExists = false
+  var spawnChan: ptr AsyncChannel[AlertEventMsg]
   withLock(gLock):
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx and
@@ -251,17 +253,22 @@ proc listen*(
     if not bucketExists:
       if gBucketCount >= gBucketCap:
         growBuckets()
-      let chan = cast[ptr AsyncChannel[AlertEventMsg]](
+      spawnChan = cast[ptr AsyncChannel[AlertEventMsg]](
         createShared(AsyncChannel[AlertEventMsg], 1))
-      discard chan[].open()
+      discard spawnChan[].open()
       let idx = gBucketCount
       gBuckets[idx] = AlertBucket(
         brokerCtx: brokerCtx,
-        eventChan: chan,
+        eventChan: spawnChan,
         threadId: myThreadId,
         active: true)
       gBucketCount += 1
-      asyncSpawn processLoop(chan, brokerCtx)
+
+  # asyncSpawn outside lock to prevent potential deadlock.
+  # If Chronos eagerly steps the coroutine and the listener calls emit
+  # (which acquires the same lock), we'd deadlock.
+  if not bucketExists:
+    asyncSpawn processLoop(spawnChan, brokerCtx)
 
   return ok(AlertListener(id: newId, threadId: myThreadId))
 

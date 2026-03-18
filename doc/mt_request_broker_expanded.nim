@@ -95,8 +95,9 @@ proc growBuckets() =
 # ═══════════════════════════════════════════════════════════════════════════
 
 var gWeatherMtRequestTimeout*: Duration = chronos.seconds(5)
-  ## Default timeout for cross-thread requests. Same-thread requests
-  ## bypass this (they call the provider directly).
+  ## Cross-thread request timeout. Set during initialization before
+  ## spawning worker threads. Reading from multiple threads is safe
+  ## on x86-64 (aligned int64), but concurrent writes are not guaranteed.
 
 proc setRequestTimeout*(_: typedesc[Weather], timeout: Duration) =
   ## Set the cross-thread request timeout for this broker type.
@@ -189,12 +190,27 @@ proc setProvider*(
   # Check if already registered on this thread for this context
   for i in 0 ..< tvProviderCtxs.len:
     if tvProviderCtxs[i] == brokerCtx:
-      return err("Provider already set")
+      # Verify this entry is still backed by a global bucket.
+      # If not, it's stale from a cross-thread clearProvider — remove it.
+      var isStale = true
+      withLock(gLock):
+        for j in 0 ..< gBucketCount:
+          if gBuckets[j].brokerCtx == brokerCtx and
+             gBuckets[j].threadId == currentMtThreadId():
+            isStale = false
+            break
+      if isStale:
+        tvProviderCtxs.del(i)
+        tvProviderHandlers.del(i)
+        break  # removed stale entry, proceed with registration
+      else:
+        return err("Provider already set")
 
   # Store closure in GC-managed threadvar
   tvProviderCtxs.add(brokerCtx)
   tvProviderHandlers.add(handler)
 
+  var spawnChan: ptr AsyncChannel[WeatherRequestMsg]
   withLock(gLock):
     # If a bucket already exists for this context, nothing more to do
     for i in 0 ..< gBucketCount:
@@ -204,19 +220,22 @@ proc setProvider*(
     # Create shared bucket + request channel
     if gBucketCount >= gBucketCap:
       growBuckets()
-    let chan = cast[ptr AsyncChannel[WeatherRequestMsg]](
+    spawnChan = cast[ptr AsyncChannel[WeatherRequestMsg]](
       createShared(AsyncChannel[WeatherRequestMsg], 1))
-    discard chan[].open()
+    discard spawnChan[].open()
 
     gBuckets[gBucketCount] = WeatherBucket(
       brokerCtx: brokerCtx,
-      requestChan: chan,
+      requestChan: spawnChan,
       threadId: currentMtThreadId(),
       active: true)
     gBucketCount += 1
 
-    # Start process loop on this thread's event loop
-    asyncSpawn processLoop(chan, brokerCtx)
+  # asyncSpawn outside lock to prevent potential deadlock.
+  # If Chronos eagerly steps the coroutine and the listener calls emit
+  # (which acquires the same lock), we'd deadlock.
+  if not spawnChan.isNil:
+    asyncSpawn processLoop(spawnChan, brokerCtx)
   return ok()
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -290,14 +309,22 @@ proc request*(
     let recvFut = respChan.recv()
     let completedRes = catch:
       await withTimeout(recvFut, gWeatherMtRequestTimeout)
-    respChan[].close()
-    deallocShared(respChan)
 
     if completedRes.isErr():
+      # withTimeout itself threw — channel may still be in use by provider.
+      respChan[].close()
+      # Do NOT deallocShared: provider may still hold a pointer to sendSync into.
       return err("RequestBroker(Weather): recv failed: " & completedRes.error.msg)
     if not completedRes.get():
+      # Timed out — provider may still be running handler and will sendSync later.
+      respChan[].close()
+      # Do NOT deallocShared: provider holds a raw pointer captured in the request
+      # message. This is an intentional leak (same strategy as request channels).
       return err("RequestBroker(Weather): cross-thread request timed out after " &
                  $gWeatherMtRequestTimeout)
+    # Success: provider already sent response. Safe to close + dealloc.
+    respChan[].close()
+    deallocShared(respChan)
     # Future completed — read the value
     let recvRes = catch:
       recvFut.read()
@@ -344,7 +371,8 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
         break
   elif not reqChan.isNil():
     warn "clearProvider called from non-provider thread; " &
-         "processLoop will handle threadvar cleanup",
+         "threadvar entries on provider thread are stale but harmless " &
+         "(next setProvider will detect and clean them)",
       brokerType = "Weather"
 
   # Send shutdown to stop process loop
