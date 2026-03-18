@@ -2,6 +2,13 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - '*'
+    paths-ignore:
+      - '**.md'
+      - '**.html'
   pull_request:
   workflow_dispatch:
 
