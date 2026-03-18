@@ -1248,7 +1248,11 @@ OnFilterSubscribeEvent.emit(
       <tbody>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Same public API</strong></td>
-          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes</td>
+          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes. MT adds <code>setRequestTimeout</code> / <code>requestTimeout</code>.</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Timeout protection</strong></td>
+          <td>Cross-thread <code>request</code> returns <code>err</code> after a configurable timeout (default 5&thinsp;s) if the provider is unresponsive &mdash; no indefinite hangs</td>
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Transparent fan-out</strong></td>
@@ -1320,7 +1324,7 @@ OnFilterSubscribeEvent.emit(
       <li class="fragment"><strong>Round-trip latency</strong> &mdash; two channel hops (request + response), both using <code>AsyncChannel</code>; expect ~2&times; the cost of a single emit</li>
       <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; <code>processLoop</code> receives requests and dispatches to the local provider closure</li>
       <li class="fragment"><strong>Same-thread fast path</strong> &mdash; when requester and provider share a thread, the provider is called directly with zero channel overhead</li>
-      <li class="fragment"><strong>Timeout handling</strong> &mdash; if the provider thread is unresponsive, the caller&rsquo;s <code>request</code> returns <code>err</code> after a configurable timeout</li>
+      <li class="fragment"><strong>Timeout handling</strong> &mdash; cross-thread requests use <code>withTimeout</code> (default 5&thinsp;s); if the provider is unresponsive, <code>request</code> returns <code>err</code>. Configure via <code>T.setRequestTimeout(duration)</code> / <code>T.requestTimeout()</code>. Same-thread requests are unaffected.</li>
     </ul>
   </section>
 

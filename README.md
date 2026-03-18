@@ -176,6 +176,15 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 - You want a typed, decoupled interface across thread boundaries without manual channel wiring.
 - You need multiple independent contexts (`BrokerContext`) served by different threads.
 
+**Cross-thread request timeout:**
+
+Cross-thread requests have a configurable timeout (default: 5 seconds). If the provider thread is unresponsive, `request()` returns `err` instead of hanging. Same-thread requests are unaffected.
+
+```nim
+Weather.setRequestTimeout(chronos.seconds(2))  # shorten timeout
+echo Weather.requestTimeout()                   # 2 seconds
+```
+
 **Performance considerations:**
 
 - **Same-thread path** adds only a mutex + threadvar scan (~25 µs debug, sub-microsecond release).

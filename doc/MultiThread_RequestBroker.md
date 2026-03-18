@@ -31,6 +31,8 @@ This generates:
 | `Weather.request(ctx, city)` | Issue a request (keyed context) |
 | `Weather.clearProvider()` | Unregister provider + shut down process loop (default context) |
 | `Weather.clearProvider(ctx)` | Unregister provider + shut down process loop (keyed context) |
+| `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 5 seconds) |
+| `Weather.requestTimeout()` | Get current cross-thread request timeout |
 
 ---
 
@@ -210,7 +212,37 @@ uses `createShared` / `deallocShared` for raw memory (no GC involvement).
 Provider closures live in threadvars (GC-managed, per-thread), avoiding
 cross-thread GC issues entirely.
 
-### 7. Compile with `--threads:on`
+### 7. Cross-thread request timeout
+
+Cross-thread requests have a configurable timeout (default: **5 seconds**). If the
+provider thread does not respond within the timeout, `request()` returns an error
+result instead of hanging indefinitely. This protects against blocked or
+unresponsive provider threads.
+
+```nim
+# Check current timeout
+echo Weather.requestTimeout()          # 5 seconds (default)
+
+# Set a shorter timeout
+Weather.setRequestTimeout(chronos.seconds(2))
+
+# Cross-thread requests now time out after 2 seconds
+let res = waitFor Weather.request("Berlin")
+if res.isErr() and "timed out" in res.error():
+  echo "Provider did not respond in time"
+```
+
+**Important notes:**
+
+- The timeout applies **only to cross-thread requests**. Same-thread requests call
+  the provider directly and are not affected by the timeout setting.
+- The timeout variable is per-type, module-level — it is shared across all threads
+  and all `BrokerContext` instances for that broker type.
+- When a timeout occurs, the one-shot response channel is closed and deallocated
+  normally. The provider's in-flight handler continues running but its response is
+  discarded.
+
+### 8. Compile with `--threads:on`
 
 Multi-thread mode requires the Nim compiler flag `--threads:on`.
 
@@ -256,9 +288,9 @@ sequenceDiagram
     activate H
     Note over H: NON-BLOCKING<br/>runs on provider's<br/>event loop
 
-    RT ->> RSP: waitFor recv()
+    RT ->> RSP: waitFor withTimeout(recv(), timeout)
     activate RT
-    Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response arrives
+    Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout (default 5s)
 
     H -->> PL: Result[T, string]
     deactivate H
@@ -282,7 +314,7 @@ sequenceDiagram
 | Operation | Thread | Blocking? | Duration |
 |-----------|--------|-----------|----------|
 | `sendSync(requestMsg)` | Requester | **Blocks** | Near-instant (channel has capacity) |
-| `waitFor recv(responseChan)` | Requester | **Blocks** | Until provider finishes handler |
+| `waitFor recv(responseChan)` | Requester | **Blocks** | Until provider responds or timeout (default 5s) |
 | `await recv(requestChan)` | Provider | Non-blocking | Yields to event loop |
 | `await handler(...)` | Provider | Non-blocking | Yields to event loop |
 | `sendSync(result)` | Provider | **Blocks** | Near-instant (channel has capacity) |
