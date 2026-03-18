@@ -20,6 +20,23 @@ template currentMtThreadId*(): pointer =
   addr mtThreadIdMarker
 
 # ---------------------------------------------------------------------------
+# Thread generation — monotonically increasing, unique per thread incarnation.
+# Under refc, threadvar addresses can be reused when threads exit and new
+# ones are created. The generation counter disambiguates reused addresses.
+# ---------------------------------------------------------------------------
+
+var gMtThreadGenCounter: Atomic[uint64]
+
+var mtThreadGen* {.threadvar.}: uint64
+var mtThreadGenInitialized {.threadvar.}: bool
+
+proc currentMtThreadGen*(): uint64 =
+  if not mtThreadGenInitialized:
+    mtThreadGen = gMtThreadGenCounter.fetchAdd(1, moRelaxed)
+    mtThreadGenInitialized = true
+  mtThreadGen
+
+# ---------------------------------------------------------------------------
 # Blocking await for {.thread.} procs
 # ---------------------------------------------------------------------------
 
