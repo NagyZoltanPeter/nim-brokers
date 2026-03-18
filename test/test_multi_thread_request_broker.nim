@@ -144,6 +144,26 @@ proc requesterDefaultCtxFail() {.thread.} =
   doAssert res.isErr()
   gThreadRes3.store(true)
 
+# Thread proc for timeout test: requester expects timeout error.
+proc requesterExpectTimeout() {.thread.} =
+  let res = waitFor MTReq.request("will-timeout")
+  doAssert res.isErr()
+  doAssert "timed out" in res.error()
+  gDone.store(true)
+
+# Thread proc for timeout e2e test: measures that timeout actually unblocks.
+proc requesterMeasureTimeout() {.thread.} =
+  let start = Moment.now()
+  let res = waitFor MTReq.request("will-timeout")
+  let elapsed = Moment.now() - start
+  doAssert res.isErr()
+  doAssert "timed out" in res.error()
+  # Should complete roughly within timeout + margin (not hang forever).
+  # Timeout is 200ms, allow up to 2s margin for slow CI.
+  doAssert elapsed < chronos.seconds(2),
+    "request took too long: " & $elapsed & " (expected ~200ms timeout)"
+  gDone.store(true)
+
 # ── Test suite ────────────────────────────────────────────────────────────
 
 suite "RequestBroker macro (multi-thread mode)":
@@ -564,3 +584,87 @@ suite "RequestBroker macro (multi-thread mode)":
     check res.isErr()
 
     MTReq.clearProvider(ctxRegistered)
+
+  # ── Timeout ──
+
+  asyncTest "setRequestTimeout and requestTimeout getter/setter":
+    let original = MTReq.requestTimeout()
+    check original == chronos.seconds(5)
+
+    MTReq.setRequestTimeout(chronos.milliseconds(500))
+    check MTReq.requestTimeout() == chronos.milliseconds(500)
+
+    # Restore default
+    MTReq.setRequestTimeout(chronos.seconds(5))
+    check MTReq.requestTimeout() == chronos.seconds(5)
+
+  asyncTest "cross-thread request times out with slow provider":
+    # Set a short timeout
+    MTReq.setRequestTimeout(chronos.milliseconds(200))
+
+    # Provider that sleeps longer than the timeout
+    check MTReq
+    .setProvider(
+      proc(input: string): Future[Result[MTReq, string]] {.async.} =
+        await sleepAsync(chronos.seconds(2))
+        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+    )
+    .isOk()
+
+    gDone.store(false)
+    var reqThread: Thread[void]
+    reqThread.createThread(requesterExpectTimeout)
+
+    while not gDone.load():
+      await sleepAsync(10.milliseconds)
+
+    reqThread.joinThread()
+    MTReq.clearProvider()
+    # Restore default timeout
+    MTReq.setRequestTimeout(chronos.seconds(5))
+
+  asyncTest "same-thread request is NOT affected by short timeout":
+    # Set a very short timeout (would fail cross-thread if provider is slow)
+    MTReq.setRequestTimeout(chronos.milliseconds(1))
+
+    check MTReq
+    .setProvider(
+      proc(input: string): Future[Result[MTReq, string]] {.async.} =
+        # Same-thread calls provider directly — no timeout applies
+        ok(MTReq(textValue: "fast:" & input, numValue: 77, boolValue: true))
+    )
+    .isOk()
+
+    let res = await MTReq.request("hello")
+    check res.isOk()
+    check res.value.textValue == "fast:hello"
+    check res.value.numValue == 77
+
+    MTReq.clearProvider()
+    # Restore default timeout
+    MTReq.setRequestTimeout(chronos.seconds(5))
+
+  asyncTest "cross-thread timeout actually unblocks (e2e timing)":
+    # Set a 200ms timeout
+    MTReq.setRequestTimeout(chronos.milliseconds(200))
+
+    # Provider that blocks indefinitely (sleeps 60s)
+    check MTReq
+    .setProvider(
+      proc(input: string): Future[Result[MTReq, string]] {.async.} =
+        await sleepAsync(chronos.seconds(60))
+        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+    )
+    .isOk()
+
+    gDone.store(false)
+    var reqThread: Thread[void]
+    reqThread.createThread(requesterMeasureTimeout)
+
+    while not gDone.load():
+      await sleepAsync(10.milliseconds)
+
+    reqThread.joinThread()
+    MTReq.clearProvider()
+    # Restore default timeout
+    MTReq.setRequestTimeout(chronos.seconds(5))

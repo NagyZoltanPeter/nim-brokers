@@ -91,6 +91,22 @@ proc growBuckets() =
   gBucketCap = newCap
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Cross-thread request timeout
+# ═══════════════════════════════════════════════════════════════════════════
+
+var gWeatherMtRequestTimeout*: Duration = chronos.seconds(5)
+  ## Default timeout for cross-thread requests. Same-thread requests
+  ## bypass this (they call the provider directly).
+
+proc setRequestTimeout*(_: typedesc[Weather], timeout: Duration) =
+  ## Set the cross-thread request timeout for this broker type.
+  gWeatherMtRequestTimeout = timeout
+
+proc requestTimeout*(_: typedesc[Weather]): Duration =
+  ## Get the current cross-thread request timeout for this broker type.
+  gWeatherMtRequestTimeout
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Threadvar provider storage (GC-managed, per-thread)
 #
 #  Closures cannot live in shared memory — they reference GC-managed
@@ -270,12 +286,21 @@ proc request*(
       city: city,
       responseChan: respChan))
 
-    # Await response
-    let recvRes = catch:
-      await respChan.recv()
+    # Await response with timeout
+    let recvFut = respChan.recv()
+    let completedRes = catch:
+      await withTimeout(recvFut, gWeatherMtRequestTimeout)
     respChan[].close()
     deallocShared(respChan)
 
+    if completedRes.isErr():
+      return err("RequestBroker(Weather): recv failed: " & completedRes.error.msg)
+    if not completedRes.get():
+      return err("RequestBroker(Weather): cross-thread request timed out after " &
+                 $gWeatherMtRequestTimeout)
+    # Future completed — read the value
+    let recvRes = catch:
+      recvFut.read()
     if recvRes.isErr():
       return err("RequestBroker(Weather): recv failed: " & recvRes.error.msg)
     return recvRes.get()

@@ -258,6 +258,23 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         `globalBucketCapIdent` = newCap
   )
 
+  # ── Cross-thread request timeout ──────────────────────────────────
+  let timeoutVarIdent = ident("g" & typeDisplayName & "MtRequestTimeout")
+  result.add(
+    quote do:
+      var `timeoutVarIdent`*: Duration = chronos.seconds(5)
+        ## Default timeout for cross-thread requests. Same-thread requests
+        ## bypass this (they call the provider directly).
+
+      proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
+        ## Set the cross-thread request timeout for this broker type.
+        `timeoutVarIdent` = timeout
+
+      proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
+        ## Get the current cross-thread request timeout for this broker type.
+        `timeoutVarIdent`
+  )
+
   # ── Threadvar provider storage ──────────────────────────────────────
   # Closures are GC-managed, so they must live in threadvars (per-thread,
   # GC-visible) rather than in createShared memory.  Two parallel seqs
@@ -663,10 +680,25 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               responseChan: respChan,
             )
             reqChan[].sendSync(msg)
-            let recvRes = catch:
-              await respChan.recv()
+            let recvFut = respChan.recv()
+            let completedRes = catch:
+              await withTimeout(recvFut, `timeoutVarIdent`)
             respChan[].close()
             deallocShared(respChan)
+            if completedRes.isErr():
+              return err(
+                "RequestBroker(" & `typeNameLit` & "): recv failed: " &
+                  completedRes.error.msg
+              )
+            if not completedRes.get():
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): cross-thread request timed out after " &
+                  $`timeoutVarIdent`
+              )
+            # Future completed — read the value
+            let recvRes = catch:
+              recvFut.read()
             if recvRes.isErr():
               return err(
                 "RequestBroker(" & `typeNameLit` & "): recv failed: " &
@@ -828,10 +860,25 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           discard `respChanIdent`[].open()
           var msg = `msgConstruction`
           `reqChanIdent`[].sendSync(msg)
-          let recvRes = catch:
-            await `respChanIdent`.recv()
+          let recvFut = `respChanIdent`.recv()
+          let completedRes = catch:
+            await withTimeout(recvFut, `timeoutVarIdent`)
           `respChanIdent`[].close()
           deallocShared(`respChanIdent`)
+          if completedRes.isErr():
+            return err(
+              "RequestBroker(" & `typeNameLit` & "): recv failed: " &
+                completedRes.error.msg
+            )
+          if not completedRes.get():
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): cross-thread request timed out after " &
+                $`timeoutVarIdent`
+            )
+          # Future completed — read the value
+          let recvRes = catch:
+            recvFut.read()
           if recvRes.isErr():
             return err(
               "RequestBroker(" & `typeNameLit` & "): recv failed: " &
