@@ -519,7 +519,7 @@ same requestChan. Each context has its own handler in the threadvar seqs.
 | Global bucket array | `4 * sizeof(MtBucket)` initially (~128 bytes), doubles on growth | Process lifetime |
 | `Lock` (OS mutex) | ~40-64 bytes (platform-dependent) | Process lifetime |
 | Init + count + cap vars | 3 `int` + 1 `bool` = ~25 bytes | Process lifetime |
-| `AsyncChannel[RequestMsg]` per context | ~200 bytes (`createShared`) | Until `clearProvider` |
+| `AsyncChannel[RequestMsg]` per context | ~200 bytes (`createShared`) | Intentionally leaked (see below) |
 | Threadvar seqs (per provider thread) | 2 `seq` headers (~32 bytes) + entries | Thread lifetime |
 | Process loop coroutine | One `Future` on the event loop (~128 bytes) | Until `clearProvider` |
 

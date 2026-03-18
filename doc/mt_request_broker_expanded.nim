@@ -163,11 +163,16 @@ proc processLoop(
                   catchedRes.error.msg))
         else:
           msg.responseChan[].sendSync(catchedRes.get())
-    # After loop: close the channel.  We do NOT deallocShared here because
-    # a concurrent requester may still hold a pointer captured before the
-    # bucket was removed from the registry.  The close() prevents further
-    # operations; the small per-channel leak only occurs at teardown.
-    requestChan[].close()
+    # After loop: Do NOT close or deallocShared the request channel.
+    # A concurrent requester may still hold a raw pointer captured before
+    # the bucket was removed from the registry.  AsyncChannel.close()
+    # destroys the inner Channel (deallocShared + nil on .chan field), so
+    # a late requester sendSync would dereference nil — a crash.
+    # Leave the channel open; any late sendSync succeeds harmlessly
+    # (writes into a channel nobody reads).  Intentional leak (~200 bytes
+    # + OS signal handle) at teardown only.
+    # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+    # (e.g. trySendSync returning bool, or close that defers inner dealloc).
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  setProvider — register a handler on the current thread.
