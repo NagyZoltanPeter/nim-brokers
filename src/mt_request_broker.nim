@@ -186,7 +186,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     newTree(nnkIdentDefs, ident("threadId"), ident("pointer"), newEmptyNode())
   )
   bucketRecList.add(
-    newTree(nnkIdentDefs, ident("active"), ident("bool"), newEmptyNode())
+    newTree(nnkIdentDefs, ident("threadGen"), ident("uint64"), newEmptyNode())
   )
   typeSection.add(
     newTree(
@@ -446,6 +446,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         ): Result[void, string] =
           `initProcIdent`()
           # Check if already registered on this thread
+          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == DefaultBrokerContext:
               # Verify entry is still backed by a global bucket.
@@ -454,7 +455,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                     `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -470,8 +472,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
-                  return ok() # Same thread, other sig registered first
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  return ok() # Same thread incarnation, other sig registered first
                 else:
                   `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
                   `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
@@ -489,7 +492,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               brokerCtx: DefaultBrokerContext,
               requestChan: spawnChan,
               threadId: currentMtThreadId(),
-              active: true,
+              threadGen: myThreadGen,
             )
             `globalBucketCountIdent` += 1
           # asyncSpawn outside lock to prevent potential deadlock.
@@ -507,6 +510,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           if brokerCtx == DefaultBrokerContext:
             return setProvider(`typeIdent`, handler)
           `initProcIdent`()
+          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == brokerCtx:
               # Verify entry is still backed by a global bucket.
@@ -514,7 +518,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                     `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -532,7 +537,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                   `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
@@ -552,7 +558,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               brokerCtx: brokerCtx,
               requestChan: spawnChan,
               threadId: currentMtThreadId(),
-              active: true,
+              threadGen: myThreadGen,
             )
             `globalBucketCountIdent` += 1
           # asyncSpawn outside lock to prevent potential deadlock.
@@ -568,6 +574,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             _: typedesc[`typeIdent`], handler: `argProviderName`
         ): Result[void, string] =
           `initProcIdent`()
+          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == DefaultBrokerContext:
               # Verify entry is still backed by a global bucket.
@@ -575,7 +582,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                     `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -590,7 +598,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                   `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
@@ -609,7 +618,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               brokerCtx: DefaultBrokerContext,
               requestChan: spawnChan,
               threadId: currentMtThreadId(),
-              active: true,
+              threadGen: myThreadGen,
             )
             `globalBucketCountIdent` += 1
           # asyncSpawn outside lock to prevent potential deadlock.
@@ -628,6 +637,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           if brokerCtx == DefaultBrokerContext:
             return setProvider(`typeIdent`, handler)
           `initProcIdent`()
+          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == brokerCtx:
               # Verify entry is still backed by a global bucket.
@@ -635,7 +645,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId():
+                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                     `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -653,7 +664,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                   `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
@@ -673,7 +685,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               brokerCtx: brokerCtx,
               requestChan: spawnChan,
               threadId: currentMtThreadId(),
-              active: true,
+              threadGen: myThreadGen,
             )
             `globalBucketCountIdent` += 1
           # asyncSpawn outside lock to prevent potential deadlock.
@@ -699,11 +711,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           var reqChan: ptr AsyncChannel[`requestMsgName`]
           var sameThread = false
+          let myThreadGen = currentMtThreadGen()
 
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                   `globalBucketsIdent`[i].threadGen == myThreadGen:
                   sameThread = true
                 else:
                   reqChan = `globalBucketsIdent`[i].requestChan
@@ -899,11 +913,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         `initProcIdent`()
         var `reqChanIdent`: ptr AsyncChannel[`requestMsgName`]
         var `sameThreadIdent` = false
+        let myThreadGen = currentMtThreadGen()
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-              if `globalBucketsIdent`[i].threadId == currentMtThreadId():
+              if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                 `globalBucketsIdent`[i].threadGen == myThreadGen:
                 `sameThreadIdent` = true
               else:
                 `reqChanIdent` = `globalBucketsIdent`[i].requestChan
@@ -1036,13 +1052,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       `initProcIdent`()
       var reqChan: ptr AsyncChannel[`requestMsgName`]
       var isProviderThread = false
+      let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
         var foundIdx = -1
         for i in 0 ..< `globalBucketCountIdent`:
           if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
             reqChan = `globalBucketsIdent`[i].requestChan
-            isProviderThread = (`globalBucketsIdent`[i].threadId == currentMtThreadId())
-            `globalBucketsIdent`[i].active = false
+            isProviderThread = (`globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                                `globalBucketsIdent`[i].threadGen == myThreadGen)
             foundIdx = i
             break
         if foundIdx >= 0:

@@ -48,7 +48,7 @@ type
     brokerCtx: BrokerContext
     requestChan: ptr AsyncChannel[WeatherRequestMsg]
     threadId: pointer   # address of threadvar marker — unique per thread
-    active: bool
+    threadGen: uint64   # disambiguates reused threadvar addresses (refc)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Global shared state (Lock-protected, createShared for refc safety)
@@ -191,17 +191,20 @@ proc setProvider*(
     handler: WeatherProvider,
 ): Result[void, string] =
   ensureInit()
+  let myThreadGen = currentMtThreadGen()
 
   # Check if already registered on this thread for this context
   for i in 0 ..< tvProviderCtxs.len:
     if tvProviderCtxs[i] == brokerCtx:
       # Verify this entry is still backed by a global bucket.
       # If not, it's stale from a cross-thread clearProvider — remove it.
+      # threadGen disambiguates reused threadvar addresses under refc.
       var isStale = true
       withLock(gLock):
         for j in 0 ..< gBucketCount:
           if gBuckets[j].brokerCtx == brokerCtx and
-             gBuckets[j].threadId == currentMtThreadId():
+             gBuckets[j].threadId == currentMtThreadId() and
+             gBuckets[j].threadGen == myThreadGen:
             isStale = false
             break
       if isStale:
@@ -217,10 +220,16 @@ proc setProvider*(
 
   var spawnChan: ptr AsyncChannel[WeatherRequestMsg]
   withLock(gLock):
-    # If a bucket already exists for this context, nothing more to do
+    # If a bucket already exists for this context from same thread incarnation
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
-        return ok()
+        if gBuckets[i].threadId == currentMtThreadId() and
+           gBuckets[i].threadGen == myThreadGen:
+          return ok()  # same thread incarnation, other sig registered first
+        else:
+          tvProviderCtxs.setLen(tvProviderCtxs.len - 1)
+          tvProviderHandlers.setLen(tvProviderHandlers.len - 1)
+          return err("RequestBroker(Weather): provider already set from another thread")
 
     # Create shared bucket + request channel
     if gBucketCount >= gBucketCap:
@@ -233,7 +242,7 @@ proc setProvider*(
       brokerCtx: brokerCtx,
       requestChan: spawnChan,
       threadId: currentMtThreadId(),
-      active: true)
+      threadGen: myThreadGen)
     gBucketCount += 1
 
   # asyncSpawn outside lock to prevent potential deadlock.
@@ -264,12 +273,16 @@ proc request*(
 
   var reqChan: ptr AsyncChannel[WeatherRequestMsg]
   var sameThread = false
+  let myThreadGen = currentMtThreadGen()
 
-  # Look up bucket for this BrokerContext
+  # Look up bucket for this BrokerContext.
+  # threadGen prevents a new thread incarnation with the same threadvar
+  # address from incorrectly taking the same-thread fast path.
   withLock(gLock):
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
-        if gBuckets[i].threadId == currentMtThreadId():
+        if gBuckets[i].threadId == currentMtThreadId() and
+           gBuckets[i].threadGen == myThreadGen:
           sameThread = true
         else:
           reqChan = gBuckets[i].requestChan
@@ -358,6 +371,7 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
 
   var reqChan: ptr AsyncChannel[WeatherRequestMsg]
   var isProviderThread = false
+  let myThreadGen = currentMtThreadGen()
 
   # Remove bucket from shared registry
   withLock(gLock):
@@ -365,8 +379,8 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
         reqChan = gBuckets[i].requestChan
-        isProviderThread = (gBuckets[i].threadId == currentMtThreadId())
-        gBuckets[i].active = false
+        isProviderThread = (gBuckets[i].threadId == currentMtThreadId() and
+                            gBuckets[i].threadGen == myThreadGen)
         foundIdx = i
         break
     if foundIdx >= 0:

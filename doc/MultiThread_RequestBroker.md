@@ -212,6 +212,18 @@ uses `createShared` / `deallocShared` for raw memory (no GC involvement).
 Provider closures live in threadvars (GC-managed, per-thread), avoiding
 cross-thread GC issues entirely.
 
+Under `--mm:refc`, threadvar addresses (`currentMtThreadId()`) can be reused
+when threads exit and new ones are created. Each bucket stores a `threadGen`
+(monotonically increasing counter from `currentMtThreadGen()`) alongside the
+`threadId` to disambiguate thread incarnations. All identity checks match on
+both `threadId` and `threadGen`.
+
+**`clearProvider` on a dead provider thread:** If the provider thread exits
+without calling `clearProvider`, a cross-thread `clearProvider` call sends a
+shutdown message into the orphaned request channel. Because `AsyncChannel` is
+unbounded, `sendSync` returns immediately — the message sits unread. This is a
+small harmless leak (~200 bytes + signal handle), not a hang.
+
 ### 7. Cross-thread request timeout
 
 Cross-thread requests have a configurable timeout (default: **5 seconds**). If the
@@ -336,7 +348,7 @@ sequenceDiagram
     participant H as handler(args)
 
     T ->> T: request("hello")
-    T ->> T: Lock → find bucket →<br/>threadId matches → sameThread=true → Unlock
+    T ->> T: Lock → find bucket →<br/>threadId+threadGen match → sameThread=true → Unlock
     T ->> TV: scan for brokerCtx
     TV -->> T: handler found
 
@@ -379,13 +391,13 @@ sequenceDiagram
     activate GL
 
     CT ->> B: scan buckets for brokerCtx
-    alt found, same threadId
-        B -->> CT: match (same thread)
+    alt found, same threadId+threadGen
+        B -->> CT: match (same thread incarnation)
         CT ->> GL: unlock
         deactivate GL
         CT ->> CT: return ok()
         Note right of CT: other signature registered first
-    else found, different threadId
+    else found, different threadId or threadGen
         B -->> CT: match (OTHER thread!)
         CT ->> TV: undo append (setLen - 1)
         CT ->> GL: unlock
@@ -394,7 +406,7 @@ sequenceDiagram
         CT ->> CH: createShared(AsyncChannel)
         activate CH
         CT ->> CH: open()
-        CT ->> B: store bucket {brokerCtx, chan, threadId, active}
+        CT ->> B: store bucket {brokerCtx, chan, threadId, threadGen}
         CT ->> B: bucketCount += 1
         CT ->> EL: asyncSpawn processLoop(chan, brokerCtx)
         Note over EL: process loop begins on<br/>THIS thread's event loop
@@ -489,15 +501,17 @@ sequenceDiagram
                 │  │ [0] brokerCtx: ctx0     │  │           │  tvHandlers: [h0,  h1  ] │
                 │  │     requestChan: ──────►│──│──►chan0   │                          │
                 │  │     threadId: addrA     │  │           ├──────────────────────────┤
-                │  │     active: true        │  │           │ Thread B:                │
+                │  │     threadGen: 0        │  │           │ Thread B:                │
                 │  ├─────────────────────────┤  │           │  tvCtxs:     [ctx2]      │
                 │  │ [1] brokerCtx: ctx1     │  │           │  tvHandlers: [h2  ]      │
                 │  │     requestChan: ──────►│──│──►chan0   │                          │
                 │  │     threadId: addrA     │  │  (shared) └──────────────────────────┘
+                │  │     threadGen: 0        │  │
                 │  ├─────────────────────────┤  │
                 │  │ [2] brokerCtx: ctx2     │  │
                 │  │     requestChan: ──────►│──│──►chan2
                 │  │     threadId: addrB     │  │
+                │  │     threadGen: 1        │  │
                 │  └─────────────────────────┘  │
                 │  gBucketCount: 3              │
                 │  gBucketCap: 4                │
