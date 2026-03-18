@@ -87,9 +87,12 @@
 import std/[macros, strutils, tables]
 import chronos, chronicles, results
 import ./helper/broker_utils, ./broker_context
-import ./mt_event_broker
 
-export chronicles, results, chronos, broker_context, mt_event_broker
+when compileOption("threads"):
+  import ./mt_event_broker
+  export mt_event_broker
+
+export chronicles, results, chronos, broker_context
 
 type EventBrokerMode = enum
   ebDefault
@@ -438,6 +441,10 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
   let m = parseEventBrokerMode(mode)
   case m
   of ebMultiThread:
-    generateMtEventBroker(body)
+    when not compileOption("threads"):
+      {.error: "EventBroker(mt) requires --threads:on. " &
+        "Compile with `--threads:on` to use multi-thread EventBroker.".}
+    else:
+      generateMtEventBroker(body)
   of ebDefault:
     generateEventBroker(body)

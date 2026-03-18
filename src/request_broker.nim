@@ -161,9 +161,12 @@ from std/sequtils import keepItIf
 import chronos
 import results
 import ./helper/broker_utils, ./broker_context
-import ./mt_request_broker
 
-export results, chronos, keepItIf, broker_context, mt_request_broker
+when compileOption("threads"):
+  import ./mt_request_broker
+  export mt_request_broker
+
+export results, chronos, keepItIf, broker_context
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
   ## Build a future that is already completed with an error result.
@@ -848,6 +851,10 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
   let m = parseMode(mode)
   case m
   of rbMultiThread:
-    generateMtRequestBroker(body)
+    when not compileOption("threads"):
+      {.error: "RequestBroker(mt) requires --threads:on. " &
+        "Compile with `--threads:on` to use multi-thread RequestBroker.".}
+    else:
+      generateMtRequestBroker(body)
   of rbAsync, rbSync:
     generateRequestBroker(body, m)
