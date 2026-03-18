@@ -311,15 +311,24 @@ proc request*(
       await withTimeout(recvFut, gWeatherMtRequestTimeout)
 
     if completedRes.isErr():
-      # withTimeout itself threw — channel may still be in use by provider.
-      respChan[].close()
-      # Do NOT deallocShared: provider may still hold a pointer to sendSync into.
+      # withTimeout itself threw — provider may still hold respChan pointer.
+      # Do NOT close: AsyncChannel.close() destroys the inner Channel
+      # (deallocShared + nil on .chan field), so a later provider sendSync
+      # would dereference nil — a crash.  Leave the channel open; the
+      # provider's eventual sendSync succeeds harmlessly into a channel
+      # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+      # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+      # (e.g. trySendSync returning bool, or close that defers inner dealloc).
       return err("RequestBroker(Weather): recv failed: " & completedRes.error.msg)
     if not completedRes.get():
-      # Timed out — provider may still be running handler and will sendSync later.
-      respChan[].close()
-      # Do NOT deallocShared: provider holds a raw pointer captured in the request
-      # message. This is an intentional leak (same strategy as request channels).
+      # Timed out — provider may still be running and will sendSync later.
+      # Do NOT close: AsyncChannel.close() destroys the inner Channel
+      # (deallocShared + nil on .chan field), so a later provider sendSync
+      # would dereference nil — a crash.  Leave the channel open; the
+      # provider's eventual sendSync succeeds harmlessly into a channel
+      # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+      # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+      # (e.g. trySendSync returning bool, or close that defers inner dealloc).
       return err("RequestBroker(Weather): cross-thread request timed out after " &
                  $gWeatherMtRequestTimeout)
     # Success: provider already sent response. Safe to close + dealloc.

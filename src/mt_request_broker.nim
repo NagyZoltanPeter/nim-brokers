@@ -752,17 +752,26 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               await withTimeout(recvFut, `timeoutVarIdent`)
             if completedRes.isErr():
               # withTimeout itself threw — provider may still hold respChan pointer.
-              respChan[].close()
-              # Do NOT deallocShared: provider may still sendSync into it.
+              # Do NOT close: AsyncChannel.close() destroys the inner Channel
+              # (deallocShared + nil on .chan field), so a later provider sendSync
+              # would dereference nil — a crash.  Leave the channel open; the
+              # provider's eventual sendSync succeeds harmlessly into a channel
+              # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+              # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+              # (e.g. trySendSync returning bool, or close that defers inner dealloc).
               return err(
                 "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                   completedRes.error.msg
               )
             if not completedRes.get():
               # Timed out — provider may still be running and will sendSync later.
-              respChan[].close()
-              # Do NOT deallocShared: provider holds a raw pointer from the request msg.
-              # Intentional leak (same strategy as request channels).
+              # Do NOT close: AsyncChannel.close() destroys the inner Channel
+              # (deallocShared + nil on .chan field), so a later provider sendSync
+              # would dereference nil — a crash.  Leave the channel open; the
+              # provider's eventual sendSync succeeds harmlessly into a channel
+              # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+              # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+              # (e.g. trySendSync returning bool, or close that defers inner dealloc).
               return err(
                 "RequestBroker(" & `typeNameLit` &
                   "): cross-thread request timed out after " &
@@ -940,17 +949,26 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             await withTimeout(recvFut, `timeoutVarIdent`)
           if completedRes.isErr():
             # withTimeout itself threw — provider may still hold respChan pointer.
-            `respChanIdent`[].close()
-            # Do NOT deallocShared: provider may still sendSync into it.
+            # Do NOT close: AsyncChannel.close() destroys the inner Channel
+            # (deallocShared + nil on .chan field), so a later provider sendSync
+            # would dereference nil — a crash.  Leave the channel open; the
+            # provider's eventual sendSync succeeds harmlessly into a channel
+            # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+            # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+            # (e.g. trySendSync returning bool, or close that defers inner dealloc).
             return err(
               "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                 completedRes.error.msg
             )
           if not completedRes.get():
             # Timed out — provider may still be running and will sendSync later.
-            `respChanIdent`[].close()
-            # Do NOT deallocShared: provider holds a raw pointer from the request msg.
-            # Intentional leak (same strategy as request channels).
+            # Do NOT close: AsyncChannel.close() destroys the inner Channel
+            # (deallocShared + nil on .chan field), so a later provider sendSync
+            # would dereference nil — a crash.  Leave the channel open; the
+            # provider's eventual sendSync succeeds harmlessly into a channel
+            # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
+            # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
+            # (e.g. trySendSync returning bool, or close that defers inner dealloc).
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): cross-thread request timed out after " &

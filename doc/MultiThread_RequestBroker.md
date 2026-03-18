@@ -238,11 +238,16 @@ if res.isErr() and "timed out" in res.error():
   the provider directly and are not affected by the timeout setting.
 - The timeout variable is per-type, module-level — it is shared across all threads
   and all `BrokerContext` instances for that broker type.
-- When a timeout occurs, the one-shot response channel is closed but **not
-  deallocated** — this is an intentional leak. The provider thread may still hold a
-  raw pointer to the response channel and will call `sendSync` after its handler
-  completes. Freeing the channel would cause a use-after-free. The same strategy is
-  used for request channels at teardown.
+- When a timeout occurs, the one-shot response channel is **left open and not
+  deallocated** — this is an intentional leak. `AsyncChannel.close()` destroys the
+  inner `Channel` (calls `deallocShared` on it and nils the pointer), so a later
+  provider `sendSync` would dereference nil and crash. By leaving the channel open,
+  the provider's eventual `sendSync` succeeds harmlessly — it writes into a channel
+  nobody reads. The leak is ~200 bytes + one OS signal handle per timed-out request.
+  A future upstream fix in `nim-asyncchannels` (e.g. a `trySendSync` that returns
+  bool on closed channel, or a `close` that defers inner dealloc) would allow safe
+  cleanup. The same intentional-leak strategy is used for request channels at
+  teardown.
 
 ### 8. Compile with `--threads:on`
 
@@ -302,7 +307,7 @@ sequenceDiagram
 
     RSP -->> RT: result received
     deactivate RT
-    RT ->> RSP: close + deallocShared
+    RT ->> RSP: close() + deallocShared (success path only)
     deactivate RSP
 
     RT ->> RT: return Result[T, string]
@@ -548,7 +553,7 @@ No channel allocations. No data copying beyond normal parameter passing.
 | `sendSync(requestMsg)` to requestChan | Copies the `RequestMsg` struct into channel buffer. **Blocks briefly** (channel has capacity 1, provider drains it). Under `--mm:refc`, string fields are deep-copied. |
 | `await responseChan.recv()` on requester | Requester blocks (via `waitFor` spinning a temporary event loop) |
 | `sendSync(result)` from provider | Copies the `Result[T, string]` into response channel. Under `--mm:refc`, result type fields are deep-copied. |
-| `close(responseChan)` + `deallocShared` | Channel teardown + OS dealloc |
+| `close(responseChan)` + `deallocShared` | Channel teardown + OS dealloc (success path; on timeout the channel is intentionally leaked open) |
 
 **Total: ~2-5 us per cross-thread request** (dominated by channel alloc/dealloc and
 context switches).
