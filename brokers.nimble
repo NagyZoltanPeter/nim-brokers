@@ -82,7 +82,7 @@ task test, "Run all tests":
     for opt in [
       "--mm:orc --threads:on", "--mm:refc --threads:on",
       "-d:release --mm:orc --threads:on",
-      "-d:release --mm:refc --threads:on --verbosity:3",
+      "-d:release --mm:refc --threads:on",
     ]:
       test opt, f
 

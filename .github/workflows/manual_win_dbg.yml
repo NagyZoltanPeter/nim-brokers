@@ -32,6 +32,11 @@ jobs:
           nimble --version
           git --version
 
+      - name: Show CPU info (Windows)
+        shell: pwsh
+        run: |
+          echo $env:NUMBER_OF_PROCESSORS
+          wmic cpu get NumberOfCores,NumberOfLogicalProcessors
       - name: Show workspace state
         shell: pwsh
         run: |
