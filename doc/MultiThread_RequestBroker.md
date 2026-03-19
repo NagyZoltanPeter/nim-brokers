@@ -394,7 +394,6 @@ sequenceDiagram
     alt found, same threadId+threadGen
         B -->> CT: match (same thread incarnation)
         CT ->> GL: unlock
-        deactivate GL
         CT ->> CT: return ok()
         Note right of CT: other signature registered first
     else found, different threadId or threadGen
@@ -411,10 +410,10 @@ sequenceDiagram
         CT ->> EL: asyncSpawn processLoop(chan, brokerCtx)
         Note over EL: process loop begins on<br/>THIS thread's event loop
         CT ->> GL: unlock
-        deactivate GL
-        deactivate CH
         CT ->> CT: return ok()
     end
+    deactivate GL
+    deactivate CH
 ```
 
 
