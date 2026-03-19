@@ -95,9 +95,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
         `eventMsgKindName` {.pure.} = enum
-          emkEvent            ## Normal event delivery
-          emkClearListeners   ## Clear threadvar handlers, keep processLoop alive
-          emkShutdown         ## Drain in-flight tasks and exit processLoop
+          emkEvent ## Normal event delivery
+          emkClearListeners ## Clear threadvar handlers, keep processLoop alive
+          emkShutdown ## Drain in-flight tasks and exit processLoop
 
         `eventMsgName` = object
           kind: `eventMsgKindName`
@@ -107,9 +107,10 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           brokerCtx: BrokerContext
           eventChan: ptr AsyncChannel[`eventMsgName`]
           threadId: pointer
-          threadGen: uint64     ## Disambiguates reused threadvar addresses
+          threadGen: uint64 ## Disambiguates reused threadvar addresses
           active: bool
           hasListeners: bool
+
   )
 
   # ── Global shared state ───────────────────────────────────────────────
@@ -135,15 +136,16 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
-            createShared(`bucketName`, `globalBucketCapIdent`)
-          )
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
+            `bucketName`, `globalBucketCapIdent`
+          ))
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
           # Another thread is initialising — spin until ready.
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
+
   )
 
   # ── Grow helper ───────────────────────────────────────────────────────
@@ -152,14 +154,14 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       proc `growProcIdent`() =
         ## Must be called under lock.
         let newCap = `globalBucketCapIdent` * 2
-        let newBuf = cast[ptr UncheckedArray[`bucketName`]](
-          createShared(`bucketName`, newCap)
-        )
+        let newBuf =
+          cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
         deallocShared(`globalBucketsIdent`)
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
+
   )
 
   # ── Threadvar listener storage ────────────────────────────────────────
@@ -168,7 +170,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   result.add(
     quote do:
       var `tvListenerCtxIdent` {.threadvar.}: seq[BrokerContext]
-      var `tvListenerHandlersIdent` {.threadvar.}: seq[Table[uint64, `handlerProcIdent`]]
+      var `tvListenerHandlersIdent` {.threadvar.}:
+        seq[Table[uint64, `handlerProcIdent`]]
       var `tvNextIdsIdent` {.threadvar.}: seq[uint64]
   )
 
@@ -184,8 +187,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           await callback(event)
         except CatchableError:
           error "Failed to execute event listener",
-            eventType = `typeNameLit`,
-            error = getCurrentExceptionMsg()
+            eventType = `typeNameLit`, error = getCurrentExceptionMsg()
+
   )
 
   # ── Process loop ──────────────────────────────────────────────────────
@@ -199,8 +202,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   result.add(
     quote do:
       proc `processLoopIdent`(
-          `ecIdent`: `ecPtrType`,
-          `loopCtxIdent`: BrokerContext,
+          `ecIdent`: `ecPtrType`, `loopCtxIdent`: BrokerContext
       ) {.async: (raises: []).} =
         var inFlight: seq[Future[void]] = @[]
 
@@ -235,14 +237,12 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             await drainInFlight()
             clearThreadvarListeners()
             break
-
           of `eventMsgKindName`.emkClearListeners:
             # Drain in-flight listeners and clear threadvar handler table,
             # but keep processLoop alive for future re-listen on this bucket.
             await drainInFlight()
             clearThreadvarListeners()
             # continue — loop stays alive, waiting for new events
-
           of `eventMsgKindName`.emkEvent:
             # Prune completed futures — await marks them as consumed so Chronos
             # does not warn about unresolved futures.  The await is instant
@@ -251,9 +251,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             while j < inFlight.len:
               if inFlight[j].finished():
                 try:
-                  await inFlight[j]      # instant — consumes the future
+                  await inFlight[j] # instant — consumes the future
                 except CatchableError:
-                  discard                # notifyListener is raises:[], but Chronos needs the guard
+                  discard # notifyListener is raises:[], but Chronos needs the guard
                 inFlight.del(j)
               else:
                 inc j
@@ -278,6 +278,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         # channel is undefined behavior. Leaving it open is safe: the channel
         # is drained, nobody reads from it, and the small per-channel leak
         # only occurs at teardown.
+
   )
 
   # ── listen impl ──────────────────────────────────────────────────────
@@ -319,8 +320,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-               `globalBucketsIdent`[i].threadId == myThreadId and
-               `globalBucketsIdent`[i].threadGen == myThreadGen:
+                `globalBucketsIdent`[i].threadId == myThreadId and
+                `globalBucketsIdent`[i].threadGen == myThreadGen:
               # Reuse existing bucket — same thread incarnation, processLoop alive.
               `globalBucketsIdent`[i].hasListeners = true
               bucketExists = true
@@ -328,9 +329,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           if not bucketExists:
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`eventMsgName`]](
-              createShared(AsyncChannel[`eventMsgName`], 1)
-            )
+            let chan = cast[ptr AsyncChannel[`eventMsgName`]](createShared(
+              AsyncChannel[`eventMsgName`], 1
+            ))
             discard chan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
@@ -349,6 +350,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
 
         return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
+
   )
 
   # ── Public listen ─────────────────────────────────────────────────────
@@ -365,6 +367,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           handler: `handlerProcIdent`,
       ): Result[`listenerHandleIdent`, string] =
         return `listenImplIdent`(brokerCtx, handler)
+
   )
 
   # ── emit impl ─────────────────────────────────────────────────────────
@@ -395,12 +398,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-               `globalBucketsIdent`[i].active and
-               `globalBucketsIdent`[i].hasListeners:
-              targets.add(EvTarget(
-                eventChan: `globalBucketsIdent`[i].eventChan,
-                isSameThread: `globalBucketsIdent`[i].threadId == myThreadId,
-              ))
+                `globalBucketsIdent`[i].active and `globalBucketsIdent`[i].hasListeners:
+              targets.add(
+                EvTarget(
+                  eventChan: `globalBucketsIdent`[i].eventChan,
+                  isSameThread: `globalBucketsIdent`[i].threadId == myThreadId,
+                )
+              )
 
         if targets.len == 0:
           return
@@ -423,6 +427,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             # Cross-thread: send via channel (sendSync is brief — buffer + signal)
             let msg = `eventMsgName`(kind: `eventMsgKindName`.emkEvent, event: event)
             target.eventChan[].sendSync(msg)
+
   )
 
   # ── Public emit ───────────────────────────────────────────────────────
@@ -438,6 +443,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           _: typedesc[`typeIdent`], brokerCtx: BrokerContext, event: `typeIdent`
       ) {.async: (raises: []).} =
         await `emitImplIdent`(brokerCtx, event)
+
   )
 
   # ── Field-constructor emit overloads (for inline object types) ────────
@@ -517,9 +523,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       )
 
     let emitCtorCallCtx =
-      newCall(
-        copyNimTree(emitImplIdent), ident("brokerCtx"), copyNimTree(emitCtorExpr)
-      )
+      newCall(copyNimTree(emitImplIdent), ident("brokerCtx"), copyNimTree(emitCtorExpr))
     let emitCtorBodyCtx = quote:
       await `emitCtorCallCtx`
 
@@ -574,10 +578,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                 `globalBucketsIdent`[i].threadId == myThreadId and
-                 `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
                 `globalBucketsIdent`[i].hasListeners = false
                 break
+
   )
 
   # ── dropAllListeners impl ─────────────────────────────────────────────
@@ -596,7 +601,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-               `globalBucketsIdent`[i].hasListeners:
+                `globalBucketsIdent`[i].hasListeners:
               `globalBucketsIdent`[i].hasListeners = false
               if `globalBucketsIdent`[i].threadId != myThreadId:
                 chansToClear.add(`globalBucketsIdent`[i].eventChan)
@@ -618,6 +623,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         # but stays alive for future re-listen.
         for chan in chansToClear:
           chan[].sendSync(`eventMsgName`(kind: `eventMsgKindName`.emkClearListeners))
+
   )
 
   # ── Public dropListener / dropAllListeners ────────────────────────────
@@ -638,6 +644,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
       proc dropAllListeners*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext) =
         `dropAllListenersImplIdent`(brokerCtx)
+
   )
 
   when defined(brokerDebug):

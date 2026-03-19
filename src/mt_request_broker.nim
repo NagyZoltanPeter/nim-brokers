@@ -68,9 +68,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       let procName = stmt[0]
       let procNameIdent =
         case procName.kind
-        of nnkIdent: procName
-        of nnkPostfix: procName[1]
-        else: procName
+        of nnkIdent:
+          procName
+        of nnkPostfix:
+          procName[1]
+        else:
+          procName
       if not ($procNameIdent).startsWith("signature"):
         error("Signature proc names must start with `signature`", procName)
       let params = stmt.params
@@ -155,7 +158,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         if nameNode.kind != nnkEmpty:
           let typeNode = paramDef[paramDef.len - 2]
           msgRecList.add(
-            newTree(nnkIdentDefs, ident($nameNode), copyNimTree(typeNode), newEmptyNode())
+            newTree(
+              nnkIdentDefs, ident($nameNode), copyNimTree(typeNode), newEmptyNode()
+            )
           )
   let responseChanType = quote:
     ptr AsyncChannel[Result[`typeIdent`, string]]
@@ -230,15 +235,16 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
-            createShared(`bucketName`, `globalBucketCapIdent`)
-          )
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
+            `bucketName`, `globalBucketCapIdent`
+          ))
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
           # Another thread is initialising — spin until ready.
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
+
   )
 
   # ── Grow helper ─────────────────────────────────────────────────────
@@ -248,14 +254,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `growProcIdent`() =
         ## Must be called under lock.
         let newCap = `globalBucketCapIdent` * 2
-        let newBuf = cast[ptr UncheckedArray[`bucketName`]](
-          createShared(`bucketName`, newCap)
-        )
+        let newBuf =
+          cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
         deallocShared(`globalBucketsIdent`)
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
+
   )
 
   # ── Cross-thread request timeout ──────────────────────────────────
@@ -277,6 +283,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
         ## Get the current cross-thread request timeout for this broker type.
         `timeoutVarIdent`
+
   )
 
   # ── Threadvar provider storage ──────────────────────────────────────
@@ -347,16 +354,22 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               break
           if `handlerIdent0`.isNil():
             `msgIdent`.responseChan[].sendSync(
-              err(Result[`typeIdent`, string],
-                  "RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered"))
+              err(
+                Result[`typeIdent`, string],
+                "RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered",
+              )
+            )
           else:
             let catchedRes = catch:
               await `handlerIdent0`()
             if catchedRes.isErr():
               `msgIdent`.responseChan[].sendSync(
-                err(Result[`typeIdent`, string],
-                    "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
-                      catchedRes.error.msg))
+                err(
+                  Result[`typeIdent`, string],
+                  "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+                    catchedRes.error.msg,
+                )
+              )
             else:
               let providerRes = catchedRes.get()
               if providerRes.isOk():
@@ -364,9 +377,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 when compiles(resultValue.isNil()):
                   if resultValue.isNil():
                     `msgIdent`.responseChan[].sendSync(
-                      err(Result[`typeIdent`, string],
-                          "RequestBroker(" & `typeNameLit` &
-                            "): provider returned nil result"))
+                      err(
+                        Result[`typeIdent`, string],
+                        "RequestBroker(" & `typeNameLit` &
+                          "): provider returned nil result",
+                      )
+                    )
                     continue
               `msgIdent`.responseChan[].sendSync(providerRes)
     )
@@ -389,17 +405,23 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               break
           if `handlerIdent1`.isNil():
             `msgIdent`.responseChan[].sendSync(
-              err(Result[`typeIdent`, string],
-                  "RequestBroker(" & `typeNameLit` &
-                    "): no provider registered for input signature"))
+              err(
+                Result[`typeIdent`, string],
+                "RequestBroker(" & `typeNameLit` &
+                  "): no provider registered for input signature",
+              )
+            )
           else:
             let catchedRes = catch:
               await `providerCall`
             if catchedRes.isErr():
               `msgIdent`.responseChan[].sendSync(
-                err(Result[`typeIdent`, string],
-                    "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
-                      catchedRes.error.msg))
+                err(
+                  Result[`typeIdent`, string],
+                  "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+                    catchedRes.error.msg,
+                )
+              )
             else:
               let providerRes = catchedRes.get()
               if providerRes.isOk():
@@ -407,9 +429,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 when compiles(resultValue.isNil()):
                   if resultValue.isNil():
                     `msgIdent`.responseChan[].sendSync(
-                      err(Result[`typeIdent`, string],
-                          "RequestBroker(" & `typeNameLit` &
-                            "): provider returned nil result"))
+                      err(
+                        Result[`typeIdent`, string],
+                        "RequestBroker(" & `typeNameLit` &
+                          "): provider returned nil result",
+                      )
+                    )
                     continue
               `msgIdent`.responseChan[].sendSync(providerRes)
     )
@@ -420,8 +445,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   result.add(
     quote do:
       proc `processLoopIdent`(
-          `rcIdent`: `rcPtrType`,
-          `loopCtxIdent`: BrokerContext,
+          `rcIdent`: `rcPtrType`, `loopCtxIdent`: BrokerContext
       ) {.async: (raises: []).} =
         while true:
           `processBody`
@@ -435,6 +459,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         # + OS signal handle) at teardown only.
         # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
         # (e.g. trySendSync returning bool, or close that defers inner dealloc).
+
   )
 
   # ── setProvider (zero-arg) ──────────────────────────────────────────
@@ -455,14 +480,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                     `globalBucketsIdent`[j].threadGen == myThreadGen:
+                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                      `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
                 `tvNoArgCtxIdent`.del(i)
                 `tvNoArgHandlerIdent`.del(i)
-                break  # removed stale entry, proceed with registration
+                break # removed stale entry, proceed with registration
               else:
                 return err("Zero-arg provider already set")
           # Store in threadvar
@@ -473,19 +498,20 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
                 if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok() # Same thread incarnation, other sig registered first
                 else:
                   `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
                   `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
                   return err(
                     "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread")
+                      "): provider already set from another thread"
+                  )
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
-              createShared(AsyncChannel[`requestMsgName`], 1)
-            )
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
+              AsyncChannel[`requestMsgName`], 1
+            ))
             discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
@@ -498,6 +524,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           # asyncSpawn outside lock to prevent potential deadlock.
           asyncSpawn `processLoopIdent`(spawnChan, DefaultBrokerContext)
           return ok()
+
     )
 
     result.add(
@@ -518,8 +545,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                     `globalBucketsIdent`[j].threadGen == myThreadGen:
+                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                      `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -538,7 +565,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
                 if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
@@ -546,12 +573,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                   return err(
                     "RequestBroker(" & `typeNameLit` &
                       "): provider already set from another thread for context " &
-                      $brokerCtx)
+                      $brokerCtx
+                  )
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
-              createShared(AsyncChannel[`requestMsgName`], 1)
-            )
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
+              AsyncChannel[`requestMsgName`], 1
+            ))
             discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
@@ -564,6 +592,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           # asyncSpawn outside lock to prevent potential deadlock.
           asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
           return ok()
+
     )
 
   # ── setProvider (with-args) ─────────────────────────────────────────
@@ -582,8 +611,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                     `globalBucketsIdent`[j].threadGen == myThreadGen:
+                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                      `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -599,19 +628,20 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
                 if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
                   `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
                   return err(
                     "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread")
+                      "): provider already set from another thread"
+                  )
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
-              createShared(AsyncChannel[`requestMsgName`], 1)
-            )
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
+              AsyncChannel[`requestMsgName`], 1
+            ))
             discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
@@ -625,6 +655,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           if not spawnChan.isNil:
             asyncSpawn `processLoopIdent`(spawnChan, DefaultBrokerContext)
           return ok()
+
     )
 
     result.add(
@@ -645,8 +676,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
                   if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                     `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                     `globalBucketsIdent`[j].threadGen == myThreadGen:
+                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                      `globalBucketsIdent`[j].threadGen == myThreadGen:
                     isStale = false
                     break
               if isStale:
@@ -665,7 +696,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
                 if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
                   return ok()
                 else:
                   `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
@@ -673,12 +704,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                   return err(
                     "RequestBroker(" & `typeNameLit` &
                       "): provider already set from another thread for context " &
-                      $brokerCtx)
+                      $brokerCtx
+                  )
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](
-              createShared(AsyncChannel[`requestMsgName`], 1)
-            )
+            spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
+              AsyncChannel[`requestMsgName`], 1
+            ))
             discard spawnChan[].open()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
@@ -692,6 +724,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           if not spawnChan.isNil:
             asyncSpawn `processLoopIdent`(spawnChan, brokerCtx)
           return ok()
+
     )
 
   # ── request (zero-arg) ──────────────────────────────────────────────
@@ -702,6 +735,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             _: typedesc[`typeIdent`]
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
           return await request(`typeIdent`, DefaultBrokerContext)
+
     )
     result.add(
       quote do:
@@ -717,7 +751,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
                 if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                   `globalBucketsIdent`[i].threadGen == myThreadGen:
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
                   sameThread = true
                 else:
                   reqChan = `globalBucketsIdent`[i].requestChan
@@ -756,14 +790,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 "RequestBroker(" & `typeNameLit` &
                   "): no zero-arg provider registered for broker context " & $brokerCtx
               )
-            let respChan = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](
-              createShared(AsyncChannel[Result[`typeIdent`, string]], 1)
-            )
+            let respChan = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
+              AsyncChannel[Result[`typeIdent`, string]], 1
+            ))
             discard respChan[].open()
             var msg = `requestMsgName`(
-              isShutdown: false,
-              requestKind: 0,
-              responseChan: respChan,
+              isShutdown: false, requestKind: 0, responseChan: respChan
             )
             reqChan[].sendSync(msg)
             let recvFut = respChan.recv()
@@ -793,8 +825,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               # (e.g. trySendSync returning bool, or close that defers inner dealloc).
               return err(
                 "RequestBroker(" & `typeNameLit` &
-                  "): cross-thread request timed out after " &
-                  $`timeoutVarIdent`
+                  "): cross-thread request timed out after " & $`timeoutVarIdent`
               )
             # Success: provider already sent response. Safe to close + dealloc.
             respChan[].close()
@@ -804,10 +835,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               recvFut.read()
             if recvRes.isErr():
               return err(
-                "RequestBroker(" & `typeNameLit` & "): recv failed: " &
-                  recvRes.error.msg
+                "RequestBroker(" & `typeNameLit` & "): recv failed: " & recvRes.error.msg
               )
             return recvRes.get()
+
     )
   else:
     # Stub zero-arg request (no zero-arg signature declared).
@@ -816,9 +847,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         proc request*(
             _: typedesc[`typeIdent`]
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered"
-          )
+          return
+            err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
+
     )
 
   # ── request (with-args) ─────────────────────────────────────────────
@@ -903,9 +934,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     msgConstruction.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
     for argName in argNameIdentsKeyed:
       msgConstruction.add(newTree(nnkExprColonExpr, argName, argName))
-    msgConstruction.add(
-      newTree(nnkExprColonExpr, ident("responseChan"), respChanIdent)
-    )
+    msgConstruction.add(newTree(nnkExprColonExpr, ident("responseChan"), respChanIdent))
 
     var requestBodyKeyed = newStmtList()
     requestBodyKeyed.add(
@@ -919,7 +948,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
               if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                 `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
                 `sameThreadIdent` = true
               else:
                 `reqChanIdent` = `globalBucketsIdent`[i].requestChan
@@ -959,9 +988,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               "RequestBroker(" & `typeNameLit` &
                 "): no provider registered for broker context " & $brokerCtx
             )
-          let `respChanIdent` = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](
-            createShared(AsyncChannel[Result[`typeIdent`, string]], 1)
-          )
+          let `respChanIdent` = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
+            AsyncChannel[Result[`typeIdent`, string]], 1
+          ))
           discard `respChanIdent`[].open()
           var msg = `msgConstruction`
           `reqChanIdent`[].sendSync(msg)
@@ -992,8 +1021,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             # (e.g. trySendSync returning bool, or close that defers inner dealloc).
             return err(
               "RequestBroker(" & `typeNameLit` &
-                "): cross-thread request timed out after " &
-                $`timeoutVarIdent`
+                "): cross-thread request timed out after " & $`timeoutVarIdent`
             )
           # Success: provider already sent response. Safe to close + dealloc.
           `respChanIdent`[].close()
@@ -1003,8 +1031,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             recvFut.read()
           if recvRes.isErr():
             return err(
-              "RequestBroker(" & `typeNameLit` & "): recv failed: " &
-                recvRes.error.msg
+              "RequestBroker(" & `typeNameLit` & "): recv failed: " & recvRes.error.msg
             )
           return recvRes.get()
     )
@@ -1058,8 +1085,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         for i in 0 ..< `globalBucketCountIdent`:
           if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
             reqChan = `globalBucketsIdent`[i].requestChan
-            isProviderThread = (`globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                                `globalBucketsIdent`[i].threadGen == myThreadGen)
+            isProviderThread = (
+              `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+              `globalBucketsIdent`[i].threadGen == myThreadGen
+            )
             foundIdx = i
             break
         if foundIdx >= 0:
@@ -1074,9 +1103,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         `tvCleanup`
       elif not reqChan.isNil():
         warn "clearProvider called from non-provider thread; " &
-             "threadvar entries on provider thread are stale but harmless " &
-             "(next setProvider will detect and clean them)",
-          brokerType = `typeNameLit`
+          "threadvar entries on provider thread are stale but harmless " &
+          "(next setProvider will detect and clean them)", brokerType = `typeNameLit`
       if not reqChan.isNil():
         # Send shutdown to process loop.
         var shutdownMsg = `requestMsgName`(isShutdown: true)
@@ -1113,6 +1141,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
   )
 
   when defined(brokerDebug):

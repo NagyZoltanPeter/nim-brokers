@@ -168,14 +168,13 @@ proc generateEventBroker(body: NimNode): NimNode =
       proc `accessProcIdent`(): `brokerTypeIdent` =
         if `globalVarIdent`.isNil():
           new(`globalVarIdent`)
-          `globalVarIdent`.buckets =
-            @[
-              `bucketTypeIdent`(
-                brokerCtx: DefaultBrokerContext,
-                listeners: initTable[uint64, `handlerProcIdent`](),
-                nextId: 1'u64,
-              )
-            ]
+          `globalVarIdent`.buckets = @[
+            `bucketTypeIdent`(
+              brokerCtx: DefaultBrokerContext,
+              listeners: initTable[uint64, `handlerProcIdent`](),
+              nextId: 1'u64,
+            )
+          ]
         `globalVarIdent`
 
   )
@@ -442,8 +441,11 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
   case m
   of ebMultiThread:
     when not compileOption("threads"):
-      {.error: "EventBroker(mt) requires --threads:on. " &
-        "Compile with `--threads:on` to use multi-thread EventBroker.".}
+      {.
+        error:
+          "EventBroker(mt) requires --threads:on. " &
+          "Compile with `--threads:on` to use multi-thread EventBroker."
+      .}
     else:
       generateMtEventBroker(body)
   of ebDefault:

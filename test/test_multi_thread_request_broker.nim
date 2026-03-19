@@ -99,7 +99,7 @@ proc setProviderFromThreadKeyed() {.thread.} =
   let res = MTReq.setProvider(
     gCtxA,
     proc(input: string): Future[Result[MTReq, string]] {.async.} =
-      ok(MTReq(textValue: "hijack", numValue: 0, boolValue: false))
+      ok(MTReq(textValue: "hijack", numValue: 0, boolValue: false)),
   )
   gSetProviderOk.store(res.isOk())
   gDone.store(true)
@@ -111,7 +111,7 @@ proc providerThreadB() {.thread.} =
     let res = MTReq.setProvider(
       gCtxB,
       proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "ctxB:" & input, numValue: 200, boolValue: false))
+        ok(MTReq(textValue: "ctxB:" & input, numValue: 200, boolValue: false)),
     )
     doAssert res.isOk()
     gSetProviderOk.store(true)
@@ -119,6 +119,7 @@ proc providerThreadB() {.thread.} =
     while not gDone.load():
       await sleepAsync(10.milliseconds)
     MTReq.clearProvider(gCtxB)
+
   waitFor inner()
 
 # Requester that sends to gCtxA.
@@ -167,16 +168,15 @@ proc requesterMeasureTimeout() {.thread.} =
 # ── Test suite ────────────────────────────────────────────────────────────
 
 suite "RequestBroker macro (multi-thread mode)":
-
   # ── Basic functionality ──
 
   asyncTest "issue request from another thread":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 42, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 42, boolValue: true))
+      )
+      .isOk()
 
     gDone.store(false)
     var reqThread: Thread[void]
@@ -190,11 +190,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "same-thread request bypasses channels":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "same-" & input, numValue: 99, boolValue: false))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "same-" & input, numValue: 99, boolValue: false))
+      )
+      .isOk()
 
     let res = await MTReq.request("thread")
     check res.isOk()
@@ -206,11 +206,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "multiple sequential cross-thread requests":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input & "!", numValue: input.len, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input & "!", numValue: input.len, boolValue: true))
+      )
+      .isOk()
 
     gDone.store(false)
     var reqThread: Thread[void]
@@ -240,11 +240,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "error after provider cleared (same-thread)":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     let res1 = await MTReq.request("before")
     check res1.isOk()
@@ -257,11 +257,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "error after provider cleared (cross-thread)":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     let res = await MTReq.request("alive")
     check res.isOk()
@@ -280,11 +280,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "duplicate setProvider returns error":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     let res = MTReq.setProvider(
       proc(input: string): Future[Result[MTReq, string]] {.async.} =
@@ -296,11 +296,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "provider returning error propagates correctly":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        err("deliberate error: " & input)
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          err("deliberate error: " & input)
+      )
+      .isOk()
 
     let res = await MTReq.request("boom")
     check res.isErr()
@@ -310,11 +310,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "clearProvider is idempotent":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     MTReq.clearProvider()
     MTReq.clearProvider()
@@ -324,11 +324,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "set-clear-set cycle works":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "first:" & input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "first:" & input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     let res1 = await MTReq.request("a")
     check res1.isOk()
@@ -337,11 +337,11 @@ suite "RequestBroker macro (multi-thread mode)":
     MTReq.clearProvider()
 
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "second:" & input, numValue: 2, boolValue: false))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "second:" & input, numValue: 2, boolValue: false))
+      )
+      .isOk()
 
     let res2 = await MTReq.request("b")
     check res2.isOk()
@@ -354,11 +354,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "concurrent requests from multiple threads":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
+      )
+      .isOk()
 
     gThreadRes1.store(false)
     gThreadRes2.store(false)
@@ -380,11 +380,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "zero-arg request returns error (no zero-arg signature)":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     let res = await MTReq.request()
     check res.isErr()
@@ -395,11 +395,11 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "setProvider from second thread (default ctx) must fail":
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     gDone.store(false)
     gSetProviderOk.store(false)
@@ -426,12 +426,12 @@ suite "RequestBroker macro (multi-thread mode)":
     gCtxA = NewBrokerContext()
 
     check MTReq
-    .setProvider(
-      gCtxA,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        gCtxA,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true)),
+      )
+      .isOk()
 
     gDone.store(false)
     gSetProviderOk.store(false)
@@ -461,20 +461,20 @@ suite "RequestBroker macro (multi-thread mode)":
     let ctxY = NewBrokerContext()
 
     check MTReq
-    .setProvider(
-      ctxX,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "X:" & input, numValue: 10, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        ctxX,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "X:" & input, numValue: 10, boolValue: true)),
+      )
+      .isOk()
 
     check MTReq
-    .setProvider(
-      ctxY,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "Y:" & input, numValue: 20, boolValue: false))
-    )
-    .isOk()
+      .setProvider(
+        ctxY,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "Y:" & input, numValue: 20, boolValue: false)),
+      )
+      .isOk()
 
     let resX = await MTReq.request(ctxX, "hello")
     check resX.isOk()
@@ -507,12 +507,12 @@ suite "RequestBroker macro (multi-thread mode)":
 
     # Main thread registers provider for ctxA.
     check MTReq
-    .setProvider(
-      gCtxA,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        gCtxA,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true)),
+      )
+      .isOk()
 
     # Worker thread registers provider for ctxB.
     gDone.store(false)
@@ -551,12 +551,12 @@ suite "RequestBroker macro (multi-thread mode)":
     gCtxA = NewBrokerContext()
 
     check MTReq
-    .setProvider(
-      gCtxA,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        gCtxA,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "ctxA:" & input, numValue: 100, boolValue: true)),
+      )
+      .isOk()
 
     gThreadRes1.store(false)
     var t: Thread[void]
@@ -573,12 +573,12 @@ suite "RequestBroker macro (multi-thread mode)":
     let ctxUnregistered = NewBrokerContext()
 
     check MTReq
-    .setProvider(
-      ctxRegistered,
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        ctxRegistered,
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true)),
+      )
+      .isOk()
 
     let res = await MTReq.request(ctxUnregistered, "nope")
     check res.isErr()
@@ -604,12 +604,12 @@ suite "RequestBroker macro (multi-thread mode)":
 
     # Provider that sleeps longer than the timeout
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        await sleepAsync(chronos.seconds(2))
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          await sleepAsync(chronos.seconds(2))
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     gDone.store(false)
     var reqThread: Thread[void]
@@ -628,12 +628,12 @@ suite "RequestBroker macro (multi-thread mode)":
     MTReq.setRequestTimeout(chronos.milliseconds(1))
 
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        # Same-thread calls provider directly — no timeout applies
-        ok(MTReq(textValue: "fast:" & input, numValue: 77, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          # Same-thread calls provider directly — no timeout applies
+          ok(MTReq(textValue: "fast:" & input, numValue: 77, boolValue: true))
+      )
+      .isOk()
 
     let res = await MTReq.request("hello")
     check res.isOk()
@@ -650,12 +650,12 @@ suite "RequestBroker macro (multi-thread mode)":
 
     # Provider that blocks indefinitely (sleeps 60s)
     check MTReq
-    .setProvider(
-      proc(input: string): Future[Result[MTReq, string]] {.async.} =
-        await sleepAsync(chronos.seconds(60))
-        ok(MTReq(textValue: input, numValue: 1, boolValue: true))
-    )
-    .isOk()
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          await sleepAsync(chronos.seconds(60))
+          ok(MTReq(textValue: input, numValue: 1, boolValue: true))
+      )
+      .isOk()
 
     gDone.store(false)
     var reqThread: Thread[void]

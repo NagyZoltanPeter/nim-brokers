@@ -19,7 +19,7 @@ import chronos, chronicles
 import results
 import asyncchannels
 import broker_context
-import mt_broker_common  # currentMtThreadId(), atomics re-exported
+import mt_broker_common # currentMtThreadId(), atomics re-exported
 
 export results, chronos, chronicles, broker_context, asyncchannels, mt_broker_common
 
@@ -33,22 +33,21 @@ type
     tempC*: float
 
   ## Callback type for the provider handler.
-  WeatherProvider =
-    proc(city: string): Future[Result[Weather, string]] {.async.}
+  WeatherProvider = proc(city: string): Future[Result[Weather, string]] {.async.}
 
   ## Internal message sent over the request channel.
   WeatherRequestMsg = object
     isShutdown: bool
-    requestKind: int  # 0 = zero-arg (unused here), 1 = with-args
-    city: string      # flattened from signature params
+    requestKind: int # 0 = zero-arg (unused here), 1 = with-args
+    city: string # flattened from signature params
     responseChan: ptr AsyncChannel[Result[Weather, string]]
 
   ## One entry in the global shared bucket array.
   WeatherBucket = object
     brokerCtx: BrokerContext
     requestChan: ptr AsyncChannel[WeatherRequestMsg]
-    threadId: pointer   # address of threadvar marker — unique per thread
-    threadGen: uint64   # disambiguates reused threadvar addresses (refc)
+    threadId: pointer # address of threadvar marker — unique per thread
+    threadGen: uint64 # disambiguates reused threadvar addresses (refc)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Global shared state (Lock-protected, createShared for refc safety)
@@ -70,8 +69,8 @@ proc ensureInit() =
     # We won the init race.
     initLock(gLock)
     gBucketCap = 4
-    gBuckets = cast[ptr UncheckedArray[WeatherBucket]](
-      createShared(WeatherBucket, gBucketCap))
+    gBuckets =
+      cast[ptr UncheckedArray[WeatherBucket]](createShared(WeatherBucket, gBucketCap))
     gBucketCount = 0
     gInitDone.store(2, moRelease)
   else:
@@ -82,8 +81,8 @@ proc ensureInit() =
 proc growBuckets() =
   ## Must be called under lock.
   let newCap = gBucketCap * 2
-  let newBuf = cast[ptr UncheckedArray[WeatherBucket]](
-    createShared(WeatherBucket, newCap))
+  let newBuf =
+    cast[ptr UncheckedArray[WeatherBucket]](createShared(WeatherBucket, newCap))
   for i in 0 ..< gBucketCount:
     newBuf[i] = gBuckets[i]
   deallocShared(gBuckets)
@@ -115,7 +114,7 @@ proc requestTimeout*(_: typedesc[Weather]): Duration =
 #  at dispatch time. The shared bucket only holds metadata + channel.
 # ═══════════════════════════════════════════════════════════════════════════
 
-var tvProviderCtxs    {.threadvar.}: seq[BrokerContext]
+var tvProviderCtxs {.threadvar.}: seq[BrokerContext]
 var tvProviderHandlers {.threadvar.}: seq[WeatherProvider]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -125,21 +124,20 @@ var tvProviderHandlers {.threadvar.}: seq[WeatherProvider]
 # ═══════════════════════════════════════════════════════════════════════════
 
 proc processLoop(
-    requestChan: ptr AsyncChannel[WeatherRequestMsg],
-    loopCtx: BrokerContext,
+    requestChan: ptr AsyncChannel[WeatherRequestMsg], loopCtx: BrokerContext
 ) {.async: (raises: []).} =
   while true:
     let recvRes = catch:
       await requestChan.recv()
     if recvRes.isErr():
-      break                       # channel closed or cancelled
+      break # channel closed or cancelled
     let msg = recvRes.get()
     # NOTE: processLoop does NOT clean threadvars on shutdown.  Threadvar
     # cleanup is done by clearProvider (which validates thread ownership).
     # Having processLoop also clean threadvars would race with new
     # setProvider registrations on the same thread.
     if msg.isShutdown:
-      break                       # clearProvider sent shutdown
+      break # clearProvider sent shutdown
 
     if msg.requestKind == 1:
       # Look up provider from threadvar
@@ -151,16 +149,18 @@ proc processLoop(
 
       if handler.isNil():
         msg.responseChan[].sendSync(
-          err(Result[Weather, string],
-              "RequestBroker(Weather): no provider registered"))
+          err(Result[Weather, string], "RequestBroker(Weather): no provider registered")
+        )
       else:
         let catchedRes = catch:
           await handler(msg.city)
         if catchedRes.isErr():
           msg.responseChan[].sendSync(
-            err(Result[Weather, string],
-                "RequestBroker(Weather): provider threw: " &
-                  catchedRes.error.msg))
+            err(
+              Result[Weather, string],
+              "RequestBroker(Weather): provider threw: " & catchedRes.error.msg,
+            )
+          )
         else:
           msg.responseChan[].sendSync(catchedRes.get())
     # After loop: Do NOT close or deallocShared the request channel.
@@ -180,15 +180,12 @@ proc processLoop(
 # ═══════════════════════════════════════════════════════════════════════════
 
 proc setProvider*(
-    _: typedesc[Weather],
-    handler: WeatherProvider,
+    _: typedesc[Weather], handler: WeatherProvider
 ): Result[void, string] =
   return setProvider(Weather, DefaultBrokerContext, handler)
 
 proc setProvider*(
-    _: typedesc[Weather],
-    brokerCtx: BrokerContext,
-    handler: WeatherProvider,
+    _: typedesc[Weather], brokerCtx: BrokerContext, handler: WeatherProvider
 ): Result[void, string] =
   ensureInit()
   let myThreadGen = currentMtThreadGen()
@@ -203,14 +200,14 @@ proc setProvider*(
       withLock(gLock):
         for j in 0 ..< gBucketCount:
           if gBuckets[j].brokerCtx == brokerCtx and
-             gBuckets[j].threadId == currentMtThreadId() and
-             gBuckets[j].threadGen == myThreadGen:
+              gBuckets[j].threadId == currentMtThreadId() and
+              gBuckets[j].threadGen == myThreadGen:
             isStale = false
             break
       if isStale:
         tvProviderCtxs.del(i)
         tvProviderHandlers.del(i)
-        break  # removed stale entry, proceed with registration
+        break # removed stale entry, proceed with registration
       else:
         return err("Provider already set")
 
@@ -224,8 +221,8 @@ proc setProvider*(
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
         if gBuckets[i].threadId == currentMtThreadId() and
-           gBuckets[i].threadGen == myThreadGen:
-          return ok()  # same thread incarnation, other sig registered first
+            gBuckets[i].threadGen == myThreadGen:
+          return ok() # same thread incarnation, other sig registered first
         else:
           tvProviderCtxs.setLen(tvProviderCtxs.len - 1)
           tvProviderHandlers.setLen(tvProviderHandlers.len - 1)
@@ -234,15 +231,17 @@ proc setProvider*(
     # Create shared bucket + request channel
     if gBucketCount >= gBucketCap:
       growBuckets()
-    spawnChan = cast[ptr AsyncChannel[WeatherRequestMsg]](
-      createShared(AsyncChannel[WeatherRequestMsg], 1))
+    spawnChan = cast[ptr AsyncChannel[WeatherRequestMsg]](createShared(
+      AsyncChannel[WeatherRequestMsg], 1
+    ))
     discard spawnChan[].open()
 
     gBuckets[gBucketCount] = WeatherBucket(
       brokerCtx: brokerCtx,
       requestChan: spawnChan,
       threadId: currentMtThreadId(),
-      threadGen: myThreadGen)
+      threadGen: myThreadGen,
+    )
     gBucketCount += 1
 
   # asyncSpawn outside lock to prevent potential deadlock.
@@ -259,15 +258,12 @@ proc setProvider*(
 # ═══════════════════════════════════════════════════════════════════════════
 
 proc request*(
-    _: typedesc[Weather],
-    city: string,
+    _: typedesc[Weather], city: string
 ): Future[Result[Weather, string]] {.async: (raises: []).} =
   return await request(Weather, DefaultBrokerContext, city)
 
 proc request*(
-    _: typedesc[Weather],
-    brokerCtx: BrokerContext,
-    city: string,
+    _: typedesc[Weather], brokerCtx: BrokerContext, city: string
 ): Future[Result[Weather, string]] {.async: (raises: []).} =
   ensureInit()
 
@@ -282,7 +278,7 @@ proc request*(
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
         if gBuckets[i].threadId == currentMtThreadId() and
-           gBuckets[i].threadGen == myThreadGen:
+            gBuckets[i].threadGen == myThreadGen:
           sameThread = true
         else:
           reqChan = gBuckets[i].requestChan
@@ -302,26 +298,25 @@ proc request*(
     let catchedRes = catch:
       await provider(city)
     if catchedRes.isErr():
-      return err("RequestBroker(Weather): provider threw: " &
-                 catchedRes.error.msg)
+      return err("RequestBroker(Weather): provider threw: " & catchedRes.error.msg)
     return catchedRes.get()
-
   else:
     # ── Cross-thread path: send via channel, await response ──
     if reqChan.isNil():
       return err("RequestBroker(Weather): no provider registered for context")
 
     # Create a one-shot response channel
-    let respChan = cast[ptr AsyncChannel[Result[Weather, string]]](
-      createShared(AsyncChannel[Result[Weather, string]], 1))
+    let respChan = cast[ptr AsyncChannel[Result[Weather, string]]](createShared(
+      AsyncChannel[Result[Weather, string]], 1
+    ))
     discard respChan[].open()
 
     # Send request message
-    reqChan[].sendSync(WeatherRequestMsg(
-      isShutdown: false,
-      requestKind: 1,
-      city: city,
-      responseChan: respChan))
+    reqChan[].sendSync(
+      WeatherRequestMsg(
+        isShutdown: false, requestKind: 1, city: city, responseChan: respChan
+      )
+    )
 
     # Await response with timeout
     let recvFut = respChan.recv()
@@ -347,8 +342,10 @@ proc request*(
       # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
       # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
       # (e.g. trySendSync returning bool, or close that defers inner dealloc).
-      return err("RequestBroker(Weather): cross-thread request timed out after " &
-                 $gWeatherMtRequestTimeout)
+      return err(
+        "RequestBroker(Weather): cross-thread request timed out after " &
+          $gWeatherMtRequestTimeout
+      )
     # Success: provider already sent response. Safe to close + dealloc.
     respChan[].close()
     deallocShared(respChan)
@@ -379,8 +376,10 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
     for i in 0 ..< gBucketCount:
       if gBuckets[i].brokerCtx == brokerCtx:
         reqChan = gBuckets[i].requestChan
-        isProviderThread = (gBuckets[i].threadId == currentMtThreadId() and
-                            gBuckets[i].threadGen == myThreadGen)
+        isProviderThread = (
+          gBuckets[i].threadId == currentMtThreadId() and
+          gBuckets[i].threadGen == myThreadGen
+        )
         foundIdx = i
         break
     if foundIdx >= 0:
@@ -399,9 +398,8 @@ proc clearProvider*(_: typedesc[Weather], brokerCtx: BrokerContext) =
         break
   elif not reqChan.isNil():
     warn "clearProvider called from non-provider thread; " &
-         "threadvar entries on provider thread are stale but harmless " &
-         "(next setProvider will detect and clean them)",
-      brokerType = "Weather"
+      "threadvar entries on provider thread are stale but harmless " &
+      "(next setProvider will detect and clean them)", brokerType = "Weather"
 
   # Send shutdown to stop process loop
   if not reqChan.isNil():

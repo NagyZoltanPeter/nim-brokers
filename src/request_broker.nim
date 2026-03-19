@@ -852,8 +852,11 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
   case m
   of rbMultiThread:
     when not compileOption("threads"):
-      {.error: "RequestBroker(mt) requires --threads:on. " &
-        "Compile with `--threads:on` to use multi-thread RequestBroker.".}
+      {.
+        error:
+          "RequestBroker(mt) requires --threads:on. " &
+          "Compile with `--threads:on` to use multi-thread RequestBroker."
+      .}
     else:
       generateMtRequestBroker(body)
   of rbAsync, rbSync:

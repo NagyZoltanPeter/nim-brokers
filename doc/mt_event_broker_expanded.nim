@@ -17,7 +17,7 @@ import chronos, chronicles
 import results
 import asyncchannels
 import broker_context
-import mt_broker_common  # currentMtThreadId(), atomics re-exported
+import mt_broker_common # currentMtThreadId(), atomics re-exported
 
 export results, chronos, broker_context, asyncchannels, chronicles, mt_broker_common
 
@@ -33,18 +33,16 @@ type
   ## Handle returned by `listen`, used for `dropListener`.
   AlertListener* = object
     id*: uint64
-    threadId*: pointer
-      ## Thread that registered this listener (for validation on drop).
+    threadId*: pointer ## Thread that registered this listener (for validation on drop).
 
   ## Callback type for listener handlers.
-  AlertListenerProc* =
-    proc(event: Alert): Future[void] {.async: (raises: []), gcsafe.}
+  AlertListenerProc* = proc(event: Alert): Future[void] {.async: (raises: []), gcsafe.}
 
   ## Message kind for the event channel protocol.
   AlertEventMsgKind {.pure.} = enum
-    emkEvent            ## Normal event delivery
-    emkClearListeners   ## Clear threadvar handlers, keep processLoop alive
-    emkShutdown         ## Drain in-flight tasks and exit processLoop
+    emkEvent ## Normal event delivery
+    emkClearListeners ## Clear threadvar handlers, keep processLoop alive
+    emkShutdown ## Drain in-flight tasks and exit processLoop
 
   ## Internal message sent over the event channel.
   AlertEventMsg = object
@@ -58,10 +56,10 @@ type
   AlertBucket = object
     brokerCtx: BrokerContext
     eventChan: ptr AsyncChannel[AlertEventMsg]
-    threadId: pointer   # address of threadvar marker — unique per thread
-    threadGen: uint64   # disambiguates reused threadvar addresses (refc)
+    threadId: pointer # address of threadvar marker — unique per thread
+    threadGen: uint64 # disambiguates reused threadvar addresses (refc)
     active: bool
-    hasListeners: bool  # false when all listeners dropped; emit skips these
+    hasListeners: bool # false when all listeners dropped; emit skips these
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Global shared state (Lock-protected, createShared for refc safety)
@@ -83,8 +81,8 @@ proc ensureInit() =
     # We won the init race.
     initLock(gLock)
     gBucketCap = 4
-    gBuckets = cast[ptr UncheckedArray[AlertBucket]](
-      createShared(AlertBucket, gBucketCap))
+    gBuckets =
+      cast[ptr UncheckedArray[AlertBucket]](createShared(AlertBucket, gBucketCap))
     gBucketCount = 0
     gInitDone.store(2, moRelease)
   else:
@@ -95,8 +93,7 @@ proc ensureInit() =
 proc growBuckets() =
   ## Must be called under lock.
   let newCap = gBucketCap * 2
-  let newBuf = cast[ptr UncheckedArray[AlertBucket]](
-    createShared(AlertBucket, newCap))
+  let newBuf = cast[ptr UncheckedArray[AlertBucket]](createShared(AlertBucket, newCap))
   for i in 0 ..< gBucketCount:
     newBuf[i] = gBuckets[i]
   deallocShared(gBuckets)
@@ -114,9 +111,9 @@ proc growBuckets() =
 #  at dispatch time. The shared bucket only holds metadata + channel.
 # ═══════════════════════════════════════════════════════════════════════════
 
-var tvListenerCtxs     {.threadvar.}: seq[BrokerContext]
+var tvListenerCtxs {.threadvar.}: seq[BrokerContext]
 var tvListenerHandlers {.threadvar.}: seq[Table[uint64, AlertListenerProc]]
-var tvNextIds          {.threadvar.}: seq[uint64]
+var tvNextIds {.threadvar.}: seq[uint64]
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Listener notify wrapper — try/catch per listener callback.
@@ -131,8 +128,7 @@ proc notifyAlertListener(
     await callback(event)
   except CatchableError:
     error "Failed to execute event listener",
-      eventType = "Alert",
-      error = getCurrentExceptionMsg()
+      eventType = "Alert", error = getCurrentExceptionMsg()
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Process loop — runs on the listener thread's chronos event loop.
@@ -144,8 +140,7 @@ proc notifyAlertListener(
 # ═══════════════════════════════════════════════════════════════════════════
 
 proc processLoop(
-    eventChan: ptr AsyncChannel[AlertEventMsg],
-    loopCtx: BrokerContext,
+    eventChan: ptr AsyncChannel[AlertEventMsg], loopCtx: BrokerContext
 ) {.async: (raises: []).} =
   var inFlight: seq[Future[void]] = @[]
 
@@ -171,7 +166,7 @@ proc processLoop(
     let recvRes = catch:
       await eventChan.recv()
     if recvRes.isErr():
-      break                               # channel closed or cancelled
+      break # channel closed or cancelled
     let msg = recvRes.get()
 
     case msg.kind
@@ -180,14 +175,12 @@ proc processLoop(
       await drainInFlight()
       clearThreadvarListeners()
       break
-
     of AlertEventMsgKind.emkClearListeners:
       # Drain in-flight listeners and clear threadvar handler table,
       # but keep processLoop alive for future re-listen on this bucket.
       await drainInFlight()
       clearThreadvarListeners()
       # continue — loop stays alive, waiting for new events
-
     of AlertEventMsgKind.emkEvent:
       # Prune completed futures
       var j = 0
@@ -228,15 +221,12 @@ proc processLoop(
 # ═══════════════════════════════════════════════════════════════════════════
 
 proc listen*(
-    _: typedesc[Alert],
-    handler: AlertListenerProc,
+    _: typedesc[Alert], handler: AlertListenerProc
 ): Result[AlertListener, string] =
   return listen(Alert, DefaultBrokerContext, handler)
 
 proc listen*(
-    _: typedesc[Alert],
-    brokerCtx: BrokerContext,
-    handler: AlertListenerProc,
+    _: typedesc[Alert], brokerCtx: BrokerContext, handler: AlertListenerProc
 ): Result[AlertListener, string] =
   if handler.isNil():
     return err("Must provide a non-nil event handler")
@@ -270,9 +260,8 @@ proc listen*(
   var spawnChan: ptr AsyncChannel[AlertEventMsg]
   withLock(gLock):
     for i in 0 ..< gBucketCount:
-      if gBuckets[i].brokerCtx == brokerCtx and
-         gBuckets[i].threadId == myThreadId and
-         gBuckets[i].threadGen == myThreadGen:
+      if gBuckets[i].brokerCtx == brokerCtx and gBuckets[i].threadId == myThreadId and
+          gBuckets[i].threadGen == myThreadGen:
         # Reuse existing bucket — same thread incarnation, processLoop alive.
         gBuckets[i].hasListeners = true
         bucketExists = true
@@ -280,8 +269,7 @@ proc listen*(
     if not bucketExists:
       if gBucketCount >= gBucketCap:
         growBuckets()
-      spawnChan = cast[ptr AsyncChannel[AlertEventMsg]](
-        createShared(AlertEventMsg, 1))
+      spawnChan = cast[ptr AsyncChannel[AlertEventMsg]](createShared(AlertEventMsg, 1))
       discard spawnChan[].open()
       let idx = gBucketCount
       gBuckets[idx] = AlertBucket(
@@ -290,7 +278,8 @@ proc listen*(
         threadId: myThreadId,
         threadGen: myThreadGen,
         active: true,
-        hasListeners: true)
+        hasListeners: true,
+      )
       gBucketCount += 1
 
   # asyncSpawn outside lock to prevent potential deadlock.
@@ -308,9 +297,7 @@ proc listen*(
 #  Use `await` in async contexts; `waitFor` from {.thread.} procs.
 # ═══════════════════════════════════════════════════════════════════════════
 
-proc emitImpl(
-    brokerCtx: BrokerContext, event: Alert
-) {.async: (raises: []).} =
+proc emitImpl(brokerCtx: BrokerContext, event: Alert) {.async: (raises: []).} =
   ensureInit()
 
   # Collect targets under lock
@@ -323,12 +310,14 @@ proc emitImpl(
 
   withLock(gLock):
     for i in 0 ..< gBucketCount:
-      if gBuckets[i].brokerCtx == brokerCtx and
-         gBuckets[i].active and
-         gBuckets[i].hasListeners:
-        targets.add(EvTarget(
-          eventChan: gBuckets[i].eventChan,
-          isSameThread: gBuckets[i].threadId == myThreadId))
+      if gBuckets[i].brokerCtx == brokerCtx and gBuckets[i].active and
+          gBuckets[i].hasListeners:
+        targets.add(
+          EvTarget(
+            eventChan: gBuckets[i].eventChan,
+            isSameThread: gBuckets[i].threadId == myThreadId,
+          )
+        )
 
   if targets.len == 0:
     return
@@ -386,9 +375,7 @@ proc dropListener*(_: typedesc[Alert], handle: AlertListener) =
   dropListener(Alert, DefaultBrokerContext, handle)
 
 proc dropListener*(
-    _: typedesc[Alert],
-    brokerCtx: BrokerContext,
-    handle: AlertListener,
+    _: typedesc[Alert], brokerCtx: BrokerContext, handle: AlertListener
 ) =
   if handle.id == 0'u64:
     return
@@ -422,9 +409,8 @@ proc dropListener*(
     let myThreadGen = currentMtThreadGen()
     withLock(gLock):
       for i in 0 ..< gBucketCount:
-        if gBuckets[i].brokerCtx == brokerCtx and
-           gBuckets[i].threadId == myThreadId and
-           gBuckets[i].threadGen == myThreadGen:
+        if gBuckets[i].brokerCtx == brokerCtx and gBuckets[i].threadId == myThreadId and
+            gBuckets[i].threadGen == myThreadGen:
           gBuckets[i].hasListeners = false
           break
 
@@ -448,8 +434,7 @@ proc dropAllListeners*(_: typedesc[Alert], brokerCtx: BrokerContext) =
 
   withLock(gLock):
     for i in 0 ..< gBucketCount:
-      if gBuckets[i].brokerCtx == brokerCtx and
-         gBuckets[i].hasListeners:
+      if gBuckets[i].brokerCtx == brokerCtx and gBuckets[i].hasListeners:
         gBuckets[i].hasListeners = false
         if gBuckets[i].threadId != myThreadId:
           chansToClear.add(gBuckets[i].eventChan)

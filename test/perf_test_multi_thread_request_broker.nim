@@ -26,7 +26,7 @@ const
   RequestsPerThread = 500
   NumWorkerThreads = 5
   TotalCrossThreadRequests = RequestsPerThread * NumWorkerThreads
-  PayloadSize = 512  ## bytes in the request/response payload
+  PayloadSize = 512 ## bytes in the request/response payload
 
 # ---------------------------------------------------------------------------
 # Broker definition — realistic payload with seq data
@@ -38,7 +38,9 @@ RequestBroker(mt):
     payload*: seq[byte]
     seqNum*: int
 
-  proc signature*(tag: string, data: seq[byte]): Future[Result[PerfData, string]] {.async.}
+  proc signature*(
+    tag: string, data: seq[byte]
+  ): Future[Result[PerfData, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Global synchronization
@@ -48,10 +50,10 @@ var gWorkersFinished: Atomic[int]
 
 # Per-thread latency accumulators (indexed by thread ordinal 0..4).
 # Each slot is written by exactly one worker thread, read by main after join.
-var gLatencySumsNs: array[NumWorkerThreads, int64]     ## sum of latencies (ns)
-var gLatencyMins:   array[NumWorkerThreads, int64]      ## min latency (ns)
-var gLatencyMaxs:   array[NumWorkerThreads, int64]      ## max latency (ns)
-var gThreadOrdinal: Atomic[int]                         ## ordinal dispenser
+var gLatencySumsNs: array[NumWorkerThreads, int64] ## sum of latencies (ns)
+var gLatencyMins: array[NumWorkerThreads, int64] ## min latency (ns)
+var gLatencyMaxs: array[NumWorkerThreads, int64] ## max latency (ns)
+var gThreadOrdinal: Atomic[int] ## ordinal dispenser
 
 # ---------------------------------------------------------------------------
 # Helper: build payload of PayloadSize bytes
@@ -84,8 +86,10 @@ proc stressWorker() {.thread.} =
     doAssert res.value.tag == "w" & $ordinal
 
     sumNs += elapsed
-    if elapsed < minNs: minNs = elapsed
-    if elapsed > maxNs: maxNs = elapsed
+    if elapsed < minNs:
+      minNs = elapsed
+    if elapsed > maxNs:
+      maxNs = elapsed
 
   gLatencySumsNs[ordinal] = sumNs
   gLatencyMins[ordinal] = minNs
@@ -105,7 +109,8 @@ proc fmtNs(ns: int64): string =
     $ns & " ns"
 
 proc fmtRate(count: int, elapsedNs: int64): string =
-  if elapsedNs == 0: return "∞"
+  if elapsedNs == 0:
+    return "∞"
   let rps = float64(count) * 1e9 / float64(elapsedNs)
   if rps >= 1_000_000:
     formatFloat(rps / 1_000_000, ffDecimal, 2) & " M req/s"
@@ -119,9 +124,8 @@ proc fmtRate(count: int, elapsedNs: int64): string =
 # ---------------------------------------------------------------------------
 
 suite "Multi-thread RequestBroker — performance":
-
   asyncTest "Cross-thread stress: " & $NumWorkerThreads & " threads × " &
-            $RequestsPerThread & " requests (payload " & $PayloadSize & "B)":
+    $RequestsPerThread & " requests (payload " & $PayloadSize & "B)":
     gWorkersFinished.store(0)
     gThreadOrdinal.store(0)
 
@@ -132,11 +136,12 @@ suite "Multi-thread RequestBroker — performance":
       gLatencyMaxs[i] = 0
 
     # Register provider on main thread.
-    check PerfData.setProvider(
-      proc(tag: string, data: seq[byte]): Future[Result[PerfData, string]]
-          {.async.} =
-        ok(PerfData(tag: tag, payload: data, seqNum: data.len))
-    ).isOk()
+    check PerfData
+      .setProvider(
+        proc(tag: string, data: seq[byte]): Future[Result[PerfData, string]] {.async.} =
+          ok(PerfData(tag: tag, payload: data, seqNum: data.len))
+      )
+      .isOk()
 
     # Spawn worker threads.
     var threads: array[NumWorkerThreads, Thread[void]]
@@ -163,8 +168,10 @@ suite "Multi-thread RequestBroker — performance":
 
     for i in 0 ..< NumWorkerThreads:
       allSumNs += gLatencySumsNs[i]
-      if gLatencyMins[i] < globalMin: globalMin = gLatencyMins[i]
-      if gLatencyMaxs[i] > globalMax: globalMax = gLatencyMaxs[i]
+      if gLatencyMins[i] < globalMin:
+        globalMin = gLatencyMins[i]
+      if gLatencyMaxs[i] > globalMax:
+        globalMax = gLatencyMaxs[i]
 
     let avgNs = allSumNs div int64(TotalCrossThreadRequests)
 
@@ -182,22 +189,28 @@ suite "Multi-thread RequestBroker — performance":
     # Per-thread breakdown.
     for i in 0 ..< NumWorkerThreads:
       let tAvg = gLatencySumsNs[i] div int64(RequestsPerThread)
-      echo "    Thread ", i, ": avg=", fmtNs(tAvg),
-           "  min=", fmtNs(gLatencyMins[i]),
-           "  max=", fmtNs(gLatencyMaxs[i])
+      echo "    Thread ",
+        i,
+        ": avg=",
+        fmtNs(tAvg),
+        "  min=",
+        fmtNs(gLatencyMins[i]),
+        "  max=",
+        fmtNs(gLatencyMaxs[i])
 
     echo ""
 
-  asyncTest "Same-thread baseline: " & $TotalCrossThreadRequests &
-            " requests (payload " & $PayloadSize & "B)":
+  asyncTest "Same-thread baseline: " & $TotalCrossThreadRequests & " requests (payload " &
+    $PayloadSize & "B)":
     let payload = makePayload()
 
     # Provider on this thread — requests will use the fast path.
-    check PerfData.setProvider(
-      proc(tag: string, data: seq[byte]): Future[Result[PerfData, string]]
-          {.async.} =
-        ok(PerfData(tag: tag, payload: data, seqNum: data.len))
-    ).isOk()
+    check PerfData
+      .setProvider(
+        proc(tag: string, data: seq[byte]): Future[Result[PerfData, string]] {.async.} =
+          ok(PerfData(tag: tag, payload: data, seqNum: data.len))
+      )
+      .isOk()
 
     var sumNs: int64 = 0
     var minNs: int64 = int64.high
@@ -214,8 +227,10 @@ suite "Multi-thread RequestBroker — performance":
       check res.value.payload.len == PayloadSize
 
       sumNs += elapsed
-      if elapsed < minNs: minNs = elapsed
-      if elapsed > maxNs: maxNs = elapsed
+      if elapsed < minNs:
+        minNs = elapsed
+      if elapsed > maxNs:
+        maxNs = elapsed
 
     let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
 

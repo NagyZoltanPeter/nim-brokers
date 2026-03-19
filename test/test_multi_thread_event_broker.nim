@@ -60,6 +60,7 @@ proc listenerThread() {.thread.} =
     while not gDone.load():
       await sleepAsync(chronos.milliseconds(1))
     MtEvt.dropAllListeners()
+
   waitFor inner()
 
 # A thread that listens but does NOT call dropAllListeners — caller does.
@@ -76,6 +77,7 @@ proc listenerThreadNoDrop() {.thread.} =
     # Keep event loop alive until signalled to stop
     while not gDone.load():
       await sleepAsync(chronos.milliseconds(1))
+
   waitFor inner()
 
 # Multiple concurrent emitters
@@ -91,7 +93,6 @@ proc concurrentEmitter3() {.thread.} =
 # ── Test suite ────────────────────────────────────────────────────────────
 
 suite "EventBroker macro (multi-thread mode)":
-
   asyncTest "cross-thread emit to single listener":
     gReceivedCount.store(0)
     gReceivedSum.store(0)
@@ -138,7 +139,7 @@ suite "EventBroker macro (multi-thread mode)":
     t.joinThread()
 
     check gReceivedCount.load() == 2
-    check gReceivedSum.load() == 84  # 42 * 2
+    check gReceivedSum.load() == 84 # 42 * 2
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
@@ -170,7 +171,7 @@ suite "EventBroker macro (multi-thread mode)":
       await sleepAsync(chronos.milliseconds(1))
 
     check gReceivedCount.load() == 2
-    check gReceivedSum.load() == 14  # 7 * 2
+    check gReceivedSum.load() == 14 # 7 * 2
 
     gDone.store(true)
     lt.joinThread()
@@ -227,7 +228,7 @@ suite "EventBroker macro (multi-thread mode)":
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
-    check gReceivedSum.load() == 20  # only h2 fired
+    check gReceivedSum.load() == 20 # only h2 fired
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
@@ -288,15 +289,17 @@ suite "EventBroker macro (multi-thread mode)":
     gCtxA = NewBrokerContext()
     gCtxB = NewBrokerContext()
 
-    discard MtEvt.listen(gCtxA,
+    discard MtEvt.listen(
+      gCtxA,
       proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
         discard gReceivedCount.fetchAdd(1)
-        discard gReceivedSum.fetchAdd(evt.value)
+        discard gReceivedSum.fetchAdd(evt.value),
     )
-    discard MtEvt.listen(gCtxB,
+    discard MtEvt.listen(
+      gCtxB,
       proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
         discard gReceivedCount.fetchAdd(1)
-        discard gReceivedSum.fetchAdd(evt.value)
+        discard gReceivedSum.fetchAdd(evt.value),
     )
 
     # Emit only to ctxA
@@ -323,15 +326,17 @@ suite "EventBroker macro (multi-thread mode)":
     gCtxA = NewBrokerContext()
     gCtxB = NewBrokerContext()
 
-    discard MtEvt.listen(gCtxA,
+    discard MtEvt.listen(
+      gCtxA,
       proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
         discard gReceivedCount.fetchAdd(1)
-        discard gReceivedSum.fetchAdd(evt.value)
+        discard gReceivedSum.fetchAdd(evt.value),
     )
-    discard MtEvt.listen(gCtxB,
+    discard MtEvt.listen(
+      gCtxB,
       proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
         discard gReceivedCount.fetchAdd(1)
-        discard gReceivedSum.fetchAdd(evt.value)
+        discard gReceivedSum.fetchAdd(evt.value),
     )
 
     # Emit to ctxA from another thread
@@ -372,7 +377,7 @@ suite "EventBroker macro (multi-thread mode)":
     t3.joinThread()
 
     check gReceivedCount.load() == 3
-    check gReceivedSum.load() == 60  # 10 + 20 + 30
+    check gReceivedSum.load() == 60 # 10 + 20 + 30
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
@@ -413,6 +418,6 @@ suite "EventBroker macro (multi-thread mode)":
     t.joinThread()
 
     check gReceivedCount.load() == 3
-    check gReceivedSum.load() == 6  # 1 + 2 + 3
+    check gReceivedSum.load() == 6 # 1 + 2 + 3
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))

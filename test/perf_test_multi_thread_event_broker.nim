@@ -80,12 +80,11 @@ proc atomicMax(a: var Atomic[int64], val: int64) =
 proc stressEmitter() {.thread.} =
   let payload = makePayload()
   for i in 0 ..< EventsPerThread:
-    waitFor PerfEvt.emit(PerfEvt(
-      tag: "stress",
-      payload: payload,
-      seqNum: i,
-      timestampNs: getMonoTime().ticks,
-    ))
+    waitFor PerfEvt.emit(
+      PerfEvt(
+        tag: "stress", payload: payload, seqNum: i, timestampNs: getMonoTime().ticks
+      )
+    )
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -100,7 +99,8 @@ proc fmtNs(ns: int64): string =
     $ns & " ns"
 
 proc fmtRate(count: int, elapsedNs: int64): string =
-  if elapsedNs == 0: return "∞"
+  if elapsedNs == 0:
+    return "∞"
   let rps = float64(count) * 1e9 / float64(elapsedNs)
   if rps >= 1_000_000:
     formatFloat(rps / 1_000_000, ffDecimal, 2) & " M evt/s"
@@ -114,9 +114,8 @@ proc fmtRate(count: int, elapsedNs: int64): string =
 # ---------------------------------------------------------------------------
 
 suite "Multi-thread EventBroker — performance":
-
   asyncTest "Cross-thread stress: " & $NumEmitterThreads & " emitters × " &
-            $EventsPerThread & " events (payload " & $PayloadSize & "B)":
+    $EventsPerThread & " events (payload " & $PayloadSize & "B)":
     gEventsReceived.store(0)
     gLatencySumNs.store(0)
     gLatencyMinNs.store(int64.high)
@@ -170,8 +169,8 @@ suite "Multi-thread EventBroker — performance":
     echo "  └──────────────────────────────────────────────────────"
     echo ""
 
-  asyncTest "Same-thread baseline: " & $TotalCrossThreadEvents &
-            " events (payload " & $PayloadSize & "B)":
+  asyncTest "Same-thread baseline: " & $TotalCrossThreadEvents & " events (payload " &
+    $PayloadSize & "B)":
     let payload = makePayload()
     var receivedCount = 0
     var sumNs: int64 = 0
@@ -181,7 +180,7 @@ suite "Multi-thread EventBroker — performance":
     # Listener on same thread — uses the fast path (asyncSpawn, no channel).
     let handle = PerfEvt.listen(
       proc(evt: PerfEvt): Future[void] {.async: (raises: []).} =
-        discard  # callback runs synchronously in same-thread mode
+        discard # callback runs synchronously in same-thread mode
     )
     check handle.isOk()
 
@@ -189,19 +188,18 @@ suite "Multi-thread EventBroker — performance":
 
     for i in 0 ..< TotalCrossThreadEvents:
       let t0 = getMonoTime()
-      await PerfEvt.emit(PerfEvt(
-        tag: "local",
-        payload: payload,
-        seqNum: i,
-        timestampNs: 0,
-      ))
+      await PerfEvt.emit(
+        PerfEvt(tag: "local", payload: payload, seqNum: i, timestampNs: 0)
+      )
       # Yield to let asyncSpawn'd listeners run.
       await sleepAsync(chronos.milliseconds(0))
       let elapsed = (getMonoTime() - t0).inNanoseconds
 
       sumNs += elapsed
-      if elapsed < minNs: minNs = elapsed
-      if elapsed > maxNs: maxNs = elapsed
+      if elapsed < minNs:
+        minNs = elapsed
+      if elapsed > maxNs:
+        maxNs = elapsed
       receivedCount += 1
 
     let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
