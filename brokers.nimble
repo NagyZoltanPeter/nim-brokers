@@ -75,7 +75,7 @@ task test, "Run all tests":
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
   for f in mtTests:
-    for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on"]:
+    for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on --verbose"]:
       test opt, f
 
 task perftest, "Run performance and stress tests":
