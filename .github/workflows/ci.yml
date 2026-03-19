@@ -7,6 +7,7 @@ on:
     tags:
       - '*'
     paths-ignore:
+      - 'doc/**'
       - '**.md'
       - '**.html'
   pull_request:
@@ -16,24 +17,21 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+  build:
+    uses: status-im/nimbus-common-workflow/.github/workflows/common.yml@main
+    with:
+      nim-versions: '["version-2-0", "version-2-2", "devel"]'
+      nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
+      test-command: |
+        nimble setup -l
+        nimble test
+        nimble perftest
 
+  nph:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup Nim
-        uses: jiro4989/setup-nim-action@v2
+      - name: Check `nph` formatting
+        uses: arnetheduck/nph-action@v1
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run tests
-        run: nimble test -y
+          version: 0.7.0
