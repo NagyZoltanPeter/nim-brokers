@@ -24,7 +24,7 @@ jobs:
       nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
       test-command: |
         nimble setup -l
-        nimble test --verbose --debug --info
+        nimble --verbose test
 
   nph:
     runs-on: ubuntu-latest
