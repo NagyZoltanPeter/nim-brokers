@@ -30,10 +30,13 @@ proc isExcludedNimPath(path: string): bool =
     normalized.startsWith("nimbledeps/") or normalized.startsWith("vendor/") or
     normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/")
 
+proc isNphFile(path: string): bool =
+  path.endsWith(".nim") or path.endsWith(".nimble")
+
 proc addUniqueNimFiles(files: var seq[string], output: string) =
   for line in output.splitLines():
     let path = line.strip()
-    if path.len > 0 and path.endsWith(".nim") and not isExcludedNimPath(path) and
+    if path.len > 0 and isNphFile(path) and not isExcludedNimPath(path) and
         path notin files:
       files.add(path)
 
@@ -41,7 +44,7 @@ proc changedNimFiles(): seq[string] =
   for command in [
     "git diff --name-only --diff-filter=ACMR --",
     "git diff --cached --name-only --diff-filter=ACMR --",
-    "git ls-files --others --exclude-standard -- '*.nim'",
+    "git ls-files --others --exclude-standard -- '*.nim' '*.nimble'",
   ]:
     let (output, exitCode) = gorgeEx(command)
     if exitCode != 0:
@@ -51,9 +54,8 @@ proc changedNimFiles(): seq[string] =
 
 proc allNimFiles(): seq[string] =
   for path in walkDirRec("."):
-    if path.endsWith(".nim") and not isExcludedNimPath(path):
+    if isNphFile(path) and not isExcludedNimPath(path):
       result.add(path)
-  result.add("brokers.nimble")
 
 proc installNphIfNeeded() =
   if findExe("nph").len == 0:
@@ -79,7 +81,8 @@ task test, "Run all tests":
   for f in mtTests:
     for opt in [
       "--mm:orc --threads:on", "--mm:refc --threads:on",
-      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on --verbosity:3",
+      "-d:release --mm:orc --threads:on",
+      "-d:release --mm:refc --threads:on --verbosity:3",
     ]:
       test opt, f
 
@@ -94,7 +97,7 @@ task perftest, "Run performance and stress tests":
       test opt, f
 
 task nph, "Install nph if needed and format modified Nim files":
-  runNph(changedNimFiles(), "No modified .nim files to format")
+  runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
 
 task nphall, "Install nph if needed and format all Nim files in the project":
-  runNph(allNimFiles(), "No .nim files found to format")
+  runNph(allNimFiles(), "No .nim or .nimble files found to format")
