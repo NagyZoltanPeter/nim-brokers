@@ -1,0 +1,49 @@
+name: Manual Nim CI (Windows)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nim-test-windows:
+    runs-on: windows-latest
+    env:
+      NIM_VERSION: '2.2.0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies (nimble)
+        shell: pwsh
+        run: nimble install -d -y
+
+      - name: Show tool versions
+        shell: pwsh
+        run: |
+          nim --version
+          nimble --version
+          git --version
+
+      - name: Show workspace state
+        shell: pwsh
+        run: |
+          Write-Host "Repository root"
+          Get-ChildItem -Force
+          Write-Host "nimbledeps"
+          if (Test-Path "nimbledeps") {
+            Get-ChildItem "nimbledeps" -Force
+          } else {
+            Write-Host "nimbledeps directory does not exist yet"
+          }
+
+      - name: Run Nimble tests (verbose)
+        shell: pwsh
+        run: nimble --verbose --debug --info test -y
