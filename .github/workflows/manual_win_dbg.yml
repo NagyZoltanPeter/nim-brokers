@@ -46,4 +46,4 @@ jobs:
 
       - name: Run Nimble tests (verbose)
         shell: pwsh
-        run: nimble --verbose --debug --info test -y
+        run: nimble --verbose --debug test -y
