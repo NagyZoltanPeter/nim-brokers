@@ -45,6 +45,10 @@ template lockGlobalBrokerContext*(brokerCtx: BrokerContext, body: untyped): unty
   ##
   ## This template is intended for use from within `chronos` async procs.
   block:
+    # Lazy init: threadvar is nil on secondary threads (module-level init
+    # only runs on the main thread).
+    if globalBrokerContextLock.isNil():
+      globalBrokerContextLock = newAsyncLock()
     await noCancel(globalBrokerContextLock.acquire())
     let previousBrokerCtx = globalBrokerContextValue
     globalBrokerContextValue = brokerCtx

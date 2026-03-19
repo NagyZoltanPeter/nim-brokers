@@ -296,12 +296,21 @@
     <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue);"><span class="wm-lambda">&lambda;</span>ogos · Messaging</div>
   </div>
   <h1>Event &amp; Request<br>Broker Design</h1>
+  <div style="text-align:center; margin-bottom:1em;">
+    <code style="color:var(--logos-green); font-size:0.78em;">
+      <a href="https://github.com/NagyZoltanPeter/nim-brokers"
+          style="color:var(--logos-green); text-decoration:underline;">
+          NagyZoltanPeter/nim-brokers
+      </a>
+    </code>
+  </div>
   <p class="subtitle">Architecture · Guarantees · Usage Patterns</p>
   <div style="display:flex; justify-content:center; gap:0.8em; margin-top:1em; flex-wrap:wrap;">
-    <span class="chip chip-blue">EventBroker</span>
-    <span class="chip chip-green">RequestBroker</span>
-    <span class="chip chip-orange">MultiRequestBroker</span>
-    <span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);">BrokerContext</span>
+    <a href="#/2" style="text-decoration:none;"><span class="chip chip-blue" style="cursor:pointer;">EventBroker</span></a>
+    <a href="#/3" style="text-decoration:none;"><span class="chip chip-green" style="cursor:pointer;">RequestBroker</span></a>
+    <a href="#/4" style="text-decoration:none;"><span class="chip chip-orange" style="cursor:pointer;">MultiRequestBroker</span></a>
+    <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
+    <a href="#/6" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread Brokers</span></a>
   </div>
   <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section</p>
 </section>
@@ -966,7 +975,14 @@ CollectedStatus.clearProviders()
 ══════════════════════════════════════════════════ -->
 <section>
 
-  <!-- 5.0  Section header + why -->
+  <!-- 5.0  Section header -->
+  <section class="section-header">
+    <div class="num">05</div>
+    <h2 style="color:var(--logos-text);">BrokerContext</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Instance isolation &middot; Multi-node &middot; Same thread, separate worlds</p>
+  </section>
+
+  <!-- 5.1  Why we needed it -->
   <section>
     <h2>Why We Needed BrokerContext</h2>
 
@@ -1089,11 +1105,254 @@ OnFilterSubscribeEvent.emit(
 </section><!-- /Section 5 -->
 
 <!-- ══════════════════════════════════════════════════
-     SECTION 6 — SUMMARY (vertical stack)
+     SECTION 6 — MULTI-THREAD BROKERS (vertical stack)
 ══════════════════════════════════════════════════ -->
 <section>
 
-  <!-- 6.0  Comparison table -->
+  <!-- 6.0  Section header -->
+  <section class="section-header">
+    <div class="num">06</div>
+    <h2 style="color:var(--logos-red);">Multi-Thread Brokers</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Cross-thread messaging &middot; Same API &middot; New trade-offs</p>
+  </section>
+
+  <!-- 6.1  Why multi-thread? -->
+  <section>
+    <h2>Why Go Multi-Thread?</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p><strong>Single-thread brokers</strong> keep listeners and emitters on one Chronos loop. When subsystems move to dedicated threads for CPU isolation or blocking I/O, those in-thread shortcuts break.</p>
+    </div>
+
+    <h3>Use cases that push you across thread boundaries</h3>
+    <ul>
+      <li class="fragment"><strong>CPU-bound work</strong> &mdash; heavy cryptography, proof generation, or tree hashing that would block the main event loop</li>
+      <li class="fragment"><strong>Blocking FFI</strong> &mdash; C libraries (e.g. database drivers, hardware access) that don&rsquo;t expose async APIs</li>
+      <li class="fragment"><strong>Thread-per-service architecture</strong> &mdash; each node service owns a thread + Chronos loop; brokers bridge them</li>
+      <li class="fragment"><strong>Integration tests</strong> &mdash; multiple node instances in one process, each on its own thread, sharing typed events</li>
+    </ul>
+  </section>
+
+  <!-- 6.2  The (mt) driver -->
+  <section>
+    <h2>Enabling Multi-Thread Mode</h2>
+
+    <p>Both <span class="chip chip-blue">EventBroker</span> and <span class="chip chip-green">RequestBroker</span> accept an <code>(mt)</code> driver annotation. The public API stays almost identical &mdash; the macro swaps the internal plumbing.</p>
+
+    <div class="cols cols-2" style="margin-top:0.6em;">
+      <div>
+        <h3>Single-thread (default)</h3>
+        <ul>
+          <li>Listeners stored directly in <code>threadvar</code> seqs</li>
+          <li>Emit / request dispatched inline on the same Chronos loop</li>
+          <li>No locks, no channels, no shared memory</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Multi-thread <code>(mt)</code></h3>
+        <ul>
+          <li>Shared bucket registry under <code>Lock</code></li>
+          <li>One <code>AsyncChannel</code> per (context, listener-thread)</li>
+          <li>Closures stay in <code>threadvar</code> &mdash; only metadata is shared</li>
+          <li>Same-thread fast-path bypasses channels entirely</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6.3  Architecture diagram -->
+  <section>
+    <h2>Cross-Thread Delivery</h2>
+
+    <div style="display:grid; grid-template-columns:auto 1fr auto; gap:0.8em; align-items:center; margin-top:0.8em;">
+
+      <div style="display:flex; flex-direction:column; gap:0.5em;">
+        <div class="diag-box accent" style="min-width:8em;">Thread A<br><span style="font-size:0.85em; color:var(--logos-muted);">emit()</span></div>
+        <div class="diag-box accent" style="min-width:8em;">Thread B<br><span style="font-size:0.85em; color:var(--logos-muted);">emit()</span></div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5em; align-items:center;">
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-bottom:0.2em;">&darr; sendSync &darr;</div>
+        <div class="diag-box" style="border-color:var(--logos-orange); color:var(--logos-orange); min-width:14em;">
+          Shared Bucket Registry<br>
+          <span style="font-size:0.8em; color:var(--logos-muted);">Lock-protected &middot; createShared</span>
+        </div>
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-top:0.2em;">&darr; AsyncChannel per listener thread &darr;</div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5em;">
+        <div class="diag-box green" style="min-width:8em;">Thread C<br><span style="font-size:0.85em; color:var(--logos-muted);">processLoop</span></div>
+        <div class="diag-box green" style="min-width:8em;">Thread D<br><span style="font-size:0.85em; color:var(--logos-muted);">processLoop</span></div>
+      </div>
+
+    </div>
+
+    <div class="callout" style="margin-top:0.8em;">
+      <p><strong>Same-thread optimisation:</strong> when emitter and listener share a thread, the channel is bypassed &mdash; listeners are dispatched directly via <code>asyncSpawn</code>, giving near-zero overhead identical to the single-thread broker.</p>
+    </div>
+  </section>
+
+  <!-- 6.4  Costs -->
+  <section>
+    <h2>Costs of Multi-Thread Mode</h2>
+
+    <table style="margin-top:0.5em;">
+      <thead>
+        <tr>
+          <th>Cost</th>
+          <th>Where it comes from</th>
+          <th>Mitigation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Lock contention</strong></td>
+          <td>Every <code>emit</code> / <code>listen</code> / <code>drop</code> acquires the global lock to read or mutate the bucket registry</td>
+          <td>Lock is held only for metadata scan &mdash; no callbacks run under lock</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Channel overhead</strong></td>
+          <td>Cross-thread delivery copies the event message into an <code>AsyncChannel</code> via <code>sendSync</code></td>
+          <td>Same-thread path skips channels entirely; keep hot-path listeners co-located</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Message copying</strong></td>
+          <td>Event / request payloads are value-copied into the channel buffer</td>
+          <td>Keep payloads small or use <code>ref</code> types for large data</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Shared memory</strong></td>
+          <td>Bucket array &amp; channels live in <code>createShared</code> heap &mdash; manual lifecycle, no GC</td>
+          <td>Managed automatically by the macro-generated init / grow / drop procs</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Shutdown complexity</strong></td>
+          <td><code>dropAllListeners</code> must coordinate across threads, drain in-flight tasks (5&thinsp;s timeout)</td>
+          <td>Allow an event-loop tick after <code>dropAllListeners</code> for processLoop to clean up</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 6.5  Benefits -->
+  <section>
+    <h2>Benefits of Multi-Thread Mode</h2>
+
+    <table style="margin-top:0.5em;">
+      <thead>
+        <tr>
+          <th>Benefit</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Same public API</strong></td>
+          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes. MT adds <code>setRequestTimeout</code> / <code>requestTimeout</code>.</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Timeout protection</strong></td>
+          <td>Cross-thread <code>request</code> returns <code>err</code> after a configurable timeout (default 5&thinsp;s) if the provider is unresponsive &mdash; no indefinite hangs</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Transparent fan-out</strong></td>
+          <td>One <code>emit</code> reaches listeners on <em>every</em> thread that registered &mdash; no manual channel wiring</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Same-thread fast path</strong></td>
+          <td>Co-located emitters and listeners pay zero channel cost &mdash; identical performance to single-thread mode</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>GC safety</strong></td>
+          <td>Closures never cross heap boundaries &mdash; stored in per-thread <code>threadvar</code>; only plain-old-data metadata is shared</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Context isolation preserved</strong></td>
+          <td><code>BrokerContext</code> scoping works identically &mdash; two node instances on two threads stay fully isolated</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Clean shutdown</strong></td>
+          <td><code>dropAllListeners</code> from <em>any</em> thread drains in-flight callbacks, cleans up channels, and removes remote threadvars</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 6.6  Considerations -->
+  <section>
+    <h2>Design Considerations</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Thread ownership rules</h3>
+        <ul>
+          <li><code>listen</code> must be called from the thread that will own the listener</li>
+          <li><code>dropListener</code> must be called from the <strong>same thread</strong> that registered it</li>
+          <li><code>dropAllListeners</code> can be called from <strong>any thread</strong></li>
+          <li><code>emit</code> can be called from <strong>any thread</strong></li>
+        </ul>
+
+        <div class="callout warn" style="margin-top:0.6em;">
+          <p><strong>EventBroker:</strong> <code>emit</code> is <code>async</code> &mdash; use <code>await</code> in Chronos contexts, <code>waitFor</code> from bare <code>{.thread.}</code> procs.</p>
+        </div>
+      </div>
+      <div>
+        <h3>When to stay single-thread</h3>
+        <ul>
+          <li>All emitters and listeners live on the same Chronos loop</li>
+          <li>No blocking FFI or CPU-heavy work in the pipeline</li>
+          <li>Integration tests with multiple nodes can use <code>BrokerContext</code> isolation instead of threads</li>
+        </ul>
+
+        <div class="callout good" style="margin-top:0.6em;">
+          <p><strong>Rule of thumb:</strong> start with single-thread. Switch to <code>(mt)</code> only when a subsystem genuinely needs its own thread.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6.7  RequestBroker (mt) specifics -->
+  <section>
+    <h2>RequestBroker <code>(mt)</code> &mdash; Specifics</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p>The multi-thread RequestBroker preserves the <strong>single-provider-per-context</strong> guarantee across threads.</p>
+    </div>
+
+    <ul>
+      <li class="fragment"><strong>Cross-thread request</strong> &mdash; caller sends request via channel, blocks (or awaits) until the provider thread responds via a separate response channel</li>
+      <li class="fragment"><strong>Round-trip latency</strong> &mdash; two channel hops (request + response), both using <code>AsyncChannel</code>; expect ~2&times; the cost of a single emit</li>
+      <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; <code>processLoop</code> receives requests and dispatches to the local provider closure</li>
+      <li class="fragment"><strong>Same-thread fast path</strong> &mdash; when requester and provider share a thread, the provider is called directly with zero channel overhead</li>
+      <li class="fragment"><strong>Timeout handling</strong> &mdash; cross-thread requests use <code>withTimeout</code> (default 5&thinsp;s); if the provider is unresponsive, <code>request</code> returns <code>err</code>. Configure via <code>T.setRequestTimeout(duration)</code> / <code>T.requestTimeout()</code>. Same-thread requests are unaffected.</li>
+    </ul>
+  </section>
+
+  <!-- 6.8  EventBroker (mt) specifics -->
+  <section>
+    <h2>EventBroker <code>(mt)</code> &mdash; Specifics</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p>The multi-thread EventBroker delivers events to <strong>all listeners on all threads</strong> (broadcast fan-out).</p>
+    </div>
+
+    <ul>
+      <li class="fragment"><strong>Per-listener-thread channel</strong> &mdash; one <code>AsyncChannel</code> per (context, listener-thread) pair; multiple listeners on the same thread share one channel</li>
+      <li class="fragment"><strong>In-flight tracking</strong> &mdash; <code>processLoop</code> tracks running listener futures and drains them on shutdown (5&thinsp;s timeout)</li>
+      <li class="fragment"><strong>Listener concurrency</strong> &mdash; within a thread, all listeners for an event run concurrently (not serialised)</li>
+      <li class="fragment"><strong>Async emit</strong> &mdash; <code>emit</code> is <code>{.async: (raises: []).}</code>; cross-thread sends use <code>sendSync</code> (brief: buffer + signal), same-thread dispatches via <code>asyncSpawn</code></li>
+      <li class="fragment"><strong>Ordering</strong> &mdash; per-thread FIFO guaranteed by the channel; cross-thread ordering is per-target-thread, not global</li>
+    </ul>
+  </section>
+
+</section><!-- /Section 6 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 7 — SUMMARY (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 7.0  Comparison table -->
   <section>
     <h2>Broker Family: Quick Reference</h2>
 
@@ -1144,6 +1403,12 @@ OnFilterSubscribeEvent.emit(
           <td>Yes</td>
         </tr>
         <tr>
+          <td>Multi-thread <code>(mt)</code></td>
+          <td>Yes</td>
+          <td>Yes</td>
+          <td>No</td>
+        </tr>
+        <tr>
           <td>Use when</td>
           <td>Something happened; notify who cares</td>
           <td>Query from one authoritative source</td>
@@ -1153,7 +1418,7 @@ OnFilterSubscribeEvent.emit(
     </table>
   </section>
 
-  <!-- 6.1  Before vs After -->
+  <!-- 7.1  Before vs After -->
   <section>
     <h2>Before vs After</h2>
 
@@ -1189,7 +1454,7 @@ OnFilterSubscribeEvent.emit(
     </div>
   </section>
 
-  <!-- 6.2  Opportunities -->
+  <!-- 7.2  Opportunities -->
   <section>
     <h2 style="color:var(--logos-green);">Opportunities!</h2>
     <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">What brokers are good for beyond decoupling&hellip;</p>
@@ -1207,7 +1472,7 @@ OnFilterSubscribeEvent.emit(
     </div>
   </section>
 
-  <!-- 6.3  Thank you / Q&A -->
+  <!-- 7.3  Thank you / Q&A -->
   <section class="title-slide">
     <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue); margin-bottom:0.8em;">LOGOS · MESSAGING</div>
     <h2 style="font-size:2em; margin-bottom:0.4em;">Questions?</h2>
@@ -1216,9 +1481,9 @@ OnFilterSubscribeEvent.emit(
     </p>
     <div style="text-align:center; margin-bottom:1em;">
       <code style="color:var(--logos-green); font-size:0.78em;">
-        <a href="https://github.com/logos-messaging/logos-delivery/tree/master/waku/common/broker"
+        <a href="https://github.com/NagyZoltanPeter/nim-brokers"
            style="color:var(--logos-green); text-decoration:underline;">
-           logos-messaging/logos-delivery &rarr; master/waku/common/broker/
+           NagyZoltanPeter/nim-brokers
         </a>
       </code>
     </div>
@@ -1230,7 +1495,7 @@ OnFilterSubscribeEvent.emit(
     </div>
   </section>
 
-</section><!-- /Section 6 -->
+</section><!-- /Section 7 -->
 
 </div><!-- /.slides -->
 </div><!-- /.reveal -->
