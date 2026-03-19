@@ -1,11 +1,11 @@
 import std/[os, strutils]
 
 # Package
-version       = "0.1.0"
-author        = "Status Research & Development GmbH"
-description   = "Type-safe, thread-local, decoupled messaging patterns for Nim"
-license       = "MIT"
-srcDir        = "src"
+version = "0.1.0"
+author = "Status Research & Development GmbH"
+description = "Type-safe, thread-local, decoupled messaging patterns for Nim"
+license = "MIT"
+srcDir = "src"
 
 # Dependencies
 requires "nim >= 2.0.0"
@@ -33,14 +33,15 @@ proc isExcludedNimPath(path: string): bool =
 proc addUniqueNimFiles(files: var seq[string], output: string) =
   for line in output.splitLines():
     let path = line.strip()
-    if path.len > 0 and path.endsWith(".nim") and not isExcludedNimPath(path) and path notin files:
+    if path.len > 0 and path.endsWith(".nim") and not isExcludedNimPath(path) and
+        path notin files:
       files.add(path)
 
 proc changedNimFiles(): seq[string] =
   for command in [
     "git diff --name-only --diff-filter=ACMR --",
     "git diff --cached --name-only --diff-filter=ACMR --",
-    "git ls-files --others --exclude-standard -- '*.nim'"
+    "git ls-files --others --exclude-standard -- '*.nim'",
   ]:
     let (output, exitCode) = gorgeEx(command)
     if exitCode != 0:
@@ -52,6 +53,7 @@ proc allNimFiles(): seq[string] =
   for path in walkDirRec("."):
     if path.endsWith(".nim") and not isExcludedNimPath(path):
       result.add(path)
+  result.add("brokers.nimble")
 
 proc installNphIfNeeded() =
   if findExe("nph").len == 0:
@@ -75,13 +77,20 @@ task test, "Run all tests":
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
   for f in mtTests:
-    for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on --verbose"]:
+    for opt in [
+      "--mm:orc --threads:on", "--mm:refc --threads:on",
+      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on --verbosity:3",
+    ]:
       test opt, f
 
 task perftest, "Run performance and stress tests":
-  let mtTests = ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
+  let mtTests =
+    ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
-    for opt in ["--mm:orc --threads:on", "--mm:refc --threads:on", "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on"]:
+    for opt in [
+      "--mm:orc --threads:on", "--mm:refc --threads:on",
+      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
+    ]:
       test opt, f
 
 task nph, "Install nph if needed and format modified Nim files":
