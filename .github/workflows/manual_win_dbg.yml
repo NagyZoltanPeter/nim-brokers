@@ -1,0 +1,31 @@
+name: Manual Nim CI (Windows)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  nim-test-windows:
+    runs-on: windows-latest
+    if: runner.os == 'Windows'
+    env:
+      NIM_VERSION: '2.2.0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: iffy/install-nim@v5
+        with:
+          version: ${{ env.NIM_VERSION }}
+
+      - name: Install dependencies (nimble)
+        run: nimble install -y
+
+      - name: Pre-test: Check DLL and cache directories
+        run: |
+          if (-not (Test-Path "external/mingw-amd64")) { throw "Missing: external/mingw-amd64" }
+          if (-not (Test-Path "external/dlls-amd64")) { throw "Missing: external/dlls-amd64" }
+          if (-not (Test-Path "nimbledeps/pkgs2")) { throw "Missing: nimbledeps/pkgs2" }
+
+      - name: Run Nimble tests (verbose)
+        run: nimble test -y --verbose --debug --info
