@@ -15,21 +15,39 @@ func `$`*(bc: BrokerContext): string =
 
 const DefaultBrokerContext* = BrokerContext(0xCAFFE14E'u32)
 
-# Global broker context accessor.
+# ---------------------------------------------------------------------------
+# Thread-global broker context
+# ---------------------------------------------------------------------------
 #
-# NOTE: This intentionally creates a *single* active BrokerContext per process
-# (per event loop thread). Use only if you accept serialization of all broker
-# context usage through the lock.
+# Each thread has its own BrokerContext value (threadvar).
+# Defaults to DefaultBrokerContext until explicitly set via
+# setThreadBrokerContext or initThreadBrokerContext.
+#
+# NOTE: Module-level threadvar assignments only execute on the main thread.
+# Secondary threads get zero-initialized threadvars, so we use a flag to
+# lazily initialize on first access.
+
 var globalBrokerContextLock {.threadvar.}: AsyncLock
 globalBrokerContextLock = newAsyncLock()
 var globalBrokerContextValue {.threadvar.}: BrokerContext
 globalBrokerContextValue = DefaultBrokerContext
-proc globalBrokerContext*(): BrokerContext =
-  ## Returns the currently active global broker context.
+var globalBrokerContextInitialized {.threadvar.}: bool
+globalBrokerContextInitialized = true # main thread is initialized
+
+proc threadGlobalBrokerContext*(): BrokerContext =
+  ## Returns the currently active broker context for this thread.
   ##
-  ## This is intentionally lock-free; callers should use it inside
-  ## `withNewGlobalBrokerContext` / `withGlobalBrokerContext`.
+  ## Defaults to `DefaultBrokerContext` until explicitly set via
+  ## `setThreadBrokerContext` or `initThreadBrokerContext`.
+  ## Lock-free threadvar read — safe to call from anywhere.
+  if not globalBrokerContextInitialized:
+    globalBrokerContextValue = DefaultBrokerContext
+    globalBrokerContextInitialized = true
   globalBrokerContextValue
+
+# Backward-compatible alias
+template globalBrokerContext*(): BrokerContext =
+  threadGlobalBrokerContext()
 
 var gContextCounter: Atomic[uint32]
 
@@ -38,6 +56,34 @@ proc NewBrokerContext*(): BrokerContext =
   if nextId == uint32(DefaultBrokerContext):
     nextId = gContextCounter.fetchAdd(1, moRelaxed)
   return BrokerContext(nextId)
+
+# ---------------------------------------------------------------------------
+# Sync thread-context binding (usable from {.thread.} init, before event loop)
+# ---------------------------------------------------------------------------
+
+proc setThreadBrokerContext*(ctx: BrokerContext) =
+  ## Installs an existing BrokerContext as this thread's global broker context.
+  ##
+  ## Use when the context was created elsewhere (e.g. on the main thread)
+  ## and this thread should adopt it. Readable via `threadGlobalBrokerContext()`.
+  ##
+  ## This is sync and thread-safe (writes only to this thread's threadvar).
+  globalBrokerContextValue = ctx
+  globalBrokerContextInitialized = true
+
+proc initThreadBrokerContext*(): BrokerContext =
+  ## Generates a new BrokerContext and installs it as this thread's
+  ## global broker context. Returns the new context so it can be
+  ## propagated to other threads for cross-thread broker access.
+  ##
+  ## Convenience for: `let ctx = NewBrokerContext(); setThreadBrokerContext(ctx)`
+  let ctx = NewBrokerContext()
+  setThreadBrokerContext(ctx)
+  return ctx
+
+# ---------------------------------------------------------------------------
+# Async scoped context (backward compat)
+# ---------------------------------------------------------------------------
 
 template lockGlobalBrokerContext*(brokerCtx: BrokerContext, body: untyped): untyped =
   ## Runs `body` while holding the global broker context lock with the provided
@@ -52,6 +98,7 @@ template lockGlobalBrokerContext*(brokerCtx: BrokerContext, body: untyped): unty
     await noCancel(globalBrokerContextLock.acquire())
     let previousBrokerCtx = globalBrokerContextValue
     globalBrokerContextValue = brokerCtx
+    globalBrokerContextInitialized = true
     try:
       body
     finally:

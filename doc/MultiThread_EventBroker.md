@@ -27,9 +27,9 @@ This generates:
 | `Alert.emit(event)` | Broadcast an event to all listeners (default context) |
 | `Alert.emit(ctx, event)` | Broadcast an event to all listeners (keyed context) |
 | `Alert.emit(level=1, message="hi")` | Field-constructor emit (inline object types only) |
-| `Alert.dropListener(handle)` | Remove a single listener (must be on registering thread) |
-| `Alert.dropAllListeners()` | Remove all listeners for default context (any thread) |
-| `Alert.dropAllListeners(ctx)` | Remove all listeners for keyed context (any thread) |
+| `await Alert.dropListener(handle)` | Remove a listener and drain in-flight futures (must be on registering thread, 5 s timeout) |
+| `Alert.dropAllListeners()` | Remove all listeners for default context, drain in-flight (any thread) |
+| `Alert.dropAllListeners(ctx)` | Remove all listeners for keyed context, drain in-flight (any thread) |
 
 ---
 
@@ -100,6 +100,15 @@ called locally on that thread.
 listener. The handle carries a `threadId` field that is validated at runtime.
 Calling from the wrong thread logs an error and returns without action.
 
+> **Planned change (in-flight drain):** `dropListener` will become an async proc
+> that cancels and awaits any in-flight futures spawned for the dropped listener
+> before returning. This ensures that after `dropListener` completes, no
+> already-spawned callback can touch resources the caller is about to release
+> (e.g. closed connections, deallocated buffers). A 5-second timeout guards
+> against deadlock in self-removal scenarios (a listener dropping its own handle
+> from inside its handler). Currently `dropListener` is sync and returns
+> immediately — in-flight callbacks from a prior `emit` may still be running.
+
 ### `dropAllListeners` works from any thread
 
 `dropAllListeners()` can be called from any thread. It:
@@ -109,6 +118,41 @@ Calling from the wrong thread logs an error and returns without action.
 3. Sends a shutdown message to each collected channel.
 4. Each `processLoop` (on its respective listener thread) drains in-flight listener
    tasks with a 5-second timeout, cleans its own threadvars, then exits.
+
+### Shutdown safety: in-flight listener futures
+
+When `dropListener` or `dropAllListeners` is called while listeners are still
+executing (i.e. futures were spawned by a recent `emit` and haven't completed),
+the following applies:
+
+**Current behavior (single-thread EventBroker):**
+- `dropListener` removes the listener from the table immediately (sync).
+- Already-spawned `asyncSpawn` futures **continue to run** — they hold a direct
+  closure reference, not a table entry.
+- If the caller releases resources after `dropListener` returns, in-flight
+  callbacks may access invalid state.
+
+**Current behavior (MT EventBroker):**
+- `dropAllListeners` sends a shutdown message. The remote `processLoop` drains
+  its `inFlight` seq with `cancelAndWait` (5 s timeout per future) before exiting.
+- `dropListener` is thread-local and sync — same in-flight risk as single-thread.
+
+**Planned behavior (both ST and MT):**
+- `dropListener(handle)` becomes `async: (raises: [])`.
+- On drop, all tracked in-flight futures for that listener are cancelled via
+  `cancelAndWait`, guarded by a 5-second timeout.
+- After `dropListener` returns, no callbacks for that handle are running.
+- Safe shutdown pattern:
+
+```nim
+await MyEvent.dropListener(handle)  # waits for in-flight to finish/cancel
+connection.close()                  # NOW safe — no callbacks can touch this
+dealloc(buffer)                     # NOW safe
+```
+
+- Self-removal (a listener dropping its own handle from inside its handler) hits
+  the timeout rather than deadlocking, since the future being awaited is the one
+  currently executing.
 
 ---
 
@@ -267,7 +311,8 @@ lower latencies.*
 | `emit()` return type | void (asyncSpawn) | Future[void] (async) |
 | Channel overhead | None | Per listener-thread |
 | `dropListener` scope | Any (thread-local broker) | Must be from registering thread |
-| `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends shutdown) |
+| `dropListener` in-flight drain | Planned: async with 5 s timeout | Planned: async with 5 s timeout |
+| `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends shutdown + drain) |
 | BrokerContext support | ✓ | ✓ |
 | Field-constructor emit | ✓ | ✓ |
 

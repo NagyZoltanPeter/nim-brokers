@@ -27,10 +27,10 @@ EventBroker:
     payload*: seq[int]
 
 template waitForListeners() =
-  waitFor sleepAsync(1.milliseconds)
+  await sleepAsync(1.milliseconds)
 
 suite "EventBroker":
-  test "delivers events to all listeners":
+  asyncTest "delivers events to all listeners":
     var seen: seq[(int, string)] = @[]
 
     discard SampleEvent.listen(
@@ -51,9 +51,9 @@ suite "EventBroker":
     check seen.anyIt(it == (5, "hi"))
     check seen.anyIt(it == (10, "hi!"))
 
-    SampleEvent.dropAllListeners()
+    await SampleEvent.dropAllListeners()
 
-  test "forget removes a single listener":
+  asyncTest "forget removes a single listener":
     var counter = 0
 
     let handleA = SampleEvent.listen(
@@ -66,15 +66,15 @@ suite "EventBroker":
         inc(counter, 2)
     )
 
-    SampleEvent.dropListener(handleA.get())
+    await SampleEvent.dropListener(handleA.get())
     let eventVal = SampleEvent(value: 1, label: "one")
     SampleEvent.emit(eventVal)
     waitForListeners()
     check counter == 2
 
-    SampleEvent.dropAllListeners()
+    await SampleEvent.dropAllListeners()
 
-  test "forgetAll clears every listener":
+  asyncTest "forgetAll clears every listener":
     var triggered = false
 
     let handle1 = SampleEvent.listen(
@@ -86,7 +86,7 @@ suite "EventBroker":
         discard
     )
 
-    SampleEvent.dropAllListeners()
+    await SampleEvent.dropAllListeners()
     SampleEvent.emit(42, "noop")
     SampleEvent.emit(label = "noop", value = 42)
     waitForListeners()
@@ -97,9 +97,9 @@ suite "EventBroker":
         discard
     )
     check freshHandle.get().id > 0'u64
-    SampleEvent.dropListener(freshHandle.get())
+    await SampleEvent.dropListener(freshHandle.get())
 
-  test "broker helpers operate via typedesc":
+  asyncTest "broker helpers operate via typedesc":
     var toggles: seq[bool] = @[]
 
     let handle = BinaryEvent.listen(
@@ -114,9 +114,9 @@ suite "EventBroker":
     waitForListeners()
 
     check toggles == @[true, false]
-    BinaryEvent.dropAllListeners()
+    await BinaryEvent.dropAllListeners()
 
-  test "ref typed event":
+  asyncTest "ref typed event":
     var counter: int = 0
 
     let handle = RefEvent.listen(
@@ -131,10 +131,10 @@ suite "EventBroker":
     waitForListeners()
 
     check counter == 21 # 1+2+3 + 4+5+6
-    RefEvent.dropAllListeners()
+    await RefEvent.dropAllListeners()
 
-  test "supports BrokerContext-scoped listeners":
-    SampleEvent.dropAllListeners()
+  asyncTest "supports BrokerContext-scoped listeners":
+    await SampleEvent.dropAllListeners()
 
     let ctxA = NewBrokerContext()
     let ctxB = NewBrokerContext()
@@ -161,7 +161,7 @@ suite "EventBroker":
     check seenA == @[1]
     check seenB == @[2]
 
-    SampleEvent.dropAllListeners(ctxA)
+    await SampleEvent.dropAllListeners(ctxA)
     SampleEvent.emit(ctxA, SampleEvent(value: 3, label: "a2"))
     SampleEvent.emit(ctxB, SampleEvent(value: 4, label: "b2"))
     waitForListeners()
@@ -169,9 +169,9 @@ suite "EventBroker":
     check seenA == @[1]
     check seenB == @[2, 4]
 
-    SampleEvent.dropAllListeners(ctxB)
+    await SampleEvent.dropAllListeners(ctxB)
 
-  test "supports non-object event types (auto-distinct)":
+  asyncTest "supports non-object event types (auto-distinct)":
     var seen: seq[int] = @[]
 
     discard IntEvent.listen(
@@ -183,9 +183,9 @@ suite "EventBroker":
     waitForListeners()
 
     check seen == @[42]
-    IntEvent.dropAllListeners()
+    await IntEvent.dropAllListeners()
 
-  test "supports externally-defined type aliases (auto-distinct)":
+  asyncTest "supports externally-defined type aliases (auto-distinct)":
     var seen: seq[string] = @[]
 
     discard ExternalAliasEvent.listen(
@@ -198,4 +198,43 @@ suite "EventBroker":
     waitForListeners()
 
     check seen == @["x"]
-    ExternalAliasEvent.dropAllListeners()
+    await ExternalAliasEvent.dropAllListeners()
+
+  asyncTest "dropAllListeners cancels in-flight listeners":
+    var completed = false
+
+    discard SampleEvent.listen(
+      proc(evt: SampleEvent): Future[void] {.async: (raises: []).} =
+        try:
+          await sleepAsync(10.seconds)
+          completed = true
+        except CancelledError:
+          discard
+    )
+
+    SampleEvent.emit(SampleEvent(value: 1, label: "cancel-test"))
+    waitForListeners()
+
+    await SampleEvent.dropAllListeners()
+    check completed == false
+
+  asyncTest "dropListener cancels in-flight and allows safe teardown":
+    var completed = false
+
+    let handle = SampleEvent
+      .listen(
+        proc(evt: SampleEvent): Future[void] {.async: (raises: []).} =
+          try:
+            await sleepAsync(10.seconds)
+            completed = true
+          except CancelledError:
+            discard
+      )
+      .get()
+
+    SampleEvent.emit(SampleEvent(value: 1, label: "drop-test"))
+    waitForListeners()
+
+    await SampleEvent.dropListener(handle)
+    # After await returns, all in-flight work is cancelled — safe to release resources
+    check completed == false
