@@ -253,9 +253,7 @@ proc generateEventBroker(body: NimNode): NimNode =
             discard
         broker.buckets[bucketIdx].inFlight.setLen(0)
 
-      proc `pruneInFlightIdent`(
-          broker: `brokerTypeIdent`, bucketIdx: int
-      ) =
+      proc `pruneInFlightIdent`(broker: `brokerTypeIdent`, bucketIdx: int) =
         ## Sync opportunistic cleanup of completed futures.
         ## Called on each emit to prevent unbounded seq growth.
         var j = 0

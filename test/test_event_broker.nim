@@ -221,14 +221,16 @@ suite "EventBroker":
   asyncTest "dropListener cancels in-flight and allows safe teardown":
     var completed = false
 
-    let handle = SampleEvent.listen(
-      proc(evt: SampleEvent): Future[void] {.async: (raises: []).} =
-        try:
-          await sleepAsync(10.seconds)
-          completed = true
-        except CancelledError:
-          discard
-    ).get()
+    let handle = SampleEvent
+      .listen(
+        proc(evt: SampleEvent): Future[void] {.async: (raises: []).} =
+          try:
+            await sleepAsync(10.seconds)
+            completed = true
+          except CancelledError:
+            discard
+      )
+      .get()
 
     SampleEvent.emit(SampleEvent(value: 1, label: "drop-test"))
     waitForListeners()
