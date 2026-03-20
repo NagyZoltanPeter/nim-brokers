@@ -255,8 +255,7 @@ proc generateEventBroker(body: NimNode): NimNode =
           except CatchableError as exc:
             # Log unexpected errors during cancellation while still completing teardown.
             error "Failed to cancel in-flight listener future",
-              bucketIdx = bucketIdx,
-              errorMsg = exc.msg
+              bucketIdx = bucketIdx, errorMsg = exc.msg
         broker.buckets[bucketIdx].inFlight.setLen(0)
 
       proc `pruneInFlightIdent`(broker: `brokerTypeIdent`, bucketIdx: int) =
