@@ -484,8 +484,8 @@ MyEvent.listen(handler)        # register
 MyEvent.listen(ctx, handler)   # context-aware
 MyEvent.emit(event)            # fire
 MyEvent.emit(ctx, field = "x") # shorthand ctor
-MyEvent.dropListener(handle)   # cleanup
-MyEvent.dropAllListeners()
+await MyEvent.dropListener(handle)   # drain in-flight, then cleanup
+MyEvent.dropAllListeners()           # drain all in-flight (5s timeout)
         </code></pre>
       </div>
     </div>
@@ -656,17 +656,17 @@ proc stopRecvService*(self: RecvService) {.async.} =
         <ul>
           <li><code>listen()</code> returns a typed <strong>handle</strong></li>
           <li>Owner stores the handle as a field — lifetime tied to the object</li>
-          <li><code>dropListener(handle)</code> removes exactly that registration</li>
-          <li>No stale closure surprises after the owner is destroyed</li>
+          <li><code>dropListener(handle)</code> removes the registration and drains in-flight futures (5&thinsp;s timeout)</li>
+          <li>After <code>dropListener</code> returns, no callbacks for that handle are running — safe to release resources</li>
         </ul>
       </div>
 
       <div>
         <h3>Error isolation</h3>
         <ul>
-          <li>Each listener runs as an independent <code>asyncSpawn</code> task</li>
+          <li>Each listener runs as an independent <code>asyncSpawn</code> task, tracked in <code>inFlight</code></li>
           <li>A panicking listener is caught and logged — others still fire</li>
-          <li>Emitter never awaits listener completion — never blocks</li>
+          <li>Emitter never awaits listener completion — <code>dropListener</code> drains in-flight on shutdown</li>
         </ul>
       </div>
     </div>
@@ -792,7 +792,7 @@ RequestBroker:
     <pre><code class="language-nim" data-trim>
 ## Sync provider — zero-arg, no IO involved
 RequestConnectionStatus.setProvider(
-  globalBrokerContext(),
+  threadGlobalBrokerContext(),
   proc(): Result[RequestConnectionStatus, string] =
     try:
       let report = waku[].healthMonitor
@@ -814,7 +814,7 @@ RequestConnectionStatus.setProvider(
     <pre><code class="language-nim" data-trim>
 ## Async provider — may perform IO
 RequestHealthReport.setProvider(
-  globalBrokerContext(),
+  threadGlobalBrokerContext(),
   proc(): Future[
       Result[RequestHealthReport, string]]
       {.async.} =
@@ -1008,7 +1008,7 @@ CollectedStatus.clearProviders()
     <h2>BrokerContext Implementation</h2>
 
     <span class="filepath">waku/common/broker/broker_context.nim</span>
-    <pre><code class="language-nim" data-trim data-line-numbers="1-3|5-8|10-16|18-23">
+    <pre><code class="language-nim" data-trim data-line-numbers="1-3|5-8|10-16|18-24|26-34">
 type BrokerContext* = distinct uint32
 
 const DefaultBrokerContext* =
@@ -1027,7 +1027,15 @@ proc new*(T: type WakuNode, ...): T =
   WakuNode(
     brokerCtx: NewBrokerContext(), ...)
 
-# Thread-local lock for sync emission:
+# Thread-global context binding (sync, usable from {.thread.} init):
+proc setThreadBrokerContext*(ctx: BrokerContext)
+  ## Adopts ctx as this thread's global context
+proc initThreadBrokerContext*(): BrokerContext
+  ## Creates new ctx + sets as thread-global
+proc threadGlobalBrokerContext*(): BrokerContext
+  ## Returns this thread's global context (lock-free)
+
+# Async scoped context (backward compat):
 template lockGlobalBrokerContext*(
     brokerCtx: BrokerContext,
     body: untyped) =
@@ -1227,8 +1235,8 @@ OnFilterSubscribeEvent.emit(
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-red);"><strong>Shutdown complexity</strong></td>
-          <td><code>dropAllListeners</code> must coordinate across threads, drain in-flight tasks (5&thinsp;s timeout)</td>
-          <td>Allow an event-loop tick after <code>dropAllListeners</code> for processLoop to clean up</td>
+          <td><code>dropListener</code> / <code>dropAllListeners</code> drain in-flight futures (5&thinsp;s timeout per future) before returning — ensures no callbacks touch released resources</td>
+          <td>Call <code>await dropListener(handle)</code> before releasing resources; allow an event-loop tick after <code>dropAllListeners</code> for processLoop cleanup</td>
         </tr>
       </tbody>
     </table>
@@ -1272,7 +1280,7 @@ OnFilterSubscribeEvent.emit(
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Clean shutdown</strong></td>
-          <td><code>dropAllListeners</code> from <em>any</em> thread drains in-flight callbacks, cleans up channels, and removes remote threadvars</td>
+          <td><code>dropListener</code> and <code>dropAllListeners</code> drain in-flight callbacks (5&thinsp;s timeout), clean up channels, and remove remote threadvars — safe to release resources immediately after return</td>
         </tr>
       </tbody>
     </table>
@@ -1287,8 +1295,8 @@ OnFilterSubscribeEvent.emit(
         <h3>Thread ownership rules</h3>
         <ul>
           <li><code>listen</code> must be called from the thread that will own the listener</li>
-          <li><code>dropListener</code> must be called from the <strong>same thread</strong> that registered it</li>
-          <li><code>dropAllListeners</code> can be called from <strong>any thread</strong></li>
+          <li><code>dropListener</code> must be called from the <strong>same thread</strong> that registered it; drains in-flight futures (async, 5&thinsp;s timeout)</li>
+          <li><code>dropAllListeners</code> can be called from <strong>any thread</strong>; drains in-flight futures before returning</li>
           <li><code>emit</code> can be called from <strong>any thread</strong></li>
         </ul>
 
