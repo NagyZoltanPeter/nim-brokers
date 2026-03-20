@@ -15,14 +15,23 @@ requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
 requires "https://github.com/status-im/nim-async-channels"
 
-proc test(env, path: string) =
-  exec "nim c " & env & " -r --path:src --outdir:build test/" & path & ".nim"
-
 proc quoteArg(arg: string): string =
   if defined(windows):
     result = '"' & arg.replace("\"", "\"\"") & '"'
   else:
     result = '"' & arg.replace("\"", "\\\"") & '"'
+
+proc compileVariantSuffix(env: string): string =
+  let normalized = env.toLowerAscii()
+  let memoryManager = if normalized.contains("--mm:refc"): "refc" else: "orc"
+  let buildMode = if normalized.contains("-d:release"): "release" else: "debug"
+
+  memoryManager & "_" & buildMode
+
+proc test(env, path: string) =
+  let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
+  exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
+    ".nim"
 
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
@@ -74,7 +83,10 @@ proc runNph(files: seq[string], emptyMessage: string) =
 task test, "Run all tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
-    for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
+    for opt in [
+      "--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert --mm:orc",
+      "-d:release -d:gcAssert -d:sysAssert --mm:refc",
+    ]:
       test opt, f
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
@@ -94,6 +106,19 @@ task perftest, "Run performance and stress tests":
       "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
     ]:
       test opt, f
+
+task testApi, "Run FFI API broker tests":
+  let apiTests = ["test_api_request_broker", "test_api_event_broker"]
+  for f in apiTests:
+    for opt in [
+      "-d:BrokerFfiApi --mm:orc --threads:on", "-d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:BrokerFfiApi -d:release --mm:refc --threads:on",
+    ]:
+      test opt, f
+
+task buildFfiExample, "Build FFI API example library":
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

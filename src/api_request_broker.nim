@@ -1,0 +1,301 @@
+## API RequestBroker
+## -----------------
+## Generates a multi-thread capable RequestBroker with additional FFI glue code
+## for exposing request signatures as C-callable exported functions.
+##
+## When compiled with `-d:BrokerFfiApi`, RequestBroker(API) generates:
+## 1. All MT broker code (via generateMtRequestBroker)
+## 2. C-compatible result struct for each request type
+## 3. Exported C functions for each request signature
+## 4. C header declarations appended to the compile-time accumulator
+##
+## When compiled without `-d:BrokerFfiApi`, falls back to MT mode.
+
+{.push raises: [].}
+
+import std/[macros, strutils]
+import chronos, chronicles
+import results
+import ./helper/broker_utils, ./broker_context, ./mt_request_broker, ./api_common
+
+export results, chronos, chronicles, broker_context, mt_request_broker, api_common
+
+# ---------------------------------------------------------------------------
+# Macro code generator
+# ---------------------------------------------------------------------------
+
+proc generateApiRequestBroker*(body: NimNode): NimNode =
+  when defined(brokerDebug):
+    echo body.treeRepr
+    echo "RequestBroker mode: API"
+
+  # Step 1: Parse type definition and signatures (same as MT)
+  let parsed = parseSingleTypeDef(
+    body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
+  )
+  let typeIdent = parsed.typeIdent
+  let fieldNames = parsed.fieldNames
+  let fieldTypes = parsed.fieldTypes
+  let hasInlineFields = parsed.hasInlineFields
+
+  let typeDisplayName = sanitizeIdentName(typeIdent)
+  let snakeName = toSnakeCase(typeDisplayName)
+
+  # Parse signatures (mirroring mt_request_broker logic)
+  var zeroArgSig: NimNode = nil
+  var argSig: NimNode = nil
+  var argParams: seq[NimNode] = @[]
+
+  for stmt in body:
+    case stmt.kind
+    of nnkProcDef:
+      let procName = stmt[0]
+      let procNameIdent =
+        case procName.kind
+        of nnkIdent:
+          procName
+        of nnkPostfix:
+          procName[1]
+        else:
+          procName
+      if not ($procNameIdent).startsWith("signature"):
+        error("Signature proc names must start with `signature`", procName)
+      let params = stmt.params
+      let paramCount = params.len - 1
+      if paramCount == 0:
+        zeroArgSig = stmt
+      elif paramCount >= 1:
+        argSig = stmt
+        argParams = @[]
+        for idx in 1 ..< params.len:
+          argParams.add(copyNimTree(params[idx]))
+    of nnkTypeSection, nnkEmpty:
+      discard
+    else:
+      discard
+
+  # If no signatures at all, default to zero-arg
+  if zeroArgSig.isNil() and argSig.isNil():
+    zeroArgSig = newEmptyNode()
+
+  # Step 2: Generate all MT broker code
+  result = newStmtList()
+  result.add(generateMtRequestBroker(body))
+
+  # Step 3: Generate C result struct type
+  let cResultIdent = ident(typeDisplayName & "CResult")
+  let exportedCResultIdent = postfix(copyNimTree(cResultIdent), "*")
+
+  var cResultFields = newTree(nnkRecList)
+  # error_message field (NULL on success)
+  cResultFields.add(
+    newTree(
+      nnkIdentDefs,
+      postfix(ident("error_message"), "*"),
+      ident("cstring"),
+      newEmptyNode(),
+    )
+  )
+
+  # Add result fields (mapped to C-compatible types)
+  if hasInlineFields:
+    for i in 0 ..< fieldNames.len:
+      let cFieldType = toCFieldType(fieldTypes[i])
+      cResultFields.add(
+        newTree(
+          nnkIdentDefs,
+          postfix(copyNimTree(fieldNames[i]), "*"),
+          cFieldType,
+          newEmptyNode(),
+        )
+      )
+
+  result.add(
+    quote do:
+      type `exportedCResultIdent` {.exportc, packed.} = object
+  )
+  # Replace the empty RecList with our fields
+  let lastTypeSect = result[result.len - 1]
+  for typeDef in lastTypeSect:
+    if typeDef.kind == nnkTypeDef:
+      let objTy = typeDef[2]
+      if objTy.kind == nnkObjectTy:
+        objTy[2] = cResultFields
+
+  # Step 4: Generate encode proc (Nim object → C result struct)
+  let encodeProcIdent = ident("encode" & typeDisplayName & "ToC")
+  let objIdent = ident("obj")
+  if hasInlineFields:
+    var encodeBody = newStmtList()
+    for i in 0 ..< fieldNames.len:
+      let fName = fieldNames[i]
+      let fType = fieldTypes[i]
+      if isCStringType(fType):
+        encodeBody.add(
+          quote do:
+            result.`fName` = allocCStringCopy(`objIdent`.`fName`)
+        )
+      else:
+        encodeBody.add(
+          quote do:
+            result.`fName` = `objIdent`.`fName`
+        )
+
+    result.add(
+      quote do:
+        proc `encodeProcIdent`(`objIdent`: `typeIdent`): `cResultIdent` =
+          `encodeBody`
+
+    )
+  else:
+    result.add(
+      quote do:
+        proc `encodeProcIdent`(`objIdent`: `typeIdent`): `cResultIdent` =
+          discard
+
+    )
+
+  # Step 5: Generate C-exported request functions
+
+  # Zero-arg signature
+  if not zeroArgSig.isNil():
+    let funcName = snakeName & "_request"
+    let funcIdent = ident(funcName)
+    let funcNameLit = newLit(funcName)
+
+    result.add(
+      quote do:
+        proc `funcIdent`(
+            ctx: uint32
+        ): `cResultIdent` {.exportc: `funcNameLit`, cdecl, dynlib.} =
+          let brokerCtx = BrokerContext(ctx)
+          let res = waitFor `typeIdent`.request(brokerCtx)
+          if res.isOk():
+            return `encodeProcIdent`(res.get())
+          else:
+            var errResult: `cResultIdent`
+            errResult.error_message = allocCStringCopy(res.error())
+            return errResult
+
+    )
+
+    # Append header declarations
+    var headerFields: seq[(string, string)] = @[]
+    headerFields.add(("error_message", "char*"))
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+    let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
+    appendHeaderDecl(structDecl)
+
+    let funcProto =
+      generateCFuncProto(funcName, typeDisplayName & "CResult", @[("ctx", "uint32_t")])
+    appendHeaderDecl(funcProto)
+
+  # Arg-based signature
+  if not argSig.isNil():
+    let funcName = snakeName & "_request_with_args"
+    let funcIdent = ident(funcName)
+    let funcNameLit = newLit(funcName)
+
+    # Build C function parameters
+    var cFormalParams = newTree(nnkFormalParams)
+    cFormalParams.add(copyNimTree(newTree(nnkBracketExpr))) # placeholder
+    cFormalParams[0] = ident($cResultIdent) # return type
+
+    cFormalParams.add(
+      newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
+    )
+
+    # Add C-compatible versions of each signature param
+    var decodeStmts = newStmtList()
+    var nimCallArgs: seq[NimNode] = @[]
+    var headerParams: seq[(string, string)] = @[("ctx", "uint32_t")]
+
+    for paramDef in argParams:
+      for i in 0 ..< paramDef.len - 2:
+        let paramName = paramDef[i]
+        let paramType = paramDef[paramDef.len - 2]
+        let cParamType = toCFieldType(paramType)
+        let cParamIdent = ident("c_" & $paramName)
+
+        cFormalParams.add(
+          newTree(nnkIdentDefs, cParamIdent, cParamType, newEmptyNode())
+        )
+
+        # Decode C param to Nim type
+        if isCStringType(paramType):
+          let nimParamIdent = ident("nim_" & $paramName)
+          decodeStmts.add(
+            quote do:
+              let `nimParamIdent` = $`cParamIdent`
+          )
+          nimCallArgs.add(nimParamIdent)
+        else:
+          nimCallArgs.add(cParamIdent)
+
+        headerParams.add(($paramName, nimTypeToCInput(paramType)))
+
+    # Build the request call with decoded args
+    let brokerCtxIdent = ident("brokerCtx")
+    var requestCall = newCall(ident("request"), copyNimTree(typeIdent), brokerCtxIdent)
+    for arg in nimCallArgs:
+      requestCall.add(arg)
+
+    var funcBody = newStmtList()
+    funcBody.add(
+      quote do:
+        let `brokerCtxIdent` = BrokerContext(ctx)
+    )
+    funcBody.add(decodeStmts)
+    funcBody.add(
+      quote do:
+        let res = waitFor `requestCall`
+        if res.isOk():
+          return `encodeProcIdent`(res.get())
+        else:
+          var errResult: `cResultIdent`
+          errResult.error_message = allocCStringCopy(res.error())
+          return errResult
+    )
+
+    # Build the exported proc
+    let pragmas = newTree(
+      nnkPragma,
+      newTree(nnkExprColonExpr, ident("exportc"), funcNameLit),
+      ident("cdecl"),
+      ident("dynlib"),
+    )
+
+    cFormalParams[0] = ident($cResultIdent)
+
+    let funcProc = newTree(
+      nnkProcDef,
+      postfix(funcIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      cFormalParams,
+      pragmas,
+      newEmptyNode(),
+      funcBody,
+    )
+    result.add(funcProc)
+
+    # If we haven't already added the struct (from zero-arg), add it now
+    if zeroArgSig.isNil():
+      var headerFields: seq[(string, string)] = @[]
+      headerFields.add(("error_message", "char*"))
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+      let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
+      appendHeaderDecl(structDecl)
+
+    let funcProto =
+      generateCFuncProto(funcName, typeDisplayName & "CResult", headerParams)
+    appendHeaderDecl(funcProto)
+
+  when defined(brokerDebug):
+    echo result.repr
+
+{.pop.}
