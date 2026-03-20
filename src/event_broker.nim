@@ -249,8 +249,14 @@ proc generateEventBroker(body: NimNode): NimNode =
         for fut in pending:
           try:
             discard await withTimeout(fut, chronos.seconds(5))
-          except CatchableError:
+          except CancelledError:
+            # Expected when actively cancelling in-flight listener futures.
             discard
+          except CatchableError as exc:
+            # Log unexpected errors during cancellation while still completing teardown.
+            error "Failed to cancel in-flight listener future",
+              bucketIdx = bucketIdx,
+              errorMsg = exc.msg
         broker.buckets[bucketIdx].inFlight.setLen(0)
 
       proc `pruneInFlightIdent`(broker: `brokerTypeIdent`, bucketIdx: int) =
@@ -259,7 +265,10 @@ proc generateEventBroker(body: NimNode): NimNode =
         var j = 0
         while j < broker.buckets[bucketIdx].inFlight.len:
           if broker.buckets[bucketIdx].inFlight[j].finished():
-            broker.buckets[bucketIdx].inFlight.del(j) # swap-delete, O(1)
+            let last = broker.buckets[bucketIdx].inFlight.len - 1
+            broker.buckets[bucketIdx].inFlight[j] =
+              broker.buckets[bucketIdx].inFlight[last]
+            broker.buckets[bucketIdx].inFlight.setLen(last) # swap-delete, O(1)
           else:
             inc j
 
