@@ -136,6 +136,8 @@ proc generateEventBroker(body: NimNode): NimNode =
   let dropAllListenersImplIdent = ident("dropAll" & sanitized & "Listeners")
   let emitImplIdent = ident("emit" & sanitized & "Value")
   let listenerTaskIdent = ident("notify" & sanitized & "Listener")
+  let cancelInFlightIdent = ident("cancelInFlight" & sanitized)
+  let pruneInFlightIdent = ident("pruneInFlight" & sanitized)
 
   result = newStmtList()
 
@@ -152,6 +154,7 @@ proc generateEventBroker(body: NimNode): NimNode =
           brokerCtx: BrokerContext
           listeners: Table[uint64, `handlerProcIdent`]
           nextId: uint64
+          inFlight: seq[Future[void]]
 
         `exportedBrokerTypeIdent` = ref object
           buckets: seq[`bucketTypeIdent`]
@@ -173,6 +176,7 @@ proc generateEventBroker(body: NimNode): NimNode =
               brokerCtx: DefaultBrokerContext,
               listeners: initTable[uint64, `handlerProcIdent`](),
               nextId: 1'u64,
+              inFlight: @[],
             )
           ]
         `globalVarIdent`
@@ -202,6 +206,7 @@ proc generateEventBroker(body: NimNode): NimNode =
             brokerCtx: brokerCtx,
             listeners: initTable[uint64, `handlerProcIdent`](),
             nextId: 1'u64,
+            inFlight: @[],
           )
         )
         return broker.buckets.high
@@ -231,9 +236,42 @@ proc generateEventBroker(body: NimNode): NimNode =
 
   result.add(
     quote do:
+      proc `cancelInFlightIdent`(
+          broker: `brokerTypeIdent`, bucketIdx: int
+      ) {.async: (raises: []).} =
+        ## Cancel all in-flight listener futures for the given bucket,
+        ## then clear the in-flight seq. Uses timeout to handle the
+        ## self-removal edge case (listener dropping itself inside its handler).
+        var pending: seq[Future[void]] = @[]
+        for fut in broker.buckets[bucketIdx].inFlight:
+          if not fut.finished():
+            pending.add(fut.cancelAndWait())
+        for fut in pending:
+          try:
+            discard await withTimeout(fut, chronos.seconds(5))
+          except CatchableError:
+            discard
+        broker.buckets[bucketIdx].inFlight.setLen(0)
+
+      proc `pruneInFlightIdent`(
+          broker: `brokerTypeIdent`, bucketIdx: int
+      ) =
+        ## Sync opportunistic cleanup of completed futures.
+        ## Called on each emit to prevent unbounded seq growth.
+        var j = 0
+        while j < broker.buckets[bucketIdx].inFlight.len:
+          if broker.buckets[bucketIdx].inFlight[j].finished():
+            broker.buckets[bucketIdx].inFlight.del(j) # swap-delete, O(1)
+          else:
+            inc j
+
+  )
+
+  result.add(
+    quote do:
       proc `dropListenerImplIdent`(
           brokerCtx: BrokerContext, handle: `listenerHandleIdent`
-      ) =
+      ) {.async: (raises: []).} =
         if handle.id == 0'u64:
           return
         var broker = `accessProcIdent`()
@@ -244,7 +282,13 @@ proc generateEventBroker(body: NimNode): NimNode =
 
         if broker.buckets[bucketIdx].listeners.len == 0:
           return
+
+        # Remove from table — prevents future dispatches
         broker.buckets[bucketIdx].listeners.del(handle.id)
+
+        # Cancel and wait for all in-flight futures (timeout-guarded)
+        await `cancelInFlightIdent`(broker, bucketIdx)
+
         if brokerCtx != DefaultBrokerContext and
             broker.buckets[bucketIdx].listeners.len == 0:
           broker.buckets.delete(bucketIdx)
@@ -253,14 +297,22 @@ proc generateEventBroker(body: NimNode): NimNode =
 
   result.add(
     quote do:
-      proc `dropAllListenersImplIdent`(brokerCtx: BrokerContext) =
+      proc `dropAllListenersImplIdent`(
+          brokerCtx: BrokerContext
+      ) {.async: (raises: []).} =
         var broker = `accessProcIdent`()
 
         let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
         if bucketIdx < 0:
           return
+
+        # Clear listeners — prevents new dispatches
         if broker.buckets[bucketIdx].listeners.len > 0:
           broker.buckets[bucketIdx].listeners.clear()
+
+        # Cancel and wait for all in-flight futures
+        await `cancelInFlightIdent`(broker, bucketIdx)
+
         if brokerCtx != DefaultBrokerContext:
           broker.buckets.delete(bucketIdx)
 
@@ -284,21 +336,27 @@ proc generateEventBroker(body: NimNode): NimNode =
 
   result.add(
     quote do:
-      proc dropListener*(_: typedesc[`typeIdent`], handle: `listenerHandleIdent`) =
-        `dropListenerImplIdent`(DefaultBrokerContext, handle)
+      proc dropListener*(
+          _: typedesc[`typeIdent`], handle: `listenerHandleIdent`
+      ): Future[void] {.async: (raises: []).} =
+        await `dropListenerImplIdent`(DefaultBrokerContext, handle)
 
       proc dropListener*(
           _: typedesc[`typeIdent`],
           brokerCtx: BrokerContext,
           handle: `listenerHandleIdent`,
-      ) =
-        `dropListenerImplIdent`(brokerCtx, handle)
+      ): Future[void] {.async: (raises: []).} =
+        await `dropListenerImplIdent`(brokerCtx, handle)
 
-      proc dropAllListeners*(_: typedesc[`typeIdent`]) =
-        `dropAllListenersImplIdent`(DefaultBrokerContext)
+      proc dropAllListeners*(
+          _: typedesc[`typeIdent`]
+      ): Future[void] {.async: (raises: []).} =
+        await `dropAllListenersImplIdent`(DefaultBrokerContext)
 
-      proc dropAllListeners*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext) =
-        `dropAllListenersImplIdent`(brokerCtx)
+      proc dropAllListeners*(
+          _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+      ): Future[void] {.async: (raises: []).} =
+        await `dropAllListenersImplIdent`(brokerCtx)
 
   )
 
@@ -328,11 +386,16 @@ proc generateEventBroker(body: NimNode): NimNode =
           return
         if broker.buckets[bucketIdx].listeners.len == 0:
           return
+
+        # Prune completed futures (sync — no yield point)
+        `pruneInFlightIdent`(broker, bucketIdx)
+
         var callbacks: seq[`handlerProcIdent`] = @[]
         for cb in broker.buckets[bucketIdx].listeners.values:
           callbacks.add(cb)
         for cb in callbacks:
-          asyncSpawn `listenerTaskIdent`(cb, event)
+          let fut = `listenerTaskIdent`(cb, event)
+          broker.buckets[bucketIdx].inFlight.add(fut)
 
       proc emit*(event: `typeIdent`) =
         asyncSpawn `emitImplIdent`(DefaultBrokerContext, event)
