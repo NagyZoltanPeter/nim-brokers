@@ -120,9 +120,16 @@ task testApi, "Run FFI API broker tests":
 task buildFfiExample, "Build FFI API example library":
   exec "nim c -d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
 
-task buildFfiExampleApp, "Build FFI API example C++ application":
+task buildFfiExampleC, "Build FFI API example — pure C application":
   let libDir = "examples/ffiapi/nimlib/build"
-  let appDir = "examples/ffiapi/cppapp"
+  let appDir = "examples/ffiapi/example"
+  let buildDir = appDir & "/build"
+  mkDir(buildDir)
+  exec "cc -std=c11 -I" & libDir & " -L" & libDir & " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " & appDir & "/main.c"
+
+task buildFfiExampleCpp, "Build FFI API example — modern C++ application":
+  let libDir = "examples/ffiapi/nimlib/build"
+  let appDir = "examples/ffiapi/cpp_example"
   let buildDir = appDir & "/build"
   mkDir(buildDir)
   exec "c++ -std=c++17 -I" & libDir & " -L" & libDir & " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " & appDir & "/main.cpp"

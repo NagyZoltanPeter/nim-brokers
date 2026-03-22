@@ -98,21 +98,41 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   )
 
   # Add result fields (mapped to C-compatible types)
+  # seq[T] fields expand to two C fields: pointer + count
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      let cFieldType = toCFieldType(fieldTypes[i])
-      cResultFields.add(
-        newTree(
-          nnkIdentDefs,
-          postfix(copyNimTree(fieldNames[i]), "*"),
-          cFieldType,
-          newEmptyNode(),
+      if isSeqType(fieldTypes[i]):
+        # seq[T] → pointer field + int32 count field
+        cResultFields.add(
+          newTree(
+            nnkIdentDefs,
+            postfix(copyNimTree(fieldNames[i]), "*"),
+            ident("pointer"),
+            newEmptyNode(),
+          )
         )
-      )
+        cResultFields.add(
+          newTree(
+            nnkIdentDefs,
+            postfix(ident($fieldNames[i] & "_count"), "*"),
+            ident("cint"),
+            newEmptyNode(),
+          )
+        )
+      else:
+        let cFieldType = toCFieldType(fieldTypes[i])
+        cResultFields.add(
+          newTree(
+            nnkIdentDefs,
+            postfix(copyNimTree(fieldNames[i]), "*"),
+            cFieldType,
+            newEmptyNode(),
+          )
+        )
 
   result.add(
     quote do:
-      type `exportedCResultIdent` {.exportc, packed.} = object
+      type `exportedCResultIdent` {.exportc.} = object
   )
   # Replace the empty RecList with our fields
   let lastTypeSect = result[result.len - 1]
@@ -125,12 +145,34 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   # Step 4: Generate encode proc (Nim object → C result struct)
   let encodeProcIdent = ident("encode" & typeDisplayName & "ToC")
   let objIdent = ident("obj")
+  var hasSeqFields = false
   if hasInlineFields:
     var encodeBody = newStmtList()
     for i in 0 ..< fieldNames.len:
       let fName = fieldNames[i]
       let fType = fieldTypes[i]
-      if isCStringType(fType):
+      if isSeqType(fType):
+        hasSeqFields = true
+        let itemTypeName = seqItemTypeName(fType)
+        let cItemIdent = ident(itemTypeName & "CItem")
+        let encodeFuncIdent = ident("encode" & itemTypeName & "ToCItem")
+        let countFieldIdent = ident($fName & "_count")
+        let nIdent = genSym(nskLet, "n")
+        let arrIdent = genSym(nskLet, "arr")
+        let iIdent = genSym(nskForVar, "i")
+        encodeBody.add(
+          quote do:
+            let `nIdent` = `objIdent`.`fName`.len
+            result.`countFieldIdent` = cint(`nIdent`)
+            if `nIdent` > 0:
+              let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](
+                alloc(`nIdent` * sizeof(`cItemIdent`))
+              )
+              for `iIdent` in 0 ..< `nIdent`:
+                `arrIdent`[`iIdent`] = `encodeFuncIdent`(`objIdent`.`fName`[`iIdent`])
+              result.`fName` = cast[pointer](`arrIdent`)
+        )
+      elif isCStringType(fType):
         encodeBody.add(
           quote do:
             result.`fName` = allocCStringCopy(`objIdent`.`fName`)
@@ -154,6 +196,83 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           discard
 
     )
+
+  # Step 4b: Generate free_result function
+  # Frees all allocated memory in a C result struct (strings, arrays, etc.)
+  block:
+    let freeProcName = "free_" & snakeName & "_result"
+    let freeProcIdent = ident(freeProcName)
+    let freeProcNameLit = newLit(freeProcName)
+    let rIdent = ident("r")
+
+    var freeBody = newStmtList()
+    # Free error_message
+    freeBody.add(
+      quote do:
+        if not `rIdent`.error_message.isNil:
+          freeCString(`rIdent`.error_message)
+    )
+
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fName = fieldNames[i]
+        let fType = fieldTypes[i]
+        if isSeqType(fType):
+          let itemTypeName = seqItemTypeName(fType)
+          let itemFields = lookupFfiStruct(itemTypeName)
+          let countFieldIdent = ident($fName & "_count")
+          let arrIdent = genSym(nskLet, "arr")
+          let cItemIdent = ident(itemTypeName & "CItem")
+          let jIdent = genSym(nskForVar, "j")
+
+          # Free string fields inside each array element, then the array
+          var itemFreeStmts = newStmtList()
+          for (ifName, ifType) in itemFields:
+            if ifType.toLowerAscii() in ["string", "cstring"]:
+              let ifNameIdent = ident(ifName)
+              itemFreeStmts.add(
+                quote do:
+                  if not `arrIdent`[`jIdent`].`ifNameIdent`.isNil:
+                    freeCString(`arrIdent`[`jIdent`].`ifNameIdent`)
+              )
+
+          freeBody.add(
+            quote do:
+              if `rIdent`.`countFieldIdent` > 0 and not `rIdent`.`fName`.isNil:
+                let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](`rIdent`.`fName`)
+                for `jIdent` in 0 ..< `rIdent`.`countFieldIdent`:
+                  `itemFreeStmts`
+                dealloc(`rIdent`.`fName`)
+          )
+        elif isCStringType(fType):
+          freeBody.add(
+            quote do:
+              if not `rIdent`.`fName`.isNil:
+                freeCString(`rIdent`.`fName`)
+          )
+
+    result.add(
+      quote do:
+        proc `freeProcIdent`(
+            `rIdent`: ptr `cResultIdent`
+        ) {.exportc: `freeProcNameLit`, cdecl, dynlib.} =
+          if `rIdent`.isNil:
+            return
+          `freeBody`
+    )
+
+  # Saved for Step 7: will be appended AFTER struct declaration in header
+  var freeHeaderProto = ""
+  var cppFreeMethod = ""
+
+  # Step 4b continued: save header declarations for later
+  block:
+    let freeProcName2 = "free_" & snakeName & "_result"
+    freeHeaderProto =
+      generateCFuncProto(freeProcName2, "void", @[("r", typeDisplayName & "CResult*")])
+    cppFreeMethod =
+      "void free" & typeDisplayName & "Result(" & typeDisplayName & "CResult* r) { " &
+      freeProcName2 & "(r); }"
 
   # Step 5: Generate C-exported request functions
 
@@ -184,7 +303,12 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     headerFields.add(("error_message", "char*"))
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
-        headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+        if isSeqType(fieldTypes[i]):
+          let itemTypeName = seqItemTypeName(fieldTypes[i])
+          headerFields.add(($fieldNames[i], itemTypeName & "CItem*"))
+          headerFields.add(($fieldNames[i] & "_count", "int32_t"))
+        else:
+          headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
     let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
     appendHeaderDecl(structDecl)
 
@@ -287,7 +411,12 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       headerFields.add(("error_message", "char*"))
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
-          headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+          if isSeqType(fieldTypes[i]):
+            let itemTypeName = seqItemTypeName(fieldTypes[i])
+            headerFields.add(($fieldNames[i], itemTypeName & "CItem*"))
+            headerFields.add(($fieldNames[i] & "_count", "int32_t"))
+          else:
+            headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
       let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
       appendHeaderDecl(structDecl)
 
@@ -323,6 +452,11 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       typeDisplayName & "CResult " & camelName & "(" & cppParams.join(", ") & ") { return " &
       funcName & "(" & cppCallArgs & "); }"
     gApiCppClassMethods.add(cppMethod)
+
+  # Step 7: Append free_result header declaration and C++ method
+  # (must come after the struct declaration in Step 5/6)
+  appendHeaderDecl(freeHeaderProto)
+  gApiCppClassMethods.add(cppFreeMethod)
 
   when defined(brokerDebug):
     echo result.repr

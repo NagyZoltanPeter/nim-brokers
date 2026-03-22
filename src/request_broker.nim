@@ -167,8 +167,8 @@ when compileOption("threads"):
   export mt_request_broker
 
 when compileOption("threads") and defined(BrokerFfiApi):
-  import ./api_request_broker
-  export api_request_broker
+  import ./api_request_broker, ./api_type
+  export api_request_broker, api_type
 
 export results, chronos, keepItIf, broker_context
 

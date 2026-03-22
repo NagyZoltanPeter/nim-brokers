@@ -11,6 +11,20 @@
 import std/[compilesettings, macros, os, strutils]
 
 # ---------------------------------------------------------------------------
+# Compile-time seq[T] type helpers (must precede type-mapping procs)
+# ---------------------------------------------------------------------------
+
+proc isSeqType*(nimType: NimNode): bool {.compileTime.} =
+  ## Returns true if the type node represents `seq[T]`.
+  nimType.kind == nnkBracketExpr and nimType.len == 2 and
+    ($nimType[0]).toLowerAscii() == "seq"
+
+proc seqItemTypeName*(nimType: NimNode): string {.compileTime.} =
+  ## Extracts the element type name from a `seq[T]` node.
+  assert isSeqType(nimType)
+  $nimType[1]
+
+# ---------------------------------------------------------------------------
 # Compile-time C type mapping
 # ---------------------------------------------------------------------------
 
@@ -56,8 +70,10 @@ proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
       # Assume it's a user-defined type — use its sanitized name as a C struct
       $nimType
   of nnkBracketExpr:
-    # seq[T] etc — not supported in initial version
-    error("seq[T] and generic types are not yet supported in API broker FFI", nimType)
+    if isSeqType(nimType):
+      seqItemTypeName(nimType) & "CItem*"
+    else:
+      error("Generic types other than seq[T] are not yet supported in API broker FFI", nimType)
   else:
     error("Unsupported type node kind for C mapping: " & $nimType.kind, nimType)
 
@@ -81,6 +97,12 @@ proc isCStringType*(nimType: NimNode): bool {.compileTime.} =
 proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
   ## Returns the Nim type to use in the C-compatible struct.
   ## string → cstring, int → cint, etc.
+  ## seq[T] → pointer (raw pointer to array; paired with a _count field).
+  if nimType.kind == nnkBracketExpr:
+    if isSeqType(nimType):
+      return ident("pointer")
+    else:
+      return copyNimTree(nimType)
   if nimType.kind == nnkIdent:
     let name = ($nimType).toLowerAscii()
     case name
@@ -130,22 +152,40 @@ var gApiLibraryName* {.compileTime.}: string = ""
 
 var gApiEventTypeCounter* {.compileTime.}: int = 0
   ## Auto-incrementing type ID for EventBroker(API) types.
-
-proc nextApiEventTypeId*(): int {.compileTime.} =
-  result = gApiEventTypeCounter
-  inc gApiEventTypeCounter
+  ## NOTE: Must be incremented directly (not via a helper proc) because the
+  ## Nim VM does not persist side effects from called compileTime procs.
 
 var gApiSharedBrokerGenerated* {.compileTime.}: bool = false
   ## Flag: has the shared RegisterEventListenerResult RequestBroker been emitted?
 
-var gApiEventHandlerEntries* {.compileTime.}: seq[(string, string)] = @[]
-  ## Accumulates (typeIdConstName, handlerProcName) pairs for the aggregate provider.
+var gApiEventHandlerEntries* {.compileTime.}: seq[(int, string)] = @[]
+  ## Accumulates (typeId, handlerProcName) pairs for the aggregate provider.
 
 var gApiEventCleanupProcNames* {.compileTime.}: seq[string] = @[]
   ## Accumulates cleanup proc names for delivery thread teardown.
 
 var gApiCppClassMethods* {.compileTime.}: seq[string] = @[]
   ## Accumulates C++ wrapper class method declarations.
+
+# ---------------------------------------------------------------------------
+# Compile-time FFI struct registry (for seq[T] support)
+# ---------------------------------------------------------------------------
+
+var gApiFfiStructs* {.compileTime.}: seq[(string, seq[(string, string)])] = @[]
+  ## Maps ApiType name → [(fieldName, nimTypeName)].
+  ## Populated by the `ApiType` macro, consumed by `RequestBroker(API)` for `seq[T]` fields.
+
+proc registerApiFfiStruct*(typeName: string, fields: seq[(string, string)]) {.compileTime.} =
+  gApiFfiStructs.add((typeName, fields))
+
+proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
+  for (name, fields) in gApiFfiStructs:
+    if name == typeName:
+      return fields
+  error(
+    "ApiType '" & typeName & "' not registered. " &
+    "Declare it with `ApiType:` before using `seq[" & typeName & "]`."
+  )
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
   gApiHeaderDeclarations.add(decl)

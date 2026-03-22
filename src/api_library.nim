@@ -229,12 +229,13 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   if gApiEventHandlerEntries.len > 0:
     let provCtxIdent = genSym(nskParam, "ctx")
 
-    # Build case statement branches
+    # Build case statement branches (use literal int values, not ident refs,
+    # because ident refs to constants can fail inside async closures)
     var caseStmt = newTree(nnkCaseStmt, ident("eventTypeId"))
-    for (typeIdConstName, handlerProcName) in gApiEventHandlerEntries:
+    for (typeIdValue, handlerProcName) in gApiEventHandlerEntries:
       let branch = newTree(
         nnkOfBranch,
-        ident(typeIdConstName),
+        newLit(int32(typeIdValue)),
         newStmtList(
           newTree(
             nnkReturnStmt,

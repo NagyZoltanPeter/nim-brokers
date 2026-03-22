@@ -129,7 +129,10 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   result.add(generateMtEventBroker(body))
 
   # Step 3: Assign compile-time type ID
-  let typeId = nextApiEventTypeId()
+  # NOTE: Must modify gApiEventTypeCounter directly here (not via a helper proc)
+  # because the Nim VM does not persist side effects from called compileTime procs.
+  let typeId = gApiEventTypeCounter
+  gApiEventTypeCounter = gApiEventTypeCounter + 1
   let typeIdConst = ident(typeDisplayName & "ApiTypeId")
   let typeIdLit = newLit(typeId)
   result.add(
@@ -382,7 +385,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   gApiCppClassMethods.add(cppOffMethod)
 
   # Step 11: Append to compile-time accumulators
-  gApiEventHandlerEntries.add(($typeIdConst, handlerProcName))
+  gApiEventHandlerEntries.add((typeId, handlerProcName))
   gApiEventCleanupProcNames.add(cleanupProcName)
 
   when defined(brokerDebug):
