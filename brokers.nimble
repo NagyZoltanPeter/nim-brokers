@@ -118,7 +118,14 @@ task testApi, "Run FFI API broker tests":
       test opt, f
 
 task buildFfiExample, "Build FFI API example library":
-  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
+
+task buildFfiExampleApp, "Build FFI API example C++ application":
+  let libDir = "examples/ffiapi/nimlib/build"
+  let appDir = "examples/ffiapi/cppapp"
+  let buildDir = appDir & "/build"
+  mkDir(buildDir)
+  exec "c++ -std=c++17 -I" & libDir & " -L" & libDir & " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " & appDir & "/main.cpp"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

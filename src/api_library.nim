@@ -5,6 +5,9 @@
 ## 2. Compile-time validation of mandatory InitRequest/DestroyRequest types
 ## 3. C header file generation from accumulated broker declarations
 ## 4. Memory management helpers (free_string)
+## 5. Delivery thread creation (hosts event listeners, calls C callbacks)
+## 6. Aggregate event listener provider (dispatches by typeId)
+## 7. Aggregate cleanup (removes all listeners on shutdown)
 ##
 ## Usage:
 ## ```nim
@@ -108,9 +111,15 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let shutdownFuncNameLit = newLit(shutdownFuncName)
   let freeStringFuncNameLit = newLit(freeStringFuncName)
 
-  # Thread argument type
-  let threadArgIdent = ident(libName & "ThreadArg")
-  let threadProcIdent = ident(libName & "ProcessingThread")
+  # Processing thread identifiers
+  let procThreadArgIdent = ident(libName & "ProcThreadArg")
+  let procThreadProcIdent = ident(libName & "ProcessingThread")
+
+  # Delivery thread identifiers
+  let delivThreadArgIdent = ident(libName & "DelivThreadArg")
+  let delivThreadProcIdent = ident(libName & "DeliveryThread")
+
+  # Context entry
   let ctxEntryIdent = ident(libName & "CtxEntry")
   let globalCtxsIdent = ident("g" & libName & "Ctxs")
   let globalCtxsLockIdent = ident("g" & libName & "CtxsLock")
@@ -119,8 +128,6 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   result = newStmtList()
 
   # Compile-time validation: ensure InitRequest and DestroyRequest types exist
-  # This is checked at compile time because the macros that define these types
-  # must appear before registerBrokerLibrary.
   result.add(
     quote do:
       when not compiles(typeof(`initReqIdent`)):
@@ -143,26 +150,64 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   result.add(
     quote do:
       type
-        `threadArgIdent` = object
+        `procThreadArgIdent` = object
+          ctx: BrokerContext
+          shutdownChan: ptr AsyncChannel[bool]
+
+        `delivThreadArgIdent` = object
           ctx: BrokerContext
           shutdownChan: ptr AsyncChannel[bool]
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
-          thread: Thread[ptr `threadArgIdent`]
-          shutdownChan: ptr AsyncChannel[bool]
+          procThread: Thread[ptr `procThreadArgIdent`]
+          delivThread: Thread[ptr `delivThreadArgIdent`]
+          procShutdownChan: ptr AsyncChannel[bool]
+          delivShutdownChan: ptr AsyncChannel[bool]
           active: bool
 
   )
 
-  # Global context registry
+  # Library initialization — must be called exactly once from the C/C++ app
+  # before any other library functions. Initializes the Nim runtime, sets up
+  # the GC for the foreign (C/C++) calling thread, and configures the stack bottom.
+  let initLibFuncName = libName & "_initialize"
+  let initLibFuncIdent = ident(initLibFuncName)
+  let initLibFuncNameLit = newLit(initLibFuncName)
+  let nimInitializedIdent = ident("g" & libName & "NimInitialized")
+  let nimMainIdent = ident(libName & "NimMain")
+  let nimMainImportName = newLit(libName & "NimMain")
+
   result.add(
     quote do:
-      var `globalCtxsIdent`: seq[`ctxEntryIdent`]
+      proc `nimMainIdent`() {.importc: `nimMainImportName`, cdecl.}
+
+      var `nimInitializedIdent`: Atomic[bool]
+
+      proc `initLibFuncIdent`() {.exportc: `initLibFuncNameLit`, cdecl, dynlib.} =
+        if not `nimInitializedIdent`.exchange(true):
+          `nimMainIdent`()
+          when declared(setupForeignThreadGc):
+            setupForeignThreadGc()
+          when declared(nimGC_setStackBottom):
+            var locals {.volatile, noinit.}: pointer
+            locals = addr(locals)
+            nimGC_setStackBottom(locals)
+
+  )
+
+  # Global context registry (stores pointers to heap-allocated entries
+  # because Thread objects must not be moved after createThread)
+  result.add(
+    quote do:
+      var `globalCtxsIdent`: seq[ptr `ctxEntryIdent`]
       var `globalCtxsLockIdent`: Lock
       var `globalCtxsInitIdent`: Atomic[int]
 
       proc ensureLibCtxInit() =
+        if not `nimInitializedIdent`.load(moRelaxed):
+          # Library not initialized — call initialize first
+          `initLibFuncIdent`()
         if `globalCtxsInitIdent`.load(moRelaxed) == 2:
           return
         var expected = 0
@@ -176,10 +221,151 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
   )
 
+  # Generate aggregate event listener provider installer
+  # This proc installs the single RegisterEventListenerResult provider
+  # that dispatches by eventTypeId to per-type handler procs.
+  let installProviderIdent = ident("installEventListenerProvider")
+
+  if gApiEventHandlerEntries.len > 0:
+    let provCtxIdent = genSym(nskParam, "ctx")
+
+    # Build case statement branches
+    var caseStmt = newTree(nnkCaseStmt, ident("eventTypeId"))
+    for (typeIdConstName, handlerProcName) in gApiEventHandlerEntries:
+      let branch = newTree(
+        nnkOfBranch,
+        ident(typeIdConstName),
+        newStmtList(
+          newTree(
+            nnkReturnStmt,
+            newCall(
+              ident("await"),
+              newCall(ident(handlerProcName), provCtxIdent, ident("action"), ident("callbackPtr")),
+            ),
+          )
+        ),
+      )
+      caseStmt.add(branch)
+
+    # else branch
+    caseStmt.add(
+      newTree(
+        nnkElse,
+        newStmtList(
+          newTree(
+            nnkReturnStmt,
+            newCall(
+              ident("err"),
+              newTree(
+                nnkInfix,
+                ident("&"),
+                newLit("Unknown event type: "),
+                newCall(ident("$"), ident("eventTypeId")),
+              ),
+            ),
+          )
+        ),
+      )
+    )
+
+    # Build provider closure
+    let closureBody = newStmtList(caseStmt)
+
+    let closureFormalParams = newTree(
+      nnkFormalParams,
+      newTree(
+        nnkBracketExpr,
+        ident("Future"),
+        newTree(
+          nnkBracketExpr,
+          ident("Result"),
+          ident("RegisterEventListenerResult"),
+          ident("string"),
+        ),
+      ),
+      newTree(nnkIdentDefs, ident("action"), ident("int32"), newEmptyNode()),
+      newTree(nnkIdentDefs, ident("eventTypeId"), ident("int32"), newEmptyNode()),
+      newTree(nnkIdentDefs, ident("callbackPtr"), ident("pointer"), newEmptyNode()),
+    )
+
+    let closurePragmas = newTree(
+      nnkPragma,
+      ident("closure"),
+      ident("async"),
+    )
+
+    let closureLambda = newTree(
+      nnkLambda,
+      newEmptyNode(),
+      newEmptyNode(),
+      newEmptyNode(),
+      closureFormalParams,
+      closurePragmas,
+      newEmptyNode(),
+      closureBody,
+    )
+
+    # proc installEventListenerProvider(ctx: BrokerContext) =
+    #   discard RegisterEventListenerResult.setProvider(ctx, closure)
+    let setProviderCall = newTree(
+      nnkDiscardStmt,
+      newCall(
+        newDotExpr(ident("RegisterEventListenerResult"), ident("setProvider")),
+        provCtxIdent,
+        closureLambda,
+      ),
+    )
+
+    let installerFormalParams = newTree(
+      nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, provCtxIdent, ident("BrokerContext"), newEmptyNode()),
+    )
+
+    let installerProc = newTree(
+      nnkProcDef,
+      installProviderIdent,
+      newEmptyNode(),
+      newEmptyNode(),
+      installerFormalParams,
+      newEmptyNode(),
+      newEmptyNode(),
+      newStmtList(setProviderCall),
+    )
+    result.add(installerProc)
+
+  # Generate aggregate cleanup proc (sync — dropAllListeners is sync in MT mode)
+  let cleanupAllIdent = ident("cleanupAllApiEventListeners")
+  if gApiEventCleanupProcNames.len > 0:
+    let cleanupCtxIdent = genSym(nskParam, "ctx")
+    var cleanupBody = newStmtList()
+    for procName in gApiEventCleanupProcNames:
+      cleanupBody.add(
+        newCall(ident(procName), cleanupCtxIdent)
+      )
+
+    let cleanupFormalParams = newTree(
+      nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, cleanupCtxIdent, ident("BrokerContext"), newEmptyNode()),
+    )
+
+    let cleanupProc = newTree(
+      nnkProcDef,
+      cleanupAllIdent,
+      newEmptyNode(),
+      newEmptyNode(),
+      cleanupFormalParams,
+      newEmptyNode(),
+      newEmptyNode(),
+      cleanupBody,
+    )
+    result.add(cleanupProc)
+
   # Processing thread proc
   result.add(
     quote do:
-      proc `threadProcIdent`(arg: ptr `threadArgIdent`) {.thread.} =
+      proc `procThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
         setThreadBrokerContext(arg.ctx)
 
         when compiles(setupProviders(arg.ctx)):
@@ -197,27 +383,148 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
   )
 
-  # init function
+  # Delivery thread proc
+  let hasEventHandlers = gApiEventHandlerEntries.len > 0
+  let hasCleanup = gApiEventCleanupProcNames.len > 0
+
+  if hasEventHandlers and hasCleanup:
+    result.add(
+      quote do:
+        proc `delivThreadProcIdent`(arg: ptr `delivThreadArgIdent`) {.thread.} =
+          setThreadBrokerContext(arg.ctx)
+
+          # Install the aggregate event listener provider
+          `installProviderIdent`(arg.ctx)
+
+          proc awaitShutdown(
+              shutdownChan: ptr AsyncChannel[bool]
+          ) {.async: (raises: []).} =
+            let recvRes = catch:
+              await shutdownChan.recv()
+            if recvRes.isErr():
+              discard
+
+          waitFor awaitShutdown(arg.shutdownChan)
+
+          # Cleanup: drop all registered event listeners
+          `cleanupAllIdent`(arg.ctx)
+
+    )
+  elif hasEventHandlers:
+    result.add(
+      quote do:
+        proc `delivThreadProcIdent`(arg: ptr `delivThreadArgIdent`) {.thread.} =
+          setThreadBrokerContext(arg.ctx)
+          `installProviderIdent`(arg.ctx)
+
+          proc awaitShutdown(
+              shutdownChan: ptr AsyncChannel[bool]
+          ) {.async: (raises: []).} =
+            let recvRes = catch:
+              await shutdownChan.recv()
+            if recvRes.isErr():
+              discard
+
+          waitFor awaitShutdown(arg.shutdownChan)
+
+    )
+  else:
+    result.add(
+      quote do:
+        proc `delivThreadProcIdent`(arg: ptr `delivThreadArgIdent`) {.thread.} =
+          setThreadBrokerContext(arg.ctx)
+
+          proc awaitShutdown(
+              shutdownChan: ptr AsyncChannel[bool]
+          ) {.async: (raises: []).} =
+            let recvRes = catch:
+              await shutdownChan.recv()
+            if recvRes.isErr():
+              discard
+
+          waitFor awaitShutdown(arg.shutdownChan)
+
+    )
+
+  # init function — creates context, both threads
   result.add(
     quote do:
       proc `initFuncIdent`(): uint32 {.exportc: `initFuncNameLit`, cdecl, dynlib.} =
         ensureLibCtxInit()
-        let ctx = NewBrokerContext()
-        let shutdownChan =
+        var ctx = NewBrokerContext()
+        # Context 0 is reserved as the C-side error sentinel
+        if uint32(ctx) == 0:
+          ctx = NewBrokerContext()
+
+        # Create shutdown channels
+        let procShutdownChan =
           cast[ptr AsyncChannel[bool]](createShared(AsyncChannel[bool], 1))
-        discard shutdownChan[].open()
+        discard procShutdownChan[].open()
 
-        let arg = cast[ptr `threadArgIdent`](createShared(`threadArgIdent`, 1))
-        arg.ctx = ctx
-        arg.shutdownChan = shutdownChan
+        let delivShutdownChan =
+          cast[ptr AsyncChannel[bool]](createShared(AsyncChannel[bool], 1))
+        discard delivShutdownChan[].open()
 
-        var entry = `ctxEntryIdent`(ctx: ctx, shutdownChan: shutdownChan, active: true)
+        # Create processing thread arg
+        let procArg = cast[ptr `procThreadArgIdent`](
+          createShared(`procThreadArgIdent`, 1)
+        )
+        procArg.ctx = ctx
+        procArg.shutdownChan = procShutdownChan
+
+        # Create delivery thread arg
+        let delivArg = cast[ptr `delivThreadArgIdent`](
+          createShared(`delivThreadArgIdent`, 1)
+        )
+        delivArg.ctx = ctx
+        delivArg.shutdownChan = delivShutdownChan
+
+        # Allocate entry on shared heap — Thread objects must not be moved
+        # after createThread (the pthread holds a pointer to them)
+        let entry = cast[ptr `ctxEntryIdent`](
+          createShared(`ctxEntryIdent`, 1)
+        )
+        entry.ctx = ctx
+        entry.procShutdownChan = procShutdownChan
+        entry.delivShutdownChan = delivShutdownChan
+        entry.active = true
+
+        # Start delivery thread first (so provider is ready for requests)
         try:
-          createThread(entry.thread, `threadProcIdent`, arg)
+          createThread(entry.delivThread, `delivThreadProcIdent`, delivArg)
         except ResourceExhaustedError:
-          shutdownChan[].close()
-          deallocShared(shutdownChan)
-          deallocShared(arg)
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
+          deallocShared(procArg)
+          deallocShared(delivArg)
+          deallocShared(entry)
+          return 0'u32
+        except Exception as e:
+          deallocShared(entry)
+          return 0'u32
+
+        # Brief pause to let delivery thread start and register provider
+        sleep(50)
+
+        # Start processing thread
+        try:
+          createThread(entry.procThread, `procThreadProcIdent`, procArg)
+        except ResourceExhaustedError:
+          # Shut down delivery thread
+          delivShutdownChan[].sendSync(true)
+          joinThread(entry.delivThread)
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
+          deallocShared(procArg)
+          deallocShared(delivArg)
+          deallocShared(entry)
+          return 0'u32
+        except Exception as e:
+          deallocShared(entry)
           return 0'u32
 
         withLock(`globalCtxsLockIdent`):
@@ -227,7 +534,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
   )
 
-  # shutdown function
+  # shutdown function — stops both threads
   result.add(
     quote do:
       proc `shutdownFuncIdent`(
@@ -236,26 +543,27 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         ensureLibCtxInit()
         let brokerCtx = BrokerContext(ctx)
 
-        var entryIdx = -1
+        var entryPtr: ptr `ctxEntryIdent` = nil
         withLock(`globalCtxsLockIdent`):
           for i in 0 ..< `globalCtxsIdent`.len:
             if `globalCtxsIdent`[i].ctx == brokerCtx and `globalCtxsIdent`[i].active:
-              entryIdx = i
+              entryPtr = `globalCtxsIdent`[i]
               break
 
-        if entryIdx < 0:
+        if entryPtr.isNil:
           return
 
-        # Signal shutdown
-        let shutdownChan = `globalCtxsIdent`[entryIdx].shutdownChan
-        shutdownChan[].sendSync(true)
+        # Signal delivery thread shutdown first
+        entryPtr.delivShutdownChan[].sendSync(true)
+        joinThread(entryPtr.delivThread)
 
-        # Wait for thread to finish
-        joinThread(`globalCtxsIdent`[entryIdx].thread)
+        # Then signal processing thread shutdown
+        entryPtr.procShutdownChan[].sendSync(true)
+        joinThread(entryPtr.procThread)
 
-        # Mark inactive and clean up
+        # Mark inactive
         withLock(`globalCtxsLockIdent`):
-          `globalCtxsIdent`[entryIdx].active = false
+          entryPtr.active = false
 
   )
 
@@ -270,12 +578,15 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   )
 
   # Append lifecycle function prototypes to header
+  appendHeaderDecl(
+    "/* Call once before any other library function to initialize the Nim runtime */\n" &
+    generateCFuncProto(initLibFuncName, "void", @[])
+  )
   appendHeaderDecl(generateCFuncProto(initFuncName, "uint32_t", @[]))
   appendHeaderDecl(generateCFuncProto(shutdownFuncName, "void", @[("ctx", "uint32_t")]))
   appendHeaderDecl(generateCFuncProto(freeStringFuncName, "void", @[("s", "char*")]))
 
   # Generate header file at compile time
-  # Prefer explicit override, then compiler --outdir, then the directory of --out.
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
   generateHeaderFile(outDir)

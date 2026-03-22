@@ -295,6 +295,35 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       generateCFuncProto(funcName, typeDisplayName & "CResult", headerParams)
     appendHeaderDecl(funcProto)
 
+  # Step 6: Generate C++ wrapper class methods
+  # Convert PascalCase type name to camelCase for method name
+  var camelName = typeDisplayName
+  if camelName.len > 0:
+    camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A'..'Z'}))
+
+  if not zeroArgSig.isNil():
+    let funcName = snakeName & "_request"
+    let cppMethod =
+      typeDisplayName & "CResult " & camelName & "() { return " & funcName & "(ctx_); }"
+    gApiCppClassMethods.add(cppMethod)
+
+  if not argSig.isNil():
+    let funcName = snakeName & "_request_with_args"
+    # Build C++ method params and call args
+    var cppParams: seq[string] = @[]
+    var cppCallArgs = "ctx_"
+    for paramDef in argParams:
+      for i in 0 ..< paramDef.len - 2:
+        let paramName = $paramDef[i]
+        let paramType = paramDef[paramDef.len - 2]
+        let cType = nimTypeToCInput(paramType)
+        cppParams.add(cType & " " & paramName)
+        cppCallArgs.add(", " & paramName)
+    let cppMethod =
+      typeDisplayName & "CResult " & camelName & "(" & cppParams.join(", ") & ") { return " &
+      funcName & "(" & cppCallArgs & "); }"
+    gApiCppClassMethods.add(cppMethod)
+
   when defined(brokerDebug):
     echo result.repr
 

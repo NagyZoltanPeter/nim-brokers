@@ -124,6 +124,29 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
 var gApiHeaderDeclarations* {.compileTime.}: seq[string] = @[]
 var gApiLibraryName* {.compileTime.}: string = ""
 
+# ---------------------------------------------------------------------------
+# Compile-time accumulators for delivery thread event system
+# ---------------------------------------------------------------------------
+
+var gApiEventTypeCounter* {.compileTime.}: int = 0
+  ## Auto-incrementing type ID for EventBroker(API) types.
+
+proc nextApiEventTypeId*(): int {.compileTime.} =
+  result = gApiEventTypeCounter
+  inc gApiEventTypeCounter
+
+var gApiSharedBrokerGenerated* {.compileTime.}: bool = false
+  ## Flag: has the shared RegisterEventListenerResult RequestBroker been emitted?
+
+var gApiEventHandlerEntries* {.compileTime.}: seq[(string, string)] = @[]
+  ## Accumulates (typeIdConstName, handlerProcName) pairs for the aggregate provider.
+
+var gApiEventCleanupProcNames* {.compileTime.}: seq[string] = @[]
+  ## Accumulates cleanup proc names for delivery thread teardown.
+
+var gApiCppClassMethods* {.compileTime.}: seq[string] = @[]
+  ## Accumulates C++ wrapper class method declarations.
+
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
   gApiHeaderDeclarations.add(decl)
 
@@ -194,6 +217,7 @@ proc detectOutputDir*(overrideOutDir = ""): string {.compileTime.} =
 
 proc generateHeaderFile*(outDir: string) {.compileTime.} =
   ## Writes the accumulated C header file.
+  ## Includes C++ wrapper class when gApiCppClassMethods has entries.
   let libName = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
   let guardName = libName.toUpperAscii().replace("-", "_") & "_H"
   let headerPath =
@@ -211,6 +235,37 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add(decl)
     header.add("\n")
   header.add("\n#ifdef __cplusplus\n}\n#endif\n\n")
+
+  # C++ wrapper class (header-only, inline)
+  if gApiCppClassMethods.len > 0:
+    # Derive class name from library name (e.g. "mylib" → "MyLib")
+    var className = ""
+    var capitalize = true
+    for ch in libName:
+      if ch == '_' or ch == '-':
+        capitalize = true
+      elif capitalize:
+        className.add(chr(ord(ch) - 32 * ord(ch in {'a'..'z'})))
+        capitalize = false
+      else:
+        className.add(ch)
+
+    header.add("#ifdef __cplusplus\n")
+    header.add("class " & className & " {\n")
+    header.add("    uint32_t ctx_;\n")
+    header.add("public:\n")
+    header.add("    " & className & "() : ctx_(0) {}\n")
+    header.add("    ~" & className & "() { if (ctx_) shutdown(); }\n")
+    header.add("    static void initialize() { " & libName & "_initialize(); }\n")
+    header.add("    bool init() { ctx_ = " & libName & "_init(); return ctx_ != 0; }\n")
+    header.add("    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n")
+    header.add("    void freeString(char* s) { " & libName & "_free_string(s); }\n")
+    header.add("    uint32_t ctx() const { return ctx_; }\n")
+    for cppMethod in gApiCppClassMethods:
+      header.add("    " & cppMethod & "\n")
+    header.add("};\n")
+    header.add("#endif\n\n")
+
   header.add("#endif /* " & guardName & " */\n")
   writeFile(headerPath, header)
 
@@ -235,5 +290,26 @@ proc freeCString*(s: cstring) =
   ## Frees a C string previously allocated by allocCStringCopy.
   if not s.isNil:
     dealloc(s)
+
+# ---------------------------------------------------------------------------
+# Shared-memory string helpers for cross-thread event data
+# ---------------------------------------------------------------------------
+# Under --mm:refc, `alloc`/`dealloc` use per-thread allocators. Event data
+# on the delivery thread is allocated and freed there, but these helpers
+# use `allocShared`/`deallocShared` for maximum safety across all MM modes.
+
+proc allocSharedCString*(s: string): cstring =
+  ## Allocate a C string copy in shared memory (safe for cross-thread use).
+  if s.len == 0:
+    return nil
+  let buf = cast[cstring](allocShared(s.len + 1))
+  copyMem(buf, unsafeAddr s[0], s.len)
+  cast[ptr char](cast[int](buf) + s.len)[] = '\0'
+  buf
+
+proc freeSharedCString*(s: cstring) =
+  ## Free a C string allocated by `allocSharedCString`.
+  if not s.isNil:
+    deallocShared(s)
 
 {.pop.}

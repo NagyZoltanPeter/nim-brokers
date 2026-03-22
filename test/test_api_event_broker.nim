@@ -7,16 +7,17 @@ import std/[atomics, os]
 import event_broker
 
 ## ---------------------------------------------------------------------------
-## API-mode EventBroker tests
+## API-mode EventBroker tests (delivery thread design)
 ## ---------------------------------------------------------------------------
 ## These tests compile with -d:BrokerFfiApi --threads:on.
 ## They define API event brokers and test the generated C-callable
-## registration functions directly from Nim.
-## NOTE: We intentionally avoid `asyncTest` here. The event listener is
-## registered from the main thread via an exported API function, and running the
-## test body itself inside a pre-existing Chronos dispatcher is unstable under
-## refc/debug. A plain `test` plus explicit `waitFor` keeps the main thread's
-## event loop lifecycle aligned with the exported API runtime.
+## registration functions with the delivery-thread-based event system.
+##
+## Architecture:
+## - Emitter thread: emits events (represents the processing thread)
+## - Delivery thread: receives events cross-thread, calls C callbacks
+##   (started manually here since we don't use registerBrokerLibrary)
+## - Main thread: registers/deregisters C callbacks via on/off exports
 
 EventBroker(API):
   type ApiTestEvent = object
@@ -27,6 +28,7 @@ EventBroker(API):
 var gCallbackInvoked: Atomic[bool]
 var gCallbackMessage: array[256, char]
 var gCallbackCode: Atomic[int32]
+var gCallbackCount: Atomic[int32]
 
 proc testCallback(message: cstring, code: int32) {.cdecl.} =
   ## C-compatible callback that stores received values for verification.
@@ -37,6 +39,11 @@ proc testCallback(message: cstring, code: int32) {.cdecl.} =
       gCallbackMessage[i] = ($message)[i]
     gCallbackMessage[msgLen] = '\0'
   gCallbackInvoked.store(true)
+  discard gCallbackCount.fetchAdd(1)
+
+proc testCallback2(message: cstring, code: int32) {.cdecl.} =
+  ## Second callback for multi-listener tests.
+  discard gCallbackCount.fetchAdd(1)
 
 # ── Emitter thread ──────────────────────────────────────────────────────
 var gEmitReady: Atomic[bool]
@@ -45,8 +52,8 @@ proc emitterThread(ctx: BrokerContext) {.thread.} =
   setThreadBrokerContext(ctx)
   gEmitReady.store(true)
 
-  # Give listener time to register
-  waitFor sleepAsync(chronos.milliseconds(200))
+  # Give delivery thread time to register provider and listener
+  waitFor sleepAsync(chronos.milliseconds(300))
 
   # Emit an event
   waitFor ApiTestEvent.emit(ctx, ApiTestEvent(message: "hello from nim", code: 42))
@@ -54,22 +61,67 @@ proc emitterThread(ctx: BrokerContext) {.thread.} =
   # Keep event loop alive for delivery
   waitFor sleepAsync(chronos.seconds(5))
 
-suite "API EventBroker":
+# ── Delivery thread ─────────────────────────────────────────────────────
+# In production, registerBrokerLibrary creates this thread automatically.
+# For unit tests, we create it manually with the event listener provider.
+
+var gDelivReady: Atomic[bool]
+
+proc deliveryThread(ctx: BrokerContext) {.thread.} =
+  setThreadBrokerContext(ctx)
+
+  # Install the provider for RegisterEventListenerResult
+  # We build a simple provider that dispatches to the handler proc
+  discard RegisterEventListenerResult.setProvider(
+    ctx,
+    proc(
+        action: int32, eventTypeId: int32, callbackPtr: pointer
+    ): Future[Result[RegisterEventListenerResult, string]] {.closure, async.} =
+      case eventTypeId
+      of ApiTestEventApiTypeId:
+        return await handleApiTestEventRegistration(ctx, action, callbackPtr)
+      else:
+        return err("Unknown event type: " & $eventTypeId),
+  )
+
+  gDelivReady.store(true)
+
+  proc awaitForever() {.async: (raises: []).} =
+    while true:
+      let catchRes = catch:
+        await sleepAsync(chronos.seconds(1))
+      if catchRes.isErr():
+        break
+
+  waitFor awaitForever()
+
+suite "API EventBroker (delivery thread)":
   test "register C callback and receive event":
     let ctx = NewBrokerContext()
     gCallbackInvoked.store(false)
     gCallbackCode.store(0)
+    gCallbackCount.store(0)
     gEmitReady.store(false)
+    gDelivReady.store(false)
+
+    # Start delivery thread first
+    var delivThread: Thread[BrokerContext]
+    createThread(delivThread, deliveryThread, ctx)
+
+    while not gDelivReady.load():
+      sleep(10)
 
     # Start emitter thread
-    var thread: Thread[BrokerContext]
-    createThread(thread, emitterThread, ctx)
+    var emitThread: Thread[BrokerContext]
+    createThread(emitThread, emitterThread, ctx)
 
     while not gEmitReady.load():
       sleep(10)
 
     # Register C callback via generated exported function
-    onApiTestEvent(uint32(ctx), testCallback)
+    # This uses waitFor internally to route request to delivery thread
+    let handle = onApiTestEvent(uint32(ctx), testCallback)
+    check handle > 0'u64
 
     # Wait for the event to be delivered
     proc waitForCallback() {.async.} =
@@ -91,16 +143,55 @@ suite "API EventBroker":
       inc i
     check receivedMsg == "hello from nim"
 
-  test "deregister C callback":
+  test "onXxx returns handle, offXxx removes listener":
     let ctx = NewBrokerContext()
     gCallbackInvoked.store(false)
+    gCallbackCount.store(0)
+    gDelivReady.store(false)
 
-    # Register and immediately deregister
-    onApiTestEvent(uint32(ctx), testCallback)
-    offApiTestEvent(uint32(ctx))
+    # Start delivery thread
+    var delivThread: Thread[BrokerContext]
+    createThread(delivThread, deliveryThread, ctx)
+
+    while not gDelivReady.load():
+      sleep(10)
+
+    # Register callback
+    let handle = onApiTestEvent(uint32(ctx), testCallback)
+    check handle > 0'u64
+
+    # Deregister by handle
+    offApiTestEvent(uint32(ctx), handle)
 
     # Emit — callback should NOT be invoked
     waitFor ApiTestEvent.emit(ctx, ApiTestEvent(message: "should not arrive", code: 99))
     waitFor sleepAsync(chronos.milliseconds(200))
 
     check gCallbackInvoked.load() == false
+
+  test "offXxx with handle=0 removes all listeners":
+    let ctx = NewBrokerContext()
+    gCallbackCount.store(0)
+    gDelivReady.store(false)
+
+    # Start delivery thread
+    var delivThread: Thread[BrokerContext]
+    createThread(delivThread, deliveryThread, ctx)
+
+    while not gDelivReady.load():
+      sleep(10)
+
+    # Register two callbacks
+    let h1 = onApiTestEvent(uint32(ctx), testCallback)
+    let h2 = onApiTestEvent(uint32(ctx), testCallback2)
+    check h1 > 0'u64
+    check h2 > 0'u64
+
+    # Remove all with handle=0
+    offApiTestEvent(uint32(ctx), 0'u64)
+
+    # Emit — no callbacks should fire
+    waitFor ApiTestEvent.emit(ctx, ApiTestEvent(message: "gone", code: 0))
+    waitFor sleepAsync(chronos.milliseconds(200))
+
+    check gCallbackCount.load() == 0
