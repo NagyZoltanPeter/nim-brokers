@@ -3,3 +3,4 @@ nimble.paths
 nimbledeps
 build/
 **/build/*
+**/cmake-build/

@@ -121,23 +121,26 @@ task testApi, "Run FFI API broker tests":
 task buildFfiExample, "Build FFI API example library":
   exec "nim c -d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
 
-task buildFfiExampleC, "Build FFI API example — pure C application":
-  let libDir = "examples/ffiapi/nimlib/build"
-  let appDir = "examples/ffiapi/example"
-  let buildDir = appDir & "/build"
+task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
+  let cmakeDir = "examples/ffiapi"
+  let buildDir = cmakeDir & "/cmake-build"
   mkDir(buildDir)
-  exec "cc -std=c11 -I" & libDir & " -L" & libDir &
-    " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " &
-    appDir & "/main.c"
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake --build " & buildDir
 
-task buildFfiExampleCpp, "Build FFI API example — modern C++ application":
-  let libDir = "examples/ffiapi/nimlib/build"
-  let appDir = "examples/ffiapi/cpp_example"
-  let buildDir = appDir & "/build"
+task buildFfiExampleC, "Build FFI API example — pure C application (via CMake)":
+  let cmakeDir = "examples/ffiapi"
+  let buildDir = cmakeDir & "/cmake-build"
   mkDir(buildDir)
-  exec "c++ -std=c++20 -I" & libDir & " -L" & libDir &
-    " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " &
-    appDir & "/main.cpp"
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake --build " & buildDir & " --target example_c"
+
+task buildFfiExampleCpp, "Build FFI API example — modern C++ application (via CMake)":
+  let cmakeDir = "examples/ffiapi"
+  let buildDir = cmakeDir & "/cmake-build"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake --build " & buildDir & " --target example_cpp"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
