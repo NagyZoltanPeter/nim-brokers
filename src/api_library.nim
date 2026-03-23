@@ -562,7 +562,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(startupState)
           releaseCtxEntryResources(entry)
           return 0'u32
-        except Exception:
+        except Exception as e:
+          trace "Delivery thread creation failed", err = e.msg
           deallocShared(startupState)
           releaseCtxEntryResources(entry)
           return 0'u32
@@ -584,7 +585,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(startupState)
           releaseCtxEntryResources(entry)
           return 0'u32
-        except Exception:
+        except Exception as e:
+          trace "Processing thread creation failed", err = e.msg
           delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
           deallocShared(startupState)
@@ -637,9 +639,9 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
         joinThread(entryPtr.delivThread)
 
-        cleanupAllApiRequestProviders(brokerCtx)
-
         # Then signal processing thread shutdown
+        # (the processing thread cleans up its own request providers internally
+        # before exiting; we do a final sweep here for any cross-thread state)
         entryPtr.procArg.shutdownFlag.store(1, moRelease)
         joinThread(entryPtr.procThread)
 

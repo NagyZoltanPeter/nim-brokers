@@ -1,4 +1,3 @@
-var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] = @[]
 ## API Common
 ## ----------
 ## Shared utilities for FFI API broker code generation.
@@ -167,6 +166,9 @@ var gApiEventHandlerEntries* {.compileTime.}: seq[(int, string)] =
 
 var gApiEventCleanupProcNames* {.compileTime.}: seq[string] =
   @[] ## Accumulates cleanup proc names for delivery thread teardown.
+
+var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
+  @[] ## Accumulates cleanup proc names for request provider teardown.
 
 var gApiCppClassMethods* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ wrapper class method declarations.
