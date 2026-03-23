@@ -229,7 +229,8 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
     let registerHelperIdent = ident("register" & typeDisplayName & "Callback")
     let unregisterHelperIdent = ident("unregister" & typeDisplayName & "Callback")
-    let unregisterAllHelperIdent = ident("unregisterAll" & typeDisplayName & "Callbacks")
+    let unregisterAllHelperIdent =
+      ident("unregisterAll" & typeDisplayName & "Callbacks")
 
     result.add(
       quote do:
@@ -266,9 +267,8 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
           let listenRes = `typeIdent`.listen(ctx, wrapper)
           if listenRes.isOk():
             `handlesIdent`.add(listenRes.get())
-            return ok(
-              RegisterEventListenerResult(handle: listenRes.get().id, success: true)
-            )
+            return
+              ok(RegisterEventListenerResult(handle: listenRes.get().id, success: true))
           else:
             return err(listenRes.error())
 
@@ -289,6 +289,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
             `typeIdent`.dropListener(ctx, h)
           `handlesIdent`.setLen(0)
           return ok(RegisterEventListenerResult(handle: 0'u64, success: true))
+
     )
 
     result.add(
@@ -511,15 +512,11 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       gApiPyCallbackSetup.add(
         "_lib." & regFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName & "]"
       )
-      gApiPyCallbackSetup.add(
-        "_lib." & regFuncName & ".restype = ctypes.c_uint64"
-      )
+      gApiPyCallbackSetup.add("_lib." & regFuncName & ".restype = ctypes.c_uint64")
       gApiPyCallbackSetup.add(
         "_lib." & deregFuncName & ".argtypes = [ctypes.c_uint32, ctypes.c_uint64]"
       )
-      gApiPyCallbackSetup.add(
-        "_lib." & deregFuncName & ".restype = None"
-      )
+      gApiPyCallbackSetup.add("_lib." & deregFuncName & ".restype = None")
 
     # Build Python callback parameter list and forwarding
     var pyCallbackParams: seq[string] = @[]
@@ -530,7 +527,9 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         let snakeFname = toSnakeCase(fName)
         pyCallbackParams.add(snakeFname)
         if isCStringType(fieldTypes[i]):
-          pyForwards.add(snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\"")
+          pyForwards.add(
+            snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\""
+          )
         else:
           pyForwards.add(snakeFname)
 
@@ -538,8 +537,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
     # on_<event> method
     block:
-      var m = "    def on_" & pySnakeEvent & "(self, callback: Callable[..., None]) -> int:\n"
-      m.add("        \"\"\"Subscribe to " & typeDisplayName & " events. Returns a handle for removal.\"\"\"\n")
+      var m =
+        "    def on_" & pySnakeEvent & "(self, callback: Callable[..., None]) -> int:\n"
+      m.add(
+        "        \"\"\"Subscribe to " & typeDisplayName &
+          " events. Returns a handle for removal.\"\"\"\n"
+      )
       # Build the trampoline that decodes strings
       m.add("        @" & cfuncTypeName & "\n")
       m.add("        def _trampoline(" & pyCallbackParams.join(", ") & "):\n")
@@ -548,7 +551,10 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       m.add("        if handle == 0:\n")
       m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")
       m.add("        with self._lock:\n")
-      m.add("            self._cb_refs[(\"" & typeDisplayName & "\", handle)] = _trampoline\n")
+      m.add(
+        "            self._cb_refs[(\"" & typeDisplayName &
+          "\", handle)] = _trampoline\n"
+      )
       m.add("        return handle")
       gApiPyEventMethods.add(m)
 
@@ -557,12 +563,17 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       var m = "    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n"
       m.add("        \"\"\"Unsubscribe from " & typeDisplayName & " events.\n\n")
       m.add("        Args:\n")
-      m.add("            handle: Listener handle from on_" & pySnakeEvent & "(). 0 removes all.\n")
+      m.add(
+        "            handle: Listener handle from on_" & pySnakeEvent &
+          "(). 0 removes all.\n"
+      )
       m.add("        \"\"\"\n")
       m.add("        self._lib." & deregFuncName & "(self._ctx, handle)\n")
       m.add("        # Note: callback references are intentionally kept alive in\n")
       m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
-      m.add("        # have in-flight event futures holding the raw function pointer;\n")
+      m.add(
+        "        # have in-flight event futures holding the raw function pointer;\n"
+      )
       m.add("        # releasing the ctypes object here could cause a use-after-free.")
       gApiPyEventMethods.add(m)
 

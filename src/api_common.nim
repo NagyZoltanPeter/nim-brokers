@@ -352,8 +352,8 @@ proc nimTypeToPyAnnotation*(nimType: NimNode): string {.compileTime.} =
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
     case name
-    of "int", "int8", "int16", "int32", "int64",
-       "uint", "uint8", "uint16", "uint32", "uint64":
+    of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+        "uint64":
       "int"
     of "float", "float32", "float64":
       "float"
@@ -377,8 +377,8 @@ proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
     case name
-    of "int", "int8", "int16", "int32", "int64",
-       "uint", "uint8", "uint16", "uint32", "uint64":
+    of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+        "uint64":
       "0"
     of "float", "float32", "float64":
       "0.0"
@@ -389,10 +389,7 @@ proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
     else:
       "None"
   of nnkBracketExpr:
-    if isSeqType(nimType):
-      "field(default_factory=list)"
-    else:
-      "None"
+    if isSeqType(nimType): "field(default_factory=list)" else: "None"
   else:
     "None"
 
@@ -595,8 +592,7 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
       className.add(ch)
 
   var py = "\"\"\"" & className & " — Python wrapper (auto-generated)\n"
-  py.add("\nGenerated from Nim macros. Do not edit manually.\n"
-  )
+  py.add("\nGenerated from Nim macros. Do not edit manually.\n")
   py.add("\"\"\"\n\n")
   py.add("from __future__ import annotations\n\n")
   py.add("import ctypes\n")
@@ -609,11 +605,17 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   py.add("from typing import Callable, Optional\n\n")
 
   # Library loader
-  py.add("# ---------------------------------------------------------------------------\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# Library loader\n")
-  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
   py.add("def _load_library(name: str = \"" & libName & "\") -> ctypes.CDLL:\n")
-  py.add("    \"\"\"Load the shared library, searching relative to this file first.\"\"\"\n")
+  py.add(
+    "    \"\"\"Load the shared library, searching relative to this file first.\"\"\"\n"
+  )
   py.add("    here = Path(__file__).parent\n")
   py.add("    if sys.platform == \"darwin\":\n")
   py.add("        suffix = \".dylib\"\n")
@@ -635,33 +637,49 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   py.add("    raise OSError(f\"Cannot find shared library '{name}'\")\n\n")
 
   # Error class
-  py.add("# ---------------------------------------------------------------------------\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# Error type\n")
-  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
   py.add("class " & className & "Error(Exception):\n")
   py.add("    \"\"\"Raised when a library call returns an error.\"\"\"\n")
   py.add("    pass\n\n")
 
   # ctypes Structure definitions
-  py.add("# ---------------------------------------------------------------------------\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# ctypes structures\n")
-  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
   for s in gApiPyCtypesStructs:
     py.add(s)
     py.add("\n\n")
 
   # Python dataclass definitions
-  py.add("# ---------------------------------------------------------------------------\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# Dataclasses\n")
-  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
   for d in gApiPyDataclasses:
     py.add(d)
     py.add("\n\n")
 
   # Wrapper class
-  py.add("# ---------------------------------------------------------------------------\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# Wrapper class\n")
-  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
   py.add("class " & className & ":\n")
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
@@ -672,7 +690,9 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
 
   # __init__
   py.add("    def __init__(self, lib_path: Optional[str] = None) -> None:\n")
-  py.add("        self._lib = _load_library(lib_path) if lib_path else _load_library()\n")
+  py.add(
+    "        self._lib = _load_library(lib_path) if lib_path else _load_library()\n"
+  )
   py.add("        self._ctx: int = 0\n")
   py.add("        self._cb_refs: dict[int, ctypes._CFuncPtr] = {}  # prevent GC\n")
   py.add("        self._lock = threading.Lock()\n")
@@ -680,7 +700,9 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   py.add("        self._lib." & libName & "_initialize()\n")
   py.add("        self._ctx = self._lib." & libName & "_init()\n")
   py.add("        if self._ctx == 0:\n")
-  py.add("            raise " & className & "Error(\"Library initialization failed\")\n\n")
+  py.add(
+    "            raise " & className & "Error(\"Library initialization failed\")\n\n"
+  )
 
   # _setup_signatures
   py.add("    def _setup_signatures(self) -> None:\n")
@@ -705,7 +727,9 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
 
   # shutdown
   py.add("    def shutdown(self) -> None:\n")
-  py.add("        \"\"\"Shut down the library context. Safe to call multiple times.\"\"\"\n")
+  py.add(
+    "        \"\"\"Shut down the library context. Safe to call multiple times.\"\"\"\n"
+  )
   py.add("        if self._ctx:\n")
   py.add("            self._lib." & libName & "_shutdown(self._ctx)\n")
   py.add("            self._ctx = 0\n")
