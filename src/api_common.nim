@@ -769,12 +769,12 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
 # ---------------------------------------------------------------------------
 
 proc allocCStringCopy*(s: string): cstring =
-  ## Allocates a copy of a Nim string as a C string.
-  ## The caller (C side) is responsible for freeing via the library's
-  ## free_string function.
+  ## Allocates a copy of a Nim string as a shared C string.
+  ## The caller frees it via the generated FFI free helpers, which may run on
+  ## a different thread than the allocation site under --mm:refc.
   if s.len == 0:
     return nil
-  let buf = cast[cstring](alloc(s.len + 1))
+  let buf = cast[cstring](allocShared(s.len + 1))
   copyMem(buf, unsafeAddr s[0], s.len)
   cast[ptr char](cast[int](buf) + s.len)[] = '\0'
   buf
@@ -782,7 +782,7 @@ proc allocCStringCopy*(s: string): cstring =
 proc freeCString*(s: cstring) =
   ## Frees a C string previously allocated by allocCStringCopy.
   if not s.isNil:
-    dealloc(s)
+    deallocShared(s)
 
 # ---------------------------------------------------------------------------
 # Shared-memory string helpers for cross-thread event data
@@ -793,16 +793,10 @@ proc freeCString*(s: cstring) =
 
 proc allocSharedCString*(s: string): cstring =
   ## Allocate a C string copy in shared memory (safe for cross-thread use).
-  if s.len == 0:
-    return nil
-  let buf = cast[cstring](allocShared(s.len + 1))
-  copyMem(buf, unsafeAddr s[0], s.len)
-  cast[ptr char](cast[int](buf) + s.len)[] = '\0'
-  buf
+  allocCStringCopy(s)
 
 proc freeSharedCString*(s: cstring) =
   ## Free a C string allocated by `allocSharedCString`.
-  if not s.isNil:
-    deallocShared(s)
+  freeCString(s)
 
 {.pop.}

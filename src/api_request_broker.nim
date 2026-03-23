@@ -165,7 +165,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
             let `nIdent` = `objIdent`.`fName`.len
             result.`countFieldIdent` = cint(`nIdent`)
             if `nIdent` > 0:
-              let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](alloc(
+              let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](allocShared(
                 `nIdent` * sizeof(`cItemIdent`)
               ))
               for `iIdent` in 0 ..< `nIdent`:
@@ -243,7 +243,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
                   cast[ptr UncheckedArray[`cItemIdent`]](`rIdent`.`fName`)
                 for `jIdent` in 0 ..< `rIdent`.`countFieldIdent`:
                   `itemFreeStmts`
-                dealloc(`rIdent`.`fName`)
+                deallocShared(`rIdent`.`fName`)
           )
         elif isCStringType(fType):
           freeBody.add(
