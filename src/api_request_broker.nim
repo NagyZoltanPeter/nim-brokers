@@ -449,9 +449,10 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         cppStruct.add("    " & cppType & " " & fName)
         if cppType in ["bool"]:
           cppStruct.add(" = false")
-        elif cppType in ["int8_t", "int16_t", "int32_t", "int64_t",
-                          "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-                          "float", "double"]:
+        elif cppType in [
+          "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
+          "uint64_t", "float", "double",
+        ]:
           cppStruct.add(" = 0")
         cppStruct.add(";\n")
     cppStruct.add("    " & cppResultName & "() = default;\n")
@@ -481,9 +482,14 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           let itemTypeName = seqItemTypeName(fType)
           let countField = fName & "_count"
           cppStruct.add("        if (c." & fName & " && c." & countField & " > 0) {\n")
-          cppStruct.add("            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." & fName & ");\n")
+          cppStruct.add(
+            "            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." & fName &
+              ");\n"
+          )
           cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
-          cppStruct.add("            for (int32_t i = 0; i < c." & countField & "; ++i)\n")
+          cppStruct.add(
+            "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
+          )
           cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
           cppStruct.add("        }\n")
     cppStruct.add("        " & freeFuncName & "(&c);\n")
@@ -503,7 +509,10 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     cppMethod.add("            " & freeFuncName & "(&c);\n")
     cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
     cppMethod.add("        }\n")
-    cppMethod.add("        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName & "Result(c));\n")
+    cppMethod.add(
+      "        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName &
+        "Result(c));\n"
+    )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
 
@@ -522,14 +531,18 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           cppCallArgs.add(", " & paramName & ".c_str()")
         else:
           cppCallArgs.add(", " & paramName)
-    var cppMethod = "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
+    var cppMethod =
+      "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
     cppMethod.add("        auto c = " & funcName & "(" & cppCallArgs & ");\n")
     cppMethod.add("        if (c.error_message) {\n")
     cppMethod.add("            std::string err(c.error_message);\n")
     cppMethod.add("            " & freeFuncName & "(&c);\n")
     cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
     cppMethod.add("        }\n")
-    cppMethod.add("        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName & "Result(c));\n")
+    cppMethod.add(
+      "        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName &
+        "Result(c));\n"
+    )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
 

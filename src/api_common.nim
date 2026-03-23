@@ -442,7 +442,9 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
     header.add("    static void initialize() { " & libName & "_initialize(); }\n")
     header.add("    bool init() { ctx_ = " & libName & "_init(); return ctx_ != 0; }\n")
-    header.add("    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n")
+    header.add(
+      "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
+    )
     header.add("    uint32_t ctx() const { return ctx_; }\n\n")
     for cppMethod in gApiCppClassMethods:
       header.add("    " & cppMethod.replace("__CPP_NS__", nsName) & "\n")

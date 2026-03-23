@@ -380,7 +380,9 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       cppCbParams.add(cbType)
       # Trampoline converts const char* → std::string_view (const in signature, not ctor)
       if isCStringType(fieldTypes[i]):
-        cppTrampolineForwards.add("std::string_view(" & fName & " ? " & fName & " : \"\")")
+        cppTrampolineForwards.add(
+          "std::string_view(" & fName & " ? " & fName & " : \"\")"
+        )
       else:
         cppTrampolineForwards.add(fName)
 
@@ -399,11 +401,19 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   var priv = ""
   priv.add("    // --- " & typeDisplayName & " event callback storage ---\n")
   priv.add("    static inline std::mutex " & prefix & "Mtx_;\n")
-  priv.add("    static inline std::unordered_map<uint64_t, " & cppFuncType & "> " & prefix & "Cbs_;\n")
-  priv.add("    static inline uint64_t " & prefix & "CHandle_ = 0; // C-layer trampoline handle\n")
+  priv.add(
+    "    static inline std::unordered_map<uint64_t, " & cppFuncType & "> " & prefix &
+      "Cbs_;\n"
+  )
+  priv.add(
+    "    static inline uint64_t " & prefix &
+      "CHandle_ = 0; // C-layer trampoline handle\n"
+  )
   priv.add("    static inline std::atomic<uint64_t> " & prefix & "NextId_{1};\n")
   # Trampoline function
-  priv.add("    static void " & prefix & "Trampoline_(" & cTrampolineParams.join(", ") & ") {\n")
+  priv.add(
+    "    static void " & prefix & "Trampoline_(" & cTrampolineParams.join(", ") & ") {\n"
+  )
   priv.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
   priv.add("        for (auto& [id, fn] : " & prefix & "Cbs_) {\n")
   priv.add("            if (fn) fn(" & cppTrampolineForwards.join(", ") & ");\n")
@@ -416,7 +426,10 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   onMethod.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
   onMethod.add("        // Register C trampoline once with the Nim layer\n")
   onMethod.add("        if (" & prefix & "CHandle_ == 0) {\n")
-  onMethod.add("            " & prefix & "CHandle_ = ::" & regFuncName & "(ctx_, " & prefix & "Trampoline_);\n")
+  onMethod.add(
+    "            " & prefix & "CHandle_ = ::" & regFuncName & "(ctx_, " & prefix &
+      "Trampoline_);\n"
+  )
   onMethod.add("        }\n")
   onMethod.add("        uint64_t id = " & prefix & "NextId_.fetch_add(1);\n")
   onMethod.add("        " & prefix & "Cbs_[id] = std::move(fn);\n")
@@ -430,13 +443,19 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   offMethod.add("            // Remove all\n")
   offMethod.add("            " & prefix & "Cbs_.clear();\n")
   offMethod.add("            if (" & prefix & "CHandle_) {\n")
-  offMethod.add("                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n")
+  offMethod.add(
+    "                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
+  )
   offMethod.add("                " & prefix & "CHandle_ = 0;\n")
   offMethod.add("            }\n")
   offMethod.add("        } else {\n")
   offMethod.add("            " & prefix & "Cbs_.erase(handle);\n")
-  offMethod.add("            if (" & prefix & "Cbs_.empty() && " & prefix & "CHandle_) {\n")
-  offMethod.add("                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n")
+  offMethod.add(
+    "            if (" & prefix & "Cbs_.empty() && " & prefix & "CHandle_) {\n"
+  )
+  offMethod.add(
+    "                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
+  )
   offMethod.add("                " & prefix & "CHandle_ = 0;\n")
   offMethod.add("            }\n")
   offMethod.add("        }\n")

@@ -132,9 +132,10 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
       # Default initializers for non-class types
       if cppType in ["bool"]:
         cppStruct.add(" = false")
-      elif cppType in ["int8_t", "int16_t", "int32_t", "int64_t",
-                        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-                        "float", "double"]:
+      elif cppType in [
+        "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
+        "uint64_t", "float", "double",
+      ]:
         cppStruct.add(" = 0")
       cppStruct.add(";\n")
     cppStruct.add("    " & typeName & "() = default;\n")
