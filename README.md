@@ -1,8 +1,12 @@
 # nim-brokers
 
-Type-safe, thread-local, decoupled messaging patterns for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos) and [results](https://github.com/status-im/nim-results).
+Type-safe, thread-local, decoupled messaging patterns for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos) and [nim-async-channels](https://github.com/status-im/nim-async-channels).
 
 nim-brokers provides three compile-time macro-generated broker patterns that enable event-driven and request-response communication between modules without direct dependencies.
+
+## Presentation slides  
+
+[May start with the presentation slides available here...](https://nagyzoltanpeter.github.io/nim-brokers/BrokerDesignPrezi.html).
 
 ## Installation
 
@@ -496,10 +500,6 @@ To inspect generated AST during compilation:
 ```
 nim c -d:brokerDebug ...
 ```
-
-## Prezentation slides  
-
-[available here](https://nagyzoltanpeter.github.io/nim-brokers/BrokerDesignPrezi.html).
 
 ## License
 
