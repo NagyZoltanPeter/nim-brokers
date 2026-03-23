@@ -44,7 +44,12 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
   ##     type RegisterEventListenerResult = object
   ##       handle*: uint64
   ##       success*: bool
-  ##     proc signature*(action: int32, eventTypeId: int32, callbackPtr: pointer):
+  ##     proc signature*(
+  ##         action: int32,
+  ##         eventTypeId: int32,
+  ##         callbackPtr: pointer,
+  ##         listenerHandle: uint64,
+  ##     ):
   ##         Future[Result[RegisterEventListenerResult, string]] {.async.}
   ##
   ## We build the AST that parseSingleTypeDef + generateMtRequestBroker expect.
@@ -90,6 +95,7 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
     newTree(nnkIdentDefs, ident("action"), ident("int32"), newEmptyNode()),
     newTree(nnkIdentDefs, ident("eventTypeId"), ident("int32"), newEmptyNode()),
     newTree(nnkIdentDefs, ident("callbackPtr"), ident("pointer"), newEmptyNode()),
+    newTree(nnkIdentDefs, ident("listenerHandle"), ident("uint64"), newEmptyNode()),
   )
 
   let sigPragmas = newTree(nnkPragma, ident("async"))
@@ -295,14 +301,16 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     result.add(
       quote do:
         proc `handlerProcIdent`(
-            ctx: BrokerContext, action: int32, callbackPtr: pointer
+            ctx: BrokerContext,
+            action: int32,
+            callbackPtr: pointer,
+            listenerHandle: uint64,
         ): Future[Result[RegisterEventListenerResult, string]] {.async: (raises: []).} =
           case action
           of 0:
             return `registerHelperIdent`(ctx, callbackPtr)
           of 1:
-            let targetId = cast[uint64](callbackPtr)
-            return `unregisterHelperIdent`(ctx, targetId)
+            return `unregisterHelperIdent`(ctx, listenerHandle)
           of 2:
             return `unregisterAllHelperIdent`(ctx)
           else:
@@ -337,6 +345,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
           0'i32,
           int32(`typeIdConst`),
           cast[pointer](`callbackParamIdent`),
+          0'u64,
         )
         if res.isOk():
           res.get().handle
@@ -358,12 +367,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         if handle == 0'u64:
           # Remove all listeners for this event type
           discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil
+            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil, 0'u64
           )
         else:
           # Remove specific listener by handle
           discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), cast[pointer](handle)
+            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), nil, handle
           )
 
   )
