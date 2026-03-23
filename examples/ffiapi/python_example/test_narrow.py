@@ -11,7 +11,7 @@ def ctx_with_3_listeners():
     print("  ctx_with_3_listeners starting...")
     counts = [0, 0, 0]
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         def make_cb(idx):
             def cb(did, n, dt, a):
                 counts[idx] += 1
@@ -36,7 +36,7 @@ def ctx_simple():
     print("  ctx_simple starting...")
     count = [0]
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h = lib.on_device_discovered(lambda did, n, dt, a: count.__setitem__(0, count[0]+1))
         for i in range(10):
             lib.add_device(f"dev{i}", "sensor", f"10.0.0.{i}")

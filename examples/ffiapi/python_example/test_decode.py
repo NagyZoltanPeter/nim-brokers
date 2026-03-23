@@ -14,11 +14,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "nimlib", "buil
 lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "..", "nimlib", "build", "libmylib.dylib"))
 
 lib.mylib_initialize()
-lib.mylib_init.restype = ctypes.c_uint32
-ctx = lib.mylib_init()
+lib.mylib_create.restype = ctypes.c_uint32
+ctx = lib.mylib_create()
 time.sleep(0.2)
 
-lib.init_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+lib.create_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
 
 DiscCb = ctypes.CFUNCTYPE(None, ctypes.c_int64, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p)
 StatusCb = ctypes.CFUNCTYPE(None, ctypes.c_int64, ctypes.c_char_p, ctypes.c_bool, ctypes.c_int64)
@@ -47,7 +47,7 @@ def on_stat(did, name, online, ts):
 
 _refs = [on_disc, on_stat]
 
-lib.init_request_request_with_args(ctx, b"/tmp/test")
+lib.create_request_request_with_args(ctx, b"/tmp/test")
 time.sleep(0.1)
 
 # Register DISCOVERED FIRST, then STATUS

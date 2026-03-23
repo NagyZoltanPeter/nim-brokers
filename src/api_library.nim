@@ -1,8 +1,8 @@
 ## API Library Registration
 ## ------------------------
 ## Provides the `registerBrokerLibrary` macro that generates:
-## 1. Library context lifecycle management (init/shutdown C exports)
-## 2. Compile-time validation of mandatory InitRequest/DestroyRequest types
+## 1. Library context lifecycle management (create/shutdown C exports)
+## 2. Compile-time validation of mandatory CreateRequest/DestroyRequest types
 ## 3. C header file generation from accumulated broker declarations
 ## 4. Memory management helpers (free_string)
 ## 5. Delivery thread creation (hosts event listeners, calls C callbacks)
@@ -13,7 +13,7 @@
 ## ```nim
 ## registerBrokerLibrary:
 ##   name: "mylib"
-##   initRequest: InitRequest
+##   createRequest: CreateRequest
 ##   destroyRequest: DestroyRequest
 ##   refType: MyLibObject  # optional
 ## ```
@@ -37,11 +37,11 @@ export results, chronos, chronicles, broker_context, api_common, asyncchannels
 
 proc parseLibraryConfig(
     body: NimNode
-): tuple[name: string, initRequest: NimNode, destroyRequest: NimNode, refType: NimNode] {.
+): tuple[name: string, createRequest: NimNode, destroyRequest: NimNode, refType: NimNode] {.
     compileTime
 .} =
   var name = ""
-  var initReq: NimNode = nil
+  var createReq: NimNode = nil
   var destroyReq: NimNode = nil
   var refTy: NimNode = nil
 
@@ -57,11 +57,11 @@ proc parseLibraryConfig(
           name = value.strVal
         else:
           error("name must be a string literal", value)
-      of "initrequest":
+      of "createrequest":
         if value.kind == nnkStmtList and value.len == 1:
-          initReq = value[0]
+          createReq = value[0]
         else:
-          initReq = value
+          createReq = value
       of "destroyrequest":
         if value.kind == nnkStmtList and value.len == 1:
           destroyReq = value[0]
@@ -79,12 +79,12 @@ proc parseLibraryConfig(
 
   if name.len == 0:
     error("registerBrokerLibrary requires a 'name' field", body)
-  if initReq.isNil():
-    error("registerBrokerLibrary requires an 'initRequest' field", body)
+  if createReq.isNil():
+    error("registerBrokerLibrary requires a 'createRequest' field", body)
   if destroyReq.isNil():
     error("registerBrokerLibrary requires a 'destroyRequest' field", body)
 
-  (name: name, initRequest: initReq, destroyRequest: destroyReq, refType: refTy)
+  (name: name, createRequest: createReq, destroyRequest: destroyReq, refType: refTy)
 
 # ---------------------------------------------------------------------------
 # Macro
@@ -93,21 +93,21 @@ proc parseLibraryConfig(
 macro registerBrokerLibrary*(body: untyped): untyped =
   let config = parseLibraryConfig(body)
   let libName = config.name
-  let initReqIdent = config.initRequest
+  let createReqIdent = config.createRequest
   let destroyReqIdent = config.destroyRequest
 
   # Set library name for header generation
   gApiLibraryName = libName
 
-  let initFuncName = libName & "_init"
+  let createFuncName = libName & "_create"
   let shutdownFuncName = libName & "_shutdown"
   let freeStringFuncName = libName & "_free_string"
 
-  let initFuncIdent = ident(initFuncName)
+  let createFuncIdent = ident(createFuncName)
   let shutdownFuncIdent = ident(shutdownFuncName)
   let freeStringFuncIdent = ident(freeStringFuncName)
 
-  let initFuncNameLit = newLit(initFuncName)
+  let createFuncNameLit = newLit(createFuncName)
   let shutdownFuncNameLit = newLit(shutdownFuncName)
   let freeStringFuncNameLit = newLit(freeStringFuncName)
 
@@ -124,16 +124,18 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let globalCtxsIdent = ident("g" & libName & "Ctxs")
   let globalCtxsLockIdent = ident("g" & libName & "CtxsLock")
   let globalCtxsInitIdent = ident("g" & libName & "CtxsInit")
+  let startupStateIdent = ident(libName & "StartupState")
+  let waitForStartupProcIdent = ident("waitFor" & libName & "Startup")
 
   result = newStmtList()
 
-  # Compile-time validation: ensure InitRequest and DestroyRequest types exist
+  # Compile-time validation: ensure CreateRequest and DestroyRequest types exist
   result.add(
     quote do:
-      when not compiles(typeof(`initReqIdent`)):
+      when not compiles(typeof(`createReqIdent`)):
         {.
           error:
-            "registerBrokerLibrary: initRequest type '" & astToStr(`initReqIdent`) &
+            "registerBrokerLibrary: createRequest type '" & astToStr(`createReqIdent`) &
             "' is not defined. Ensure a RequestBroker(API) declaring this type " &
             "appears before registerBrokerLibrary."
         .}
@@ -150,13 +152,19 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   result.add(
     quote do:
       type
+        `startupStateIdent` = object
+          deliveryReady: Atomic[int]
+          processingReady: Atomic[int]
+
         `procThreadArgIdent` = object
           ctx: BrokerContext
           shutdownChan: ptr AsyncChannel[bool]
+          startupState: ptr `startupStateIdent`
 
         `delivThreadArgIdent` = object
           ctx: BrokerContext
           shutdownChan: ptr AsyncChannel[bool]
+          startupState: ptr `startupStateIdent`
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
@@ -365,11 +373,24 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   # Processing thread proc
   result.add(
     quote do:
+      proc `waitForStartupProcIdent`(
+          startupFlag: ptr Atomic[int], timeoutMs: int
+      ): bool =
+        var waitedMs = 0
+        while startupFlag[].load(moAcquire) != 1:
+          if waitedMs >= timeoutMs:
+            return false
+          sleep(1)
+          inc waitedMs
+        true
+
       proc `procThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
         setThreadBrokerContext(arg.ctx)
 
         when compiles(setupProviders(arg.ctx)):
           setupProviders(arg.ctx)
+
+        arg.startupState.processingReady.store(1, moRelease)
 
         proc awaitShutdown(
             shutdownChan: ptr AsyncChannel[bool]
@@ -396,6 +417,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           # Install the aggregate event listener provider
           `installProviderIdent`(arg.ctx)
 
+          arg.startupState.deliveryReady.store(1, moRelease)
+
           proc awaitShutdown(
               shutdownChan: ptr AsyncChannel[bool]
           ) {.async: (raises: []).} =
@@ -417,6 +440,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           setThreadBrokerContext(arg.ctx)
           `installProviderIdent`(arg.ctx)
 
+          arg.startupState.deliveryReady.store(1, moRelease)
+
           proc awaitShutdown(
               shutdownChan: ptr AsyncChannel[bool]
           ) {.async: (raises: []).} =
@@ -434,6 +459,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         proc `delivThreadProcIdent`(arg: ptr `delivThreadArgIdent`) {.thread.} =
           setThreadBrokerContext(arg.ctx)
 
+          arg.startupState.deliveryReady.store(1, moRelease)
+
           proc awaitShutdown(
               shutdownChan: ptr AsyncChannel[bool]
           ) {.async: (raises: []).} =
@@ -446,10 +473,10 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
     )
 
-  # init function — creates context, both threads
+  # create function — creates context, both threads
   result.add(
     quote do:
-      proc `initFuncIdent`(): uint32 {.exportc: `initFuncNameLit`, cdecl, dynlib.} =
+      proc `createFuncIdent`(): uint32 {.exportc: `createFuncNameLit`, cdecl, dynlib.} =
         ensureLibCtxInit()
         var ctx = NewBrokerContext()
         # Context 0 is reserved as the C-side error sentinel
@@ -465,17 +492,24 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           cast[ptr AsyncChannel[bool]](createShared(AsyncChannel[bool], 1))
         discard delivShutdownChan[].open()
 
+        let startupState =
+          cast[ptr `startupStateIdent`](createShared(`startupStateIdent`, 1))
+        startupState.deliveryReady.store(0, moRelaxed)
+        startupState.processingReady.store(0, moRelaxed)
+
         # Create processing thread arg
         let procArg =
           cast[ptr `procThreadArgIdent`](createShared(`procThreadArgIdent`, 1))
         procArg.ctx = ctx
         procArg.shutdownChan = procShutdownChan
+        procArg.startupState = startupState
 
         # Create delivery thread arg
         let delivArg =
           cast[ptr `delivThreadArgIdent`](createShared(`delivThreadArgIdent`, 1))
         delivArg.ctx = ctx
         delivArg.shutdownChan = delivShutdownChan
+        delivArg.startupState = startupState
 
         # Allocate entry on shared heap — Thread objects must not be moved
         # after createThread (the pthread holds a pointer to them)
@@ -493,16 +527,28 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           delivShutdownChan[].close()
           deallocShared(procShutdownChan)
           deallocShared(delivShutdownChan)
+          deallocShared(startupState)
           deallocShared(procArg)
           deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
         except Exception as e:
+          deallocShared(startupState)
           deallocShared(entry)
           return 0'u32
 
-        # Brief pause to let delivery thread start and register provider
-        sleep(50)
+        if not `waitForStartupProcIdent`(addr startupState.deliveryReady, 5000):
+          delivShutdownChan[].sendSync(true)
+          joinThread(entry.delivThread)
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
+          deallocShared(startupState)
+          deallocShared(procArg)
+          deallocShared(delivArg)
+          deallocShared(entry)
+          return 0'u32
 
         # Start processing thread
         try:
@@ -515,16 +561,32 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           delivShutdownChan[].close()
           deallocShared(procShutdownChan)
           deallocShared(delivShutdownChan)
+          deallocShared(startupState)
           deallocShared(procArg)
           deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
         except Exception as e:
+          deallocShared(startupState)
           deallocShared(entry)
           return 0'u32
 
-        # Brief pause to let processing thread start and register providers
-        sleep(50)
+        if not `waitForStartupProcIdent`(addr startupState.processingReady, 5000):
+          procShutdownChan[].sendSync(true)
+          delivShutdownChan[].sendSync(true)
+          joinThread(entry.procThread)
+          joinThread(entry.delivThread)
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
+          deallocShared(startupState)
+          deallocShared(procArg)
+          deallocShared(delivArg)
+          deallocShared(entry)
+          return 0'u32
+
+        deallocShared(startupState)
 
         withLock(`globalCtxsLockIdent`):
           `globalCtxsIdent`.add(entry)
@@ -581,7 +643,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     "/* Call once before any other library function to initialize the Nim runtime */\n" &
       generateCFuncProto(initLibFuncName, "void", @[])
   )
-  appendHeaderDecl(generateCFuncProto(initFuncName, "uint32_t", @[]))
+  appendHeaderDecl(generateCFuncProto(createFuncName, "uint32_t", @[]))
   appendHeaderDecl(generateCFuncProto(shutdownFuncName, "void", @[("ctx", "uint32_t")]))
   appendHeaderDecl(generateCFuncProto(freeStringFuncName, "void", @[("s", "char*")]))
 

@@ -1,0 +1,6 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "nim": true,
+        "nimble": true
+    }
+}

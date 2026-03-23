@@ -42,12 +42,11 @@ int main() {
     // ── 1. Create the library wrapper (RAII, move-only) ──────────────
     Mylib::initialize();
     Mylib lib;
-    if (!lib.init()) {
-        fprintf(stderr, "FATAL: library init failed\n");
+    if (!lib.create()) {
+        fprintf(stderr, "FATAL: library create failed\n");
         return 1;
     }
     printf("Library context: 0x%08X\n\n", lib.ctx());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // ── 2. Subscribe to events using lambdas ─────────────────────────
     //    Callbacks receive std::string_view (zero-copy, valid during call).
@@ -93,12 +92,12 @@ int main() {
            (unsigned long long)h_status,
            (unsigned long long)h_status2);
 
-    // ── 3. Initialize — returns Result<InitRequestResult> ────────────
-    printf("--- Initializing ---\n");
+    // ── 3. Configure library — returns Result<CreateRequestResult> ───
+    printf("--- Configuring library ---\n");
     {
-        auto res = lib.initRequest("/opt/devices.yaml");
+        auto res = lib.createRequest("/opt/devices.yaml");
         if (!res.ok()) {
-            fprintf(stderr, "Init error: %s\n", res.error().c_str());
+            fprintf(stderr, "Create error: %s\n", res.error().c_str());
             return 1;
         }
         // res->configPath is std::string, res->initialized is bool

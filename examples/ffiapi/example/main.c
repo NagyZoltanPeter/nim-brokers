@@ -4,7 +4,7 @@
  * Demonstrates consuming the mylib Nim dynamic library from plain C.
  *
  * Exercises:
- *   - Library lifecycle (initialize / init / shutdown)
+ *   - Library lifecycle (initialize / create / shutdown)
  *   - Adding devices (AddDevice request with string args)
  *   - Querying a single device (GetDevice request)
  *   - Listing all devices (ListDevices — returns an array of structs)
@@ -76,15 +76,12 @@ int main(void) {
 
     /* ── 2. Create library context ────────────────────────────────────── */
     printf("2. Create library context\n");
-    uint32_t ctx = mylib_init();
+    uint32_t ctx = mylib_create();
     if (ctx == 0) {
-        fprintf(stderr, "   FATAL: mylib_init() returned 0\n");
+        fprintf(stderr, "   FATAL: mylib_create() returned 0\n");
         return 1;
     }
     printf("   ctx = 0x%08X\n\n", ctx);
-
-    /* Let threads start up */
-    sleep_ms(200);
 
     /* ── 3. Register event listeners ──────────────────────────────────── */
     printf("3. Register event listeners\n");
@@ -94,20 +91,20 @@ int main(void) {
     printf("   DeviceStatusChanged handle:  %llu\n\n", (unsigned long long)h_status);
 
     /* ── 4. Initialize the library ────────────────────────────────────── */
-    printf("4. Initialize library (InitRequest)\n");
+    printf("4. Configure library (CreateRequest)\n");
     {
-        InitRequestCResult res =
-            init_request_request_with_args(ctx, "/etc/devices.conf");
+        CreateRequestCResult res =
+            create_request_request_with_args(ctx, "/etc/devices.conf");
         if (res.error_message) {
             fprintf(stderr, "   ERROR: %s\n", res.error_message);
-            free_init_request_result(&res);
+            free_create_request_result(&res);
             mylib_shutdown(ctx);
             return 1;
         }
         printf("   initialized=%s  configPath=\"%s\"\n",
                res.initialized ? "true" : "false",
                res.configPath ? res.configPath : "(null)");
-        free_init_request_result(&res);
+         free_create_request_result(&res);
     }
     printf("\n");
 

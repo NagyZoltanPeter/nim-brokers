@@ -11,7 +11,7 @@ def test_status_only():
     print("=== DeviceStatusChanged only (no events fire) ===")
     status = []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h = lib.on_device_status_changed(lambda did, n, online, ts: status.append(did))
         for i in range(20):
             lib.add_device(f"dev{i}", "sensor", f"10.0.0.{i}")
@@ -26,7 +26,7 @@ def test_discovered_after_status_registered():
     print("=== StatusChanged first, then Discovered ===")
     discovered = []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h1 = lib.on_device_status_changed(lambda did, n, online, ts: None)
         h2 = lib.on_device_discovered(lambda did, n, dt, a: discovered.append(did))
         for i in range(20):
@@ -43,7 +43,7 @@ def test_discovered_only_baseline():
     print("=== DeviceDiscovered only (baseline) ===")
     discovered = []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h = lib.on_device_discovered(lambda did, n, dt, a: discovered.append(did))
         for i in range(20):
             lib.add_device(f"dev{i}", "sensor", f"10.0.0.{i}")

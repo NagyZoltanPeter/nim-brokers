@@ -555,7 +555,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("    " & className & "(" & className & "&&) = delete;\n")
     header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
     header.add("    static void initialize() { " & libName & "_initialize(); }\n")
-    header.add("    bool init() { ctx_ = " & libName & "_init(); return ctx_ != 0; }\n")
+    header.add("    bool create() { ctx_ = " & libName & "_create(); return ctx_ != 0; }\n")
     header.add(
       "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
     )
@@ -684,7 +684,7 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
   py.add("        with " & className & "() as lib:\n")
-  py.add("            result = lib.init_request(\"/path/to/config\")\n")
+  py.add("            result = lib.create_request(\"/path/to/config\")\n")
   py.add("            print(result.config_path)\n")
   py.add("    \"\"\"\n\n")
 
@@ -698,10 +698,10 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   py.add("        self._lock = threading.Lock()\n")
   py.add("        self._setup_signatures()\n")
   py.add("        self._lib." & libName & "_initialize()\n")
-  py.add("        self._ctx = self._lib." & libName & "_init()\n")
+  py.add("        self._ctx = self._lib." & libName & "_create()\n")
   py.add("        if self._ctx == 0:\n")
   py.add(
-    "            raise " & className & "Error(\"Library initialization failed\")\n\n"
+    "            raise " & className & "Error(\"Library context creation failed\")\n\n"
   )
 
   # _setup_signatures
@@ -711,8 +711,8 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
   # Lifecycle functions
   py.add("        _lib." & libName & "_initialize.argtypes = []\n")
   py.add("        _lib." & libName & "_initialize.restype = None\n")
-  py.add("        _lib." & libName & "_init.argtypes = []\n")
-  py.add("        _lib." & libName & "_init.restype = ctypes.c_uint32\n")
+  py.add("        _lib." & libName & "_create.argtypes = []\n")
+  py.add("        _lib." & libName & "_create.restype = ctypes.c_uint32\n")
   py.add("        _lib." & libName & "_shutdown.argtypes = [ctypes.c_uint32]\n")
   py.add("        _lib." & libName & "_shutdown.restype = None\n")
   for setup in gApiPyCallbackSetup:

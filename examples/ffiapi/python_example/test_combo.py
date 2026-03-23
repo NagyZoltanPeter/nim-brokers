@@ -11,7 +11,7 @@ def test_A():
     print("A: 3 listeners, off, more events")
     counts = [0, 0, 0]
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         def make_cb(idx):
             def cb(did, n, dt, a): counts[idx] += 1
             return cb
@@ -31,7 +31,7 @@ def test_B():
     print("B: Both event types")
     disc, stat = [], []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h1 = lib.on_device_discovered(lambda did, n, dt, a: disc.append(did))
         h2 = lib.on_device_status_changed(lambda did, n, online, ts: stat.append(did))
         for i in range(15): lib.add_device(f"d{i}", "s", f"1.0.0.{i}")
@@ -44,11 +44,11 @@ def test_B():
 
 def test_C():
     """Repeated cycles."""
-    print("C: 5 init/shutdown cycles")
+    print("C: 5 create/shutdown cycles")
     for c in range(5):
         evts = []
         with Mylib() as lib:
-            lib.init_request("/tmp/test")
+            lib.create_request("/tmp/test")
             h = lib.on_device_discovered(lambda did, n, dt, a: evts.append(did))
             for i in range(5): lib.add_device(f"c{c}d{i}", "s", f"1.{c}.0.{i}")
             time.sleep(0.3)

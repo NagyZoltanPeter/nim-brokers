@@ -17,13 +17,13 @@ lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "..", "nimlib", "build
 
 # Setup
 lib.mylib_initialize()
-lib.mylib_init.restype = ctypes.c_uint32
-ctx = lib.mylib_init()
+lib.mylib_create.restype = ctypes.c_uint32
+ctx = lib.mylib_create()
 print(f"ctx = {ctx}")
 time.sleep(0.2)
 
-# Init
-lib.init_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+# Create request
+lib.create_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
 # Skip restype setup for simplicity — just check if callback works
 
 # Define callback types
@@ -61,8 +61,8 @@ _refs = [on_disc, on_stat]
 print(f"disc callback ptr: {ctypes.cast(on_disc, ctypes.c_void_p).value:#x}")
 print(f"stat callback ptr: {ctypes.cast(on_stat, ctypes.c_void_p).value:#x}")
 
-# Init the library
-lib.init_request_request_with_args(ctx, b"/tmp/test")
+# Configure the library
+lib.create_request_request_with_args(ctx, b"/tmp/test")
 time.sleep(0.1)
 
 # Register DISCOVERED FIRST

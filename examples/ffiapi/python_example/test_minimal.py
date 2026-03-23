@@ -15,7 +15,7 @@ def test_single_listener_many_events():
     count = [0]
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_disc(device_id, name, device_type, address):
             count[0] += 1
@@ -36,7 +36,7 @@ def test_three_listeners_many_events():
     counts = [0, 0, 0]
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def make_cb(idx):
             def cb(did, n, dt, a):
@@ -61,7 +61,7 @@ def test_off_then_more_events():
     counts = [0, 0, 0]
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def make_cb(idx):
             def cb(did, n, dt, a):

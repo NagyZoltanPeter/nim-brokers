@@ -14,7 +14,7 @@ from mylib import Mylib
 
 lib = Mylib()
 print(f"ctx = {lib.ctx}")
-lib.init_request("/tmp/test")
+lib.create_request("/tmp/test")
 
 # Print the CFUNCTYPE classes
 print(f"DiscCCallback type: {lib._DeviceDiscoveredCCallback}")

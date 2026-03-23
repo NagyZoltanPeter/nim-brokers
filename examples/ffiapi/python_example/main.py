@@ -30,7 +30,6 @@ def main() -> int:
     try:
         with Mylib() as lib:
             print(f"Library context: 0x{lib.ctx:08X}\n")
-            time.sleep(0.2)
 
             print("--- Subscribing to events ---")
 
@@ -66,11 +65,11 @@ def main() -> int:
                 f"  Handles: discovered={h_disc}  status={h_status}  status2={h_status2}\n"
             )
 
-            print("--- Initializing ---")
-            init_result = lib.init_request("/opt/devices.yaml")
+            print("--- Configuring library ---")
+            create_result = lib.create_request("/opt/devices.yaml")
             print(
-                f"  config={init_result.config_path}  "
-                f"initialized={'yes' if init_result.initialized else 'no'}\n"
+                f"  config={create_result.config_path}  "
+                f"initialized={'yes' if create_result.initialized else 'no'}\n"
             )
 
             print("--- Adding devices ---")

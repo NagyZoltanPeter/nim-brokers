@@ -15,12 +15,12 @@ _lib = ctypes.CDLL(libpath)
 # Same as _setup_signatures
 _lib.mylib_initialize.argtypes = []
 _lib.mylib_initialize.restype = None
-_lib.mylib_init.argtypes = []
-_lib.mylib_init.restype = ctypes.c_uint32
+_lib.mylib_create.argtypes = []
+_lib.mylib_create.restype = ctypes.c_uint32
 _lib.mylib_shutdown.argtypes = [ctypes.c_uint32]
 _lib.mylib_shutdown.restype = None
-_lib.init_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
-# Skip restype for init — we just call it
+_lib.create_request_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
+# Skip restype for create request — we just call it
 _lib.add_device_request_with_args.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
 # Skip restype for add_device — we just call it
 
@@ -37,12 +37,12 @@ _lib.onDeviceDiscovered.restype = ctypes.c_uint64
 _lib.offDeviceDiscovered.argtypes = [ctypes.c_uint32, ctypes.c_uint64]
 _lib.offDeviceDiscovered.restype = None
 
-# Init
+# Create context
 _lib.mylib_initialize()
-ctx = _lib.mylib_init()
+ctx = _lib.mylib_create()
 time.sleep(0.2)
 
-_lib.init_request_request_with_args(ctx, b"/tmp/test")
+_lib.create_request_request_with_args(ctx, b"/tmp/test")
 time.sleep(0.1)
 
 # Create trampolines exactly like the wrapper class does

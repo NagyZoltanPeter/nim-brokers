@@ -14,8 +14,8 @@ def test_basic_requests():
     """Test that basic requests work."""
     print("=== Basic request test ===")
     with Mylib() as lib:
-        result = lib.init_request("/tmp/test")
-        print(f"  init_request: config_path={result.config_path}, initialized={result.initialized}")
+        result = lib.create_request("/tmp/test")
+        print(f"  create_request: config_path={result.config_path}, initialized={result.initialized}")
 
         result = lib.add_device("sensor1", "temperature", "192.168.1.10")
         print(f"  add_device: device_id={result.device_id}, success={result.success}")
@@ -33,7 +33,7 @@ def test_single_event():
     events_received = []
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_discovered(device_id, name, device_type, address):
             events_received.append((device_id, name, device_type, address))
@@ -57,7 +57,7 @@ def test_events_with_sleep():
     events_received = []
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_discovered(device_id, name, device_type, address):
             events_received.append((device_id, name, device_type, address))
@@ -81,7 +81,7 @@ def test_rapid_fire_events():
     events_received = []
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_discovered(device_id, name, device_type, address):
             events_received.append((device_id, name, device_type, address))

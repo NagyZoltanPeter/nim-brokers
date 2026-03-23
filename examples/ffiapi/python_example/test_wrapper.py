@@ -18,7 +18,7 @@ disc = [0]
 stat = [0]
 
 lib = Mylib()
-lib.init_request("/tmp/test")
+lib.create_request("/tmp/test")
 
 # These callbacks don't decode strings — they use the wrapper's trampoline though
 h1 = lib.on_device_discovered(lambda did, n, dt, a: disc.__setitem__(0, disc[0]+1))

@@ -15,7 +15,7 @@ def test_off_no_sleep():
     counts = [0, 0, 0]
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def make_cb(idx):
             def cb(did, n, dt, a):
@@ -54,7 +54,7 @@ def test_multiple_contexts():
     for cycle in range(5):
         events = []
         with Mylib() as lib:
-            lib.init_request("/tmp/test")
+            lib.create_request("/tmp/test")
             h = lib.on_device_discovered(lambda did, n, dt, a: events.append(did))
             for i in range(10):
                 lib.add_device(f"c{cycle}d{i}", "sensor", f"10.0.{cycle}.{i}")
@@ -72,7 +72,7 @@ def test_both_event_types():
     status_changed = []
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_disc(did, n, dt, a):
             discovered.append(did)

@@ -40,13 +40,13 @@ ApiType:
 # Request Brokers
 # ---------------------------------------------------------------------------
 
-## InitRequest: called after mylib_init() to configure the monitoring engine.
+## CreateRequest: called after mylib_create() to configure the monitoring engine.
 RequestBroker(API):
-  type InitRequest = object
+  type CreateRequest = object
     configPath*: string
     initialized*: bool
 
-  proc signature*(configPath: string): Future[Result[InitRequest, string]] {.async.}
+  proc signature*(configPath: string): Future[Result[CreateRequest, string]] {.async.}
 
 ## DestroyRequest: called before mylib_shutdown() to tear down state.
 RequestBroker(API):
@@ -136,13 +136,13 @@ proc setupProviders(ctx: BrokerContext) =
   gNextDeviceId = 1
   gDevices = @[]
 
-  # InitRequest provider
-  discard InitRequest.setProvider(
+  # CreateRequest provider
+  discard CreateRequest.setProvider(
     ctx,
-    proc(configPath: string): Future[Result[InitRequest, string]] {.closure, async.} =
+    proc(configPath: string): Future[Result[CreateRequest, string]] {.closure, async.} =
       gConfigPath = configPath
       gInitialized = true
-      return ok(InitRequest(configPath: configPath, initialized: true)),
+      return ok(CreateRequest(configPath: configPath, initialized: true)),
   )
 
   # DestroyRequest provider
@@ -248,8 +248,8 @@ when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name:
       "mylib"
-    initRequest:
-      InitRequest
+    createRequest:
+      CreateRequest
     destroyRequest:
       DestroyRequest
 

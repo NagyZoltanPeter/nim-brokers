@@ -11,7 +11,7 @@ def test_status_first():
     print("=== StatusChanged first ===")
     disc = []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h1 = lib.on_device_status_changed(lambda did, n, o, ts: None)
         h2 = lib.on_device_discovered(lambda did, n, dt, a: disc.append(did))
         for i in range(15):
@@ -28,7 +28,7 @@ def test_discovered_first():
     print("=== Discovered first ===")
     disc = []
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
         h1 = lib.on_device_discovered(lambda did, n, dt, a: disc.append(did))
         h2 = lib.on_device_status_changed(lambda did, n, o, ts: None)
         for i in range(15):

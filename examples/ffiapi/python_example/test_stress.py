@@ -16,7 +16,7 @@ def test_multiple_listeners():
     counts = [0, 0, 0]
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def make_cb(idx):
             def cb(device_id, name, device_type, address):
@@ -60,7 +60,7 @@ def test_both_event_types():
     status_changed = []
 
     with Mylib() as lib:
-        lib.init_request("/tmp/test")
+        lib.create_request("/tmp/test")
 
         def on_disc(device_id, name, device_type, address):
             discovered.append(device_id)
@@ -85,12 +85,12 @@ def test_both_event_types():
 
 
 def test_repeated_init_shutdown():
-    """Repeated init/shutdown cycles with events."""
-    print("=== Repeated init/shutdown cycles ===")
+    """Repeated create/shutdown cycles with events."""
+    print("=== Repeated create/shutdown cycles ===")
     for cycle in range(5):
         events = []
         with Mylib() as lib:
-            lib.init_request("/tmp/test")
+            lib.create_request("/tmp/test")
             h = lib.on_device_discovered(lambda did, n, dt, a: events.append(did))
             for i in range(5):
                 lib.add_device(f"c{cycle}d{i}", "sensor", f"10.0.{cycle}.{i}")
