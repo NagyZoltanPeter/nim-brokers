@@ -112,7 +112,6 @@ proc parseEventBrokerMode(modeNode: NimNode): EventBrokerMode =
     ebApi
   else:
     error("Unknown EventBroker mode: " & $modeNode & ". Expected: mt or API", modeNode)
-    ebDefault
 
 proc generateEventBroker(body: NimNode): NimNode =
   when defined(brokerDebug):
