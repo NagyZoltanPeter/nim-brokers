@@ -165,9 +165,9 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
             let `nIdent` = `objIdent`.`fName`.len
             result.`countFieldIdent` = cint(`nIdent`)
             if `nIdent` > 0:
-              let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](
-                alloc(`nIdent` * sizeof(`cItemIdent`))
-              )
+              let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](alloc(
+                `nIdent` * sizeof(`cItemIdent`)
+              ))
               for `iIdent` in 0 ..< `nIdent`:
                 `arrIdent`[`iIdent`] = `encodeFuncIdent`(`objIdent`.`fName`[`iIdent`])
               result.`fName` = cast[pointer](`arrIdent`)
@@ -239,7 +239,8 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           freeBody.add(
             quote do:
               if `rIdent`.`countFieldIdent` > 0 and not `rIdent`.`fName`.isNil:
-                let `arrIdent` = cast[ptr UncheckedArray[`cItemIdent`]](`rIdent`.`fName`)
+                let `arrIdent` =
+                  cast[ptr UncheckedArray[`cItemIdent`]](`rIdent`.`fName`)
                 for `jIdent` in 0 ..< `rIdent`.`countFieldIdent`:
                   `itemFreeStmts`
                 dealloc(`rIdent`.`fName`)
@@ -259,6 +260,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           if `rIdent`.isNil:
             return
           `freeBody`
+
     )
 
   # Saved for Step 7: will be appended AFTER struct declaration in header
@@ -428,7 +430,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   # Convert PascalCase type name to camelCase for method name
   var camelName = typeDisplayName
   if camelName.len > 0:
-    camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A'..'Z'}))
+    camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A' .. 'Z'}))
 
   if not zeroArgSig.isNil():
     let funcName = snakeName & "_request"
@@ -449,8 +451,8 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         cppParams.add(cType & " " & paramName)
         cppCallArgs.add(", " & paramName)
     let cppMethod =
-      typeDisplayName & "CResult " & camelName & "(" & cppParams.join(", ") & ") { return " &
-      funcName & "(" & cppCallArgs & "); }"
+      typeDisplayName & "CResult " & camelName & "(" & cppParams.join(", ") &
+      ") { return " & funcName & "(" & cppCallArgs & "); }"
     gApiCppClassMethods.add(cppMethod)
 
   # Step 7: Append free_result header declaration and C++ method

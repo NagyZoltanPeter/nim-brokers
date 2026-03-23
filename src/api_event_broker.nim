@@ -61,7 +61,9 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
         newEmptyNode(),
         newTree(
           nnkRecList,
-          newTree(nnkIdentDefs, postfix(ident("handle"), "*"), ident("uint64"), newEmptyNode()),
+          newTree(
+            nnkIdentDefs, postfix(ident("handle"), "*"), ident("uint64"), newEmptyNode()
+          ),
           newTree(
             nnkIdentDefs, postfix(ident("success"), "*"), ident("bool"), newEmptyNode()
           ),
@@ -211,20 +213,15 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
                 cVarIdent,
                 newEmptyNode(),
                 newCall(
-                  ident("allocSharedCString"),
-                  newDotExpr(evtParam, copyNimTree(fName)),
+                  ident("allocSharedCString"), newDotExpr(evtParam, copyNimTree(fName))
                 ),
               ),
             )
           )
           callbackCallArgs.add(cVarIdent)
-          postCallStmts.add(
-            newCall(ident("freeSharedCString"), cVarIdent)
-          )
+          postCallStmts.add(newCall(ident("freeSharedCString"), cVarIdent))
         else:
-          callbackCallArgs.add(
-            newDotExpr(evtParam, copyNimTree(fName))
-          )
+          callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
 
     var cbInvocation = newCall(cbLocal)
     for arg in callbackCallArgs:
@@ -258,12 +255,11 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
             let listenRes = `typeIdent`.listen(ctx, wrapper)
             if listenRes.isOk():
               `handlesIdent`.add(listenRes.get())
-              return ok(RegisterEventListenerResult(
-                handle: listenRes.get().id, success: true
-              ))
+              return ok(
+                RegisterEventListenerResult(handle: listenRes.get().id, success: true)
+              )
             else:
               return err(listenRes.error())
-
           of 1:
             # Unregister by handle
             let targetId = cast[uint64](callbackPtr)
@@ -271,20 +267,17 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
               if `handlesIdent`[i].id == targetId:
                 `typeIdent`.dropListener(ctx, `handlesIdent`[i])
                 `handlesIdent`.del(i)
-                return ok(RegisterEventListenerResult(
-                  handle: targetId, success: true
-                ))
+                return ok(RegisterEventListenerResult(handle: targetId, success: true))
             return err("Handle not found")
-
           of 2:
             # Unregister all for this event type
             for h in `handlesIdent`:
               `typeIdent`.dropListener(ctx, h)
             `handlesIdent`.setLen(0)
             return ok(RegisterEventListenerResult(handle: 0, success: true))
-
           else:
             return err("Unknown action: " & $action)
+
     )
 
   # Step 7: Generate cleanup proc
@@ -295,6 +288,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     quote do:
       proc `cleanupProcIdent`(ctx: BrokerContext) =
         `typeIdent`.dropAllListeners(ctx)
+
   )
 
   # Step 8: Generate C-exported on<TypeName>(ctx, callback) -> uint64
@@ -318,6 +312,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
           res.get().handle
         else:
           0'u64
+
   )
 
   # Step 9: Generate C-exported off<TypeName>(ctx, handle)
@@ -340,6 +335,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
           discard waitFor RegisterEventListenerResult.request(
             BrokerContext(ctx), 1'i32, int32(`typeIdConst`), cast[pointer](handle)
           )
+
   )
 
   # Step 10: Append header declarations

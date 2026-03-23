@@ -73,7 +73,10 @@ proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
     if isSeqType(nimType):
       seqItemTypeName(nimType) & "CItem*"
     else:
-      error("Generic types other than seq[T] are not yet supported in API broker FFI", nimType)
+      error(
+        "Generic types other than seq[T] are not yet supported in API broker FFI",
+        nimType,
+      )
   else:
     error("Unsupported type node kind for C mapping: " & $nimType.kind, nimType)
 
@@ -158,14 +161,14 @@ var gApiEventTypeCounter* {.compileTime.}: int = 0
 var gApiSharedBrokerGenerated* {.compileTime.}: bool = false
   ## Flag: has the shared RegisterEventListenerResult RequestBroker been emitted?
 
-var gApiEventHandlerEntries* {.compileTime.}: seq[(int, string)] = @[]
-  ## Accumulates (typeId, handlerProcName) pairs for the aggregate provider.
+var gApiEventHandlerEntries* {.compileTime.}: seq[(int, string)] =
+  @[] ## Accumulates (typeId, handlerProcName) pairs for the aggregate provider.
 
-var gApiEventCleanupProcNames* {.compileTime.}: seq[string] = @[]
-  ## Accumulates cleanup proc names for delivery thread teardown.
+var gApiEventCleanupProcNames* {.compileTime.}: seq[string] =
+  @[] ## Accumulates cleanup proc names for delivery thread teardown.
 
-var gApiCppClassMethods* {.compileTime.}: seq[string] = @[]
-  ## Accumulates C++ wrapper class method declarations.
+var gApiCppClassMethods* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ wrapper class method declarations.
 
 # ---------------------------------------------------------------------------
 # Compile-time FFI struct registry (for seq[T] support)
@@ -175,7 +178,9 @@ var gApiFfiStructs* {.compileTime.}: seq[(string, seq[(string, string)])] = @[]
   ## Maps ApiType name → [(fieldName, nimTypeName)].
   ## Populated by the `ApiType` macro, consumed by `RequestBroker(API)` for `seq[T]` fields.
 
-proc registerApiFfiStruct*(typeName: string, fields: seq[(string, string)]) {.compileTime.} =
+proc registerApiFfiStruct*(
+    typeName: string, fields: seq[(string, string)]
+) {.compileTime.} =
   gApiFfiStructs.add((typeName, fields))
 
 proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
@@ -184,7 +189,7 @@ proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
       return fields
   error(
     "ApiType '" & typeName & "' not registered. " &
-    "Declare it with `ApiType:` before using `seq[" & typeName & "]`."
+      "Declare it with `ApiType:` before using `seq[" & typeName & "]`."
   )
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
@@ -285,7 +290,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
       if ch == '_' or ch == '-':
         capitalize = true
       elif capitalize:
-        className.add(chr(ord(ch) - 32 * ord(ch in {'a'..'z'})))
+        className.add(chr(ord(ch) - 32 * ord(ch in {'a' .. 'z'})))
         capitalize = false
       else:
         className.add(ch)
@@ -298,7 +303,9 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("    ~" & className & "() { if (ctx_) shutdown(); }\n")
     header.add("    static void initialize() { " & libName & "_initialize(); }\n")
     header.add("    bool init() { ctx_ = " & libName & "_init(); return ctx_ != 0; }\n")
-    header.add("    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n")
+    header.add(
+      "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
+    )
     header.add("    void freeString(char* s) { " & libName & "_free_string(s); }\n")
     header.add("    uint32_t ctx() const { return ctx_; }\n")
     for cppMethod in gApiCppClassMethods:

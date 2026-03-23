@@ -35,9 +35,10 @@ proc test(env, path: string) =
 
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
-  normalized == "nimbledeps" or normalized == "vendor" or
+  normalized == "nimbledeps" or normalized == "vendor" or normalized == "doc" or
     normalized.startsWith("nimbledeps/") or normalized.startsWith("vendor/") or
-    normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/")
+    normalized.startsWith("doc/") or normalized.startsWith("./nimbledeps/") or
+    normalized.startsWith("./vendor/") or normalized.startsWith("./doc/")
 
 proc isNphFile(path: string): bool =
   path.endsWith(".nim") or path.endsWith(".nimble")
@@ -125,14 +126,18 @@ task buildFfiExampleC, "Build FFI API example — pure C application":
   let appDir = "examples/ffiapi/example"
   let buildDir = appDir & "/build"
   mkDir(buildDir)
-  exec "cc -std=c11 -I" & libDir & " -L" & libDir & " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " & appDir & "/main.c"
+  exec "cc -std=c11 -I" & libDir & " -L" & libDir &
+    " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " &
+    appDir & "/main.c"
 
 task buildFfiExampleCpp, "Build FFI API example — modern C++ application":
   let libDir = "examples/ffiapi/nimlib/build"
   let appDir = "examples/ffiapi/cpp_example"
   let buildDir = appDir & "/build"
   mkDir(buildDir)
-  exec "c++ -std=c++17 -I" & libDir & " -L" & libDir & " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " & appDir & "/main.cpp"
+  exec "c++ -std=c++17 -I" & libDir & " -L" & libDir &
+    " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " &
+    appDir & "/main.cpp"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

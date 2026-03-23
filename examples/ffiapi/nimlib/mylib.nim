@@ -62,7 +62,7 @@ RequestBroker(API):
     success*: bool
 
   proc signature*(
-      name: string, deviceType: string, address: string
+    name: string, deviceType: string, address: string
   ): Future[Result[AddDevice, string]] {.async.}
 
 ## RemoveDevice: stop monitoring a device and remove it.
@@ -139,9 +139,7 @@ proc setupProviders(ctx: BrokerContext) =
   # InitRequest provider
   discard InitRequest.setProvider(
     ctx,
-    proc(
-        configPath: string
-    ): Future[Result[InitRequest, string]] {.closure, async.} =
+    proc(configPath: string): Future[Result[InitRequest, string]] {.closure, async.} =
       gConfigPath = configPath
       gInitialized = true
       return ok(InitRequest(configPath: configPath, initialized: true)),
@@ -167,7 +165,9 @@ proc setupProviders(ctx: BrokerContext) =
       let id = gNextDeviceId
       inc gNextDeviceId
       gDevices.add(
-        Device(id: id, name: name, deviceType: deviceType, address: address, online: true)
+        Device(
+          id: id, name: name, deviceType: deviceType, address: address, online: true
+        )
       )
       # Emit a discovery event
       await DeviceDiscovered.emit(

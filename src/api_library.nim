@@ -241,7 +241,12 @@ macro registerBrokerLibrary*(body: untyped): untyped =
             nnkReturnStmt,
             newCall(
               ident("await"),
-              newCall(ident(handlerProcName), provCtxIdent, ident("action"), ident("callbackPtr")),
+              newCall(
+                ident(handlerProcName),
+                provCtxIdent,
+                ident("action"),
+                ident("callbackPtr"),
+              ),
             ),
           )
         ),
@@ -289,11 +294,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       newTree(nnkIdentDefs, ident("callbackPtr"), ident("pointer"), newEmptyNode()),
     )
 
-    let closurePragmas = newTree(
-      nnkPragma,
-      ident("closure"),
-      ident("async"),
-    )
+    let closurePragmas = newTree(nnkPragma, ident("closure"), ident("async"))
 
     let closureLambda = newTree(
       nnkLambda,
@@ -341,9 +342,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     let cleanupCtxIdent = genSym(nskParam, "ctx")
     var cleanupBody = newStmtList()
     for procName in gApiEventCleanupProcNames:
-      cleanupBody.add(
-        newCall(ident(procName), cleanupCtxIdent)
-      )
+      cleanupBody.add(newCall(ident(procName), cleanupCtxIdent))
 
     let cleanupFormalParams = newTree(
       nnkFormalParams,
@@ -467,24 +466,20 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         discard delivShutdownChan[].open()
 
         # Create processing thread arg
-        let procArg = cast[ptr `procThreadArgIdent`](
-          createShared(`procThreadArgIdent`, 1)
-        )
+        let procArg =
+          cast[ptr `procThreadArgIdent`](createShared(`procThreadArgIdent`, 1))
         procArg.ctx = ctx
         procArg.shutdownChan = procShutdownChan
 
         # Create delivery thread arg
-        let delivArg = cast[ptr `delivThreadArgIdent`](
-          createShared(`delivThreadArgIdent`, 1)
-        )
+        let delivArg =
+          cast[ptr `delivThreadArgIdent`](createShared(`delivThreadArgIdent`, 1))
         delivArg.ctx = ctx
         delivArg.shutdownChan = delivShutdownChan
 
         # Allocate entry on shared heap — Thread objects must not be moved
         # after createThread (the pthread holds a pointer to them)
-        let entry = cast[ptr `ctxEntryIdent`](
-          createShared(`ctxEntryIdent`, 1)
-        )
+        let entry = cast[ptr `ctxEntryIdent`](createShared(`ctxEntryIdent`, 1))
         entry.ctx = ctx
         entry.procShutdownChan = procShutdownChan
         entry.delivShutdownChan = delivShutdownChan
@@ -581,7 +576,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   # Append lifecycle function prototypes to header
   appendHeaderDecl(
     "/* Call once before any other library function to initialize the Nim runtime */\n" &
-    generateCFuncProto(initLibFuncName, "void", @[])
+      generateCFuncProto(initLibFuncName, "void", @[])
   )
   appendHeaderDecl(generateCFuncProto(initFuncName, "uint32_t", @[]))
   appendHeaderDecl(generateCFuncProto(shutdownFuncName, "void", @[("ctx", "uint32_t")]))

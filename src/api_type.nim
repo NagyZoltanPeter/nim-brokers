@@ -78,12 +78,7 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
   for (fname, ftype) in fields:
     let cFieldType = toCFieldType(ident(ftype))
     cItemFields.add(
-      newTree(
-        nnkIdentDefs,
-        postfix(ident(fname), "*"),
-        cFieldType,
-        newEmptyNode(),
-      )
+      newTree(nnkIdentDefs, postfix(ident(fname), "*"), cFieldType, newEmptyNode())
     )
 
   result.add(
@@ -119,6 +114,7 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
     quote do:
       proc `encodeProcIdent`*(`itemParam`: `typeIdent`): `cItemIdent` =
         `encodeBody`
+
   )
 
   # 4. Generate C header struct declaration
