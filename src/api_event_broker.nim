@@ -535,10 +535,19 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
 
+    # Build specific Callable type hint from event fields
+    # e.g. Callable[[int, str, str, str], None]
+    var pyTypeHintParams: seq[string] = @[]
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
+    let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
+
     # on_<event> method
     block:
       var m =
-        "    def on_" & pySnakeEvent & "(self, callback: Callable[..., None]) -> int:\n"
+        "    def on_" & pySnakeEvent & "(self, callback: " & pyCallableHint &
+        ") -> int:\n"
       m.add(
         "        \"\"\"Subscribe to " & typeDisplayName &
           " events. Returns a handle for removal.\"\"\"\n"

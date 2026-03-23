@@ -696,7 +696,9 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
     "        self._lib = _load_library(lib_path) if lib_path else _load_library()\n"
   )
   py.add("        self._ctx: int = 0\n")
-  py.add("        self._cb_refs: dict[int, ctypes._CFuncPtr] = {}  # prevent GC\n")
+  py.add(
+    "        self._cb_refs: dict[tuple[str, int], ctypes._CFuncPtr] = {}  # prevent GC\n"
+  )
   py.add("        self._lock = threading.Lock()\n")
   py.add("        self._setup_signatures()\n")
   py.add("        self._lib." & libName & "_initialize()\n")
