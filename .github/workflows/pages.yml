@@ -2,8 +2,10 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [master]
-    paths: [doc/**]
+    branches: [master, main]
+    paths:
+      - 'doc/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -16,16 +18,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+
+      - name: Prepare Pages artifact
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp -R doc/. _site/
+          touch _site/.nojekyll
+
+          if [ ! -f _site/index.html ]; then
+            cat > _site/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <title>nim-brokers documentation</title>
+              <meta http-equiv="refresh" content="0; url=./BrokerDesignPrezi.html">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body>
+              <p>Redirecting to <a href="./BrokerDesignPrezi.html">nim-brokers documentation</a>.</p>
+            </body>
+          </html>
+          EOF
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: doc
       - id: deployment
         uses: actions/deploy-pages@v4
