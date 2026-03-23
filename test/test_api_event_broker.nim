@@ -46,26 +46,16 @@ proc testCallback2(message: cstring, code: int32) {.cdecl.} =
   discard gCallbackCount.fetchAdd(1)
 
 # ── Emitter thread ──────────────────────────────────────────────────────
-var gEmitReady: Atomic[bool]
-
 proc emitterThread(ctx: BrokerContext) {.thread.} =
   setThreadBrokerContext(ctx)
-  gEmitReady.store(true)
-
-  # Give delivery thread time to register provider and listener
-  waitFor sleepAsync(chronos.milliseconds(300))
-
-  # Emit an event
   waitFor ApiTestEvent.emit(ctx, ApiTestEvent(message: "hello from nim", code: 42))
-
-  # Keep event loop alive for delivery
-  waitFor sleepAsync(chronos.seconds(5))
 
 # ── Delivery thread ─────────────────────────────────────────────────────
 # In production, registerBrokerLibrary creates this thread automatically.
 # For unit tests, we create it manually with the event listener provider.
 
 var gDelivReady: Atomic[bool]
+var gStopDelivery: Atomic[bool]
 
 proc deliveryThread(ctx: BrokerContext) {.thread.} =
   setThreadBrokerContext(ctx)
@@ -75,25 +65,29 @@ proc deliveryThread(ctx: BrokerContext) {.thread.} =
   discard RegisterEventListenerResult.setProvider(
     ctx,
     proc(
-        action: int32, eventTypeId: int32, callbackPtr: pointer
+        action: int32, eventTypeId: int32, callbackPtr: pointer, listenerHandle: uint64
     ): Future[Result[RegisterEventListenerResult, string]] {.closure, async.} =
       case eventTypeId
       of ApiTestEventApiTypeId:
-        return await handleApiTestEventRegistration(ctx, action, callbackPtr)
+        return
+          await handleApiTestEventRegistration(ctx, action, callbackPtr, listenerHandle)
       else:
         return err("Unknown event type: " & $eventTypeId),
   )
 
   gDelivReady.store(true)
 
-  proc awaitForever() {.async: (raises: []).} =
-    while true:
+  proc awaitUntilStopped() {.async: (raises: []).} =
+    while not gStopDelivery.load():
       let catchRes = catch:
-        await sleepAsync(chronos.seconds(1))
+        await sleepAsync(chronos.milliseconds(1))
       if catchRes.isErr():
         break
 
-  waitFor awaitForever()
+    ApiTestEvent.dropAllListeners(ctx)
+    RegisterEventListenerResult.clearProvider(ctx)
+
+  waitFor awaitUntilStopped()
 
 suite "API EventBroker (delivery thread)":
   test "register C callback and receive event":
@@ -101,27 +95,29 @@ suite "API EventBroker (delivery thread)":
     gCallbackInvoked.store(false)
     gCallbackCode.store(0)
     gCallbackCount.store(0)
-    gEmitReady.store(false)
     gDelivReady.store(false)
+    gStopDelivery.store(false)
 
     # Start delivery thread first
     var delivThread: Thread[BrokerContext]
     createThread(delivThread, deliveryThread, ctx)
+    defer:
+      gStopDelivery.store(true)
+      delivThread.joinThread()
 
     while not gDelivReady.load():
-      sleep(10)
-
-    # Start emitter thread
-    var emitThread: Thread[BrokerContext]
-    createThread(emitThread, emitterThread, ctx)
-
-    while not gEmitReady.load():
       sleep(10)
 
     # Register C callback via generated exported function
     # This uses waitFor internally to route request to delivery thread
     let handle = onApiTestEvent(uint32(ctx), testCallback)
     check handle > 0'u64
+
+    # Start emitter thread after listener registration completed
+    var emitThread: Thread[BrokerContext]
+    createThread(emitThread, emitterThread, ctx)
+    defer:
+      emitThread.joinThread()
 
     # Wait for the event to be delivered
     proc waitForCallback() {.async.} =
@@ -148,10 +144,14 @@ suite "API EventBroker (delivery thread)":
     gCallbackInvoked.store(false)
     gCallbackCount.store(0)
     gDelivReady.store(false)
+    gStopDelivery.store(false)
 
     # Start delivery thread
     var delivThread: Thread[BrokerContext]
     createThread(delivThread, deliveryThread, ctx)
+    defer:
+      gStopDelivery.store(true)
+      delivThread.joinThread()
 
     while not gDelivReady.load():
       sleep(10)
@@ -173,10 +173,14 @@ suite "API EventBroker (delivery thread)":
     let ctx = NewBrokerContext()
     gCallbackCount.store(0)
     gDelivReady.store(false)
+    gStopDelivery.store(false)
 
     # Start delivery thread
     var delivThread: Thread[BrokerContext]
     createThread(delivThread, deliveryThread, ctx)
+    defer:
+      gStopDelivery.store(true)
+      delivThread.joinThread()
 
     while not gDelivReady.load():
       sleep(10)
