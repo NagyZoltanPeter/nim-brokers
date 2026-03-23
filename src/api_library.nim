@@ -532,8 +532,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
-        except Exception as e:
+        except Exception:
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
           deallocShared(startupState)
+          deallocShared(procArg)
+          deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
 
@@ -566,8 +572,16 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
-        except Exception as e:
+        except Exception:
+          delivShutdownChan[].sendSync(true)
+          joinThread(entry.delivThread)
+          procShutdownChan[].close()
+          delivShutdownChan[].close()
+          deallocShared(procShutdownChan)
+          deallocShared(delivShutdownChan)
           deallocShared(startupState)
+          deallocShared(procArg)
+          deallocShared(delivArg)
           deallocShared(entry)
           return 0'u32
 
