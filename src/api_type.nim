@@ -153,6 +153,31 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
     cppStruct.add("};\n")
     gApiCppStructs.add(cppStruct)
 
+  # 6. Generate Python ctypes Structure + dataclass (when -d:BrokerFfiApiGenPy)
+  when defined(BrokerFfiApiGenPy):
+    # ctypes Structure for CItem
+    block:
+      var pyCStruct = "class " & typeName & "CItem(ctypes.Structure):\n"
+      pyCStruct.add("    _fields_ = [\n")
+      for (fname, ftype) in fields:
+        let ctField = nimTypeToCtypes(ident(ftype))
+        pyCStruct.add("        (\"" & fname & "\", " & ctField & "),\n")
+      pyCStruct.add("    ]")
+      gApiPyCtypesStructs.add(pyCStruct)
+
+    # Python dataclass
+    block:
+      var pyDc = "@dataclass\n"
+      pyDc.add("class " & typeName & ":\n")
+      pyDc.add("    \"\"\"" & typeName & " data object.\"\"\"\n")
+      for (fname, ftype) in fields:
+        let pyType = nimTypeToPyAnnotation(ident(ftype))
+        let snakeFname = toSnakeCase(fname)
+        let pyDefault = nimTypeToPyDefault(ident(ftype))
+        pyDc.add("    " & snakeFname & ": " & pyType & " = " & pyDefault)
+        pyDc.add("\n")
+      gApiPyDataclasses.add(pyDc)
+
   when defined(brokerDebug):
     echo result.repr
 

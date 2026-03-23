@@ -227,9 +227,68 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     for arg in callbackCallArgs:
       cbInvocation.add(arg)
 
+    let registerHelperIdent = ident("register" & typeDisplayName & "Callback")
+    let unregisterHelperIdent = ident("unregister" & typeDisplayName & "Callback")
+    let unregisterAllHelperIdent = ident("unregisterAll" & typeDisplayName & "Callbacks")
+
     result.add(
       quote do:
         var `handlesIdent` {.threadvar.}: seq[`listenerHandleType`]
+    )
+
+    # Non-async helper for registration — closures capture from a normal
+    # stack frame, not from an async Future's environment (which can be freed).
+    result.add(
+      quote do:
+        proc `registerHelperIdent`(
+            ctx: BrokerContext, callbackPtr: pointer
+        ): Result[RegisterEventListenerResult, string] =
+          let `cbLocal` = cast[`callbackTypeIdent`](callbackPtr)
+          let wrapper: `listenerProcType` = proc(
+              `evtParam`: `typeIdent`
+          ): Future[void] {.async: (raises: []).} =
+            when defined(brokerDebug):
+              debugEcho "[API-EVENT] Entering wrapper, cb isNil=", `cbLocal`.isNil()
+            `preCallStmts`
+            when defined(brokerDebug):
+              debugEcho "[API-EVENT] post-alloc, calling cb"
+            {.gcsafe.}:
+              try:
+                `cbInvocation`
+              except Exception:
+                when defined(brokerDebug):
+                  debugEcho "[API-EVENT] Callback exception: ", getCurrentExceptionMsg()
+                discard
+            when defined(brokerDebug):
+              debugEcho "[API-EVENT] cb done, freeing"
+            `postCallStmts`
+
+          let listenRes = `typeIdent`.listen(ctx, wrapper)
+          if listenRes.isOk():
+            `handlesIdent`.add(listenRes.get())
+            return ok(
+              RegisterEventListenerResult(handle: listenRes.get().id, success: true)
+            )
+          else:
+            return err(listenRes.error())
+
+        proc `unregisterHelperIdent`(
+            ctx: BrokerContext, targetId: uint64
+        ): Result[RegisterEventListenerResult, string] =
+          for i in 0 ..< `handlesIdent`.len:
+            if `handlesIdent`[i].id == targetId:
+              `typeIdent`.dropListener(ctx, `handlesIdent`[i])
+              `handlesIdent`.del(i)
+              return ok(RegisterEventListenerResult(handle: targetId, success: true))
+          return err("Handle not found")
+
+        proc `unregisterAllHelperIdent`(
+            ctx: BrokerContext
+        ): Result[RegisterEventListenerResult, string] =
+          for h in `handlesIdent`:
+            `typeIdent`.dropListener(ctx, h)
+          `handlesIdent`.setLen(0)
+          return ok(RegisterEventListenerResult(handle: 0'u64, success: true))
     )
 
     result.add(
@@ -239,42 +298,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         ): Future[Result[RegisterEventListenerResult, string]] {.async: (raises: []).} =
           case action
           of 0:
-            # Register: wrap C callback in a listener proc, call listen()
-            let `cbLocal` = cast[`callbackTypeIdent`](callbackPtr)
-            let wrapper: `listenerProcType` = proc(
-                `evtParam`: `typeIdent`
-            ): Future[void] {.async: (raises: []).} =
-              `preCallStmts`
-              {.gcsafe.}:
-                try:
-                  `cbInvocation`
-                except Exception:
-                  discard
-              `postCallStmts`
-
-            let listenRes = `typeIdent`.listen(ctx, wrapper)
-            if listenRes.isOk():
-              `handlesIdent`.add(listenRes.get())
-              return ok(
-                RegisterEventListenerResult(handle: listenRes.get().id, success: true)
-              )
-            else:
-              return err(listenRes.error())
+            return `registerHelperIdent`(ctx, callbackPtr)
           of 1:
-            # Unregister by handle
             let targetId = cast[uint64](callbackPtr)
-            for i in 0 ..< `handlesIdent`.len:
-              if `handlesIdent`[i].id == targetId:
-                `typeIdent`.dropListener(ctx, `handlesIdent`[i])
-                `handlesIdent`.del(i)
-                return ok(RegisterEventListenerResult(handle: targetId, success: true))
-            return err("Handle not found")
+            return `unregisterHelperIdent`(ctx, targetId)
           of 2:
-            # Unregister all for this event type
-            for h in `handlesIdent`:
-              `typeIdent`.dropListener(ctx, h)
-            `handlesIdent`.setLen(0)
-            return ok(RegisterEventListenerResult(handle: 0, success: true))
+            return `unregisterAllHelperIdent`(ctx)
           else:
             return err("Unknown action: " & $action)
 
@@ -462,7 +491,82 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   offMethod.add("    }")
   gApiCppClassMethods.add(offMethod)
 
-  # Step 11: Append to compile-time accumulators
+  # Step 11: Generate Python on/off event methods (when -d:BrokerFfiApiGenPy)
+  when defined(BrokerFfiApiGenPy):
+    let pySnakeEvent = toSnakeCase(typeDisplayName)
+
+    # CFUNCTYPE definition + argtypes/restype setup
+    # Store CFUNCTYPE as instance attribute (self._XxxCCallback) for use in methods
+    block:
+      var cfuncArgs: seq[string] = @[]
+      cfuncArgs.add("None") # return type
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
+
+      let cfuncName = "self._" & typeDisplayName & "CCallback"
+      gApiPyCallbackSetup.add(
+        cfuncName & " = ctypes.CFUNCTYPE(" & cfuncArgs.join(", ") & ")"
+      )
+      gApiPyCallbackSetup.add(
+        "_lib." & regFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName & "]"
+      )
+      gApiPyCallbackSetup.add(
+        "_lib." & regFuncName & ".restype = ctypes.c_uint64"
+      )
+      gApiPyCallbackSetup.add(
+        "_lib." & deregFuncName & ".argtypes = [ctypes.c_uint32, ctypes.c_uint64]"
+      )
+      gApiPyCallbackSetup.add(
+        "_lib." & deregFuncName & ".restype = None"
+      )
+
+    # Build Python callback parameter list and forwarding
+    var pyCallbackParams: seq[string] = @[]
+    var pyForwards: seq[string] = @[]
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fName = $fieldNames[i]
+        let snakeFname = toSnakeCase(fName)
+        pyCallbackParams.add(snakeFname)
+        if isCStringType(fieldTypes[i]):
+          pyForwards.add(snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\"")
+        else:
+          pyForwards.add(snakeFname)
+
+    let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
+
+    # on_<event> method
+    block:
+      var m = "    def on_" & pySnakeEvent & "(self, callback: Callable[..., None]) -> int:\n"
+      m.add("        \"\"\"Subscribe to " & typeDisplayName & " events. Returns a handle for removal.\"\"\"\n")
+      # Build the trampoline that decodes strings
+      m.add("        @" & cfuncTypeName & "\n")
+      m.add("        def _trampoline(" & pyCallbackParams.join(", ") & "):\n")
+      m.add("            callback(" & pyForwards.join(", ") & ")\n")
+      m.add("        handle = self._lib." & regFuncName & "(self._ctx, _trampoline)\n")
+      m.add("        if handle == 0:\n")
+      m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")
+      m.add("        with self._lock:\n")
+      m.add("            self._cb_refs[(\"" & typeDisplayName & "\", handle)] = _trampoline\n")
+      m.add("        return handle")
+      gApiPyEventMethods.add(m)
+
+    # off_<event> method
+    block:
+      var m = "    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n"
+      m.add("        \"\"\"Unsubscribe from " & typeDisplayName & " events.\n\n")
+      m.add("        Args:\n")
+      m.add("            handle: Listener handle from on_" & pySnakeEvent & "(). 0 removes all.\n")
+      m.add("        \"\"\"\n")
+      m.add("        self._lib." & deregFuncName & "(self._ctx, handle)\n")
+      m.add("        # Note: callback references are intentionally kept alive in\n")
+      m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
+      m.add("        # have in-flight event futures holding the raw function pointer;\n")
+      m.add("        # releasing the ctypes object here could cause a use-after-free.")
+      gApiPyEventMethods.add(m)
+
+  # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))
   gApiEventCleanupProcNames.add(cleanupProcName)
 

@@ -177,6 +177,25 @@ var gApiCppPrivateMembers* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ private static members (trampolines, storage).
 
 # ---------------------------------------------------------------------------
+# Compile-time accumulators for Python wrapper generation
+# ---------------------------------------------------------------------------
+
+var gApiPyCtypesStructs* {.compileTime.}: seq[string] =
+  @[] ## ctypes.Structure subclass definitions (CItem + CResult types).
+
+var gApiPyDataclasses* {.compileTime.}: seq[string] =
+  @[] ## Python dataclass definitions (high-level result/item types).
+
+var gApiPyMethods* {.compileTime.}: seq[string] =
+  @[] ## Python wrapper class method definitions.
+
+var gApiPyEventMethods* {.compileTime.}: seq[string] =
+  @[] ## Python wrapper class on/off event method definitions.
+
+var gApiPyCallbackSetup* {.compileTime.}: seq[string] =
+  @[] ## Python CFUNCTYPE definitions and argtypes/restype setup lines.
+
+# ---------------------------------------------------------------------------
 # Compile-time FFI struct registry (for seq[T] support)
 # ---------------------------------------------------------------------------
 
@@ -278,6 +297,104 @@ proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
       nimTypeToCpp(nimType)
   else:
     nimTypeToCpp(nimType)
+
+# ---------------------------------------------------------------------------
+# Compile-time Python type mapping
+# ---------------------------------------------------------------------------
+
+proc nimTypeToCtypes*(nimType: NimNode): string {.compileTime.} =
+  ## Maps a Nim type to its ctypes equivalent for Structure field definitions.
+  case nimType.kind
+  of nnkIdent:
+    let name = ($nimType).toLowerAscii()
+    case name
+    of "int", "int32":
+      "ctypes.c_int32"
+    of "int8":
+      "ctypes.c_int8"
+    of "int16":
+      "ctypes.c_int16"
+    of "int64":
+      "ctypes.c_int64"
+    of "uint", "uint32":
+      "ctypes.c_uint32"
+    of "uint8":
+      "ctypes.c_uint8"
+    of "uint16":
+      "ctypes.c_uint16"
+    of "uint64":
+      "ctypes.c_uint64"
+    of "float", "float64":
+      "ctypes.c_double"
+    of "float32":
+      "ctypes.c_float"
+    of "bool":
+      "ctypes.c_bool"
+    of "string", "cstring":
+      "ctypes.c_char_p"
+    of "brokercontext":
+      "ctypes.c_uint32"
+    of "pointer":
+      "ctypes.c_void_p"
+    else:
+      $nimType & "CItem" # user-defined ctypes Structure
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      "ctypes.c_void_p" # pointer to array
+    else:
+      "ctypes.c_void_p"
+  else:
+    "ctypes.c_void_p"
+
+proc nimTypeToPyAnnotation*(nimType: NimNode): string {.compileTime.} =
+  ## Maps a Nim type to a Python type annotation for dataclass fields.
+  case nimType.kind
+  of nnkIdent:
+    let name = ($nimType).toLowerAscii()
+    case name
+    of "int", "int8", "int16", "int32", "int64",
+       "uint", "uint8", "uint16", "uint32", "uint64":
+      "int"
+    of "float", "float32", "float64":
+      "float"
+    of "bool":
+      "bool"
+    of "string", "cstring":
+      "str"
+    else:
+      $nimType # user-defined dataclass name
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      "list[" & seqItemTypeName(nimType) & "]"
+    else:
+      "object"
+  else:
+    "object"
+
+proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
+  ## Returns a Python default value for a dataclass field.
+  case nimType.kind
+  of nnkIdent:
+    let name = ($nimType).toLowerAscii()
+    case name
+    of "int", "int8", "int16", "int32", "int64",
+       "uint", "uint8", "uint16", "uint32", "uint64":
+      "0"
+    of "float", "float32", "float64":
+      "0.0"
+    of "bool":
+      "False"
+    of "string", "cstring":
+      "\"\""
+    else:
+      "None"
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      "field(default_factory=list)"
+    else:
+      "None"
+  else:
+    "None"
 
 proc toSnakeCase*(name: string): string {.compileTime.} =
   ## Converts PascalCase/camelCase to snake_case.
@@ -453,6 +570,169 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
 
   header.add("#endif /* " & guardName & " */\n")
   writeFile(headerPath, header)
+
+proc generatePythonFile*(outDir: string) {.compileTime.} =
+  ## Writes the accumulated Python wrapper file.
+  ## Generates a single .py module with ctypes bindings, dataclasses,
+  ## and a Pythonic wrapper class mirroring the C++ class experience.
+  let libName = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
+  let pyPath =
+    if outDir.len > 0:
+      outDir & "/" & libName & ".py"
+    else:
+      libName & ".py"
+
+  # Derive class name from library name (PascalCase)
+  var className = ""
+  var capitalize = true
+  for ch in libName:
+    if ch == '_' or ch == '-':
+      capitalize = true
+    elif capitalize:
+      className.add(chr(ord(ch) - 32 * ord(ch in {'a' .. 'z'})))
+      capitalize = false
+    else:
+      className.add(ch)
+
+  var py = "\"\"\"" & className & " — Python wrapper (auto-generated)\n"
+  py.add("\nGenerated from Nim macros. Do not edit manually.\n"
+  )
+  py.add("\"\"\"\n\n")
+  py.add("from __future__ import annotations\n\n")
+  py.add("import ctypes\n")
+  py.add("import ctypes.util\n")
+  py.add("import os\n")
+  py.add("import sys\n")
+  py.add("import threading\n")
+  py.add("from dataclasses import dataclass, field\n")
+  py.add("from pathlib import Path\n")
+  py.add("from typing import Callable, Optional\n\n")
+
+  # Library loader
+  py.add("# ---------------------------------------------------------------------------\n")
+  py.add("# Library loader\n")
+  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add("def _load_library(name: str = \"" & libName & "\") -> ctypes.CDLL:\n")
+  py.add("    \"\"\"Load the shared library, searching relative to this file first.\"\"\"\n")
+  py.add("    here = Path(__file__).parent\n")
+  py.add("    if sys.platform == \"darwin\":\n")
+  py.add("        suffix = \".dylib\"\n")
+  py.add("    elif sys.platform == \"win32\":\n")
+  py.add("        suffix = \".dll\"\n")
+  py.add("    else:\n")
+  py.add("        suffix = \".so\"\n")
+  py.add("    # Try relative paths first\n")
+  py.add("    for candidate in [\n")
+  py.add("        here / f\"lib{name}{suffix}\",\n")
+  py.add("        here / f\"{name}{suffix}\",\n")
+  py.add("    ]:\n")
+  py.add("        if candidate.exists():\n")
+  py.add("            return ctypes.CDLL(str(candidate))\n")
+  py.add("    # Fall back to system search\n")
+  py.add("    path = ctypes.util.find_library(name)\n")
+  py.add("    if path:\n")
+  py.add("        return ctypes.CDLL(path)\n")
+  py.add("    raise OSError(f\"Cannot find shared library '{name}'\")\n\n")
+
+  # Error class
+  py.add("# ---------------------------------------------------------------------------\n")
+  py.add("# Error type\n")
+  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add("class " & className & "Error(Exception):\n")
+  py.add("    \"\"\"Raised when a library call returns an error.\"\"\"\n")
+  py.add("    pass\n\n")
+
+  # ctypes Structure definitions
+  py.add("# ---------------------------------------------------------------------------\n")
+  py.add("# ctypes structures\n")
+  py.add("# ---------------------------------------------------------------------------\n\n")
+  for s in gApiPyCtypesStructs:
+    py.add(s)
+    py.add("\n\n")
+
+  # Python dataclass definitions
+  py.add("# ---------------------------------------------------------------------------\n")
+  py.add("# Dataclasses\n")
+  py.add("# ---------------------------------------------------------------------------\n\n")
+  for d in gApiPyDataclasses:
+    py.add(d)
+    py.add("\n\n")
+
+  # Wrapper class
+  py.add("# ---------------------------------------------------------------------------\n")
+  py.add("# Wrapper class\n")
+  py.add("# ---------------------------------------------------------------------------\n\n")
+  py.add("class " & className & ":\n")
+  py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
+  py.add("    Usage::\n\n")
+  py.add("        with " & className & "() as lib:\n")
+  py.add("            result = lib.init_request(\"/path/to/config\")\n")
+  py.add("            print(result.config_path)\n")
+  py.add("    \"\"\"\n\n")
+
+  # __init__
+  py.add("    def __init__(self, lib_path: Optional[str] = None) -> None:\n")
+  py.add("        self._lib = _load_library(lib_path) if lib_path else _load_library()\n")
+  py.add("        self._ctx: int = 0\n")
+  py.add("        self._cb_refs: dict[int, ctypes._CFuncPtr] = {}  # prevent GC\n")
+  py.add("        self._lock = threading.Lock()\n")
+  py.add("        self._setup_signatures()\n")
+  py.add("        self._lib." & libName & "_initialize()\n")
+  py.add("        self._ctx = self._lib." & libName & "_init()\n")
+  py.add("        if self._ctx == 0:\n")
+  py.add("            raise " & className & "Error(\"Library initialization failed\")\n\n")
+
+  # _setup_signatures
+  py.add("    def _setup_signatures(self) -> None:\n")
+  py.add("        \"\"\"Configure ctypes argtypes/restype for all C functions.\"\"\"\n")
+  py.add("        _lib = self._lib\n")
+  # Lifecycle functions
+  py.add("        _lib." & libName & "_initialize.argtypes = []\n")
+  py.add("        _lib." & libName & "_initialize.restype = None\n")
+  py.add("        _lib." & libName & "_init.argtypes = []\n")
+  py.add("        _lib." & libName & "_init.restype = ctypes.c_uint32\n")
+  py.add("        _lib." & libName & "_shutdown.argtypes = [ctypes.c_uint32]\n")
+  py.add("        _lib." & libName & "_shutdown.restype = None\n")
+  for setup in gApiPyCallbackSetup:
+    py.add("        " & setup & "\n")
+  py.add("\n")
+
+  # Context manager
+  py.add("    def __enter__(self) -> " & className & ":\n")
+  py.add("        return self\n\n")
+  py.add("    def __exit__(self, *_: object) -> None:\n")
+  py.add("        self.shutdown()\n\n")
+
+  # shutdown
+  py.add("    def shutdown(self) -> None:\n")
+  py.add("        \"\"\"Shut down the library context. Safe to call multiple times.\"\"\"\n")
+  py.add("        if self._ctx:\n")
+  py.add("            self._lib." & libName & "_shutdown(self._ctx)\n")
+  py.add("            self._ctx = 0\n")
+  py.add("            self._cb_refs.clear()\n\n")
+
+  # __del__
+  py.add("    def __del__(self) -> None:\n")
+  py.add("        self.shutdown()\n\n")
+
+  # ctx property
+  py.add("    @property\n")
+  py.add("    def ctx(self) -> int:\n")
+  py.add("        \"\"\"The raw library context handle.\"\"\"\n")
+  py.add("        return self._ctx\n\n")
+
+  # Request methods
+  let pyErrClass = className & "Error"
+  for m in gApiPyMethods:
+    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add("\n\n")
+
+  # Event methods
+  for m in gApiPyEventMethods:
+    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add("\n\n")
+
+  writeFile(pyPath, py)
 
 {.push raises: [].}
 

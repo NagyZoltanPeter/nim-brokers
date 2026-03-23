@@ -119,7 +119,12 @@ task testApi, "Run FFI API broker tests":
       test opt, f
 
 task buildFfiExample, "Build FFI API example library":
-  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build examples/ffiapi/nimlib/mylib.nim"
+  var flags = "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
+  if existsEnv("MM"):
+    flags.add(" --mm:" & getEnv("MM"))
+  if existsEnv("GEN_PY"):
+    flags.add(" -d:BrokerFfiApiGenPy")
+  exec "nim c " & flags & " examples/ffiapi/nimlib/mylib.nim"
 
 task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
   let cmakeDir = "examples/ffiapi"

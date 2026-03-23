@@ -546,6 +546,170 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
 
+  # Step 6c: Generate Python ctypes + dataclass + methods (when -d:BrokerFfiApiGenPy)
+  when defined(BrokerFfiApiGenPy):
+    let pySnakeName = toSnakeCase(typeDisplayName)
+    let pyFreeFuncName = "free_" & pySnakeName & "_result"
+    let pyResultName = typeDisplayName & "Result"
+    let pyCResultName = typeDisplayName & "CResult"
+
+    # ctypes Structure for CResult
+    block:
+      var pyCStruct = "class " & pyCResultName & "(ctypes.Structure):\n"
+      pyCStruct.add("    _fields_ = [\n")
+      pyCStruct.add("        (\"error_message\", ctypes.c_char_p),\n")
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let fType = fieldTypes[i]
+          if isSeqType(fType):
+            pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
+            pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
+          else:
+            let ctField = nimTypeToCtypes(fType)
+            pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
+      pyCStruct.add("    ]")
+      gApiPyCtypesStructs.add(pyCStruct)
+
+    # Python dataclass for result
+    block:
+      var pyDc = "@dataclass\nclass " & pyResultName & ":\n"
+      pyDc.add("    \"\"\"Result of " & typeDisplayName & " request.\"\"\"\n")
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let fType = fieldTypes[i]
+          let snakeFname = toSnakeCase(fName)
+          let pyType = nimTypeToPyAnnotation(fType)
+          let pyDefault = nimTypeToPyDefault(fType)
+          pyDc.add("    " & snakeFname & ": " & pyType & " = " & pyDefault & "\n")
+      else:
+        pyDc.add("    pass\n")
+      gApiPyDataclasses.add(pyDc)
+
+    # Callback setup (argtypes/restype for C functions)
+    block:
+      if not zeroArgSig.isNil():
+        let funcName = pySnakeName & "_request"
+        gApiPyCallbackSetup.add(
+          "_lib." & funcName & ".argtypes = [ctypes.c_uint32]"
+        )
+        gApiPyCallbackSetup.add(
+          "_lib." & funcName & ".restype = " & pyCResultName
+        )
+      if not argSig.isNil():
+        let funcName = pySnakeName & "_request_with_args"
+        var argTypes = "[ctypes.c_uint32"
+        for paramDef in argParams:
+          for i in 0 ..< paramDef.len - 2:
+            let paramType = paramDef[paramDef.len - 2]
+            argTypes.add(", " & nimTypeToCtypes(paramType))
+        argTypes.add("]")
+        gApiPyCallbackSetup.add(
+          "_lib." & funcName & ".argtypes = " & argTypes
+        )
+        gApiPyCallbackSetup.add(
+          "_lib." & funcName & ".restype = " & pyCResultName
+        )
+      # free function
+      gApiPyCallbackSetup.add(
+        "_lib." & pyFreeFuncName & ".argtypes = [ctypes.POINTER(" & pyCResultName & ")]"
+      )
+      gApiPyCallbackSetup.add(
+        "_lib." & pyFreeFuncName & ".restype = None"
+      )
+
+    # Indent prefix for lines inside `try` block (3 levels: class → method → try)
+    const I = "            "
+
+    # Helper to build field extraction code
+    proc pyExtractField(fName, snakeFname: string, fType: NimNode): string {.compileTime.} =
+      if isCStringType(fType):
+        I & snakeFname & " = c." & fName & ".decode(\"utf-8\") if c." & fName & " else \"\"\n"
+      elif isSeqType(fType):
+        let itemType = seqItemTypeName(fType)
+        var s = I & snakeFname & "_list: list[" & itemType & "] = []\n"
+        s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+        s.add(I & "    arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & itemType & "CItem))\n")
+        s.add(I & "    for _i in range(c." & fName & "_count):\n")
+        s.add(I & "        _item = arr[_i]\n")
+        # Build item extraction from CItem fields
+        let itemFields = lookupFfiStruct(itemType)
+        var itemArgs: seq[string] = @[]
+        for (ifName, ifType) in itemFields:
+          let snakeIfName = toSnakeCase(ifName)
+          if ifType.toLowerAscii() in ["string", "cstring"]:
+            itemArgs.add(snakeIfName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName & " else \"\"")
+          else:
+            itemArgs.add(snakeIfName & "=_item." & ifName)
+        s.add(I & "        " & snakeFname & "_list.append(" & itemType & "(\n")
+        for j, arg in itemArgs:
+          s.add(I & "            " & arg)
+          if j < itemArgs.len - 1:
+            s.add(",")
+          s.add("\n")
+        s.add(I & "        ))\n")
+        s.add(I & snakeFname & " = " & snakeFname & "_list\n")
+        s
+      else:
+        I & snakeFname & " = c." & fName & "\n"
+
+    # Generate Python method body (shared between zero-arg and arg variants)
+    proc buildPyMethodBody(funcName, callArgs, pyResultName2, pyFreeFuncName2: string): string {.compileTime.} =
+      result = "        c = self._lib." & funcName & "(" & callArgs & ")\n"
+      result.add("        try:\n")
+      result.add("            if c.error_message:\n")
+      result.add("                raise __LIB_ERROR__(c.error_message.decode(\"utf-8\"))\n")
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let snakeFname = toSnakeCase(fName)
+          result.add(pyExtractField(fName, snakeFname, fieldTypes[i]))
+        var dcArgs: seq[string] = @[]
+        for i in 0 ..< fieldNames.len:
+          let snakeFname = toSnakeCase($fieldNames[i])
+          dcArgs.add(snakeFname & "=" & snakeFname)
+        result.add("            return " & pyResultName2 & "(\n")
+        for j, arg in dcArgs:
+          result.add("                " & arg)
+          if j < dcArgs.len - 1:
+            result.add(",")
+          result.add("\n")
+        result.add("            )\n")
+      else:
+        result.add("            return " & pyResultName2 & "()\n")
+      result.add("        finally:\n")
+      result.add("            self._lib." & pyFreeFuncName2 & "(ctypes.byref(c))")
+
+    # Generate Python method — prefer arg signature if available, else zero-arg
+    if not argSig.isNil():
+      let funcName = pySnakeName & "_request_with_args"
+      var pyParams = "self"
+      var callArgs = "self._ctx"
+      for paramDef in argParams:
+        for i in 0 ..< paramDef.len - 2:
+          let paramName = $paramDef[i]
+          let paramType = paramDef[paramDef.len - 2]
+          let snakeParamName = toSnakeCase(paramName)
+          let pyType = nimTypeToPyAnnotation(paramType)
+          pyParams.add(", " & snakeParamName & ": " & pyType)
+          if isCStringType(paramType):
+            callArgs.add(", " & snakeParamName & ".encode(\"utf-8\")")
+          else:
+            callArgs.add(", " & snakeParamName)
+
+      var pyMethod = "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+      pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+      pyMethod.add(buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName))
+      gApiPyMethods.add(pyMethod)
+
+    elif not zeroArgSig.isNil():
+      let funcName = pySnakeName & "_request"
+      var pyMethod = "    def " & pySnakeName & "(self) -> " & pyResultName & ":\n"
+      pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+      pyMethod.add(buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName))
+      gApiPyMethods.add(pyMethod)
+
   # Step 7: Append free_result header declaration (C side still needs it)
   appendHeaderDecl(freeHeaderProto)
 

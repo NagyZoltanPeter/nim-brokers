@@ -523,6 +523,9 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(entry)
           return 0'u32
 
+        # Brief pause to let processing thread start and register providers
+        sleep(50)
+
         withLock(`globalCtxsLockIdent`):
           `globalCtxsIdent`.add(entry)
 
@@ -586,6 +589,10 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
   generateHeaderFile(outDir)
+
+  # Generate Python wrapper file when requested
+  when defined(BrokerFfiApiGenPy):
+    generatePythonFile(outDir)
 
   when defined(brokerDebug):
     echo result.repr
