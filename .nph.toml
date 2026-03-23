@@ -2,4 +2,5 @@ extend-exclude = [
   "vendor",
   "nimbledeps",
   "doc",
+  "doc/api/*.nim"
 ]

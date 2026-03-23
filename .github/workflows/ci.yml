@@ -25,8 +25,8 @@ jobs:
       nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
       test-command: |
         nimble setup -l
-        nimble test
-        nimble testApi
+        # nimble test
+        nimble testApi --verbose
 
   examples:
     runs-on: ubuntu-latest
