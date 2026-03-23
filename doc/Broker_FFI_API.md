@@ -24,6 +24,11 @@ The FFI API solution provides:
 - a generated C++ wrapper layer inside that header
 - an optional generated Python wrapper module
 
+Generated `CItem` and `CResult` structs use the platform's normal C ABI
+layout. They are not emitted as packed structs, and the generated C header,
+C++ wrapper, and Python `ctypes.Structure` definitions all assume that default
+layout.
+
 The FFI API is designed around a per-library-context runtime model. Each call to
 `<lib>_create()` creates one independent broker context with its own worker
 threads and broker registrations.

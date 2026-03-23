@@ -5,7 +5,8 @@
 ##
 ## When compiled with `-d:BrokerFfiApi`, `ApiType` generates:
 ## 1. The normal Nim type definition (usable from Nim code)
-## 2. A `{.exportc, packed.}` C-compatible item struct (`<TypeName>CItem`)
+## 2. A `{.exportc.}` C-compatible item struct (`<TypeName>CItem`) using the
+##    platform's normal C ABI layout
 ## 3. An encode proc (`encode<TypeName>ToCItem`) that converts Nim → CItem
 ## 4. A C header struct declaration appended to the compile-time accumulator
 ## 5. Registration in the compile-time FFI struct registry
@@ -70,7 +71,7 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
                     field[i] = exportIdentNode(field[i])
       result.add(clonedSect)
 
-  # 2. Emit CItem Nim type ({.exportc, packed.})
+  # 2. Emit CItem Nim type ({.exportc.}, default C ABI layout)
   let cItemIdent = ident(typeName & "CItem")
   let exportedCItemIdent = postfix(copyNimTree(cItemIdent), "*")
 
