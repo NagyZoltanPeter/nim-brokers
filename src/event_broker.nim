@@ -92,20 +92,26 @@ when compileOption("threads"):
   import ./mt_event_broker
   export mt_event_broker
 
+when compileOption("threads") and defined(BrokerFfiApi):
+  import ./api_event_broker
+  export api_event_broker
+
 export chronicles, results, chronos, broker_context
 
 type EventBrokerMode = enum
   ebDefault
   ebMultiThread
+  ebApi
 
 proc parseEventBrokerMode(modeNode: NimNode): EventBrokerMode =
   let raw = ($modeNode).strip().toLowerAscii()
   case raw
   of "mt":
     ebMultiThread
+  of "api":
+    ebApi
   else:
-    error("Unknown EventBroker mode: " & $modeNode & ". Expected: mt", modeNode)
-    ebDefault
+    error("Unknown EventBroker mode: " & $modeNode & ". Expected: mt or API", modeNode)
 
 proc generateEventBroker(body: NimNode): NimNode =
   when defined(brokerDebug):
@@ -517,5 +523,17 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
       .}
     else:
       generateMtEventBroker(body)
+  of ebApi:
+    when not compileOption("threads"):
+      {.
+        error:
+          "EventBroker(API) requires --threads:on. " &
+          "Compile with `--threads:on` to use API EventBroker."
+      .}
+    else:
+      when defined(BrokerFfiApi):
+        generateApiEventBroker(body)
+      else:
+        generateMtEventBroker(body)
   of ebDefault:
     generateEventBroker(body)

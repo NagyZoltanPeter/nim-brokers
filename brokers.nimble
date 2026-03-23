@@ -15,20 +15,71 @@ requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
 requires "https://github.com/status-im/nim-async-channels"
 
-proc test(env, path: string) =
-  exec "nim c " & env & " -r --path:src --outdir:build test/" & path & ".nim"
-
 proc quoteArg(arg: string): string =
   if defined(windows):
     result = '"' & arg.replace("\"", "\"\"") & '"'
   else:
     result = '"' & arg.replace("\"", "\\\"") & '"'
 
+proc compileVariantSuffix(env: string): string =
+  let normalized = env.toLowerAscii()
+  let memoryManager = if normalized.contains("--mm:refc"): "refc" else: "orc"
+  let buildMode = if normalized.contains("-d:release"): "release" else: "debug"
+
+  memoryManager & "_" & buildMode
+
+proc findPythonExe(): string =
+  result = findExe("python3")
+  if result.len == 0:
+    result = findExe("python")
+  if result.len == 0:
+    quit "Python interpreter not found. Install python3 or add it to PATH."
+
+proc buildFfiExampleFlags(generatePy = false): string =
+  result =
+    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
+
+proc buildFfiExampleLibrary(generatePy = false) =
+  exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
+
+proc ffiExamplesBuildDir(): string =
+  "examples/ffiapi/cmake-build"
+
+proc buildFfiCmakeTarget(target = "") =
+  let cmakeDir = "examples/ffiapi"
+  let buildDir = ffiExamplesBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc ffiExampleExecutablePath(exampleDir: string): string =
+  when defined(windows):
+    joinPath(exampleDir, "build", "example.exe")
+  else:
+    joinPath(exampleDir, "build", "example")
+
+proc test(env, path: string) =
+  let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
+  exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
+    ".nim"
+
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
-  normalized == "nimbledeps" or normalized == "vendor" or
+  normalized == "nimbledeps" or normalized == "vendor" or normalized == "doc" or
+    normalized == "build" or normalized == ".venv" or normalized == ".git" or
     normalized.startsWith("nimbledeps/") or normalized.startsWith("vendor/") or
-    normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/")
+    normalized.startsWith("doc/") or normalized.startsWith("build/") or
+    normalized.startsWith(".venv/") or normalized.startsWith(".git/") or
+    normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/") or
+    normalized.startsWith("./doc/") or normalized.startsWith("./build/") or
+    normalized.startsWith("./.venv/") or normalized.startsWith("./.git/")
 
 proc isNphFile(path: string): bool =
   path.endsWith(".nim") or path.endsWith(".nimble")
@@ -52,10 +103,26 @@ proc changedNimFiles(): seq[string] =
 
     result.addUniqueNimFiles(output)
 
+proc collectNimFiles(dir: string, files: var seq[string]) =
+  for kind, path in walkDir(dir, relative = true):
+    let fullPath =
+      if dir == ".":
+        path
+      else:
+        joinPath(dir, path)
+    let normalized = fullPath.replace('\\', '/')
+    case kind
+    of pcDir:
+      if not isExcludedNimPath(normalized):
+        collectNimFiles(normalized, files)
+    of pcFile, pcLinkToFile:
+      if isNphFile(normalized) and not isExcludedNimPath(normalized):
+        files.add(normalized)
+    else:
+      discard
+
 proc allNimFiles(): seq[string] =
-  for path in walkDirRec("."):
-    if isNphFile(path) and not isExcludedNimPath(path):
-      result.add(path)
+  collectNimFiles(".", result)
 
 proc installNphIfNeeded() =
   if findExe("nph").len == 0:
@@ -74,7 +141,10 @@ proc runNph(files: seq[string], emptyMessage: string) =
 task test, "Run all tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
-    for opt in ["--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert"]:
+    for opt in [
+      "--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert --mm:orc",
+      "-d:release -d:gcAssert -d:sysAssert --mm:refc",
+    ]:
       test opt, f
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
@@ -94,6 +164,49 @@ task perftest, "Run performance and stress tests":
       "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
     ]:
       test opt, f
+
+task testApi, "Run FFI API broker tests":
+  let apiTests =
+    ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
+  for f in apiTests:
+    for opt in [
+      "-d:BrokerFfiApi --mm:orc --threads:on", "-d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:BrokerFfiApi -d:release --mm:refc --threads:on",
+    ]:
+      let extraOpt =
+        if f == "test_api_library_init": " --nimMainPrefix:apitestlib" else: ""
+      test opt & extraOpt, f
+
+task buildFfiExample, "Build FFI API example library":
+  buildFfiExampleLibrary()
+
+task buildFfiExamplePy, "Build FFI API example library with generated Python wrapper":
+  buildFfiExampleLibrary(true)
+
+task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
+  buildFfiCmakeTarget()
+
+task buildFfiExampleC, "Build FFI API example — pure C application (via CMake)":
+  buildFfiCmakeTarget("example_c")
+
+task buildFfiExampleCpp, "Build FFI API example — modern C++ application (via CMake)":
+  buildFfiCmakeTarget("example_cpp")
+
+task runFfiExampleC, "Build and run the pure C FFI example application":
+  buildFfiExampleLibrary()
+  buildFfiCmakeTarget("example_c")
+  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/example"))
+
+task runFfiExampleCpp, "Build and run the modern C++ FFI example application":
+  buildFfiExampleLibrary()
+  buildFfiCmakeTarget("example_cpp")
+  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
+
+task runFfiExamplePy, "Build and run the Python wrapper example application":
+  buildFfiExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/ffiapi/python_example/main.py")
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

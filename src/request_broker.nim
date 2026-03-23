@@ -166,6 +166,10 @@ when compileOption("threads"):
   import ./mt_request_broker
   export mt_request_broker
 
+when compileOption("threads") and defined(BrokerFfiApi):
+  import ./api_request_broker, ./api_type
+  export api_request_broker, api_type
+
 export results, chronos, keepItIf, broker_context
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
@@ -178,6 +182,7 @@ type RequestBrokerMode = enum
   rbAsync
   rbSync
   rbMultiThread
+  rbApi
 
 proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
   ## Accept Future[Result[TypeIdent, string]] as the contract.
@@ -206,7 +211,7 @@ proc isSyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
 
 proc isReturnTypeValid(returnType, typeIdent: NimNode, mode: RequestBrokerMode): bool =
   case mode
-  of rbAsync, rbMultiThread:
+  of rbAsync, rbMultiThread, rbApi:
     isAsyncReturnTypeValid(returnType, typeIdent)
   of rbSync:
     isSyncReturnTypeValid(returnType, typeIdent)
@@ -219,7 +224,7 @@ proc makeProcType(
   for param in params:
     formal.add(param)
   case mode
-  of rbAsync, rbMultiThread:
+  of rbAsync, rbMultiThread, rbApi:
     let pragmas = newTree(nnkPragma, ident("async"))
     newTree(nnkProcTy, formal, pragmas)
   of rbSync:
@@ -231,7 +236,7 @@ proc makeProcType(
 
 proc parseMode(modeNode: NimNode): RequestBrokerMode =
   ## Parses the mode selector for the 2-argument macro overload.
-  ## Supported spellings: `sync` / `async` (case-insensitive).
+  ## Supported spellings: `sync` / `async` / `mt` / `API` (case-insensitive).
   let raw = ($modeNode).strip().toLowerAscii()
   case raw
   of "sync":
@@ -240,8 +245,10 @@ proc parseMode(modeNode: NimNode): RequestBrokerMode =
     rbAsync
   of "mt":
     rbMultiThread
+  of "api":
+    rbApi
   else:
-    error("RequestBroker mode must be `sync`, `async` or `mt`", modeNode)
+    error("RequestBroker mode must be `sync`, `async`, `mt` or `API`", modeNode)
 
 proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   when defined(brokerDebug):
@@ -284,7 +291,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
       let returnType = params[0]
       if not isReturnTypeValid(returnType, typeIdent, mode):
         case mode
-        of rbAsync, rbMultiThread:
+        of rbAsync, rbMultiThread, rbApi:
           error(
             "Signature must return Future[Result[`" & $typeIdent & "`, string]]", stmt
           )
@@ -332,7 +339,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
   let returnType =
     case mode
-    of rbAsync, rbMultiThread:
+    of rbAsync, rbMultiThread, rbApi:
       quote:
         Future[Result[`typeIdent`, string]]
     of rbSync:
@@ -478,7 +485,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
           )
     )
     case mode
-    of rbAsync, rbMultiThread:
+    of rbAsync, rbMultiThread, rbApi:
       result.add(
         quote do:
           proc request*(
@@ -649,7 +656,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
     let requestPragmas =
       case mode
-      of rbAsync, rbMultiThread:
+      of rbAsync, rbMultiThread, rbApi:
         quote:
           {.async: (raises: []).}
       of rbSync:
@@ -664,7 +671,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
     var requestBody = newStmtList()
     case mode
-    of rbAsync, rbMultiThread:
+    of rbAsync, rbMultiThread, rbApi:
       requestBody.add(
         quote do:
           return await `forwardCall`
@@ -740,7 +747,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     )
 
     case mode
-    of rbAsync, rbMultiThread:
+    of rbAsync, rbMultiThread, rbApi:
       requestBodyKeyed.add(
         quote do:
           let catchedRes = catch:
@@ -859,5 +866,17 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
       .}
     else:
       generateMtRequestBroker(body)
+  of rbApi:
+    when not compileOption("threads"):
+      {.
+        error:
+          "RequestBroker(API) requires --threads:on. " &
+          "Compile with `--threads:on` to use API RequestBroker."
+      .}
+    else:
+      when defined(BrokerFfiApi):
+        generateApiRequestBroker(body)
+      else:
+        generateMtRequestBroker(body)
   of rbAsync, rbSync:
     generateRequestBroker(body, m)

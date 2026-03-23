@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches:
+      - master
       - main
     tags:
       - '*'
@@ -24,7 +25,41 @@ jobs:
       nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
       test-command: |
         nimble setup -l
-        nimble test
+        nimble test --verbose
+        nimble testApi --verbose
+
+  examples:
+    runs-on: ubuntu-latest
+    env:
+      NIM_VERSION: '2.2.0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies (nimble)
+        run: nimble install -d -y
+
+      - name: Show tool versions
+        run: |
+          nim --version
+          nimble --version
+          cmake --version
+          python3 --version
+
+      - name: Run C FFI example
+        run: nimble runFfiExampleC -y --verbose
+
+      - name: Run C++ FFI example
+        run: nimble runFfiExampleCpp -y --verbose
+
+      - name: Run Python FFI example
+        run: nimble runFfiExamplePy -y --verbose
 
   nph:
     runs-on: ubuntu-latest

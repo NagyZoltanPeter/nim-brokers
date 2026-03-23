@@ -1102,7 +1102,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       if isProviderThread:
         `tvCleanup`
       elif not reqChan.isNil():
-        warn "clearProvider called from non-provider thread; " &
+        trace "clearProvider called from non-provider thread; " &
           "threadvar entries on provider thread are stale but harmless " &
           "(next setProvider will detect and clean them)", brokerType = `typeNameLit`
       if not reqChan.isNil():
