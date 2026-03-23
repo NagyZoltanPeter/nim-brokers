@@ -458,9 +458,22 @@ proc detectOutputDir*(overrideOutDir = ""): string {.compileTime.} =
 
 {.pop.} # temporarily lift raises:[] for compile-time proc using writeFile
 
+proc ensureGeneratedOutputDir*(outDir: string) {.compileTime, raises: [].} =
+  if outDir.len == 0 or dirExists(outDir):
+    return
+
+  try:
+    createDir(outDir)
+  except CatchableError:
+    error(
+      "Failed to create generated output directory '" & outDir & "': " &
+        getCurrentExceptionMsg()
+    )
+
 proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
   ## Writes the accumulated C header file.
   ## Includes C++ wrapper class when gApiCppClassMethods has entries.
+  ensureGeneratedOutputDir(outDir)
   let libName = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
   let guardName = libName.toUpperAscii().replace("-", "_") & "_H"
   let headerPath =
@@ -580,6 +593,7 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   ## Writes the accumulated Python wrapper file.
   ## Generates a single .py module with ctypes bindings, dataclasses,
   ## and a Pythonic wrapper class mirroring the C++ class experience.
+  ensureGeneratedOutputDir(outDir)
   let libName = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
   let pyPath =
     if outDir.len > 0:
