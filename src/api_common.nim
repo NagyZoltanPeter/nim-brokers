@@ -458,7 +458,7 @@ proc detectOutputDir*(overrideOutDir = ""): string {.compileTime.} =
 
 {.pop.} # temporarily lift raises:[] for compile-time proc using writeFile
 
-proc generateHeaderFile*(outDir: string) {.compileTime.} =
+proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
   ## Writes the accumulated C header file.
   ## Includes C++ wrapper class when gApiCppClassMethods has entries.
   let libName = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
@@ -568,9 +568,15 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("#endif /* __cplusplus */\n\n")
 
   header.add("#endif /* " & guardName & " */\n")
-  writeFile(headerPath, header)
+  try:
+    writeFile(headerPath, header)
+  except IOError:
+    error(
+      "Failed to write generated header file '" & headerPath & "': " &
+        getCurrentExceptionMsg()
+    )
 
-proc generatePythonFile*(outDir: string) {.compileTime.} =
+proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   ## Writes the accumulated Python wrapper file.
   ## Generates a single .py module with ctypes bindings, dataclasses,
   ## and a Pythonic wrapper class mirroring the C++ class experience.
@@ -760,7 +766,13 @@ proc generatePythonFile*(outDir: string) {.compileTime.} =
     py.add(m.replace("__LIB_ERROR__", pyErrClass))
     py.add("\n\n")
 
-  writeFile(pyPath, py)
+  try:
+    writeFile(pyPath, py)
+  except IOError:
+    error(
+      "Failed to write generated Python wrapper '" & pyPath & "': " &
+        getCurrentExceptionMsg()
+    )
 
 {.push raises: [].}
 
