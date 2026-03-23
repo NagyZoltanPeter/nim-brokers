@@ -25,7 +25,7 @@ jobs:
       nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
       test-command: |
         nimble setup -l
-        # nimble test
+        nimble test --verbose
         nimble testApi --verbose
 
   examples:
@@ -53,13 +53,13 @@ jobs:
           python3 --version
 
       - name: Run C FFI example
-        run: nimble runFfiExampleC -y
+        run: nimble runFfiExampleC -y --verbose
 
       - name: Run C++ FFI example
-        run: nimble runFfiExampleCpp -y
+        run: nimble runFfiExampleCpp -y --verbose
 
       - name: Run Python FFI example
-        run: nimble runFfiExamplePy -y
+        run: nimble runFfiExamplePy -y --verbose
 
   nph:
     runs-on: ubuntu-latest
