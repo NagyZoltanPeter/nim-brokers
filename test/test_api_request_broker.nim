@@ -34,6 +34,7 @@ RequestBroker(API):
 
 # ── Global synchronization ──────────────────────────────────────────────
 var gProviderReady: Atomic[bool]
+var gStopProvider: Atomic[bool]
 
 # ── Provider thread ─────────────────────────────────────────────────────
 proc providerThread(ctx: BrokerContext) {.thread.} =
@@ -55,8 +56,17 @@ proc providerThread(ctx: BrokerContext) {.thread.} =
 
   gProviderReady.store(true)
 
-  # Run chronos event loop
-  waitFor sleepAsync(chronos.seconds(30))
+  proc awaitUntilStopped() {.async: (raises: []).} =
+    while not gStopProvider.load():
+      let catchRes = catch:
+        await sleepAsync(chronos.milliseconds(1))
+      if catchRes.isErr():
+        break
+
+    ApiTestReq.clearProvider(ctx)
+    ApiTestReqArgs.clearProvider(ctx)
+
+  waitFor awaitUntilStopped()
 
 # ── Requester threads that call exported C functions ────────────────────
 var gZeroArgResult: Atomic[bool]
@@ -97,11 +107,15 @@ suite "API RequestBroker":
   test "zero-arg request via exported C function":
     let ctx = NewBrokerContext()
     gProviderReady.store(false)
+    gStopProvider.store(false)
     gZeroArgResult.store(false)
     gZeroArgCtx = ctx
 
     var provThread: Thread[BrokerContext]
     createThread(provThread, providerThread, ctx)
+    defer:
+      gStopProvider.store(true)
+      provThread.joinThread()
 
     # Wait for provider to be ready (busy-wait, no chronos on main thread)
     while not gProviderReady.load():
@@ -117,11 +131,15 @@ suite "API RequestBroker":
   test "arg-based request via exported C function":
     let ctx = NewBrokerContext()
     gProviderReady.store(false)
+    gStopProvider.store(false)
     gArgResult.store(false)
     gArgCtx = ctx
 
     var provThread: Thread[BrokerContext]
     createThread(provThread, providerThread, ctx)
+    defer:
+      gStopProvider.store(true)
+      provThread.joinThread()
 
     while not gProviderReady.load():
       sleep(10)
