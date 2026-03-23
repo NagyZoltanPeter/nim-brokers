@@ -158,20 +158,20 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
         `procThreadArgIdent` = object
           ctx: BrokerContext
-          shutdownChan: ptr AsyncChannel[bool]
+          shutdownFlag: Atomic[int]
           startupState: ptr `startupStateIdent`
 
         `delivThreadArgIdent` = object
           ctx: BrokerContext
-          shutdownChan: ptr AsyncChannel[bool]
+          shutdownFlag: Atomic[int]
           startupState: ptr `startupStateIdent`
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
           procThread: Thread[ptr `procThreadArgIdent`]
           delivThread: Thread[ptr `delivThreadArgIdent`]
-          procShutdownChan: ptr AsyncChannel[bool]
-          delivShutdownChan: ptr AsyncChannel[bool]
+          procArg: ptr `procThreadArgIdent`
+          delivArg: ptr `delivThreadArgIdent`
           active: bool
 
   )
@@ -194,13 +194,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
       proc `initLibFuncIdent`() {.exportc: `initLibFuncNameLit`, cdecl, dynlib.} =
         if not `nimInitializedIdent`.exchange(true):
-          `nimMainIdent`()
-          when declared(setupForeignThreadGc):
-            setupForeignThreadGc()
-          when declared(nimGC_setStackBottom):
-            var locals {.volatile, noinit.}: pointer
-            locals = addr(locals)
-            nimGC_setStackBottom(locals)
+          when compileOption("app", "lib"):
+            `nimMainIdent`()
+            when declared(setupForeignThreadGc):
+              setupForeignThreadGc()
+            when declared(nimGC_setStackBottom):
+              var locals {.volatile, noinit.}: pointer
+              locals = addr(locals)
+              nimGC_setStackBottom(locals)
 
   )
 
@@ -226,6 +227,18 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         else:
           while `globalCtxsInitIdent`.load(moAcquire) != 2:
             discard
+
+      proc releaseCtxEntryResources(entryPtr: ptr `ctxEntryIdent`) =
+        if entryPtr.isNil:
+          return
+
+        if not entryPtr.procArg.isNil:
+          deallocShared(entryPtr.procArg)
+
+        if not entryPtr.delivArg.isNil:
+          deallocShared(entryPtr.delivArg)
+
+        deallocShared(entryPtr)
 
   )
 
@@ -372,6 +385,31 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     )
     result.add(cleanupProc)
 
+  let cleanupAllRequestsIdent = ident("cleanupAllApiRequestProviders")
+  block:
+    let cleanupCtxIdent = genSym(nskParam, "ctx")
+    var cleanupBody = newStmtList()
+    for procName in gApiRequestCleanupProcNames:
+      cleanupBody.add(newCall(ident(procName), cleanupCtxIdent))
+
+    let cleanupFormalParams = newTree(
+      nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, cleanupCtxIdent, ident("BrokerContext"), newEmptyNode()),
+    )
+
+    let cleanupProc = newTree(
+      nnkProcDef,
+      cleanupAllRequestsIdent,
+      newEmptyNode(),
+      newEmptyNode(),
+      cleanupFormalParams,
+      newEmptyNode(),
+      newEmptyNode(),
+      cleanupBody,
+    )
+    result.add(cleanupProc)
+
   # Processing thread proc
   result.add(
     quote do:
@@ -394,15 +432,23 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
         arg.startupState.processingReady.store(1, moRelease)
 
-        proc awaitShutdown(
-            shutdownChan: ptr AsyncChannel[bool]
-        ) {.async: (raises: []).} =
-          let recvRes = catch:
-            await shutdownChan.recv()
-          if recvRes.isErr():
-            discard # channel closed, shutting down
+        proc awaitShutdown(shutdownFlag: ptr Atomic[int]) {.async: (raises: []).} =
+          while shutdownFlag[].load(moAcquire) != 1:
+            let sleepRes = catch:
+              await sleepAsync(milliseconds(1))
+            if sleepRes.isErr():
+              discard
 
-        waitFor awaitShutdown(arg.shutdownChan)
+        proc drainAsyncOps() {.async: (raises: []).} =
+          let sleepRes = catch:
+            await sleepAsync(milliseconds(1))
+          if sleepRes.isErr():
+            discard
+
+        waitFor awaitShutdown(addr arg.shutdownFlag)
+
+        `cleanupAllRequestsIdent`(arg.ctx)
+        waitFor drainAsyncOps()
 
   )
 
@@ -421,15 +467,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
           arg.startupState.deliveryReady.store(1, moRelease)
 
-          proc awaitShutdown(
-              shutdownChan: ptr AsyncChannel[bool]
-          ) {.async: (raises: []).} =
-            let recvRes = catch:
-              await shutdownChan.recv()
-            if recvRes.isErr():
-              discard
+          proc awaitShutdown(shutdownFlag: ptr Atomic[int]) {.async: (raises: []).} =
+            while shutdownFlag[].load(moAcquire) != 1:
+              let sleepRes = catch:
+                await sleepAsync(milliseconds(1))
+              if sleepRes.isErr():
+                discard
 
-          waitFor awaitShutdown(arg.shutdownChan)
+          waitFor awaitShutdown(addr arg.shutdownFlag)
 
           # Cleanup: drop all registered event listeners
           `cleanupAllIdent`(arg.ctx)
@@ -444,15 +489,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
           arg.startupState.deliveryReady.store(1, moRelease)
 
-          proc awaitShutdown(
-              shutdownChan: ptr AsyncChannel[bool]
-          ) {.async: (raises: []).} =
-            let recvRes = catch:
-              await shutdownChan.recv()
-            if recvRes.isErr():
-              discard
+          proc awaitShutdown(shutdownFlag: ptr Atomic[int]) {.async: (raises: []).} =
+            while shutdownFlag[].load(moAcquire) != 1:
+              let sleepRes = catch:
+                await sleepAsync(milliseconds(1))
+              if sleepRes.isErr():
+                discard
 
-          waitFor awaitShutdown(arg.shutdownChan)
+          waitFor awaitShutdown(addr arg.shutdownFlag)
 
     )
   else:
@@ -463,15 +507,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
           arg.startupState.deliveryReady.store(1, moRelease)
 
-          proc awaitShutdown(
-              shutdownChan: ptr AsyncChannel[bool]
-          ) {.async: (raises: []).} =
-            let recvRes = catch:
-              await shutdownChan.recv()
-            if recvRes.isErr():
-              discard
+          proc awaitShutdown(shutdownFlag: ptr Atomic[int]) {.async: (raises: []).} =
+            while shutdownFlag[].load(moAcquire) != 1:
+              let sleepRes = catch:
+                await sleepAsync(milliseconds(1))
+              if sleepRes.isErr():
+                discard
 
-          waitFor awaitShutdown(arg.shutdownChan)
+          waitFor awaitShutdown(addr arg.shutdownFlag)
 
     )
 
@@ -485,77 +528,50 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         if uint32(ctx) == 0:
           ctx = NewBrokerContext()
 
-        # Create shutdown channels
-        let procShutdownChan =
-          cast[ptr AsyncChannel[bool]](createShared(AsyncChannel[bool], 1))
-        discard procShutdownChan[].open()
-
-        let delivShutdownChan =
-          cast[ptr AsyncChannel[bool]](createShared(AsyncChannel[bool], 1))
-        discard delivShutdownChan[].open()
-
         let startupState =
           cast[ptr `startupStateIdent`](createShared(`startupStateIdent`, 1))
-        startupState.deliveryReady.store(0, moRelaxed)
-        startupState.processingReady.store(0, moRelaxed)
+        startupState.deliveryReady.store(0, moRelease)
+        startupState.processingReady.store(0, moRelease)
 
         # Create processing thread arg
         let procArg =
           cast[ptr `procThreadArgIdent`](createShared(`procThreadArgIdent`, 1))
         procArg.ctx = ctx
-        procArg.shutdownChan = procShutdownChan
+        procArg.shutdownFlag.store(0, moRelease)
         procArg.startupState = startupState
 
         # Create delivery thread arg
         let delivArg =
           cast[ptr `delivThreadArgIdent`](createShared(`delivThreadArgIdent`, 1))
         delivArg.ctx = ctx
-        delivArg.shutdownChan = delivShutdownChan
+        delivArg.shutdownFlag.store(0, moRelease)
         delivArg.startupState = startupState
 
         # Allocate entry on shared heap — Thread objects must not be moved
         # after createThread (the pthread holds a pointer to them)
         let entry = cast[ptr `ctxEntryIdent`](createShared(`ctxEntryIdent`, 1))
         entry.ctx = ctx
-        entry.procShutdownChan = procShutdownChan
-        entry.delivShutdownChan = delivShutdownChan
+        entry.procArg = procArg
+        entry.delivArg = delivArg
         entry.active = true
 
         # Start delivery thread first (so provider is ready for requests)
         try:
           createThread(entry.delivThread, `delivThreadProcIdent`, delivArg)
         except ResourceExhaustedError:
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
         except Exception:
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
 
         if not `waitForStartupProcIdent`(addr startupState.deliveryReady, 5000):
-          delivShutdownChan[].sendSync(true)
+          delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
 
         # Start processing thread
@@ -563,43 +579,25 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           createThread(entry.procThread, `procThreadProcIdent`, procArg)
         except ResourceExhaustedError:
           # Shut down delivery thread
-          delivShutdownChan[].sendSync(true)
+          delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
         except Exception:
-          delivShutdownChan[].sendSync(true)
+          delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
 
         if not `waitForStartupProcIdent`(addr startupState.processingReady, 5000):
-          procShutdownChan[].sendSync(true)
-          delivShutdownChan[].sendSync(true)
+          procArg.shutdownFlag.store(1, moRelease)
+          delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.procThread)
           joinThread(entry.delivThread)
-          procShutdownChan[].close()
-          delivShutdownChan[].close()
-          deallocShared(procShutdownChan)
-          deallocShared(delivShutdownChan)
           deallocShared(startupState)
-          deallocShared(procArg)
-          deallocShared(delivArg)
-          deallocShared(entry)
+          releaseCtxEntryResources(entry)
           return 0'u32
 
         deallocShared(startupState)
@@ -623,24 +621,41 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         var entryPtr: ptr `ctxEntryIdent` = nil
         withLock(`globalCtxsLockIdent`):
           for i in 0 ..< `globalCtxsIdent`.len:
-            if `globalCtxsIdent`[i].ctx == brokerCtx and `globalCtxsIdent`[i].active:
-              entryPtr = `globalCtxsIdent`[i]
+            let candidate = `globalCtxsIdent`[i]
+            if candidate.isNil:
+              continue
+            if candidate.ctx == brokerCtx and candidate.active:
+              entryPtr = candidate
+              entryPtr.active = false
+              `globalCtxsIdent`[i] = nil
               break
 
         if entryPtr.isNil:
           return
 
         # Signal delivery thread shutdown first
-        entryPtr.delivShutdownChan[].sendSync(true)
+        entryPtr.delivArg.shutdownFlag.store(1, moRelease)
         joinThread(entryPtr.delivThread)
 
+        cleanupAllApiRequestProviders(brokerCtx)
+
         # Then signal processing thread shutdown
-        entryPtr.procShutdownChan[].sendSync(true)
+        entryPtr.procArg.shutdownFlag.store(1, moRelease)
         joinThread(entryPtr.procThread)
 
-        # Mark inactive
+        cleanupAllApiRequestProviders(brokerCtx)
+
         withLock(`globalCtxsLockIdent`):
-          entryPtr.active = false
+          var writeIdx = 0
+          for i in 0 ..< `globalCtxsIdent`.len:
+            let candidate = `globalCtxsIdent`[i]
+            if candidate.isNil:
+              continue
+            `globalCtxsIdent`[writeIdx] = candidate
+            inc writeIdx
+          `globalCtxsIdent`.setLen(writeIdx)
+
+        releaseCtxEntryResources(entryPtr)
 
   )
 

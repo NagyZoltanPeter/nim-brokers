@@ -82,6 +82,19 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   result = newStmtList()
   result.add(generateMtRequestBroker(body))
 
+  # Step 2b: Generate per-type provider cleanup proc and register it for
+  # registerBrokerLibrary shutdown.
+  let cleanupProcName = "cleanupApiRequestProvider_" & typeDisplayName
+  let cleanupProcIdent = ident(cleanupProcName)
+  let cleanupCtxIdent = genSym(nskParam, "ctx")
+  result.add(
+    quote do:
+      proc `cleanupProcIdent`(`cleanupCtxIdent`: BrokerContext) =
+        `typeIdent`.clearProvider(`cleanupCtxIdent`)
+
+  )
+  gApiRequestCleanupProcNames.add(cleanupProcName)
+
   # Step 3: Generate C result struct type
   let cResultIdent = ident(typeDisplayName & "CResult")
   let exportedCResultIdent = postfix(copyNimTree(cResultIdent), "*")

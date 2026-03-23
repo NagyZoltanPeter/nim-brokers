@@ -1,3 +1,4 @@
+var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] = @[]
 ## API Common
 ## ----------
 ## Shared utilities for FFI API broker code generation.
