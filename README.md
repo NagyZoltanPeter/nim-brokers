@@ -248,6 +248,47 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
 
+## Broker FFI API
+
+nim-brokers also includes a macro-based FFI API layer for exposing broker-driven services as a shared library with generated C, C++, and optional Python bindings.
+
+At a high level:
+
+- `RequestBroker(API)` and `EventBroker(API)` generate C-callable request and event registration functions.
+- `registerBrokerLibrary` generates the library lifecycle exports, context registry, startup threads, and wrapper artifacts.
+- The generated library uses a two-thread runtime model per created context:
+  - a processing thread for request providers
+  - a delivery thread for event listener registration and foreign-language callbacks
+
+The process-wide runtime init and per-context lifecycle are intentionally separate:
+
+- `mylib_initialize()` initializes the Nim runtime once per process.
+- `mylib_create()` creates one broker-backed library context.
+- `CreateRequest` is the broker request used for post-create configuration.
+- `DestroyRequest` is the broker request used for orderly teardown before shutdown.
+
+Build the example shared library with:
+
+```sh
+nimble buildFfiExample
+```
+
+Generate the Python wrapper as well with:
+
+```sh
+nimble buildFfiExamplePy
+```
+
+Run the examples with:
+
+```sh
+nimble runFfiExampleC
+nimble runFfiExampleCpp
+nimble runFfiExamplePy
+```
+
+See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
+
 ## BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
