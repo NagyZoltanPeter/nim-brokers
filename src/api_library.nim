@@ -37,9 +37,9 @@ export results, chronos, chronicles, broker_context, api_common, asyncchannels
 
 proc parseLibraryConfig(
     body: NimNode
-): tuple[name: string, createRequest: NimNode, destroyRequest: NimNode, refType: NimNode] {.
-    compileTime
-.} =
+): tuple[
+  name: string, createRequest: NimNode, destroyRequest: NimNode, refType: NimNode
+] {.compileTime.} =
   var name = ""
   var createReq: NimNode = nil
   var destroyReq: NimNode = nil

@@ -555,7 +555,9 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("    " & className & "(" & className & "&&) = delete;\n")
     header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
     header.add("    static void initialize() { " & libName & "_initialize(); }\n")
-    header.add("    bool create() { ctx_ = " & libName & "_create(); return ctx_ != 0; }\n")
+    header.add(
+      "    bool create() { ctx_ = " & libName & "_create(); return ctx_ != 0; }\n"
+    )
     header.add(
       "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
     )

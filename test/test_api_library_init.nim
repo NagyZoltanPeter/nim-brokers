@@ -58,9 +58,12 @@ proc setupProviders(ctx: BrokerContext) =
   )
 
 registerBrokerLibrary:
-  name: "apitestlib"
-  createRequest: CreateRequest
-  destroyRequest: DestroyRequest
+  name:
+    "apitestlib"
+  createRequest:
+    CreateRequest
+  destroyRequest:
+    DestroyRequest
 
 var gReadyCallbackCount: Atomic[int32]
 var gReadyCallbackValue: Atomic[int32]

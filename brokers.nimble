@@ -146,14 +146,16 @@ task perftest, "Run performance and stress tests":
       test opt, f
 
 task testApi, "Run FFI API broker tests":
-  let apiTests = ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
+  let apiTests =
+    ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
   for f in apiTests:
     for opt in [
       "-d:BrokerFfiApi --mm:orc --threads:on", "-d:BrokerFfiApi --mm:refc --threads:on",
       "-d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      let extraOpt = if f == "test_api_library_init": " --nimMainPrefix:apitestlib" else: ""
+      let extraOpt =
+        if f == "test_api_library_init": " --nimMainPrefix:apitestlib" else: ""
       test opt & extraOpt, f
 
 task buildFfiExample, "Build FFI API example library":
