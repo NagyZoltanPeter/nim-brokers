@@ -84,6 +84,7 @@
     .chip-green  { background: rgba(100,244,172,0.12); color: var(--logos-green); border: 1px solid var(--logos-green-dim); }
     .chip-orange { background: rgba(249,136,42,0.18); color: var(--logos-orange); border: 1px solid #b35f10; }
     .chip-red    { background: rgba(244,92,116,0.15); color: var(--logos-red); border: 1px solid #a02040; }
+    .chip-api    { background: rgba(92,156,245,0.10); color: #b6d2ff; border: 1px solid var(--logos-blue); }
 
     /* Callout boxes */
     .callout {
@@ -311,6 +312,9 @@
     <a href="#/4" style="text-decoration:none;"><span class="chip chip-orange" style="cursor:pointer;">MultiRequestBroker</span></a>
     <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
     <a href="#/6" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread Brokers</span></a>
+  </div>
+  <div style="display:flex; justify-content:center; margin-top:0.6em;">
+    <a href="#/9" style="text-decoration:none;"><span class="chip chip-api" style="cursor:pointer;">Broker FFI-API</span></a>
   </div>
   <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section</p>
 </section>
@@ -1356,154 +1360,442 @@ OnFilterSubscribeEvent.emit(
 </section><!-- /Section 6 -->
 
 <!-- ══════════════════════════════════════════════════
-     SECTION 7 — SUMMARY (vertical stack)
+     SECTION 7 — QUICK REFERENCE (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+  <h2>Broker Family: Quick Reference</h2>
+
+  <table style="margin-top:0.5em;">
+    <thead>
+      <tr>
+        <th>Aspect</th>
+        <th><span class="chip chip-blue">EventBroker</span></th>
+        <th><span class="chip chip-green">RequestBroker</span></th>
+        <th><span class="chip chip-orange">MultiRequestBroker</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pattern</td>
+        <td>Reactive pub/sub</td>
+        <td>Proactive req/resp</td>
+        <td>Proactive fan-out</td>
+      </tr>
+      <tr>
+        <td>Direction</td>
+        <td>N emitters &rarr; N listeners</td>
+        <td>N requesters &rarr; 1 provider</td>
+        <td>N requesters &rarr; N providers</td>
+      </tr>
+      <tr>
+        <td>Return type</td>
+        <td><code>void</code> per listener</td>
+        <td><code>Result[T, string]</code></td>
+        <td><code>Result[seq[T], string]</code></td>
+      </tr>
+      <tr>
+        <td>Mode</td>
+        <td>Always async</td>
+        <td>Async <em>or</em> Sync</td>
+        <td>Always async</td>
+      </tr>
+      <tr>
+        <td>Providers / Listeners</td>
+        <td>Unlimited, handle per reg</td>
+        <td>Exactly 1 per context</td>
+        <td>Unlimited, handle per reg</td>
+      </tr>
+      <tr>
+        <td>Context-aware</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td>Multi-thread <code>(mt)</code></td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td>Use when</td>
+        <td>Something happened; notify who cares</td>
+        <td>Query from one authoritative source</td>
+        <td>Gather data from multiple subsystems</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 8 — BEFORE VS AFTER (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+  <h2>Before vs After</h2>
+
+  <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+    <div>
+      <div class="callout bad" style="margin-bottom:0.4em;">
+        <p style="font-size:0.9em;"><strong style="color:var(--logos-red);">Before — Raw callbacks</strong></p>
+      </div>
+      <ul>
+        <li>Callback stored in <code>seq</code> with no cleanup path</li>
+        <li>Sender must import receiver's types</li>
+        <li>Init order matters — wire-up at the right moment</li>
+        <li>Stale captures after owner destruction</li>
+        <li>Adding a subscriber &rarr; modifying unrelated code</li>
+      </ul>
+    </div>
+    <div>
+      <div class="callout good" style="margin-bottom:0.4em;">
+        <p style="font-size:0.9em;"><strong style="color:var(--logos-green);">After — Brokers</strong></p>
+      </div>
+      <ul>
+        <li>Handle stored on owner; cleanup explicit (<code>start</code>/<code>stop</code>)</li>
+        <li>Emitter and listener share only the <em>event module</em></li>
+        <li>Register/provide <em>after</em> construction — order doesn't matter</li>
+        <li>No stale captures — handle tracks registration</li>
+        <li>Adding a subscriber &rarr; one <code>listen()</code> in its own module</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="fragment callout good" style="margin-top:0.7em; text-align:center;">
+    <p>Modules interact through a <strong>shared vocabulary of typed events and requests</strong> — not through direct references or init-time wiring.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 9 — BROKER FFI-API (vertical stack)
 ══════════════════════════════════════════════════ -->
 <section>
 
-  <!-- 7.0  Comparison table -->
-  <section>
-    <h2>Broker Family: Quick Reference</h2>
-
-    <table style="margin-top:0.5em;">
-      <thead>
-        <tr>
-          <th>Aspect</th>
-          <th><span class="chip chip-blue">EventBroker</span></th>
-          <th><span class="chip chip-green">RequestBroker</span></th>
-          <th><span class="chip chip-orange">MultiRequestBroker</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Pattern</td>
-          <td>Reactive pub/sub</td>
-          <td>Proactive req/resp</td>
-          <td>Proactive fan-out</td>
-        </tr>
-        <tr>
-          <td>Direction</td>
-          <td>N emitters &rarr; N listeners</td>
-          <td>N requesters &rarr; 1 provider</td>
-          <td>N requesters &rarr; N providers</td>
-        </tr>
-        <tr>
-          <td>Return type</td>
-          <td><code>void</code> per listener</td>
-          <td><code>Result[T, string]</code></td>
-          <td><code>Result[seq[T], string]</code></td>
-        </tr>
-        <tr>
-          <td>Mode</td>
-          <td>Always async</td>
-          <td>Async <em>or</em> Sync</td>
-          <td>Always async</td>
-        </tr>
-        <tr>
-          <td>Providers / Listeners</td>
-          <td>Unlimited, handle per reg</td>
-          <td>Exactly 1 per context</td>
-          <td>Unlimited, handle per reg</td>
-        </tr>
-        <tr>
-          <td>Context-aware</td>
-          <td>Yes</td>
-          <td>Yes</td>
-          <td>Yes</td>
-        </tr>
-        <tr>
-          <td>Multi-thread <code>(mt)</code></td>
-          <td>Yes</td>
-          <td>Yes</td>
-          <td>No</td>
-        </tr>
-        <tr>
-          <td>Use when</td>
-          <td>Something happened; notify who cares</td>
-          <td>Query from one authoritative source</td>
-          <td>Gather data from multiple subsystems</td>
-        </tr>
-      </tbody>
-    </table>
+  <!-- 9.0  Section header -->
+  <section class="section-header">
+    <div class="num">09</div>
+    <h2 style="color:var(--logos-blue);">Broker FFI-API</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; C ABI &middot; C++ and Python wrappers</p>
   </section>
 
-  <!-- 7.1  Before vs After -->
+  <!-- 9.1  The Concept -->
   <section>
-    <h2>Before vs After</h2>
+    <h2>The Concept</h2>
 
     <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
       <div>
-        <div class="callout bad" style="margin-bottom:0.4em;">
-          <p style="font-size:0.9em;"><strong style="color:var(--logos-red);">Before — Raw callbacks</strong></p>
+        <div class="callout good">
+          <p><strong>Clean contractual design:</strong> the library interface is described as a typed set of broker requests and broker events, so the contract stays explicit, reviewable, and compile-time checked.</p>
         </div>
-        <ul>
-          <li>Callback stored in <code>seq</code> with no cleanup path</li>
-          <li>Sender must import receiver's types</li>
-          <li>Init order matters — wire-up at the right moment</li>
-          <li>Stale captures after owner destruction</li>
-          <li>Adding a subscriber &rarr; modifying unrelated code</li>
-        </ul>
+
+        <div class="callout" style="margin-top:0.7em;">
+          <p><strong>Decoupled modules:</strong> the same broker vocabulary lets internal components collaborate without direct references, while <code>BrokerContext</code> keeps independent instances sandboxed from each other.</p>
+        </div>
       </div>
+
       <div>
-        <div class="callout good" style="margin-bottom:0.4em;">
-          <p style="font-size:0.9em;"><strong style="color:var(--logos-green);">After — Brokers</strong></p>
+        <div class="callout" style="margin-top:0.1em;">
+          <p><strong>Less FFI boilerplate:</strong> request exports, event callback registration, wrappers, and lifecycle glue are all generated from the API definitions instead of being hand-written and repeated.</p>
         </div>
-        <ul>
-          <li>Handle stored on owner; cleanup explicit (<code>start</code>/<code>stop</code>)</li>
-          <li>Emitter and listener share only the <em>event module</em></li>
-          <li>Register/provide <em>after</em> construction — order doesn't matter</li>
-          <li>No stale captures — handle tracks registration</li>
-          <li>Adding a subscriber &rarr; one <code>listen()</code> in its own module</li>
-        </ul>
+
+        <div class="callout warn" style="margin-top:0.7em;">
+          <p><strong>Safer by construction:</strong> the generated layer removes much of the manual synchronization, ownership plumbing, and calling-convention risk that usually makes FFI code fragile and easy to misuse.</p>
+        </div>
       </div>
     </div>
-
-    <div class="fragment callout good" style="margin-top:0.7em; text-align:center;">
-      <p>Modules interact through a <strong>shared vocabulary of typed events and requests</strong> — not through direct references or init-time wiring.</p>
-    </div>
-  </section>
-
-  <!-- 7.2  Opportunities -->
-  <section>
-    <h2 style="color:var(--logos-green);">Opportunities!</h2>
-    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">What brokers are good for beyond decoupling&hellip;</p>
-
-    <ul style="font-size:0.88em; line-height:1.7;">
-      <li class="fragment"><strong>Define API contracts for modules</strong> — strict compile-time enforcement</li>
-      <li class="fragment"><strong>Easy mocking for testing</strong> — swap <code>setProvider</code> with a stub, no rewiring</li>
-      <li class="fragment"><strong>Serializable out of the box</strong> — event &amp; request types are plain objects</li>
-      <li class="fragment"><strong>IPC between threads or processes</strong> — broker boundary is a natural serialization seam</li>
-      <li class="fragment"><strong>FFI &amp; plugin interface</strong> — with CBOR / JSON / Protobuf serialization it&rsquo;s straightforward to implement the same interface in other languages</li>
-    </ul>
 
     <div class="fragment callout good" style="margin-top:0.8em; text-align:center;">
-      <p>Brokers turn internal module boundaries into <strong>portable, testable, language-agnostic interfaces</strong>.</p>
+      <p>In short: define the API once as brokers, then let the generator turn that contract into a usable shared-library interface.</p>
     </div>
   </section>
 
-  <!-- 7.3  Thank you / Q&A -->
-  <section class="title-slide">
-    <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue); margin-bottom:0.8em;">LOGOS · MESSAGING</div>
-    <h2 style="font-size:2em; margin-bottom:0.4em;">Questions?</h2>
-    <p style="color:var(--logos-muted); font-size:0.8em; margin-bottom:0.8em;">
-      Source:
-    </p>
-    <div style="text-align:center; margin-bottom:1em;">
-      <code style="color:var(--logos-green); font-size:0.78em;">
-        <a href="https://github.com/NagyZoltanPeter/nim-brokers"
-           style="color:var(--logos-green); text-decoration:underline;">
-           NagyZoltanPeter/nim-brokers
-        </a>
-      </code>
-    </div>
-    <div style="display:flex; justify-content:center; gap:0.6em; flex-wrap:wrap;">
-      <span class="chip chip-blue">event_broker.nim</span>
-      <span class="chip chip-green">request_broker.nim</span>
-      <span class="chip chip-orange">multi_request_broker.nim</span>
-      <span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);">broker_context.nim</span>
+  <!-- 9.2  Concept -->
+  <section>
+    <h2>What the Broker FFI-API Adds</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Use brokers as the library contract</h3>
+        <ul>
+          <li><code>RequestBroker(API)</code> turns typed requests into exported C ABI functions</li>
+          <li class="fragment"><code>EventBroker(API)</code> turns typed events into callback registration functions</li>
+          <li class="fragment"><code>registerBrokerLibrary</code> adds lifecycle, context management, header generation, and wrapper generation</li>
+          <li class="fragment">The Nim implementation stays decoupled internally while foreign callers see a stable library interface</li>
+        </ul>
+      </div>
+
+      <div>
+        <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.45em; align-items:center; margin-top:0.6em;">
+          <div class="diag-box accent">Foreign App<br><small style="color:var(--logos-muted);">C / C++ / Python</small></div>
+          <div class="arrow">&harr;</div>
+          <div class="diag-box">Generated ABI<br><small style="color:var(--logos-muted);">header + wrappers</small></div>
+          <div class="arrow">&harr;</div>
+          <div class="diag-box green">API Brokers<br><small style="color:var(--logos-muted);">requests + events</small></div>
+        </div>
+
+        <div class="callout good" style="margin-top:0.8em;">
+          <p><strong>Result:</strong> instead of hand-writing fragile callback tables and request trampolines, the broker declarations become the authoritative API schema.</p>
+        </div>
+      </div>
     </div>
   </section>
 
-</section><!-- /Section 7 -->
+  <!-- 9.3  Threading model -->
+  <section>
+    <h2>Threading Model of a Created Library Context</h2>
+
+    <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.6em; align-items:center; margin-top:0.7em;">
+      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_create()<br/>blocking request calls</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box">Delivery thread<br><small style="color:var(--logos-muted);">owns listener registration<br/>runs foreign callbacks</small></div>
+      <div class="arrow">&larr;&rarr;</div>
+      <div class="diag-box green">Processing thread<br><small style="color:var(--logos-muted);">runs setupProviders(ctx)<br/>executes request providers</small></div>
+    </div>
+
+    <div class="cols cols-2" style="margin-top:0.9em;">
+      <div>
+        <h3>Create semantics</h3>
+        <ul>
+          <li><code>mylib_initialize()</code> is process-wide runtime initialization</li>
+          <li><code>mylib_create()</code> starts the delivery thread first, then the processing thread</li>
+          <li>Creation blocks until both threads report readiness</li>
+          <li>When create returns, listener registration and API requests are immediately usable</li>
+        </ul>
+      </div>
+
+      <div>
+        <h3>Execution ownership</h3>
+        <ul>
+          <li>Request providers always run on the <strong>processing thread</strong></li>
+          <li>Foreign event callbacks always run on the <strong>delivery thread</strong></li>
+          <li>Generated C/C++/Python request calls block until the provider finishes</li>
+          <li>Events cross from Nim emitters to the delivery thread before invoking the FFI callback</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout warn" style="margin-top:0.7em;">
+      <p><strong>Operational rule:</strong> keep foreign callbacks lightweight. Blocking in a callback stalls later callback delivery on the delivery thread.</p>
+    </div>
+  </section>
+
+  <!-- 9.4  Nim library authoring -->
+  <section>
+    <h2>Author the Library Interface in Nim</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <span class="filepath">examples/ffiapi/nimlib/mylib.nim</span>
+        <pre><code class="language-nim" data-trim data-line-numbers="1-8|10-16|18-23|25-28">
+when defined(BrokerFfiApi):
+  import brokers/api_library
+
+RequestBroker(API):
+  type CreateRequest = object
+    configPath*: string
+    initialized*: bool
+  proc signature*(configPath: string):
+    Future[Result[CreateRequest, string]] {.async.}
+
+EventBroker(API):
+  type DeviceDiscovered = object
+    deviceId*: int64
+    name*: string
+    deviceType*: string
+    address*: string
+
+when defined(BrokerFfiApi):
+  registerBrokerLibrary:
+    name: "mylib"
+    createRequest: CreateRequest
+    destroyRequest: DestroyRequest
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout good">
+          <p><strong>Single source of truth:</strong> the request and event types define the foreign API surface as well as the internal broker contracts.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>Provider setup:</strong> <code>setupProviders(ctx)</code> runs on the processing thread and installs the request handlers that back the exported ABI.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>Wrapper generation:</strong> from this one declaration set, the build emits <code>libmylib</code>, <code>mylib.h</code>, the C++ wrapper class, and optionally the Python ctypes wrapper.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9.5  C++ consumer -->
+  <section>
+    <h2>Consume It from C++ Through the Generated Wrapper</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <span class="filepath">examples/ffiapi/cpp_example/main.cpp</span>
+        <pre><code class="language-cpp" data-trim data-line-numbers="1-7|9-14|16-23|25-31">
+Mylib::initialize();
+Mylib lib;
+if (!lib.create()) {
+  fprintf(stderr, "FATAL: library create failed\n");
+  return 1;
+}
+
+auto h_disc = lib.onDeviceDiscovered(
+  [](int64_t id, const std::string_view name,
+     const std::string_view type,
+     const std::string_view addr) {
+    printf("discovered: %.*s\n",
+           (int)name.size(), name.data());
+  });
+
+auto res = lib.createRequest("/opt/devices.yaml");
+auto add = lib.addDevice("Core-Router", "router", "10.0.0.1");
+auto list = lib.listDevices();
+
+lib.offDeviceDiscovered(h_disc);
+lib.shutdown();
+        </code></pre>
+      </div>
+
+      <div>
+        <h3>Why the wrapper matters</h3>
+        <ul>
+          <li>No manual <code>free_*_result</code> calls in user code</li>
+          <li><code>Result&lt;T&gt;</code> wrappers preserve the broker success/error model</li>
+          <li>Callbacks use C++ lambdas while the generated code keeps the C ABI underneath</li>
+          <li>The library consumer never needs to know about the internal broker graph</li>
+        </ul>
+
+        <div class="callout warn" style="margin-top:0.7em;">
+          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread, while <code>createRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> synchronously wait for provider work on the processing thread.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9.6  Build flags -->
+  <section>
+    <h2>Build Flags That Enable the Feature</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <pre><code class="language-sh" data-trim>
+nim c \
+  -d:BrokerFfiApi \
+  --threads:on \
+  --app:lib \
+  --nimMainPrefix:mylib \
+  --mm:orc \
+  --outdir:examples/ffiapi/nimlib/build \
+  examples/ffiapi/nimlib/mylib.nim
+        </code></pre>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p>Add <code>-d:BrokerFfiApiGenPy</code> when you also want the generated Python wrapper module.</p>
+        </div>
+      </div>
+
+      <div>
+        <h3>Required knobs</h3>
+        <ul>
+          <li><code>-d:BrokerFfiApi</code> enables the library generator path</li>
+          <li><code>--threads:on</code> enables the delivery and processing thread runtime</li>
+          <li><code>--app:lib</code> builds a shared library instead of an executable</li>
+          <li><code>--nimMainPrefix:mylib</code> must match <code>name: "mylib"</code> in <code>registerBrokerLibrary</code></li>
+          <li><code>--mm:orc</code> or <code>--mm:refc</code> are the supported memory managers</li>
+        </ul>
+
+        <div class="callout good" style="margin-top:0.7em;">
+          <p>In this repository the convenience entry points are <code>nimble buildFfiExample</code>, <code>nimble buildFfiExampleCpp</code>, and <code>nimble runFfiExampleCpp</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 9 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 10 — SUMMARY (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 10.1  Summary -->
+  <section>
+    <h2>Summary</h2>
+    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.7em;">A simple way to navigate the broker toolbox:</p>
+
+    <div class="cols cols-3" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout good">
+          <p><strong>1. Start with single-thread brokers</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use async or sync brokers when you want mockable, type-safe decoupling between layers inside one module, library, or application without introducing thread complexity.</p>
+      </div>
+
+      <div>
+        <div class="callout warn">
+          <p><strong>2. Move to multi-thread brokers</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use multi-thread brokers when you want lightweight in-process IPC, need to off-load work onto worker threads, and still want communication between those threads to remain structured and safe.</p>
+      </div>
+
+      <div>
+        <div class="callout" style="border-left-color: var(--logos-blue);">
+          <p><strong>3. Choose the FFI-API layer</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use the Broker FFI-API when the library is meant to be consumed broadly from other languages or external runtimes and you want a safe shared-library surface without hand-written plumbing.</p>
+      </div>
+    </div>
+
+    <div class="fragment callout good" style="margin-top:0.9em; text-align:center;">
+      <p>Pick the smallest layer that solves the problem: in-thread decoupling first, cross-thread messaging next, and generated FFI only when the boundary must leave Nim.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 10 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 11 — OPPORTUNITIES (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 11.1  Opportunities -->
+  <section>
+    <h2 style="color:var(--logos-green);">Opportunities!</h2>
+    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">A natural extension point beyond the core broker runtime:</p>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout good">
+          <p><strong>Serializable by design:</strong> broker requests and events are plain structured data, which makes them a strong fit for explicit serialization formats.</p>
+        </div>
+
+        <ul style="font-size:0.82em; line-height:1.7; margin-top:0.7em;">
+          <li class="fragment">Encode broker payloads with CBOR, JSON, or Protobuf</li>
+          <li class="fragment">Reuse the same contract across process boundaries</li>
+          <li class="fragment">Treat the broker interface as a stable schema for plugins, RPC, or transport layers</li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="diag-box accent" style="font-size:0.72em; padding:0.8em;">
+          Broker request / event type<br><br>
+          <span style="color:var(--logos-muted);">&darr; serialize &darr;</span><br><br>
+          JSON / CBOR / Protobuf<br><br>
+          <span style="color:var(--logos-muted);">&darr; transport or storage &darr;</span><br><br>
+          RPC &middot; plugin boundary &middot; cross-process API
+        </div>
+
+        <div class="fragment callout" style="margin-top:0.8em;">
+          <p>This is where brokers can evolve from an internal decoupling tool into a portable interface definition that survives beyond a single process.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 11 -->
 
 </div><!-- /.slides -->
 </div><!-- /.reveal -->
