@@ -46,6 +46,25 @@ proc buildFfiExampleFlags(generatePy = false): string =
 proc buildFfiExampleLibrary(generatePy = false) =
   exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
 
+proc ffiExamplesBuildDir(): string =
+  "examples/ffiapi/cmake-build"
+
+proc buildFfiCmakeTarget(target = "") =
+  let cmakeDir = "examples/ffiapi"
+  let buildDir = ffiExamplesBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc ffiExampleExecutablePath(exampleDir: string): string =
+  when defined(windows):
+    joinPath(exampleDir, "build", "example.exe")
+  else:
+    joinPath(exampleDir, "build", "example")
+
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
   exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
@@ -143,25 +162,23 @@ task buildFfiExamplePy, "Build FFI API example library with generated Python wra
   buildFfiExampleLibrary(true)
 
 task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
-  let cmakeDir = "examples/ffiapi"
-  let buildDir = cmakeDir & "/cmake-build"
-  mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
-  exec "cmake --build " & buildDir
+  buildFfiCmakeTarget()
 
 task buildFfiExampleC, "Build FFI API example — pure C application (via CMake)":
-  let cmakeDir = "examples/ffiapi"
-  let buildDir = cmakeDir & "/cmake-build"
-  mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
-  exec "cmake --build " & buildDir & " --target example_c"
+  buildFfiCmakeTarget("example_c")
 
 task buildFfiExampleCpp, "Build FFI API example — modern C++ application (via CMake)":
-  let cmakeDir = "examples/ffiapi"
-  let buildDir = cmakeDir & "/cmake-build"
-  mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
-  exec "cmake --build " & buildDir & " --target example_cpp"
+  buildFfiCmakeTarget("example_cpp")
+
+task runFfiExampleC, "Build and run the pure C FFI example application":
+  buildFfiExampleLibrary()
+  buildFfiCmakeTarget("example_c")
+  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/example"))
+
+task runFfiExampleCpp, "Build and run the modern C++ FFI example application":
+  buildFfiExampleLibrary()
+  buildFfiCmakeTarget("example_cpp")
+  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
 task runFfiExamplePy, "Build and run the Python wrapper example application":
   buildFfiExampleLibrary(true)
