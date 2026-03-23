@@ -426,39 +426,115 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       generateCFuncProto(funcName, typeDisplayName & "CResult", headerParams)
     appendHeaderDecl(funcProto)
 
-  # Step 6: Generate C++ wrapper class methods
+  # Step 6: Generate C++ result struct + modern class methods
+  let freeFuncName = "free_" & snakeName & "_result"
+
+  # Use placeholder for namespace — resolved during header generation
+  let cppNs = "__CPP_NS__"
+
   # Convert PascalCase type name to camelCase for method name
   var camelName = typeDisplayName
   if camelName.len > 0:
     camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A' .. 'Z'}))
 
+  # 6a: Generate C++ result struct with RAII constructor from C struct
+  block:
+    let cppResultName = typeDisplayName & "Result"
+    var cppStruct = "struct " & cppResultName & " {\n"
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fName = $fieldNames[i]
+        let fType = fieldTypes[i]
+        let cppType = nimTypeToCpp(fType)
+        cppStruct.add("    " & cppType & " " & fName)
+        if cppType in ["bool"]:
+          cppStruct.add(" = false")
+        elif cppType in ["int8_t", "int16_t", "int32_t", "int64_t",
+                          "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+                          "float", "double"]:
+          cppStruct.add(" = 0")
+        cppStruct.add(";\n")
+    cppStruct.add("    " & cppResultName & "() = default;\n")
+    # Constructor from C result — copies data then frees the C struct
+    let cResultName = typeDisplayName & "CResult"
+    cppStruct.add("    explicit " & cppResultName & "(" & cResultName & "& c)")
+    if hasInlineFields:
+      var ctorInits: seq[string] = @[]
+      for i in 0 ..< fieldNames.len:
+        let fName = $fieldNames[i]
+        let fType = fieldTypes[i]
+        if isCStringType(fType):
+          ctorInits.add(fName & "(c." & fName & " ? c." & fName & " : \"\")")
+        elif isSeqType(fType):
+          discard # handled in body
+        else:
+          ctorInits.add(fName & "(c." & fName & ")")
+      if ctorInits.len > 0:
+        cppStruct.add("\n        : " & ctorInits.join("\n        , "))
+    cppStruct.add(" {\n")
+    # Handle seq[T] fields in the constructor body
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fName = $fieldNames[i]
+        let fType = fieldTypes[i]
+        if isSeqType(fType):
+          let itemTypeName = seqItemTypeName(fType)
+          let countField = fName & "_count"
+          cppStruct.add("        if (c." & fName & " && c." & countField & " > 0) {\n")
+          cppStruct.add("            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." & fName & ");\n")
+          cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
+          cppStruct.add("            for (int32_t i = 0; i < c." & countField & "; ++i)\n")
+          cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
+          cppStruct.add("        }\n")
+    cppStruct.add("        " & freeFuncName & "(&c);\n")
+    cppStruct.add("    }\n")
+    cppStruct.add("};\n")
+    gApiCppStructs.add(cppStruct)
+
+  # 6b: Generate modern C++ class methods returning Result<CppStruct>
+  let cppResultType = cppNs & "::Result<" & cppNs & "::" & typeDisplayName & "Result>"
+
   if not zeroArgSig.isNil():
     let funcName = snakeName & "_request"
-    let cppMethod =
-      typeDisplayName & "CResult " & camelName & "() { return " & funcName & "(ctx_); }"
+    var cppMethod = "inline " & cppResultType & " " & camelName & "() {\n"
+    cppMethod.add("        auto c = " & funcName & "(ctx_);\n")
+    cppMethod.add("        if (c.error_message) {\n")
+    cppMethod.add("            std::string err(c.error_message);\n")
+    cppMethod.add("            " & freeFuncName & "(&c);\n")
+    cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
+    cppMethod.add("        }\n")
+    cppMethod.add("        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName & "Result(c));\n")
+    cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
 
   if not argSig.isNil():
     let funcName = snakeName & "_request_with_args"
-    # Build C++ method params and call args
+    # Build C++ method params and C call args
     var cppParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
     for paramDef in argParams:
       for i in 0 ..< paramDef.len - 2:
         let paramName = $paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
-        let cType = nimTypeToCInput(paramType)
-        cppParams.add(cType & " " & paramName)
-        cppCallArgs.add(", " & paramName)
-    let cppMethod =
-      typeDisplayName & "CResult " & camelName & "(" & cppParams.join(", ") &
-      ") { return " & funcName & "(" & cppCallArgs & "); }"
+        let cppParamType = nimTypeToCppParam(paramType)
+        cppParams.add(cppParamType & " " & paramName)
+        if isCStringType(paramType):
+          cppCallArgs.add(", " & paramName & ".c_str()")
+        else:
+          cppCallArgs.add(", " & paramName)
+    var cppMethod = "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
+    cppMethod.add("        auto c = " & funcName & "(" & cppCallArgs & ");\n")
+    cppMethod.add("        if (c.error_message) {\n")
+    cppMethod.add("            std::string err(c.error_message);\n")
+    cppMethod.add("            " & freeFuncName & "(&c);\n")
+    cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
+    cppMethod.add("        }\n")
+    cppMethod.add("        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName & "Result(c));\n")
+    cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
 
-  # Step 7: Append free_result header declaration and C++ method
-  # (must come after the struct declaration in Step 5/6)
+  # Step 7: Append free_result header declaration (C side still needs it)
   appendHeaderDecl(freeHeaderProto)
-  gApiCppClassMethods.add(cppFreeMethod)
 
   when defined(brokerDebug):
     echo result.repr

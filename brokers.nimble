@@ -135,7 +135,7 @@ task buildFfiExampleCpp, "Build FFI API example — modern C++ application":
   let appDir = "examples/ffiapi/cpp_example"
   let buildDir = appDir & "/build"
   mkDir(buildDir)
-  exec "c++ -std=c++17 -I" & libDir & " -L" & libDir &
+  exec "c++ -std=c++20 -I" & libDir & " -L" & libDir &
     " -lmylib -Wl,-rpath,@loader_path/../../nimlib/build -o " & buildDir & "/example " &
     appDir & "/main.cpp"
 

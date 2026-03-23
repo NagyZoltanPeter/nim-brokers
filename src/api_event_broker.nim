@@ -369,16 +369,79 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   )
   appendHeaderDecl(deregProto)
 
-  # C++ wrapper class methods
-  let cppOnMethod =
-    "uint64_t on" & typeDisplayName & "(" & typeDisplayName & "CCallback cb) { return ::" &
-    regFuncName & "(ctx_, cb); }"
-  gApiCppClassMethods.add(cppOnMethod)
+  # C++ wrapper: trampoline + multiplexed std::function callbacks
+  # Build the std::function signature from event fields
+  var cppCbParams: seq[string] = @[]
+  var cppTrampolineForwards: seq[string] = @[]
+  if hasInlineFields:
+    for i in 0 ..< fieldNames.len:
+      let fName = $fieldNames[i]
+      let cbType = nimTypeToCppCallbackParam(fieldTypes[i])
+      cppCbParams.add(cbType)
+      # Trampoline converts const char* → std::string_view (const in signature, not ctor)
+      if isCStringType(fieldTypes[i]):
+        cppTrampolineForwards.add("std::string_view(" & fName & " ? " & fName & " : \"\")")
+      else:
+        cppTrampolineForwards.add(fName)
 
-  let cppOffMethod =
-    "void off" & typeDisplayName & "(uint64_t handle = 0) { ::" & deregFuncName &
-    "(ctx_, handle); }"
-  gApiCppClassMethods.add(cppOffMethod)
+  let cppFuncType = "std::function<void(" & cppCbParams.join(", ") & ")>"
+  let prefix = "s" & typeDisplayName
+
+  # Build C callback param list for the trampoline signature
+  var cTrampolineParams: seq[string] = @[]
+  if hasInlineFields:
+    for i in 0 ..< fieldNames.len:
+      let fName = $fieldNames[i]
+      let cType = nimTypeToCInput(fieldTypes[i])
+      cTrampolineParams.add(cType & " " & fName)
+
+  # Private static members
+  var priv = ""
+  priv.add("    // --- " & typeDisplayName & " event callback storage ---\n")
+  priv.add("    static inline std::mutex " & prefix & "Mtx_;\n")
+  priv.add("    static inline std::unordered_map<uint64_t, " & cppFuncType & "> " & prefix & "Cbs_;\n")
+  priv.add("    static inline uint64_t " & prefix & "CHandle_ = 0; // C-layer trampoline handle\n")
+  priv.add("    static inline std::atomic<uint64_t> " & prefix & "NextId_{1};\n")
+  # Trampoline function
+  priv.add("    static void " & prefix & "Trampoline_(" & cTrampolineParams.join(", ") & ") {\n")
+  priv.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
+  priv.add("        for (auto& [id, fn] : " & prefix & "Cbs_) {\n")
+  priv.add("            if (fn) fn(" & cppTrampolineForwards.join(", ") & ");\n")
+  priv.add("        }\n")
+  priv.add("    }\n")
+  gApiCppPrivateMembers.add(priv)
+
+  # Public on/off methods
+  var onMethod = "uint64_t on" & typeDisplayName & "(" & cppFuncType & " fn) {\n"
+  onMethod.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
+  onMethod.add("        // Register C trampoline once with the Nim layer\n")
+  onMethod.add("        if (" & prefix & "CHandle_ == 0) {\n")
+  onMethod.add("            " & prefix & "CHandle_ = ::" & regFuncName & "(ctx_, " & prefix & "Trampoline_);\n")
+  onMethod.add("        }\n")
+  onMethod.add("        uint64_t id = " & prefix & "NextId_.fetch_add(1);\n")
+  onMethod.add("        " & prefix & "Cbs_[id] = std::move(fn);\n")
+  onMethod.add("        return id;\n")
+  onMethod.add("    }")
+  gApiCppClassMethods.add(onMethod)
+
+  var offMethod = "void off" & typeDisplayName & "(uint64_t handle = 0) {\n"
+  offMethod.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
+  offMethod.add("        if (handle == 0) {\n")
+  offMethod.add("            // Remove all\n")
+  offMethod.add("            " & prefix & "Cbs_.clear();\n")
+  offMethod.add("            if (" & prefix & "CHandle_) {\n")
+  offMethod.add("                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n")
+  offMethod.add("                " & prefix & "CHandle_ = 0;\n")
+  offMethod.add("            }\n")
+  offMethod.add("        } else {\n")
+  offMethod.add("            " & prefix & "Cbs_.erase(handle);\n")
+  offMethod.add("            if (" & prefix & "Cbs_.empty() && " & prefix & "CHandle_) {\n")
+  offMethod.add("                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n")
+  offMethod.add("                " & prefix & "CHandle_ = 0;\n")
+  offMethod.add("            }\n")
+  offMethod.add("        }\n")
+  offMethod.add("    }")
+  gApiCppClassMethods.add(offMethod)
 
   # Step 11: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))

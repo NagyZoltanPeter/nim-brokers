@@ -123,6 +123,35 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
     headerFields.add((fname, nimTypeToCOutput(ident(ftype))))
   appendHeaderDecl(generateCStruct(typeName & "CItem", headerFields))
 
+  # 5. Generate C++ struct with std::string fields + ctor from CItem
+  block:
+    var cppStruct = "struct " & typeName & " {\n"
+    for (fname, ftype) in fields:
+      let cppType = nimTypeToCpp(ident(ftype))
+      cppStruct.add("    " & cppType & " " & fname)
+      # Default initializers for non-class types
+      if cppType in ["bool"]:
+        cppStruct.add(" = false")
+      elif cppType in ["int8_t", "int16_t", "int32_t", "int64_t",
+                        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+                        "float", "double"]:
+        cppStruct.add(" = 0")
+      cppStruct.add(";\n")
+    cppStruct.add("    " & typeName & "() = default;\n")
+    # Constructor from CItem
+    cppStruct.add("    explicit " & typeName & "(const " & typeName & "CItem& c)")
+    var ctorInits: seq[string] = @[]
+    for (fname, ftype) in fields:
+      if ftype.toLowerAscii() in ["string", "cstring"]:
+        ctorInits.add(fname & "(c." & fname & " ? c." & fname & " : \"\")")
+      else:
+        ctorInits.add(fname & "(c." & fname & ")")
+    if ctorInits.len > 0:
+      cppStruct.add("\n        : " & ctorInits.join("\n        , "))
+    cppStruct.add(" {}\n")
+    cppStruct.add("};\n")
+    gApiCppStructs.add(cppStruct)
+
   when defined(brokerDebug):
     echo result.repr
 

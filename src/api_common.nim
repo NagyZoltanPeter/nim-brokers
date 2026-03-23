@@ -170,6 +170,12 @@ var gApiEventCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiCppClassMethods* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ wrapper class method declarations.
 
+var gApiCppStructs* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ struct definitions (emitted before the class).
+
+var gApiCppPrivateMembers* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ private static members (trampolines, storage).
+
 # ---------------------------------------------------------------------------
 # Compile-time FFI struct registry (for seq[T] support)
 # ---------------------------------------------------------------------------
@@ -194,6 +200,84 @@ proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
   gApiHeaderDeclarations.add(decl)
+
+# ---------------------------------------------------------------------------
+# Compile-time C++ type mapping
+# ---------------------------------------------------------------------------
+
+proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
+  ## Maps a Nim type to its C++ equivalent for struct fields / return types.
+  ## string → std::string, seq[T] → std::vector<T>, primitives pass through.
+  case nimType.kind
+  of nnkIdent:
+    let name = ($nimType).toLowerAscii()
+    case name
+    of "string", "cstring":
+      "std::string"
+    of "int", "int32":
+      "int32_t"
+    of "int8":
+      "int8_t"
+    of "int16":
+      "int16_t"
+    of "int64":
+      "int64_t"
+    of "uint", "uint32":
+      "uint32_t"
+    of "uint8":
+      "uint8_t"
+    of "uint16":
+      "uint16_t"
+    of "uint64":
+      "uint64_t"
+    of "float", "float64":
+      "double"
+    of "float32":
+      "float"
+    of "bool":
+      "bool"
+    of "brokercontext":
+      "uint32_t"
+    of "pointer":
+      "void*"
+    else:
+      $nimType # user-defined C++ struct name
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      "std::vector<" & seqItemTypeName(nimType) & ">"
+    else:
+      error("Generic types other than seq[T] not supported for C++ mapping", nimType)
+  else:
+    error("Unsupported type node for C++ mapping: " & $nimType.kind, nimType)
+
+proc nimTypeToCppParam*(nimType: NimNode): string {.compileTime.} =
+  ## Maps a Nim type to a C++ method input parameter type.
+  ## string → const std::string&, primitives pass through.
+  let cppType = nimTypeToCpp(nimType)
+  if cppType == "std::string":
+    "const std::string&"
+  elif cppType.startsWith("std::vector<"):
+    "const " & cppType & "&"
+  else:
+    cppType
+
+proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
+  ## Maps a Nim type to the C++ callback parameter type.
+  ## string → std::string_view, seq[T] → std::span<const T>, primitives pass through.
+  case nimType.kind
+  of nnkIdent:
+    let name = ($nimType).toLowerAscii()
+    if name in ["string", "cstring"]:
+      "const std::string_view"
+    else:
+      nimTypeToCpp(nimType)
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      "std::span<const " & seqItemTypeName(nimType) & ">"
+    else:
+      nimTypeToCpp(nimType)
+  else:
+    nimTypeToCpp(nimType)
 
 proc toSnakeCase*(name: string): string {.compileTime.} =
   ## Converts PascalCase/camelCase to snake_case.
@@ -281,9 +365,9 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
     header.add("\n")
   header.add("\n#ifdef __cplusplus\n}\n#endif\n\n")
 
-  # C++ wrapper class (header-only, inline)
+  # Modern C++ section (header-only, inline)
   if gApiCppClassMethods.len > 0:
-    # Derive class name from library name (e.g. "mylib" → "MyLib")
+    # Derive class name from library name (e.g. "mylib" → "Mylib")
     var className = ""
     var capitalize = true
     for ch in libName:
@@ -295,23 +379,75 @@ proc generateHeaderFile*(outDir: string) {.compileTime.} =
       else:
         className.add(ch)
 
-    header.add("#ifdef __cplusplus\n")
+    header.add("#ifdef __cplusplus\n\n")
+
+    # C++ standard includes
+    header.add("#include <string>\n")
+    header.add("#include <string_view>\n")
+    header.add("#include <vector>\n")
+    header.add("#include <span>\n")
+    header.add("#include <functional>\n")
+    header.add("#include <optional>\n")
+    header.add("#include <mutex>\n")
+    header.add("#include <unordered_map>\n")
+    header.add("#include <cstring>\n")
+    header.add("#include <atomic>\n\n")
+
+    # Derive namespace from library name (lowercase)
+    let nsName = libName.toLowerAscii().replace("-", "_")
+
+    header.add("namespace " & nsName & " {\n\n")
+
+    # Result<T> template
+    header.add("// Result<T> — mirrors Nim's Result[T, string]\n")
+    header.add("template <typename T>\n")
+    header.add("class Result {\n")
+    header.add("    std::optional<T> value_;\n")
+    header.add("    std::string error_;\n")
+    header.add("public:\n")
+    header.add("    Result(T val) : value_(std::move(val)) {}\n")
+    header.add("    Result(std::string err) : error_(std::move(err)) {}\n")
+    header.add("    bool ok() const { return value_.has_value(); }\n")
+    header.add("    explicit operator bool() const { return ok(); }\n")
+    header.add("    const T& value() const { return *value_; }\n")
+    header.add("    T& value() { return *value_; }\n")
+    header.add("    const T& operator*() const { return *value_; }\n")
+    header.add("    const T* operator->() const { return &*value_; }\n")
+    header.add("    const std::string& error() const { return error_; }\n")
+    header.add("};\n\n")
+
+    # C++ structs (ApiType structs, then RequestBroker result structs)
+    for s in gApiCppStructs:
+      header.add(s)
+      header.add("\n")
+
+    header.add("} // namespace " & nsName & "\n\n")
+
+    # Class definition (outside namespace)
     header.add("class " & className & " {\n")
-    header.add("    uint32_t ctx_;\n")
+    header.add("    uint32_t ctx_;\n\n")
+
+    # Private members (trampolines, callback storage)
+    if gApiCppPrivateMembers.len > 0:
+      for m in gApiCppPrivateMembers:
+        header.add(m & "\n")
+      header.add("\n")
+
     header.add("public:\n")
     header.add("    " & className & "() : ctx_(0) {}\n")
     header.add("    ~" & className & "() { if (ctx_) shutdown(); }\n")
+    header.add("    " & className & "(const " & className & "&) = delete;\n")
+    header.add("    " & className & "& operator=(const " & className & "&) = delete;\n")
+    header.add("    " & className & "(" & className & "&&) = delete;\n")
+    header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
     header.add("    static void initialize() { " & libName & "_initialize(); }\n")
     header.add("    bool init() { ctx_ = " & libName & "_init(); return ctx_ != 0; }\n")
-    header.add(
-      "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
-    )
-    header.add("    void freeString(char* s) { " & libName & "_free_string(s); }\n")
-    header.add("    uint32_t ctx() const { return ctx_; }\n")
+    header.add("    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n")
+    header.add("    uint32_t ctx() const { return ctx_; }\n\n")
     for cppMethod in gApiCppClassMethods:
-      header.add("    " & cppMethod & "\n")
-    header.add("};\n")
-    header.add("#endif\n\n")
+      header.add("    " & cppMethod.replace("__CPP_NS__", nsName) & "\n")
+    header.add("};\n\n")
+    header.add("#endif /* __cplusplus */\n\n")
 
   header.add("#endif /* " & guardName & " */\n")
   writeFile(headerPath, header)
