@@ -28,6 +28,24 @@ proc compileVariantSuffix(env: string): string =
 
   memoryManager & "_" & buildMode
 
+proc findPythonExe(): string =
+  result = findExe("python3")
+  if result.len == 0:
+    result = findExe("python")
+  if result.len == 0:
+    quit "Python interpreter not found. Install python3 or add it to PATH."
+
+proc buildFfiExampleFlags(generatePy = false): string =
+  result =
+    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
+
+proc buildFfiExampleLibrary(generatePy = false) =
+  exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
+
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
   exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
@@ -119,12 +137,10 @@ task testApi, "Run FFI API broker tests":
       test opt, f
 
 task buildFfiExample, "Build FFI API example library":
-  var flags = "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
-  if existsEnv("MM"):
-    flags.add(" --mm:" & getEnv("MM"))
-  if existsEnv("GEN_PY"):
-    flags.add(" -d:BrokerFfiApiGenPy")
-  exec "nim c " & flags & " examples/ffiapi/nimlib/mylib.nim"
+  buildFfiExampleLibrary()
+
+task buildFfiExamplePy, "Build FFI API example library with generated Python wrapper":
+  buildFfiExampleLibrary(true)
 
 task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
   let cmakeDir = "examples/ffiapi"
@@ -146,6 +162,11 @@ task buildFfiExampleCpp, "Build FFI API example — modern C++ application (via 
   mkDir(buildDir)
   exec "cmake -S " & cmakeDir & " -B " & buildDir
   exec "cmake --build " & buildDir & " --target example_cpp"
+
+task runFfiExamplePy, "Build and run the Python wrapper example application":
+  buildFfiExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/ffiapi/python_example/main.py")
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
