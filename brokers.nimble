@@ -73,9 +73,13 @@ proc test(env, path: string) =
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
   normalized == "nimbledeps" or normalized == "vendor" or normalized == "doc" or
+    normalized == "build" or normalized == ".venv" or normalized == ".git" or
     normalized.startsWith("nimbledeps/") or normalized.startsWith("vendor/") or
-    normalized.startsWith("doc/") or normalized.startsWith("./nimbledeps/") or
-    normalized.startsWith("./vendor/") or normalized.startsWith("./doc/")
+    normalized.startsWith("doc/") or normalized.startsWith("build/") or
+    normalized.startsWith(".venv/") or normalized.startsWith(".git/") or
+    normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/") or
+    normalized.startsWith("./doc/") or normalized.startsWith("./build/") or
+    normalized.startsWith("./.venv/") or normalized.startsWith("./.git/")
 
 proc isNphFile(path: string): bool =
   path.endsWith(".nim") or path.endsWith(".nimble")
@@ -99,10 +103,26 @@ proc changedNimFiles(): seq[string] =
 
     result.addUniqueNimFiles(output)
 
+proc collectNimFiles(dir: string, files: var seq[string]) =
+  for kind, path in walkDir(dir, relative = true):
+    let fullPath =
+      if dir == ".":
+        path
+      else:
+        joinPath(dir, path)
+    let normalized = fullPath.replace('\\', '/')
+    case kind
+    of pcDir:
+      if not isExcludedNimPath(normalized):
+        collectNimFiles(normalized, files)
+    of pcFile, pcLinkToFile:
+      if isNphFile(normalized) and not isExcludedNimPath(normalized):
+        files.add(normalized)
+    else:
+      discard
+
 proc allNimFiles(): seq[string] =
-  for path in walkDirRec("."):
-    if isNphFile(path) and not isExcludedNimPath(path):
-      result.add(path)
+  collectNimFiles(".", result)
 
 proc installNphIfNeeded() =
   if findExe("nph").len == 0:
