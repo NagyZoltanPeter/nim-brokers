@@ -1544,7 +1544,7 @@ OnFilterSubscribeEvent.emit(
     <h2>Threading Model of a Created Library Context</h2>
 
     <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.6em; align-items:center; margin-top:0.7em;">
-      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_create()<br/>blocking request calls</small></div>
+      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_createContext()<br/>blocking request calls</small></div>
       <div class="arrow">&rarr;</div>
       <div class="diag-box">Delivery thread<br><small style="color:var(--logos-muted);">owns listener registration<br/>runs foreign callbacks</small></div>
       <div class="arrow">&larr;&rarr;</div>
@@ -1555,8 +1555,8 @@ OnFilterSubscribeEvent.emit(
       <div>
         <h3>Create semantics</h3>
         <ul>
-          <li><code>mylib_initialize()</code> is process-wide runtime initialization</li>
-          <li><code>mylib_create()</code> starts the delivery thread first, then the processing thread</li>
+          <li><code>mylib_createContext()</code> performs one-time runtime initialization if needed</li>
+          <li><code>mylib_createContext()</code> starts the delivery thread first, then the processing thread</li>
           <li>Creation blocks until both threads report readiness</li>
           <li>When create returns, listener registration and API requests are immediately usable</li>
         </ul>
@@ -1590,11 +1590,11 @@ when defined(BrokerFfiApi):
   import brokers/api_library
 
 RequestBroker(API):
-  type CreateRequest = object
+  type InitializeRequest = object
     configPath*: string
     initialized*: bool
   proc signature*(configPath: string):
-    Future[Result[CreateRequest, string]] {.async.}
+    Future[Result[InitializeRequest, string]] {.async.}
 
 EventBroker(API):
   type DeviceDiscovered = object
@@ -1606,7 +1606,7 @@ EventBroker(API):
 when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name: "mylib"
-    createRequest: CreateRequest
+    initializeRequest: InitializeRequest
     destroyRequest: DestroyRequest
         </code></pre>
       </div>
@@ -1634,11 +1634,11 @@ when defined(BrokerFfiApi):
     <div class="cols cols-2" style="align-items:start;">
       <div>
         <span class="filepath">examples/ffiapi/cpp_example/main.cpp</span>
-        <pre><code class="language-cpp" data-trim data-line-numbers="1-7|9-14|16-23|25-31">
-Mylib::initialize();
+        <pre><code class="language-cpp" data-trim data-line-numbers="1-9|11-16|18-25|27-33">
 Mylib lib;
-if (!lib.create()) {
-  fprintf(stderr, "FATAL: library create failed\n");
+auto created = lib.createContext();
+if (!created.ok()) {
+  fprintf(stderr, "FATAL: %s\n", created.error().c_str());
   return 1;
 }
 
@@ -1650,7 +1650,7 @@ auto h_disc = lib.onDeviceDiscovered(
            (int)name.size(), name.data());
   });
 
-auto res = lib.createRequest("/opt/devices.yaml");
+auto res = lib.initializeRequest("/opt/devices.yaml");
 auto add = lib.addDevice("Core-Router", "router", "10.0.0.1");
 auto list = lib.listDevices();
 
@@ -1669,7 +1669,7 @@ lib.shutdown();
         </ul>
 
         <div class="callout warn" style="margin-top:0.7em;">
-          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread, while <code>createRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> synchronously wait for provider work on the processing thread.</p>
+          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread, while <code>initializeRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> synchronously wait for provider work on the processing thread.</p>
         </div>
       </div>
     </div>

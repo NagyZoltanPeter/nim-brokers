@@ -4,7 +4,7 @@
  * Demonstrates consuming the mylib Nim dynamic library from plain C.
  *
  * Exercises:
- *   - Library lifecycle (initialize / create / shutdown)
+ *   - Library lifecycle (createContext / shutdown)
  *   - Adding devices (AddDevice request with string args)
  *   - Querying a single device (GetDevice request)
  *   - Listing all devices (ListDevices — returns an array of structs)
@@ -69,47 +69,49 @@ static void on_device_status_changed(
 int main(void) {
     printf("=== Device Monitor — C Example ===\n\n");
 
-    /* ── 1. Initialize Nim runtime (once per process) ─────────────────── */
-    printf("1. Initialize Nim runtime\n");
-    mylib_initialize();
-    printf("   Done.\n\n");
-
-    /* ── 2. Create library context ────────────────────────────────────── */
-    printf("2. Create library context\n");
-    uint32_t ctx = mylib_create();
+    /* ── 1. Create library context ────────────────────────────────────── */
+    printf("1. Create library context\n");
+    mylibCreateContextResult create_res = mylib_createContext();
+    if (create_res.error_message) {
+        fprintf(stderr, "   FATAL: %s\n", create_res.error_message);
+        free_mylib_create_context_result(&create_res);
+        return 1;
+    }
+    uint32_t ctx = create_res.ctx;
+    free_mylib_create_context_result(&create_res);
     if (ctx == 0) {
-        fprintf(stderr, "   FATAL: mylib_create() returned 0\n");
+        fprintf(stderr, "   FATAL: mylib_createContext() returned no context\n");
         return 1;
     }
     printf("   ctx = 0x%08X\n\n", ctx);
 
-    /* ── 3. Register event listeners ──────────────────────────────────── */
-    printf("3. Register event listeners\n");
+    /* ── 2. Register event listeners ──────────────────────────────────── */
+    printf("2. Register event listeners\n");
     uint64_t h_discovered = onDeviceDiscovered(ctx, on_device_discovered);
     uint64_t h_status     = onDeviceStatusChanged(ctx, on_device_status_changed);
     printf("   DeviceDiscovered handle:     %llu\n", (unsigned long long)h_discovered);
     printf("   DeviceStatusChanged handle:  %llu\n\n", (unsigned long long)h_status);
 
-    /* ── 4. Initialize the library ────────────────────────────────────── */
-    printf("4. Configure library (CreateRequest)\n");
+    /* ── 3. Initialize the library ────────────────────────────────────── */
+    printf("3. Configure library (InitializeRequest)\n");
     {
-        CreateRequestCResult res =
-            create_request_request_with_args(ctx, "/etc/devices.conf");
+        InitializeRequestCResult res =
+            initialize_request_request_with_args(ctx, "/etc/devices.conf");
         if (res.error_message) {
             fprintf(stderr, "   ERROR: %s\n", res.error_message);
-            free_create_request_result(&res);
+            free_initialize_request_result(&res);
             mylib_shutdown(ctx);
             return 1;
         }
         printf("   initialized=%s  configPath=\"%s\"\n",
                res.initialized ? "true" : "false",
                res.configPath ? res.configPath : "(null)");
-         free_create_request_result(&res);
+         free_initialize_request_result(&res);
     }
     printf("\n");
 
-    /* ── 5. Add some devices ──────────────────────────────────────────── */
-    printf("5. Add devices\n");
+    /* ── 4. Add some devices ──────────────────────────────────────────── */
+    printf("4. Add devices\n");
     int64_t id_gw = 0, id_sensor = 0, id_cam = 0;
     {
         AddDeviceCResult r = add_device_request_with_args(
@@ -148,8 +150,8 @@ int main(void) {
     sleep_ms(200);
     printf("\n");
 
-    /* ── 6. List all devices ──────────────────────────────────────────── */
-    printf("6. List all devices\n");
+    /* ── 5. List all devices ──────────────────────────────────────────── */
+    printf("5. List all devices\n");
     {
         ListDevicesCResult lr = list_devices_request(ctx);
         if (lr.error_message) {
@@ -171,8 +173,8 @@ int main(void) {
     }
     printf("\n");
 
-    /* ── 7. Query a single device ─────────────────────────────────────── */
-    printf("7. Query single device (id=%lld)\n", (long long)id_sensor);
+    /* ── 6. Query a single device ─────────────────────────────────────── */
+    printf("6. Query single device (id=%lld)\n", (long long)id_sensor);
     {
         GetDeviceCResult gr = get_device_request_with_args(ctx, id_sensor);
         if (gr.error_message) {
@@ -188,8 +190,8 @@ int main(void) {
     }
     printf("\n");
 
-    /* ── 8. Remove a device (triggers DeviceStatusChanged) ────────────── */
-    printf("8. Remove device (id=%lld)\n", (long long)id_cam);
+    /* ── 7. Remove a device (triggers DeviceStatusChanged) ────────────── */
+    printf("7. Remove device (id=%lld)\n", (long long)id_cam);
     {
         RemoveDeviceCResult rr = remove_device_request_with_args(ctx, id_cam);
         if (rr.error_message) {
@@ -202,8 +204,8 @@ int main(void) {
     sleep_ms(200);
     printf("\n");
 
-    /* ── 9. List again — should show 2 devices ────────────────────────── */
-    printf("9. List devices after removal\n");
+    /* ── 8. List again — should show 2 devices ────────────────────────── */
+    printf("8. List devices after removal\n");
     {
         ListDevicesCResult lr = list_devices_request(ctx);
         if (lr.error_message) {

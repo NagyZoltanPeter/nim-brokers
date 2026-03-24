@@ -5,10 +5,10 @@ import std/[algorithm, atomics, locks, os]
 import brokers/[api_library, broker_context, event_broker, request_broker]
 
 RequestBroker(API):
-  type CreateRequest = object
+  type InitializeRequest = object
     initialized*: bool
 
-  proc signature*(): Future[Result[CreateRequest, string]] {.async.}
+  proc signature*(): Future[Result[InitializeRequest, string]] {.async.}
 
 RequestBroker(API):
   type DestroyRequest = object
@@ -32,11 +32,11 @@ var gReadyCallbackValue: Atomic[int32]
 var gSetupProvidersCount: Atomic[int32]
 var gSetupPingBucketCount: Atomic[int32]
 var gSetupDestroyBucketCount: Atomic[int32]
-var gSetupCreateBucketCount: Atomic[int32]
+var gSetupInitializeBucketCount: Atomic[int32]
 
 proc recordRequestBrokerBuckets() =
-  withLock(gCreateRequestMtLock):
-    gSetupCreateBucketCount.store(int32(gCreateRequestMtBucketCount))
+  withLock(gInitializeRequestMtLock):
+    gSetupInitializeBucketCount.store(int32(gInitializeRequestMtBucketCount))
   withLock(gDestroyRequestMtLock):
     gSetupDestroyBucketCount.store(int32(gDestroyRequestMtBucketCount))
   withLock(gPingRequestMtLock):
@@ -45,19 +45,19 @@ proc recordRequestBrokerBuckets() =
 proc resetSetupBucketState() =
   gSetupPingBucketCount.store(-1)
   gSetupDestroyBucketCount.store(-1)
-  gSetupCreateBucketCount.store(-1)
+  gSetupInitializeBucketCount.store(-1)
 
 proc setupProviders(ctx: BrokerContext) =
   gLibCtx = ctx
   discard gSetupProvidersCount.fetchAdd(1)
 
-  let createProviderRes = CreateRequest.setProvider(
+  let initializeProviderRes = InitializeRequest.setProvider(
     ctx,
-    proc(): Future[Result[CreateRequest, string]] {.closure, async.} =
+    proc(): Future[Result[InitializeRequest, string]] {.closure, async.} =
       await ReadyEvent.emit(gLibCtx, ReadyEvent(value: 7))
-      return ok(CreateRequest(initialized: true)),
+      return ok(InitializeRequest(initialized: true)),
   )
-  doAssert createProviderRes.isOk(), createProviderRes.error()
+  doAssert initializeProviderRes.isOk(), initializeProviderRes.error()
 
   let destroyProviderRes = DestroyRequest.setProvider(
     ctx,
@@ -78,8 +78,8 @@ proc setupProviders(ctx: BrokerContext) =
 registerBrokerLibrary:
   name:
     "apitestlib"
-  createRequest:
-    CreateRequest
+  initializeRequest:
+    InitializeRequest
   destroyRequest:
     DestroyRequest
 
@@ -101,27 +101,37 @@ proc destroyBucketCtxs(): seq[uint32] =
     for i in 0 ..< gDestroyRequestMtBucketCount:
       result.add(uint32(gDestroyRequestMtBuckets[i].brokerCtx))
 
-proc createBucketCtxs(): seq[uint32] =
-  withLock(gCreateRequestMtLock):
-    for i in 0 ..< gCreateRequestMtBucketCount:
-      result.add(uint32(gCreateRequestMtBuckets[i].brokerCtx))
+proc initializeBucketCtxs(): seq[uint32] =
+  withLock(gInitializeRequestMtLock):
+    for i in 0 ..< gInitializeRequestMtBucketCount:
+      result.add(uint32(gInitializeRequestMtBuckets[i].brokerCtx))
+
+proc freeCreateContextResult(r: var apitestlibCreateContextResult) =
+  free_apitestlib_create_context_result(addr r)
+
+proc createContext(): uint32 =
+  var createContextRes = apitestlib_createContext()
+  defer:
+    freeCreateContextResult(createContextRes)
+  check createContextRes.error_message.isNil()
+  clearError(createContextRes.error_message)
+  result = createContextRes.ctx
 
 proc assertSingleContextBuckets(ctx: uint32) =
   check gSetupProvidersCount.load() >= 1
   check gSetupPingBucketCount.load() == 1
   check gSetupDestroyBucketCount.load() == 1
-  check gSetupCreateBucketCount.load() == 1
+  check gSetupInitializeBucketCount.load() == 1
   check pingBucketCtxs() == @[ctx]
   check destroyBucketCtxs() == @[ctx]
-  check createBucketCtxs() == @[ctx]
+  check initializeBucketCtxs() == @[ctx]
 
 suite "API library init":
-  test "lib_create returns only after immediate requests and listener registration are ready":
+  test "lib_createContext returns only after immediate requests and listener registration are ready":
     gReadyCallbackCount.store(0)
     gReadyCallbackValue.store(-1)
 
-    apitestlib_initialize()
-    let ctx = apitestlib_create()
+    let ctx = createContext()
     check ctx != 0'u32
 
     let handle = onReadyEvent(ctx, readyCallback)
@@ -132,10 +142,10 @@ suite "API library init":
     check pingRes.value == 99
     clearError(pingRes.error_message)
 
-    let createRes = create_request_request(ctx)
-    check createRes.error_message.isNil()
-    check createRes.initialized == true
-    clearError(createRes.error_message)
+    let initializeRes = initialize_request_request(ctx)
+    check initializeRes.error_message.isNil()
+    check initializeRes.initialized == true
+    clearError(initializeRes.error_message)
 
     var waitedMs = 0
     while gReadyCallbackCount.load() == 0 and waitedMs < 1000:
@@ -160,14 +170,12 @@ suite "API library init":
     check activeCtxCount == 0
     check pingBucketCtxs().len == 0
     check destroyBucketCtxs().len == 0
-    check createBucketCtxs().len == 0
+    check initializeBucketCtxs().len == 0
 
   test "shutdown removes registry entry and repeated create/shutdown cycles work":
-    apitestlib_initialize()
-
     for _ in 0 ..< 3:
       resetSetupBucketState()
-      let ctx = apitestlib_create()
+      let ctx = createContext()
       check ctx != 0'u32
 
       var activeCtxCount = -1
@@ -180,7 +188,7 @@ suite "API library init":
       if not pingRes.error_message.isNil:
         echo "ping buckets: ", pingBucketCtxs()
         echo "destroy buckets: ", destroyBucketCtxs()
-        echo "create buckets: ", createBucketCtxs()
+        echo "initialize buckets: ", initializeBucketCtxs()
         echo "ping_request_request error: ", $pingRes.error_message
       check pingRes.error_message.isNil()
       check pingRes.value == 99
@@ -190,7 +198,7 @@ suite "API library init":
       if not destroyRes.error_message.isNil:
         echo "ping buckets: ", pingBucketCtxs()
         echo "destroy buckets: ", destroyBucketCtxs()
-        echo "create buckets: ", createBucketCtxs()
+        echo "initialize buckets: ", initializeBucketCtxs()
         echo "destroy_request_request error: ", $destroyRes.error_message
       check destroyRes.error_message.isNil()
       check destroyRes.status == 0
@@ -203,10 +211,8 @@ suite "API library init":
       check activeCtxCount == 0
 
   test "two library instances coexist and remain independently usable":
-    apitestlib_initialize()
-
-    let ctx1 = apitestlib_create()
-    let ctx2 = apitestlib_create()
+    let ctx1 = createContext()
+    let ctx2 = createContext()
     check ctx1 != 0'u32
     check ctx2 != 0'u32
     check ctx1 != ctx2
@@ -217,7 +223,7 @@ suite "API library init":
     check activeCtxCount == 2
     check pingBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
     check destroyBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
-    check createBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
+    check initializeBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
 
     let pingRes1 = ping_request_request(ctx1)
     check pingRes1.error_message.isNil()
@@ -229,15 +235,15 @@ suite "API library init":
     check pingRes2.value == 99
     clearError(pingRes2.error_message)
 
-    let createRes1 = create_request_request(ctx1)
-    check createRes1.error_message.isNil()
-    check createRes1.initialized == true
-    clearError(createRes1.error_message)
+    let initializeRes1 = initialize_request_request(ctx1)
+    check initializeRes1.error_message.isNil()
+    check initializeRes1.initialized == true
+    clearError(initializeRes1.error_message)
 
-    let createRes2 = create_request_request(ctx2)
-    check createRes2.error_message.isNil()
-    check createRes2.initialized == true
-    clearError(createRes2.error_message)
+    let initializeRes2 = initialize_request_request(ctx2)
+    check initializeRes2.error_message.isNil()
+    check initializeRes2.initialized == true
+    clearError(initializeRes2.error_message)
 
     apitestlib_shutdown(ctx1)
 
@@ -246,7 +252,7 @@ suite "API library init":
     check activeCtxCount == 1
     check pingBucketCtxs() == @[ctx2]
     check destroyBucketCtxs() == @[ctx2]
-    check createBucketCtxs() == @[ctx2]
+    check initializeBucketCtxs() == @[ctx2]
 
     let destroyRes2 = destroy_request_request(ctx2)
     check destroyRes2.error_message.isNil()
@@ -260,12 +266,11 @@ suite "API library init":
     check activeCtxCount == 0
     check pingBucketCtxs().len == 0
     check destroyBucketCtxs().len == 0
-    check createBucketCtxs().len == 0
+    check initializeBucketCtxs().len == 0
 
-  test "repeated initialize create shutdown sequences remain usable":
+  test "repeated createContext shutdown sequences remain usable":
     for _ in 0 ..< 2:
-      apitestlib_initialize()
-      let ctx = apitestlib_create()
+      let ctx = createContext()
       check ctx != 0'u32
 
       let pingRes = ping_request_request(ctx)
@@ -273,10 +278,10 @@ suite "API library init":
       check pingRes.value == 99
       clearError(pingRes.error_message)
 
-      let createRes = create_request_request(ctx)
-      check createRes.error_message.isNil()
-      check createRes.initialized == true
-      clearError(createRes.error_message)
+      let initializeRes = initialize_request_request(ctx)
+      check initializeRes.error_message.isNil()
+      check initializeRes.initialized == true
+      clearError(initializeRes.error_message)
 
       let destroyRes = destroy_request_request(ctx)
       check destroyRes.error_message.isNil()
@@ -291,4 +296,4 @@ suite "API library init":
       check activeCtxCount == 0
       check pingBucketCtxs().len == 0
       check destroyBucketCtxs().len == 0
-      check createBucketCtxs().len == 0
+      check initializeBucketCtxs().len == 0

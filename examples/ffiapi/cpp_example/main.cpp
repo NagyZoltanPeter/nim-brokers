@@ -7,7 +7,7 @@
  * Key features exercised:
  *   - mylib:: namespace for Result<T>, structs, and value types
  *   - Result<T> return type with ok()/error()/value() + operator->
- *   - RAII lifecycle (Mylib non-copyable, non-movable)
+ *   - Explicit lifecycle with inert construction and createContext()
  *   - std::string inputs (no raw const char*)
  *   - const std::string_view in event callbacks (zero-copy, lifetime-safe)
  *   - Lambda callbacks with captures via std::function
@@ -39,11 +39,15 @@ using namespace mylib;
 int main() {
     printf("=== Device Monitor — Modern C++ Example ===\n\n");
 
-    // ── 1. Create the library wrapper (RAII, move-only) ──────────────
-    Mylib::initialize();
+    // ── 1. Create the library wrapper and context explicitly ─────────
     Mylib lib;
-    if (!lib.create()) {
-        fprintf(stderr, "FATAL: library create failed\n");
+    auto createContextResult = lib.createContext();
+    if (!createContextResult.ok()) {
+        fprintf(stderr, "FATAL: %s\n", createContextResult.error().c_str());
+        return 1;
+    }
+    if (!lib) {
+        fprintf(stderr, "FATAL: createContext() returned success without a context\n");
         return 1;
     }
     printf("Library context: 0x%08X\n\n", lib.ctx());
@@ -92,12 +96,12 @@ int main() {
            (unsigned long long)h_status,
            (unsigned long long)h_status2);
 
-    // ── 3. Configure library — returns Result<CreateRequestResult> ───
+    // ── 3. Configure library — returns Result<InitializeRequestResult> ─
     printf("--- Configuring library ---\n");
     {
-        auto res = lib.createRequest("/opt/devices.yaml");
+        auto res = lib.initializeRequest("/opt/devices.yaml");
         if (!res.ok()) {
-            fprintf(stderr, "Create error: %s\n", res.error().c_str());
+            fprintf(stderr, "Initialize error: %s\n", res.error().c_str());
             return 1;
         }
         // res->configPath is std::string, res->initialized is bool

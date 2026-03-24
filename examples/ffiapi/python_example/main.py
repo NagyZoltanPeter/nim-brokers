@@ -66,10 +66,10 @@ def main() -> int:
             )
 
             print("--- Configuring library ---")
-            create_result = lib.create_request("/opt/devices.yaml")
+            initialize_result = lib.initialize_request("/opt/devices.yaml")
             print(
-                f"  config={create_result.config_path}  "
-                f"initialized={'yes' if create_result.initialized else 'no'}\n"
+                f"  config={initialize_result.config_path}  "
+                f"initialized={'yes' if initialize_result.initialized else 'no'}\n"
             )
 
             print("--- Adding devices ---")

@@ -30,7 +30,7 @@ C++ wrapper, and Python `ctypes.Structure` definitions all assume that default
 layout.
 
 The FFI API is designed around a per-library-context runtime model. Each call to
-`<lib>_create()` creates one independent broker context with its own worker
+`<lib>_createContext()` creates one independent broker context with its own worker
 threads and broker registrations.
 
 ---
@@ -91,14 +91,13 @@ Example:
 ```nim
 registerBrokerLibrary:
   name: "mylib"
-  createRequest: CreateRequest
+  initializeRequest: InitializeRequest
   destroyRequest: DestroyRequest
 ```
 
 This generates:
 
-- `mylib_initialize()`
-- `mylib_create()`
+- `mylib_createContext()`
 - `mylib_shutdown(ctx)`
 - `mylib_free_string(...)`
 - the library context registry
@@ -110,29 +109,15 @@ This generates:
 
 ## Lifecycle Model
 
-The FFI API deliberately separates process initialization from per-context
-creation.
-
-### Process-wide runtime setup
-
-`<lib>_initialize()` must be called once before using the library from foreign
-code.
-
-Responsibilities:
-
-- initialize the Nim runtime
-- configure foreign-thread GC support where applicable
-- set the Nim GC stack bottom for the caller thread
-
-This is a process-wide operation. It does not create broker contexts and it does
-not register request providers.
+The FFI API exposes a single public creation entry point.
 
 ### Per-context creation
 
-`<lib>_create()` creates one independent library instance.
+`<lib>_createContext()` creates one independent library instance.
 
 Responsibilities:
 
+- ensure the Nim runtime is initialized once per process
 - allocate a fresh `BrokerContext`
 - start the delivery thread
 - start the processing thread
@@ -140,24 +125,30 @@ Responsibilities:
 - publish the context in the library registry
 
 The startup handshake is synchronous from the caller point of view. When
-`<lib>_create()` returns non-zero, the delivery side and processing side are
-already ready for use.
+`<lib>_createContext()` returns a context, the delivery side and processing side
+are already ready for use.
 
 This is why the examples do not need a post-create sleep.
+
+The generated C API returns a small result struct with:
+
+- `ctx`
+- `error_message`
+
+When startup fails, `ctx` is zero and `error_message` contains a descriptive
+message that must be released with `free_<lib>_create_context_result(...)`.
 
 Sequence overview:
 
 ```mermaid
 sequenceDiagram
   actor F as Foreign caller
-  participant I as mylib_initialize()
-  participant C as mylib_create()
+  participant C as mylib_createContext()
   participant D as Delivery thread
   participant P as Processing thread
   participant R as Context registry
-  F->>I: initialize once per process
-  I-->>F: Nim runtime ready
   F->>+C: create context
+  C->>C: ensure Nim runtime initialized
   C->>C: allocate BrokerContext
   C-)D: start delivery thread
   D->>D: install event registration provider
@@ -167,12 +158,12 @@ sequenceDiagram
   P-->>C: processingReady = true
   C->>R: publish active context
   C-->>-F: return ctx
-  Note over F,C: create() blocks until both worker threads are ready
+  Note over F,C: createContext() blocks until both worker threads are ready
 ```
 
 ### Post-create configuration
 
-`CreateRequest` is the request broker type used for configuration after the
+`InitializeRequest` is the request broker type used for configuration after the
 context exists.
 
 Typical responsibilities:
@@ -332,17 +323,17 @@ level request-routing behavior that the FFI API builds on.
 
 ---
 
-## Requirements on `CreateRequest` and `DestroyRequest`
+## Requirements on `InitializeRequest` and `DestroyRequest`
 
-`registerBrokerLibrary` requires that the types named in `createRequest:` and
+`registerBrokerLibrary` requires that the types named in `initializeRequest:` and
 `destroyRequest:` exist at compile time.
 
 It does not itself force those providers to be registered.
 
 In practice:
 
-- `CreateRequest.setProvider(ctx, ...)` should be installed in `setupProviders`
-  if you want the generated `create_request_*` export to be immediately usable
+- `InitializeRequest.setProvider(ctx, ...)` should be installed in `setupProviders`
+  if you want the generated `initialize_request_*` export to be immediately usable
 - `DestroyRequest.setProvider(ctx, ...)` should also usually be installed there
   if you want a stable always-available lifecycle API
 
@@ -350,10 +341,10 @@ For other API request brokers, lazy registration is allowed.
 
 For example, a library may:
 
-- register `CreateRequest` and `DestroyRequest` during startup
-- use `CreateRequest.request(...)` to install additional API broker providers
+- register `InitializeRequest` and `DestroyRequest` during startup
+- use `InitializeRequest.request(...)` to install additional API broker providers
 
-This works because `CreateRequest` executes on the processing thread, which is
+This works because `InitializeRequest` executes on the processing thread, which is
 the correct owner thread for `setProvider` on API request brokers.
 
 The main limitation is that a provider can only be registered once per broker
@@ -371,10 +362,10 @@ when defined(BrokerFfiApi):
   import brokers/api_library
 
 RequestBroker(API):
-  type CreateRequest = object
+  type InitializeRequest = object
     initialized*: bool
 
-  proc signature*(configPath: string): Future[Result[CreateRequest, string]] {.async.}
+  proc signature*(configPath: string): Future[Result[InitializeRequest, string]] {.async.}
 
 RequestBroker(API):
   type DestroyRequest = object
@@ -391,10 +382,10 @@ var gProviderCtx {.threadvar.}: BrokerContext
 proc setupProviders(ctx: BrokerContext) =
   gProviderCtx = ctx
 
-  discard CreateRequest.setProvider(
+  discard InitializeRequest.setProvider(
     ctx,
-    proc(configPath: string): Future[Result[CreateRequest, string]] {.closure, async.} =
-      return ok(CreateRequest(initialized: true))
+    proc(configPath: string): Future[Result[InitializeRequest, string]] {.closure, async.} =
+      return ok(InitializeRequest(initialized: true))
   )
 
   discard DestroyRequest.setProvider(
@@ -406,7 +397,7 @@ proc setupProviders(ctx: BrokerContext) =
 when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name: "mylib"
-    createRequest: CreateRequest
+    initializeRequest: InitializeRequest
     destroyRequest: DestroyRequest
 ```
 
@@ -447,12 +438,17 @@ The generated C surface contains:
 Example:
 
 ```c
-void mylib_initialize(void);
-uint32_t mylib_create(void);
+typedef struct {
+  uint32_t ctx;
+  const char* error_message;
+} mylibCreateContextResult;
+
+mylibCreateContextResult mylib_createContext(void);
+void free_mylib_create_context_result(mylibCreateContextResult* r);
 void mylib_shutdown(uint32_t ctx);
 
-CreateRequestCResult create_request_request_with_args(uint32_t ctx, const char* configPath);
-void free_create_request_result(CreateRequestCResult* r);
+InitializeRequestCResult initialize_request_request_with_args(uint32_t ctx, const char* configPath);
+void free_initialize_request_result(InitializeRequestCResult* r);
 
 uint64_t onDeviceDiscovered(uint32_t ctx, DeviceDiscoveredCCallback callback);
 void offDeviceDiscovered(uint32_t ctx, uint64_t handle);
@@ -464,22 +460,22 @@ The generated header also contains a wrapper class.
 
 Current lifecycle shape:
 
-- `Mylib::initialize()` for process-wide runtime init
-- `lib.create()` for per-context creation
+- inert `Mylib lib;`
+- `lib.createContext()` for per-context creation
 - `lib.shutdown()` for shutdown
-- request wrapper methods such as `createRequest(...)`, `listDevices()`, and
+- request wrapper methods such as `initializeRequest(...)`, `listDevices()`, and
   `getDevice(...)`
 
 Example:
 
 ```cpp
-Mylib::initialize();
 Mylib lib;
-if (!lib.create()) {
+auto created = lib.createContext();
+if (!created.ok()) {
     return 1;
 }
 
-auto res = lib.createRequest("/opt/devices.yaml");
+auto res = lib.initializeRequest("/opt/devices.yaml");
 if (!res.ok()) {
     std::fprintf(stderr, "%s\n", res.error().c_str());
 }
@@ -492,8 +488,7 @@ When Python generation is enabled, a ctypes wrapper module is emitted.
 The Python wrapper differs slightly from C and C++:
 
 - `Mylib()` automatically loads the library
-- the constructor calls `mylib_initialize()`
-- the constructor also calls `mylib_create()`
+- the constructor creates a context immediately via `mylib_createContext()`
 - `shutdown()` is exposed for explicit teardown
 
 Example:
@@ -502,7 +497,7 @@ Example:
 from mylib import Mylib
 
 with Mylib() as lib:
-    res = lib.create_request("/opt/devices.yaml")
+  res = lib.initialize_request("/opt/devices.yaml")
     print(res.config_path)
 ```
 
@@ -572,9 +567,9 @@ The repository provides convenience tasks:
 
 ## Operational Expectations
 
-### What `mylib_create()` guarantees
+### What `mylib_createContext()` guarantees
 
-When `mylib_create()` succeeds:
+When `mylib_createContext()` succeeds:
 
 - the event registration provider is already installed
 - the processing thread already ran `setupProviders(ctx)`

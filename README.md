@@ -266,9 +266,8 @@ At a high level:
 
 The process-wide runtime init and per-context lifecycle are intentionally separate:
 
-- `mylib_initialize()` initializes the Nim runtime once per process.
-- `mylib_create()` creates one broker-backed library context.
-- `CreateRequest` is the broker request used for post-create configuration.
+- `mylib_createContext()` creates one broker-backed library context and performs any required one-time runtime initialization internally.
+- `InitializeRequest` is the broker request used for post-create configuration.
 - `DestroyRequest` is the broker request used for orderly teardown before shutdown.
 
 Build the example shared library with:
