@@ -98,6 +98,7 @@ proc parseLibraryConfig(
 macro registerBrokerLibrary*(body: untyped): untyped =
   let config = parseLibraryConfig(body)
   let libName = config.name
+  let libNameLit = newLit(libName)
   let initializeReqIdent = config.initializeRequest
   let destroyReqIdent = config.destroyRequest
 
@@ -164,6 +165,8 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         `startupStateIdent` = object
           deliveryReady: Atomic[int]
           processingReady: Atomic[int]
+          deliveryErrorMessage: cstring
+          processingErrorMessage: cstring
 
         `procThreadArgIdent` = object
           ctx: BrokerContext
@@ -201,18 +204,37 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     quote do:
       proc `nimMainIdent`() {.importc: `nimMainImportName`, cdecl.}
 
-      var `nimInitializedIdent`: Atomic[bool]
+      var `nimInitializedIdent`: Atomic[int]
 
-      proc `initLibFuncIdent`() =
-        if not `nimInitializedIdent`.exchange(true):
-          when compileOption("app", "lib"):
-            `nimMainIdent`()
-            when declared(setupForeignThreadGc):
-              setupForeignThreadGc()
-            when declared(nimGC_setStackBottom):
-              var locals {.volatile, noinit.}: pointer
-              locals = addr(locals)
-              nimGC_setStackBottom(locals)
+      proc `initLibFuncIdent`(): Result[void, string] =
+        while true:
+          case `nimInitializedIdent`.load(moAcquire)
+          of 2:
+            return ok()
+          of -1:
+            return err("Failed to initialize Nim runtime")
+          of 1:
+            sleep(1)
+          else:
+            var expected = 0
+            if `nimInitializedIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
+              when compileOption("app", "lib"):
+                let initRes = catch:
+                  `nimMainIdent`()
+                  when declared(setupForeignThreadGc):
+                    setupForeignThreadGc()
+                  when declared(nimGC_setStackBottom):
+                    var locals {.volatile, noinit.}: pointer
+                    locals = addr(locals)
+                    nimGC_setStackBottom(locals)
+                if initRes.isErr():
+                  error "Failed to initialize Nim runtime",
+                    library = `libNameLit`, detail = initRes.error.msg
+                  `nimInitializedIdent`.store(-1, moRelease)
+                  return err("Failed to initialize Nim runtime")
+
+              `nimInitializedIdent`.store(2, moRelease)
+              return ok()
 
       type `exportedCreateContextResultIdent` {.exportc.} = object
         ctx*: uint32
@@ -237,11 +259,12 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       var `globalCtxsLockIdent`: Lock
       var `globalCtxsInitIdent`: Atomic[int]
 
-      proc ensureLibCtxInit() =
-        if not `nimInitializedIdent`.load(moRelaxed):
-          `initLibFuncIdent`()
+      proc ensureLibCtxInit(): Result[void, string] =
+        let initRes = `initLibFuncIdent`()
+        if initRes.isErr():
+          return err(initRes.error())
         if `globalCtxsInitIdent`.load(moRelaxed) == 2:
-          return
+          return ok()
         var expected = 0
         if `globalCtxsInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
           initLock(`globalCtxsLockIdent`)
@@ -250,6 +273,18 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         else:
           while `globalCtxsInitIdent`.load(moAcquire) != 2:
             discard
+        ok()
+
+      proc cleanupStartupState(startupState: ptr `startupStateIdent`) =
+        if startupState.isNil:
+          return
+        if not startupState.deliveryErrorMessage.isNil:
+          freeCString(startupState.deliveryErrorMessage)
+          startupState.deliveryErrorMessage = nil
+        if not startupState.processingErrorMessage.isNil:
+          freeCString(startupState.processingErrorMessage)
+          startupState.processingErrorMessage = nil
+        deallocShared(startupState)
 
       proc releaseCtxEntryResources(entryPtr: ptr `ctxEntryIdent`) =
         if entryPtr.isNil:
@@ -262,6 +297,34 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           deallocShared(entryPtr.delivArg)
 
         deallocShared(entryPtr)
+
+      proc releaseCreateContextResources(
+          startupState: ptr `startupStateIdent`,
+          procArg: ptr `procThreadArgIdent`,
+          delivArg: ptr `delivThreadArgIdent`,
+          entryPtr: ptr `ctxEntryIdent`,
+      ) =
+        cleanupStartupState(startupState)
+        if not entryPtr.isNil:
+          releaseCtxEntryResources(entryPtr)
+          return
+        if not procArg.isNil:
+          deallocShared(procArg)
+        if not delivArg.isNil:
+          deallocShared(delivArg)
+
+      proc recordStartupFailure(
+          startupFlag: ptr Atomic[int],
+          errorMessage: ptr cstring,
+          stage: string,
+          detail: string,
+      ) =
+        error "Library context startup failed",
+          library = `libNameLit`, stage = stage, detail = detail
+        if not errorMessage[].isNil:
+          freeCString(errorMessage[])
+        errorMessage[] = allocCStringCopy(detail)
+        startupFlag[].store(-1, moRelease)
 
   )
 
@@ -353,33 +416,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       closureBody,
     )
 
-    # proc installEventListenerProvider(ctx: BrokerContext) =
-    #   discard RegisterEventListenerResult.setProvider(ctx, closure)
-    let setProviderCall = newTree(
-      nnkDiscardStmt,
-      newCall(
-        newDotExpr(ident("RegisterEventListenerResult"), ident("setProvider")),
-        provCtxIdent,
-        closureLambda,
-      ),
-    )
+    let installerProc = quote:
+      proc `installProviderIdent`(`provCtxIdent`: BrokerContext): Result[void, string] =
+        let providerInstallRes =
+          RegisterEventListenerResult.setProvider(`provCtxIdent`, `closureLambda`)
+        if providerInstallRes.isErr():
+          return err(providerInstallRes.error())
+        return ok()
 
-    let installerFormalParams = newTree(
-      nnkFormalParams,
-      newEmptyNode(),
-      newTree(nnkIdentDefs, provCtxIdent, ident("BrokerContext"), newEmptyNode()),
-    )
-
-    let installerProc = newTree(
-      nnkProcDef,
-      installProviderIdent,
-      newEmptyNode(),
-      newEmptyNode(),
-      installerFormalParams,
-      newEmptyNode(),
-      newEmptyNode(),
-      newStmtList(setProviderCall),
-    )
     result.add(installerProc)
 
   # Generate aggregate cleanup proc (sync — dropAllListeners is sync in MT mode)
@@ -438,20 +482,51 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     quote do:
       proc `waitForStartupProcIdent`(
           startupFlag: ptr Atomic[int], timeoutMs: int
-      ): bool =
+      ): int =
         var waitedMs = 0
-        while startupFlag[].load(moAcquire) != 1:
+        while true:
+          let startupStatus = startupFlag[].load(moAcquire)
+          if startupStatus != 0:
+            return startupStatus
           if waitedMs >= timeoutMs:
-            return false
+            return 0
           sleep(1)
           inc waitedMs
-        true
 
       proc `procThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
         setThreadBrokerContext(arg.ctx)
 
-        when compiles(setupProviders(arg.ctx)):
-          setupProviders(arg.ctx)
+        when compiles(setupProviders(arg.ctx).isErr()):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            recordStartupFailure(
+              addr arg.startupState.processingReady,
+              addr arg.startupState.processingErrorMessage,
+              "request processing startup",
+              "setupProviders raised exception: " & setupCatchRes.error.msg,
+            )
+            return
+          let setupRes = setupCatchRes.get()
+          if setupRes.isErr():
+            recordStartupFailure(
+              addr arg.startupState.processingReady,
+              addr arg.startupState.processingErrorMessage,
+              "request processing startup",
+              setupRes.error(),
+            )
+            return
+        elif compiles(setupProviders(arg.ctx)):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            recordStartupFailure(
+              addr arg.startupState.processingReady,
+              addr arg.startupState.processingErrorMessage,
+              "request processing startup",
+              "setupProviders raised exception: " & setupCatchRes.error.msg,
+            )
+            return
 
         arg.startupState.processingReady.store(1, moRelease)
 
@@ -486,7 +561,15 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           setThreadBrokerContext(arg.ctx)
 
           # Install the aggregate event listener provider
-          `installProviderIdent`(arg.ctx)
+          let installProviderRes = `installProviderIdent`(arg.ctx)
+          if installProviderRes.isErr():
+            recordStartupFailure(
+              addr arg.startupState.deliveryReady,
+              addr arg.startupState.deliveryErrorMessage,
+              "event delivery startup",
+              installProviderRes.error(),
+            )
+            return
 
           arg.startupState.deliveryReady.store(1, moRelease)
 
@@ -508,7 +591,15 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       quote do:
         proc `delivThreadProcIdent`(arg: ptr `delivThreadArgIdent`) {.thread.} =
           setThreadBrokerContext(arg.ctx)
-          `installProviderIdent`(arg.ctx)
+          let installProviderRes = `installProviderIdent`(arg.ctx)
+          if installProviderRes.isErr():
+            recordStartupFailure(
+              addr arg.startupState.deliveryReady,
+              addr arg.startupState.deliveryErrorMessage,
+              "event delivery startup",
+              installProviderRes.error(),
+            )
+            return
 
           arg.startupState.deliveryReady.store(1, moRelease)
 
@@ -547,37 +638,115 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       proc `createContextFuncIdent`(): `createContextResultIdent` {.
           exportc: `createContextFuncNameLit`, cdecl, dynlib
       .} =
-        ensureLibCtxInit()
         result.ctx = 0'u32
         result.error_message = nil
+
+        let initRes = ensureLibCtxInit()
+        if initRes.isErr():
+          result.error_message = allocCStringCopy(initRes.error())
+          return
 
         var ctx = NewBrokerContext()
         # Context 0 is reserved as the C-side error sentinel
         if uint32(ctx) == 0:
           ctx = NewBrokerContext()
 
-        let startupState =
-          cast[ptr `startupStateIdent`](createShared(`startupStateIdent`, 1))
+        var startupState: ptr `startupStateIdent` = nil
+        var procArg: ptr `procThreadArgIdent` = nil
+        var delivArg: ptr `delivThreadArgIdent` = nil
+        var entry: ptr `ctxEntryIdent` = nil
+
+        try:
+          startupState =
+            cast[ptr `startupStateIdent`](createShared(`startupStateIdent`, 1))
+        except ResourceExhaustedError:
+          error "Failed to allocate createContext startup state",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
+        except Exception as e:
+          error "Failed to allocate createContext startup state",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
+
         startupState.deliveryReady.store(0, moRelease)
         startupState.processingReady.store(0, moRelease)
+        startupState.deliveryErrorMessage = nil
+        startupState.processingErrorMessage = nil
 
         # Create processing thread arg
-        let procArg =
-          cast[ptr `procThreadArgIdent`](createShared(`procThreadArgIdent`, 1))
+        try:
+          procArg =
+            cast[ptr `procThreadArgIdent`](createShared(`procThreadArgIdent`, 1))
+        except ResourceExhaustedError:
+          error "Failed to allocate processing-thread startup arguments",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
+        except Exception as e:
+          error "Failed to allocate processing-thread startup arguments",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
         procArg.ctx = ctx
         procArg.shutdownFlag.store(0, moRelease)
         procArg.startupState = startupState
 
         # Create delivery thread arg
-        let delivArg =
-          cast[ptr `delivThreadArgIdent`](createShared(`delivThreadArgIdent`, 1))
+        try:
+          delivArg =
+            cast[ptr `delivThreadArgIdent`](createShared(`delivThreadArgIdent`, 1))
+        except ResourceExhaustedError:
+          error "Failed to allocate delivery-thread startup arguments",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
+        except Exception as e:
+          error "Failed to allocate delivery-thread startup arguments",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
         delivArg.ctx = ctx
         delivArg.shutdownFlag.store(0, moRelease)
         delivArg.startupState = startupState
 
         # Allocate entry on shared heap — Thread objects must not be moved
         # after createThread (the pthread holds a pointer to them)
-        let entry = cast[ptr `ctxEntryIdent`](createShared(`ctxEntryIdent`, 1))
+        try:
+          entry = cast[ptr `ctxEntryIdent`](createShared(`ctxEntryIdent`, 1))
+        except ResourceExhaustedError:
+          error "Failed to allocate library context entry",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
+        except Exception as e:
+          error "Failed to allocate library context entry",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
+          result.error_message = allocCStringCopy(
+            "Library context creation failed during startup preparation"
+          )
+          return
         entry.ctx = ctx
         entry.procArg = procArg
         entry.delivArg = delivArg
@@ -587,28 +756,46 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         try:
           createThread(entry.delivThread, `delivThreadProcIdent`, delivArg)
         except ResourceExhaustedError:
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
+          error "Failed to create delivery thread",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           result.error_message = allocCStringCopy(
-            "createContext failed: delivery thread creation exhausted resources"
+            "Library context creation failed during event delivery startup"
           )
           return
         except Exception as e:
-          trace "Delivery thread creation failed", err = e.msg
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
+          error "Failed to create delivery thread",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           result.error_message = allocCStringCopy(
-            "createContext failed: delivery thread creation failed: " & e.msg
+            "Library context creation failed during event delivery startup"
           )
           return
 
-        if not `waitForStartupProcIdent`(addr startupState.deliveryReady, 5000):
+        let deliveryStartupStatus =
+          `waitForStartupProcIdent`(addr startupState.deliveryReady, 5000)
+        if deliveryStartupStatus != 1:
           delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
-          result.error_message =
-            allocCStringCopy("createContext failed: delivery thread startup timed out")
+          if deliveryStartupStatus == -1:
+            error "Event delivery startup reported failure",
+              library = `libNameLit`,
+              ctx = uint32(ctx),
+              detail =
+                if startupState.deliveryErrorMessage.isNil:
+                  "no additional detail"
+                else:
+                  $startupState.deliveryErrorMessage
+            result.error_message = allocCStringCopy(
+              "Library context creation failed during event delivery startup"
+            )
+          else:
+            error "Event delivery startup timed out",
+              library = `libNameLit`, ctx = uint32(ctx), timeout_ms = 5000
+            result.error_message = allocCStringCopy(
+              "Library context creation timed out during event delivery startup"
+            )
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           return
 
         # Start processing thread
@@ -618,36 +805,53 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           # Shut down delivery thread
           delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
+          error "Failed to create processing thread",
+            library = `libNameLit`, ctx = uint32(ctx), detail = "resource exhaustion"
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           result.error_message = allocCStringCopy(
-            "createContext failed: processing thread creation exhausted resources"
+            "Library context creation failed during request processing startup"
           )
           return
         except Exception as e:
-          trace "Processing thread creation failed", err = e.msg
+          error "Failed to create processing thread",
+            library = `libNameLit`, ctx = uint32(ctx), detail = e.msg
           delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           result.error_message = allocCStringCopy(
-            "createContext failed: processing thread creation failed: " & e.msg
+            "Library context creation failed during request processing startup"
           )
           return
 
-        if not `waitForStartupProcIdent`(addr startupState.processingReady, 5000):
+        let processingStartupStatus =
+          `waitForStartupProcIdent`(addr startupState.processingReady, 5000)
+        if processingStartupStatus != 1:
           procArg.shutdownFlag.store(1, moRelease)
           delivArg.shutdownFlag.store(1, moRelease)
           joinThread(entry.procThread)
           joinThread(entry.delivThread)
-          deallocShared(startupState)
-          releaseCtxEntryResources(entry)
-          result.error_message = allocCStringCopy(
-            "createContext failed: processing thread startup timed out"
-          )
+          if processingStartupStatus == -1:
+            error "Request processing startup reported failure",
+              library = `libNameLit`,
+              ctx = uint32(ctx),
+              detail =
+                if startupState.processingErrorMessage.isNil:
+                  "no additional detail"
+                else:
+                  $startupState.processingErrorMessage
+            result.error_message = allocCStringCopy(
+              "Library context creation failed during request processing startup"
+            )
+          else:
+            error "Request processing startup timed out",
+              library = `libNameLit`, ctx = uint32(ctx), timeout_ms = 5000
+            result.error_message = allocCStringCopy(
+              "Library context creation timed out during request processing startup"
+            )
+          releaseCreateContextResources(startupState, procArg, delivArg, entry)
           return
 
-        deallocShared(startupState)
+        cleanupStartupState(startupState)
 
         withLock(`globalCtxsLockIdent`):
           `globalCtxsIdent`.add(entry)
@@ -662,7 +866,11 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       proc `shutdownFuncIdent`(
           ctx: uint32
       ) {.exportc: `shutdownFuncNameLit`, cdecl, dynlib.} =
-        ensureLibCtxInit()
+        let initRes = ensureLibCtxInit()
+        if initRes.isErr():
+          error "Library shutdown skipped because initialization failed",
+            library = `libNameLit`, ctx = ctx, detail = initRes.error()
+          return
         let brokerCtx = BrokerContext(ctx)
 
         var entryPtr: ptr `ctxEntryIdent` = nil

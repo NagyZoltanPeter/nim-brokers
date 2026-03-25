@@ -33,6 +33,7 @@ var gSetupProvidersCount: Atomic[int32]
 var gSetupPingBucketCount: Atomic[int32]
 var gSetupDestroyBucketCount: Atomic[int32]
 var gSetupInitializeBucketCount: Atomic[int32]
+var gSetupProvidersShouldFail: Atomic[int32]
 
 proc recordRequestBrokerBuckets() =
   withLock(gInitializeRequestMtLock):
@@ -47,9 +48,12 @@ proc resetSetupBucketState() =
   gSetupDestroyBucketCount.store(-1)
   gSetupInitializeBucketCount.store(-1)
 
-proc setupProviders(ctx: BrokerContext) =
+proc setupProviders(ctx: BrokerContext): Result[void, string] =
   gLibCtx = ctx
   discard gSetupProvidersCount.fetchAdd(1)
+
+  if gSetupProvidersShouldFail.load() == 1:
+    return err("simulated setupProviders failure")
 
   let initializeProviderRes = InitializeRequest.setProvider(
     ctx,
@@ -57,23 +61,30 @@ proc setupProviders(ctx: BrokerContext) =
       await ReadyEvent.emit(gLibCtx, ReadyEvent(value: 7))
       return ok(InitializeRequest(initialized: true)),
   )
-  doAssert initializeProviderRes.isOk(), initializeProviderRes.error()
+  if initializeProviderRes.isErr():
+    return err(
+      "failed to register InitializeRequest provider: " & initializeProviderRes.error()
+    )
 
   let destroyProviderRes = DestroyRequest.setProvider(
     ctx,
     proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
       return ok(DestroyRequest(status: 0)),
   )
-  doAssert destroyProviderRes.isOk(), destroyProviderRes.error()
+  if destroyProviderRes.isErr():
+    return
+      err("failed to register DestroyRequest provider: " & destroyProviderRes.error())
 
   let pingProviderRes = PingRequest.setProvider(
     ctx,
     proc(): Future[Result[PingRequest, string]] {.closure, async.} =
       return ok(PingRequest(value: 99)),
   )
-  doAssert pingProviderRes.isOk(), pingProviderRes.error()
+  if pingProviderRes.isErr():
+    return err("failed to register PingRequest provider: " & pingProviderRes.error())
 
   recordRequestBrokerBuckets()
+  ok()
 
 registerBrokerLibrary:
   name:
@@ -128,6 +139,7 @@ proc assertSingleContextBuckets(ctx: uint32) =
 
 suite "API library init":
   test "lib_createContext returns only after immediate requests and listener registration are ready":
+    gSetupProvidersShouldFail.store(0)
     gReadyCallbackCount.store(0)
     gReadyCallbackValue.store(-1)
 
@@ -173,6 +185,7 @@ suite "API library init":
     check initializeBucketCtxs().len == 0
 
   test "shutdown removes registry entry and repeated create/shutdown cycles work":
+    gSetupProvidersShouldFail.store(0)
     for _ in 0 ..< 3:
       resetSetupBucketState()
       let ctx = createContext()
@@ -211,6 +224,7 @@ suite "API library init":
       check activeCtxCount == 0
 
   test "two library instances coexist and remain independently usable":
+    gSetupProvidersShouldFail.store(0)
     let ctx1 = createContext()
     let ctx2 = createContext()
     check ctx1 != 0'u32
@@ -269,6 +283,7 @@ suite "API library init":
     check initializeBucketCtxs().len == 0
 
   test "repeated createContext shutdown sequences remain usable":
+    gSetupProvidersShouldFail.store(0)
     for _ in 0 ..< 2:
       let ctx = createContext()
       check ctx != 0'u32
@@ -297,3 +312,16 @@ suite "API library init":
       check pingBucketCtxs().len == 0
       check destroyBucketCtxs().len == 0
       check initializeBucketCtxs().len == 0
+
+  test "createContext returns a generic startup error when setupProviders fails":
+    gSetupProvidersShouldFail.store(1)
+
+    var createContextRes = apitestlib_createContext()
+    defer:
+      freeCreateContextResult(createContextRes)
+      gSetupProvidersShouldFail.store(0)
+
+    check createContextRes.ctx == 0'u32
+    check not createContextRes.error_message.isNil()
+    check $createContextRes.error_message ==
+      "Library context creation failed during request processing startup"

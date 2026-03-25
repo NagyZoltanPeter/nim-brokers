@@ -132,14 +132,14 @@ var gProviderCtx {.threadvar.}: BrokerContext
 proc nowMs(): int64 =
   int64(chronos.Moment.now().epochNanoSeconds div 1_000_000)
 
-proc setupProviders(ctx: BrokerContext) =
+proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ## Set up broker providers on the library's processing thread.
   gProviderCtx = ctx
   gNextDeviceId = 1
   gDevices = @[]
 
   # InitializeRequest provider
-  discard InitializeRequest.setProvider(
+  let initializeProviderRes = InitializeRequest.setProvider(
     ctx,
     proc(
         configPath: string
@@ -148,18 +148,25 @@ proc setupProviders(ctx: BrokerContext) =
       gInitialized = true
       return ok(InitializeRequest(configPath: configPath, initialized: true)),
   )
+  if initializeProviderRes.isErr():
+    return err(
+      "failed to register InitializeRequest provider: " & initializeProviderRes.error()
+    )
 
   # DestroyRequest provider
-  discard DestroyRequest.setProvider(
+  let destroyProviderRes = DestroyRequest.setProvider(
     ctx,
     proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
       gInitialized = false
       gDevices = @[]
       return ok(DestroyRequest(status: 0)),
   )
+  if destroyProviderRes.isErr():
+    return
+      err("failed to register DestroyRequest provider: " & destroyProviderRes.error())
 
   # AddDevice provider
-  discard AddDevice.setProvider(
+  let addDeviceProviderRes = AddDevice.setProvider(
     ctx,
     proc(
         name: string, deviceType: string, address: string
@@ -182,9 +189,11 @@ proc setupProviders(ctx: BrokerContext) =
       )
       return ok(AddDevice(deviceId: id, success: true)),
   )
+  if addDeviceProviderRes.isErr():
+    return err("failed to register AddDevice provider: " & addDeviceProviderRes.error())
 
   # RemoveDevice provider
-  discard RemoveDevice.setProvider(
+  let removeDeviceProviderRes = RemoveDevice.setProvider(
     ctx,
     proc(deviceId: int64): Future[Result[RemoveDevice, string]] {.closure, async.} =
       if not gInitialized:
@@ -203,9 +212,13 @@ proc setupProviders(ctx: BrokerContext) =
           return ok(RemoveDevice(success: true))
       return err("Device not found: " & $deviceId),
   )
+  if removeDeviceProviderRes.isErr():
+    return err(
+      "failed to register RemoveDevice provider: " & removeDeviceProviderRes.error()
+    )
 
   # GetDevice provider
-  discard GetDevice.setProvider(
+  let getDeviceProviderRes = GetDevice.setProvider(
     ctx,
     proc(deviceId: int64): Future[Result[GetDevice, string]] {.closure, async.} =
       if not gInitialized:
@@ -223,9 +236,11 @@ proc setupProviders(ctx: BrokerContext) =
           )
       return err("Device not found: " & $deviceId),
   )
+  if getDeviceProviderRes.isErr():
+    return err("failed to register GetDevice provider: " & getDeviceProviderRes.error())
 
   # ListDevices provider
-  discard ListDevices.setProvider(
+  let listDevicesProviderRes = ListDevices.setProvider(
     ctx,
     proc(): Future[Result[ListDevices, string]] {.closure, async.} =
       if not gInitialized:
@@ -243,6 +258,11 @@ proc setupProviders(ctx: BrokerContext) =
         )
       return ok(ListDevices(devices: infos)),
   )
+  if listDevicesProviderRes.isErr():
+    return
+      err("failed to register ListDevices provider: " & listDevicesProviderRes.error())
+
+  ok()
 
 # ---------------------------------------------------------------------------
 # Library registration — MUST be last
