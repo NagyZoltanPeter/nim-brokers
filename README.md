@@ -302,6 +302,47 @@ nimble runFfiExamplePy
 
 See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
 
+### Torpedo Duel — a richer FFI API example
+
+The `examples/torpedo/` directory contains a full game example that pushes the
+Broker FFI API beyond a minimal hello-world.
+
+One Nim shared library (`torpedolib`) hosts **two independent contexts** in the
+same Python process — one per player. After a short bootstrap phase (create,
+initialize, place fleets, link opponents), the foreign app calls
+`StartGameRequest` on one side and **steps back entirely**. From that point the
+two captains exchange volleys autonomously inside Nim through cross-context
+`VolleyEvent` listeners, while Python only observes events and polls public
+board snapshots for its text UI.
+
+This demonstrates several things that a trivial example cannot:
+
+- **Multi-context isolation** — two active contexts share the same dylib, each
+  with its own processing thread, delivery thread, and `Captain` state object.
+- **Cross-context native listeners** — `EventBroker(API)` events are not just
+  a foreign callback surface; the same `VolleyEvent` type serves as the
+  internal protocol between linked contexts *and* as the observable stream
+  delivered to Python.
+- **Object-oriented state management** — all per-player state lives in a
+  `Captain` ref object, created by `InitializeCaptainRequest` and torn down by
+  `ShutdownRequest`. Only two threadvars remain per processing thread.
+- **Callback lifetime safety** — the Python example shows the correct shutdown
+  sequence: unregister all event listeners *before* the context manager calls
+  `shutdown()`, preventing use-after-free on ctypes function pointers.
+- **Deterministic replays** — identical seeds produce identical games, making
+  the example useful for regression testing.
+
+Build and run from the repository root:
+
+```sh
+nimble buildTorpedoExamplePy
+nimble runTorpedoExamplePy          # default pacing
+nimble runTorpedoExamplePy -- --fast # reduced delays
+```
+
+See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full
+architecture, sequence diagrams, and API surface reference.
+
 ## BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
