@@ -3,6 +3,18 @@
 ## A richer Broker FFI API example showing two isolated library contexts
 ## orchestrated by a foreign application.
 ##
+## Architecture
+## ------------
+## Each library context spawns a dedicated processing thread.  All game
+## state for one player lives inside a `Captain` ref object which is held
+## by a single threadvar (`gCaptain`).  The `InitializeCaptainRequest`
+## provider instantiates the Captain; the `ShutdownRequest` provider tears
+## it down by niling the threadvar and dropping the peer link.
+##
+## Because the framework guarantees one processing thread per context, no
+## locking is required on the Captain — all mutations happen on the owning
+## thread's chronos event loop.
+##
 ## Build (from repo root):
 ##   nimble buildTorpedoExamplePy
 ##
@@ -17,6 +29,10 @@ import brokers/[event_broker, request_broker, broker_context]
 
 when defined(BrokerFfiApi):
   import brokers/api_library
+
+# ---------------------------------------------------------------------------
+# FFI-visible data types (shared between Nim, C, C++, Python)
+# ---------------------------------------------------------------------------
 
 ApiType:
   type PublicCell = object
@@ -37,6 +53,10 @@ ApiType:
     side*: string
     phase*: string
     message*: string
+
+# ---------------------------------------------------------------------------
+# Request brokers — each generates an exported C function + wrappers
+# ---------------------------------------------------------------------------
 
 RequestBroker(API):
   type InitializeCaptainRequest = object
@@ -108,6 +128,10 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[GetPublicBoardRequest, string]] {.async.}
 
+# ---------------------------------------------------------------------------
+# Event brokers — each generates a C callback type + on/off exports
+# ---------------------------------------------------------------------------
+
 EventBroker(API):
   type CaptainRemark = object
     captainName*: string
@@ -155,7 +179,13 @@ EventBroker(API):
     gameOver*: bool
     message*: string
 
+# ---------------------------------------------------------------------------
+# Internal types & constants
+# ---------------------------------------------------------------------------
+
 type Ship = object
+  ## A single ship on the board.  `cells` records the (row, col) positions
+  ## it occupies so we can look up occupancy by index.
   name: string
   length: int32
   hits: int32
@@ -170,54 +200,93 @@ const FleetTemplates = [
 ]
 
 const
-  EnemyUnknown = 0'i32
-  OwnWater = 1'i32
-  OwnShip = 2'i32
-  ShotMiss = 3'i32
-  ShotHit = 4'i32
-  ShotSunk = 5'i32
+  EnemyUnknown = 0'i32 ## Enemy cell not yet targeted
+  OwnWater = 1'i32 ## Own cell with no ship
+  OwnShip = 2'i32 ## Own cell occupied by a ship (not yet hit)
+  ShotMiss = 3'i32 ## Shot landed in water
+  ShotHit = 4'i32 ## Shot hit a ship (not yet sunk)
+  ShotSunk = 5'i32 ## Shot hit and sank a ship
 
-## Thread-local captain state
-## --------------------------
-## Each library context gets its own processing thread, so all game state
-## is kept in threadvars.  This means exactly one captain per thread; the
-## framework enforces that invariant via registerBrokerLibrary which spawns
-## a dedicated processing thread per context.
+const MaxReplayLogSize = 256
+
+# ---------------------------------------------------------------------------
+# Captain — the per-player state object
+# ---------------------------------------------------------------------------
+# All mutable game state lives here instead of in threadvars.
+# `InitializeCaptainRequest` creates the instance, `ShutdownRequest` nils it.
+
+type Captain = ref object
+  ## Encapsulates the full state of one player (one library context).
+  ## Created by InitializeCaptainRequest, destroyed by ShutdownRequest.
+
+  # Identity & configuration
+  ctx: BrokerContext ## The broker context this captain is bound to
+  name: string ## Display name ("Red Fleet", "Blue Fleet", etc.)
+  aiMode: string ## Targeting strategy: "hunt", "random", "sweep"
+  boardSize: int32 ## Board dimension (NxN, typically 8)
+  seed: int64 ## Original RNG seed for reproducibility
+  turnDelayMs: int32 ## Artificial delay between turns for pacing
+
+  # RNG — XorShift64 state (Marsaglia 2003, triple 13/7/17)
+  rngState: uint64
+
+  # Lifecycle flags
+  fleetPlaced: bool ## True after AutoPlaceFleetRequest succeeds
+  linked: bool ## True after LinkOpponentRequest succeeds
+  started: bool ## True after the first shot is fired or received
+  gameOver: bool ## True when all ships on either side are sunk
+  hasWon: bool ## True if this captain won the duel
+
+  # Own board — what the opponent shoots at
+  ships: seq[Ship] ## The fleet
+  shipIndexBoard: seq[seq[int]] ## Grid mapping (row,col) → ship index (-1 = water)
+  incomingHit: seq[seq[bool]] ## Cells where incoming shots hit a ship
+  incomingMiss: seq[seq[bool]] ## Cells where incoming shots missed
+
+  # Enemy board — what this captain knows about the opponent
+  enemyState: seq[seq[int32]]
+    ## Per-cell knowledge (EnemyUnknown/ShotMiss/ShotHit/ShotSunk)
+
+  # Combat counters
+  shotsFired: int32 ## Total shots this captain has fired
+  shotsReceived: int32 ## Total shots this captain has received
+
+  # Pending outgoing shot — waiting for opponent's reply
+  pendingShot: bool
+  pendingExchangeId: int32
+  pendingTurn: int32
+  pendingRow: int32
+  pendingCol: int32
+  nextExchangeId: int32 ## Monotonically increasing exchange counter
+
+  # Peer link — native Nim listener on the opponent's VolleyEvent
+  opponentCtx: BrokerContext
+  peerVolleyHandle: VolleyEventListener
+  peerListenerInstalled: bool
+
+  # Replay log — bounded ring of recent game events for the observer
+  replayLog: seq[ReplayEntry]
+
+# ---------------------------------------------------------------------------
+# Thread-local state
+# ---------------------------------------------------------------------------
+# The framework spawns one processing thread per library context.
+# `gProviderCtx` is set once by setupProviders and never changes.
+# `gCaptain` is nil until InitializeCaptainRequest creates it.
+
 var gProviderCtx {.threadvar.}: BrokerContext
-var gInitialized {.threadvar.}: bool
-var gFleetPlaced {.threadvar.}: bool
-var gLinked {.threadvar.}: bool
-var gStarted {.threadvar.}: bool
-var gCaptainName {.threadvar.}: string
-var gAiMode {.threadvar.}: string
-var gBoardSize {.threadvar.}: int32
-var gSeed {.threadvar.}: int64
-var gTurnDelayMs {.threadvar.}: int32
-var gRngState {.threadvar.}: uint64
-var gHasWon {.threadvar.}: bool
-var gGameOver {.threadvar.}: bool
-var gShips {.threadvar.}: seq[Ship]
-var gShipIndexBoard {.threadvar.}: seq[seq[int]]
-var gIncomingHit {.threadvar.}: seq[seq[bool]]
-var gIncomingMiss {.threadvar.}: seq[seq[bool]]
-var gEnemyState {.threadvar.}: seq[seq[int32]]
-var gReplayLog {.threadvar.}: seq[ReplayEntry]
-var gShotsFired {.threadvar.}: int32
-var gShotsReceived {.threadvar.}: int32
-var gPendingShot {.threadvar.}: bool
-var gPendingExchangeId {.threadvar.}: int32
-var gPendingTurn {.threadvar.}: int32
-var gPendingRow {.threadvar.}: int32
-var gPendingCol {.threadvar.}: int32
-var gNextExchangeId {.threadvar.}: int32
-var gOpponentCtx {.threadvar.}: BrokerContext
-var gPeerVolleyHandle {.threadvar.}: VolleyEventListener
-var gPeerListenerInstalled {.threadvar.}: bool
+var gCaptain {.threadvar.}: Captain
+
+# ---------------------------------------------------------------------------
+# Helpers — pure utilities with no state dependencies
+# ---------------------------------------------------------------------------
 
 proc toCoordLabel(row: int32, col: int32): string =
+  ## Convert (row, col) to human-readable label like "A1", "B3".
   $(char(ord('A') + int(col))) & $(row + 1)
 
 proc normalizeAiMode(aiMode: string): string =
+  ## Map user-supplied AI mode string to one of the three canonical values.
   let normalized = aiMode.strip().toLowerAscii()
   case normalized
   of "", "hunt": "hunt"
@@ -225,129 +294,141 @@ proc normalizeAiMode(aiMode: string): string =
   of "sweep", "scripted": "sweep"
   else: "hunt"
 
-proc nextRandRaw(): uint64 =
+# ---------------------------------------------------------------------------
+# Captain — RNG
+# ---------------------------------------------------------------------------
+
+proc nextRandRaw(c: Captain): uint64 =
   ## XorShift64 PRNG — Marsaglia "Xorshift RNGs", Journal of Statistical
   ## Software 2003, triple (13, 7, 17) which is a full-period generator
   ## for 64-bit state (period 2^64 - 1).
-  if gRngState == 0'u64:
-    gRngState = 0x9E3779B97F4A7C15'u64
-  var value = gRngState
+  if c.rngState == 0'u64:
+    c.rngState = 0x9E3779B97F4A7C15'u64
+  var value = c.rngState
   value = value xor (value shl 13)
   value = value xor (value shr 7)
   value = value xor (value shl 17)
-  gRngState = value
+  c.rngState = value
   result = value
 
-proc nextRand(maxExclusive: int): int =
+proc nextRand(c: Captain, maxExclusive: int): int =
   ## Returns a value in [0, maxExclusive).  Uses simple modulo reduction
   ## which has negligible bias for small maxExclusive relative to 2^64.
   if maxExclusive <= 0:
     return 0
-  int(nextRandRaw() mod uint64(maxExclusive))
+  int(c.nextRandRaw() mod uint64(maxExclusive))
 
-proc resetState() =
-  gInitialized = false
-  gFleetPlaced = false
-  gLinked = false
-  gStarted = false
-  gCaptainName = ""
-  gAiMode = "hunt"
-  gBoardSize = 8
-  gSeed = 0
-  gTurnDelayMs = 0
-  gRngState = 0
-  gHasWon = false
-  gGameOver = false
-  gShips = @[]
-  gShipIndexBoard = @[]
-  gIncomingHit = @[]
-  gIncomingMiss = @[]
-  gEnemyState = @[]
-  gReplayLog = @[]
-  gShotsFired = 0
-  gShotsReceived = 0
-  gPendingShot = false
-  gPendingExchangeId = 0
-  gPendingTurn = 0
-  gPendingRow = -1
-  gPendingCol = -1
-  gNextExchangeId = 0
-  gOpponentCtx = BrokerContext(0'u32)
-  gPeerVolleyHandle = VolleyEventListener(id: 0'u64)
-  gPeerListenerInstalled = false
+# ---------------------------------------------------------------------------
+# Captain — board state queries
+# ---------------------------------------------------------------------------
 
-proc initBoardState(boardSize: int32) =
-  gShipIndexBoard = newSeqWith(int(boardSize), newSeqWith(int(boardSize), -1))
-  gIncomingHit = newSeqWith(int(boardSize), newSeqWith(int(boardSize), false))
-  gIncomingMiss = newSeqWith(int(boardSize), newSeqWith(int(boardSize), false))
-  gEnemyState = newSeqWith(int(boardSize), newSeqWith(int(boardSize), EnemyUnknown))
+proc inBounds(c: Captain, row: int32, col: int32): bool =
+  row >= 0 and col >= 0 and row < c.boardSize and col < c.boardSize
 
-proc inBounds(row: int32, col: int32): bool =
-  row >= 0 and col >= 0 and row < gBoardSize and col < gBoardSize
-
-proc allShipsSunk(): bool =
-  if gShips.len == 0:
+proc allShipsSunk(c: Captain): bool =
+  ## Returns true when every ship in the fleet has been sunk.
+  if c.ships.len == 0:
     return false
-  for ship in gShips:
+  for ship in c.ships:
     if not ship.sunk:
       return false
   true
 
-const MaxReplayLogSize = 256
+proc ownCellState(c: Captain, row: int, col: int): int32 =
+  ## Compute the public view of one of our own cells.
+  let shipIndex = c.shipIndexBoard[row][col]
+  if shipIndex >= 0:
+    if c.ships[shipIndex].sunk:
+      return ShotSunk
+    if c.incomingHit[row][col]:
+      return ShotHit
+    return OwnShip
+  if c.incomingMiss[row][col]:
+    return ShotMiss
+  OwnWater
 
-proc appendReplay(phase: string, turnNumber: int32, message: string) =
-  if gReplayLog.len >= MaxReplayLogSize:
-    # Trim oldest half to amortize the copy cost
-    let keepFrom = gReplayLog.len - (MaxReplayLogSize div 2)
-    gReplayLog = gReplayLog[keepFrom ..< gReplayLog.len]
-  gReplayLog.add(
-    ReplayEntry(
-      turnNumber: turnNumber, side: gCaptainName, phase: phase, message: message
+proc ownCells(c: Captain): seq[PublicCell] =
+  for row in 0 ..< int(c.boardSize):
+    for col in 0 ..< int(c.boardSize):
+      result.add(
+        PublicCell(
+          row: int32(row), col: int32(col), stateCode: c.ownCellState(row, col)
+        )
+      )
+
+proc enemyCells(c: Captain): seq[PublicCell] =
+  for row in 0 ..< int(c.boardSize):
+    for col in 0 ..< int(c.boardSize):
+      result.add(
+        PublicCell(row: int32(row), col: int32(col), stateCode: c.enemyState[row][col])
+      )
+
+proc fleetStatus(c: Captain): seq[ShipStatus] =
+  for ship in c.ships:
+    result.add(
+      ShipStatus(name: ship.name, length: ship.length, hits: ship.hits, sunk: ship.sunk)
     )
+
+# ---------------------------------------------------------------------------
+# Captain — replay log
+# ---------------------------------------------------------------------------
+
+proc appendReplay(c: Captain, phase: string, turnNumber: int32, message: string) =
+  if c.replayLog.len >= MaxReplayLogSize:
+    # Trim oldest half to amortize the copy cost
+    let keepFrom = c.replayLog.len - (MaxReplayLogSize div 2)
+    c.replayLog = c.replayLog[keepFrom ..< c.replayLog.len]
+  c.replayLog.add(
+    ReplayEntry(turnNumber: turnNumber, side: c.name, phase: phase, message: message)
   )
 
-proc replayTail(): seq[ReplayEntry] =
-  let startIndex = max(0, gReplayLog.len - 14)
-  for index in startIndex ..< gReplayLog.len:
-    result.add(gReplayLog[index])
+proc replayTail(c: Captain): seq[ReplayEntry] =
+  let startIndex = max(0, c.replayLog.len - 14)
+  for index in startIndex ..< c.replayLog.len:
+    result.add(c.replayLog[index])
+
+# ---------------------------------------------------------------------------
+# Captain — event emission helpers
+# ---------------------------------------------------------------------------
+# These thin wrappers keep the emit call sites readable.  Each one appends
+# to the replay log (where appropriate) and emits the broker event on the
+# captain's context.
 
 proc emitRemark(
-    phase: string, turnNumber: int32, message: string
+    c: Captain, phase: string, turnNumber: int32, message: string
 ): Future[void] {.async.} =
-  appendReplay(phase, turnNumber, message)
+  c.appendReplay(phase, turnNumber, message)
   await CaptainRemark.emit(
-    gProviderCtx,
+    c.ctx,
     CaptainRemark(
-      captainName: gCaptainName, phase: phase, message: message, turnNumber: turnNumber
+      captainName: c.name, phase: phase, message: message, turnNumber: turnNumber
     ),
   )
 
-proc emitBoardChanged(turnNumber: int32): Future[void] {.async.} =
+proc emitBoardChanged(c: Captain, turnNumber: int32): Future[void] {.async.} =
   await BoardChanged.emit(
-    gProviderCtx,
+    c.ctx,
     BoardChanged(
-      captainName: gCaptainName,
+      captainName: c.name,
       turnNumber: turnNumber,
-      totalShotsFired: gShotsFired,
-      totalShotsReceived: gShotsReceived,
+      totalShotsFired: c.shotsFired,
+      totalShotsReceived: c.shotsReceived,
     ),
   )
 
 proc emitMatchEnded(
-    outcome: string, turnNumber: int32, message: string
+    c: Captain, outcome: string, turnNumber: int32, message: string
 ): Future[void] {.async.} =
-  appendReplay("end", turnNumber, message)
+  c.appendReplay("end", turnNumber, message)
   await MatchEnded.emit(
-    gProviderCtx,
+    c.ctx,
     MatchEnded(
-      captainName: gCaptainName,
-      outcome: outcome,
-      message: message,
-      turnNumber: turnNumber,
+      captainName: c.name, outcome: outcome, message: message, turnNumber: turnNumber
     ),
   )
 
 proc emitVolley(
+    c: Captain,
     exchangeId: int32,
     stage: string,
     row: int32,
@@ -360,9 +441,9 @@ proc emitVolley(
     message: string,
 ): Future[void] {.async.} =
   await VolleyEvent.emit(
-    gProviderCtx,
+    c.ctx,
     VolleyEvent(
-      captainName: gCaptainName,
+      captainName: c.name,
       exchangeId: exchangeId,
       stage: stage,
       row: row,
@@ -376,79 +457,27 @@ proc emitVolley(
     ),
   )
 
-proc applyTurnDelay(): Future[void] {.async.} =
-  if gTurnDelayMs > 0:
-    await sleepAsync(milliseconds(gTurnDelayMs))
+proc applyTurnDelay(c: Captain): Future[void] {.async.} =
+  if c.turnDelayMs > 0:
+    await sleepAsync(milliseconds(c.turnDelayMs))
 
-proc ownCellState(row: int, col: int): int32 =
-  let shipIndex = gShipIndexBoard[row][col]
-  if shipIndex >= 0:
-    if gShips[shipIndex].sunk:
-      return ShotSunk
-    if gIncomingHit[row][col]:
-      return ShotHit
-    return OwnShip
-  if gIncomingMiss[row][col]:
-    return ShotMiss
-  OwnWater
+# ---------------------------------------------------------------------------
+# Captain — board initialization & fleet placement
+# ---------------------------------------------------------------------------
 
-proc enemyCellState(row: int, col: int): int32 =
-  gEnemyState[row][col]
-
-proc fleetStatus(): seq[ShipStatus] =
-  for ship in gShips:
-    result.add(
-      ShipStatus(name: ship.name, length: ship.length, hits: ship.hits, sunk: ship.sunk)
-    )
-
-proc ownCells(): seq[PublicCell] =
-  for row in 0 ..< int(gBoardSize):
-    for col in 0 ..< int(gBoardSize):
-      result.add(
-        PublicCell(row: int32(row), col: int32(col), stateCode: ownCellState(row, col))
-      )
-
-proc enemyCells(): seq[PublicCell] =
-  for row in 0 ..< int(gBoardSize):
-    for col in 0 ..< int(gBoardSize):
-      result.add(
-        PublicCell(
-          row: int32(row), col: int32(col), stateCode: enemyCellState(row, col)
-        )
-      )
-
-proc buildAutoPlaceResult(): AutoPlaceFleetRequest =
-  AutoPlaceFleetRequest(
-    captainName: gCaptainName,
-    success: true,
-    shipCount: int32(gShips.len),
-    ownCells: ownCells(),
-    fleet: fleetStatus(),
-  )
-
-proc buildPublicBoardResult(): GetPublicBoardRequest =
-  GetPublicBoardRequest(
-    captainName: gCaptainName,
-    boardSize: gBoardSize,
-    aiMode: gAiMode,
-    turnDelayMs: gTurnDelayMs,
-    ownCells: ownCells(),
-    enemyCells: enemyCells(),
-    fleet: fleetStatus(),
-    replayTail: replayTail(),
-    fleetPlaced: gFleetPlaced,
-    linked: gLinked,
-    started: gStarted,
-    gameOver: gGameOver,
-    hasWon: gHasWon,
-    opponentCtx: uint32(gOpponentCtx),
-    totalShotsFired: gShotsFired,
-    totalShotsReceived: gShotsReceived,
-  )
+proc initBoardState(c: Captain) =
+  ## Allocate empty NxN grids for own-board tracking and enemy knowledge.
+  let n = int(c.boardSize)
+  c.shipIndexBoard = newSeqWith(n, newSeqWith(n, -1))
+  c.incomingHit = newSeqWith(n, newSeqWith(n, false))
+  c.incomingMiss = newSeqWith(n, newSeqWith(n, false))
+  c.enemyState = newSeqWith(n, newSeqWith(n, EnemyUnknown))
 
 proc canPlaceShip(
-    startRow: int, startCol: int, horizontal: bool, shipLen: int32
+    c: Captain, startRow: int, startCol: int, horizontal: bool, shipLen: int32
 ): bool =
+  ## Check whether a ship of `shipLen` fits at the given position without
+  ## overlapping existing ships or going out of bounds.
   for offset in 0 ..< int(shipLen):
     let row =
       if horizontal:
@@ -460,36 +489,38 @@ proc canPlaceShip(
         startCol + offset
       else:
         startCol
-    if row < 0 or col < 0 or row >= int(gBoardSize) or col >= int(gBoardSize):
+    if row < 0 or col < 0 or row >= int(c.boardSize) or col >= int(c.boardSize):
       return false
-    if gShipIndexBoard[row][col] >= 0:
+    if c.shipIndexBoard[row][col] >= 0:
       return false
   true
 
-proc placeFleet(): Result[void, string] =
-  gShips = @[]
-  initBoardState(gBoardSize)
+proc placeFleet(c: Captain): Result[void, string] =
+  ## Deterministically place all ships using the seeded PRNG.
+  ## Tries up to 256 random placements per ship before giving up.
+  c.ships = @[]
+  c.initBoardState()
 
   for (shipName, shipLen) in FleetTemplates:
     var placed = false
     for _ in 0 ..< 256:
-      let horizontal = nextRand(2) == 0
+      let horizontal = c.nextRand(2) == 0
       let maxRow =
         if horizontal:
-          int(gBoardSize)
+          int(c.boardSize)
         else:
-          int(gBoardSize - shipLen + 1)
+          int(c.boardSize - shipLen + 1)
       let maxCol =
         if horizontal:
-          int(gBoardSize - shipLen + 1)
+          int(c.boardSize - shipLen + 1)
         else:
-          int(gBoardSize)
-      let startRow = nextRand(maxRow)
-      let startCol = nextRand(maxCol)
-      if not canPlaceShip(startRow, startCol, horizontal, shipLen):
+          int(c.boardSize)
+      let startRow = c.nextRand(maxRow)
+      let startCol = c.nextRand(maxCol)
+      if not c.canPlaceShip(startRow, startCol, horizontal, shipLen):
         continue
 
-      let shipIndex = gShips.len
+      let shipIndex = c.ships.len
       var cells: seq[(int, int)] = @[]
       for offset in 0 ..< int(shipLen):
         let row =
@@ -502,10 +533,10 @@ proc placeFleet(): Result[void, string] =
             startCol + offset
           else:
             startCol
-        gShipIndexBoard[row][col] = shipIndex
+        c.shipIndexBoard[row][col] = shipIndex
         cells.add((row, col))
 
-      gShips.add(
+      c.ships.add(
         Ship(name: shipName, length: shipLen, hits: 0, sunk: false, cells: cells)
       )
       placed = true
@@ -514,25 +545,38 @@ proc placeFleet(): Result[void, string] =
     if not placed:
       return err("failed to place fleet for " & shipName)
 
-  gFleetPlaced = true
+  c.fleetPlaced = true
   ok()
 
-proc chooseShot(): tuple[row: int32, col: int32, reasoning: string] =
+# ---------------------------------------------------------------------------
+# Captain — AI target selection
+# ---------------------------------------------------------------------------
+
+proc chooseShot(c: Captain): tuple[row: int32, col: int32, reasoning: string] =
+  ## Pick the next cell to fire at.
+  ##
+  ## Hunt mode: if any enemy cell is ShotHit (hit but not yet sunk), look
+  ## for adjacent unknown cells to finish off the ship.  If none found,
+  ## fall through to random search.
+  ##
+  ## Sweep mode: deterministic top-left-to-bottom-right scan.
+  ## Random / default: pick uniformly from all unknown cells.
   var candidates: seq[(int32, int32)] = @[]
 
-  if gAiMode == "hunt":
-    for row in 0 ..< int(gBoardSize):
-      for col in 0 ..< int(gBoardSize):
-        if gEnemyState[row][col] != ShotHit:
+  # Hunt phase — look for adjacents to existing hits
+  if c.aiMode == "hunt":
+    for row in 0 ..< int(c.boardSize):
+      for col in 0 ..< int(c.boardSize):
+        if c.enemyState[row][col] != ShotHit:
           continue
         for (deltaRow, deltaCol) in [
           (-1'i32, 0'i32), (1'i32, 0'i32), (0'i32, -1'i32), (0'i32, 1'i32)
         ]:
           let nextRow = int32(row) + deltaRow
           let nextCol = int32(col) + deltaCol
-          if not inBounds(nextRow, nextCol):
+          if not c.inBounds(nextRow, nextCol):
             continue
-          if gEnemyState[int(nextRow)][int(nextCol)] != EnemyUnknown:
+          if c.enemyState[int(nextRow)][int(nextCol)] != EnemyUnknown:
             continue
           var seen = false
           for candidate in candidates:
@@ -543,146 +587,164 @@ proc chooseShot(): tuple[row: int32, col: int32, reasoning: string] =
             candidates.add((nextRow, nextCol))
 
     if candidates.len > 0:
-      let pick = candidates[nextRand(candidates.len)]
+      let pick = candidates[c.nextRand(candidates.len)]
       return (pick[0], pick[1], "finish-contact")
 
   # Fallback: hunt found no adjacent targets, or mode is sweep/random.
   # Collect all unknown cells and pick one according to mode.
   candidates.setLen(0)
-  for row in 0 ..< int(gBoardSize):
-    for col in 0 ..< int(gBoardSize):
-      if gEnemyState[row][col] == EnemyUnknown:
+  for row in 0 ..< int(c.boardSize):
+    for col in 0 ..< int(c.boardSize):
+      if c.enemyState[row][col] == EnemyUnknown:
         candidates.add((int32(row), int32(col)))
 
   if candidates.len == 0:
     return (-1'i32, -1'i32, "no-target")
 
-  if gAiMode == "sweep":
+  if c.aiMode == "sweep":
     # Deterministic top-left-to-bottom-right scan
     return (candidates[0][0], candidates[0][1], "sweep")
 
-  let pick = candidates[nextRand(candidates.len)]
+  let pick = candidates[c.nextRand(candidates.len)]
   let reasoning =
-    if gAiMode == "hunt": "search"
-    elif gAiMode == "random": "random-search"
-    else: "search"
+    if c.aiMode == "hunt":
+      "search"
+    elif c.aiMode == "random":
+      "random-search"
+    else:
+      "search"
   (pick[0], pick[1], reasoning)
 
-proc requireInitialized(): Result[void, string] =
-  if not gInitialized:
-    return err("captain not initialized")
-  ok()
+# ---------------------------------------------------------------------------
+# Captain — state guards
+# ---------------------------------------------------------------------------
 
-proc requireActiveGame(): Result[void, string] =
-  let initializedRes = requireInitialized()
-  if initializedRes.isErr():
-    return initializedRes
-  if not gFleetPlaced:
+proc requireActive(c: Captain): Result[void, string] =
+  ## Ensure the captain is initialized, fleet is placed, and game is live.
+  if not c.fleetPlaced:
     return err("fleet not placed")
-  if gGameOver:
+  if c.gameOver:
     return err("game already finished")
   ok()
 
-proc requireLinkedGame(): Result[void, string] =
-  let activeRes = requireActiveGame()
+proc requireLinked(c: Captain): Result[void, string] =
+  ## Ensure the captain is in a live, linked game.
+  let activeRes = c.requireActive()
   if activeRes.isErr():
     return activeRes
-  if not gLinked:
+  if not c.linked:
     return err("opponent not linked")
   ok()
 
-proc clearPendingShot() =
-  gPendingShot = false
-  gPendingExchangeId = 0
-  gPendingTurn = 0
-  gPendingRow = -1
-  gPendingCol = -1
+# ---------------------------------------------------------------------------
+# Captain — pending shot management
+# ---------------------------------------------------------------------------
 
-proc dropPeerLink() =
-  if gPeerListenerInstalled:
-    VolleyEvent.dropListener(gOpponentCtx, gPeerVolleyHandle)
-  gPeerListenerInstalled = false
-  gPeerVolleyHandle = VolleyEventListener(id: 0'u64)
-  gOpponentCtx = BrokerContext(0'u32)
-  gLinked = false
-  gStarted = false
-  gGameOver = false
-  gHasWon = false
-  clearPendingShot()
+proc clearPendingShot(c: Captain) =
+  c.pendingShot = false
+  c.pendingExchangeId = 0
+  c.pendingTurn = 0
+  c.pendingRow = -1
+  c.pendingCol = -1
 
-proc planNextShotInternal(): Result[(int32, int32, int32, int32, string), string] =
-  let activeRes = requireLinkedGame()
+# ---------------------------------------------------------------------------
+# Captain — peer link management
+# ---------------------------------------------------------------------------
+
+proc dropPeerLink(c: Captain) =
+  ## Tear down the native listener on the opponent's VolleyEvent and
+  ## reset all link/game-outcome state so the captain can be re-linked.
+  if c.peerListenerInstalled:
+    VolleyEvent.dropListener(c.opponentCtx, c.peerVolleyHandle)
+  c.peerListenerInstalled = false
+  c.peerVolleyHandle = VolleyEventListener(id: 0'u64)
+  c.opponentCtx = BrokerContext(0'u32)
+  c.linked = false
+  c.started = false
+  c.gameOver = false
+  c.hasWon = false
+  c.clearPendingShot()
+
+# ---------------------------------------------------------------------------
+# Captain — combat: plan, receive, observe
+# ---------------------------------------------------------------------------
+
+proc planNextShot(c: Captain): Result[(int32, int32, int32, int32, string), string] =
+  ## Choose a target and record it as the pending outgoing shot.
+  let activeRes = c.requireLinked()
   if activeRes.isErr():
     return err(activeRes.error())
-  if gPendingShot:
+  if c.pendingShot:
     return err("pending shot must be resolved before planning another")
 
-  let shot = chooseShot()
+  let shot = c.chooseShot()
   if shot.row < 0 or shot.col < 0:
     return err("no valid target remaining")
 
-  gPendingShot = true
-  gPendingExchangeId = gNextExchangeId + 1
-  gNextExchangeId = gPendingExchangeId
-  gPendingTurn = gShotsFired + 1
-  gPendingRow = shot.row
-  gPendingCol = shot.col
-  gShotsFired = gPendingTurn
+  c.pendingShot = true
+  c.pendingExchangeId = c.nextExchangeId + 1
+  c.nextExchangeId = c.pendingExchangeId
+  c.pendingTurn = c.shotsFired + 1
+  c.pendingRow = shot.row
+  c.pendingCol = shot.col
+  c.shotsFired = c.pendingTurn
 
-  ok((gPendingExchangeId, gPendingTurn, shot.row, shot.col, shot.reasoning))
+  ok((c.pendingExchangeId, c.pendingTurn, shot.row, shot.col, shot.reasoning))
 
-proc receiveShotInternal(
-    exchangeId: int32, row: int32, col: int32
+proc receiveShot(
+    c: Captain, exchangeId: int32, row: int32, col: int32
 ): Future[Result[(bool, bool, string, bool, int32), string]] {.async.} =
-  let activeRes = requireLinkedGame()
+  ## Process an incoming shot from the opponent.  Updates own board,
+  ## emits ShotResolved + BoardChanged, and detects loss.
+  let activeRes = c.requireLinked()
   if activeRes.isErr():
     return err(activeRes.error())
-  if not inBounds(row, col):
+  if not c.inBounds(row, col):
     return err("incoming shot out of bounds")
 
   let rowIndex = int(row)
   let colIndex = int(col)
-  if gIncomingHit[rowIndex][colIndex] or gIncomingMiss[rowIndex][colIndex]:
+  if c.incomingHit[rowIndex][colIndex] or c.incomingMiss[rowIndex][colIndex]:
     return err("incoming shot already resolved at " & toCoordLabel(row, col))
 
-  gStarted = true
-  gShotsReceived.inc()
+  c.started = true
+  c.shotsReceived.inc()
 
   var hit = false
   var sunk = false
   var shipName = ""
 
-  let shipIndex = gShipIndexBoard[rowIndex][colIndex]
+  let shipIndex = c.shipIndexBoard[rowIndex][colIndex]
   if shipIndex >= 0:
     hit = true
-    gIncomingHit[rowIndex][colIndex] = true
-    gShips[shipIndex].hits.inc()
-    shipName = gShips[shipIndex].name
-    if gShips[shipIndex].hits >= gShips[shipIndex].length:
-      gShips[shipIndex].sunk = true
+    c.incomingHit[rowIndex][colIndex] = true
+    c.ships[shipIndex].hits.inc()
+    shipName = c.ships[shipIndex].name
+    if c.ships[shipIndex].hits >= c.ships[shipIndex].length:
+      c.ships[shipIndex].sunk = true
       sunk = true
   else:
-    gIncomingMiss[rowIndex][colIndex] = true
+    c.incomingMiss[rowIndex][colIndex] = true
 
-  let turnNumber = gShotsReceived
-  let lost = allShipsSunk()
+  let turnNumber = c.shotsReceived
+  let lost = c.allShipsSunk()
   if lost:
-    gGameOver = true
-    gHasWon = false
+    c.gameOver = true
+    c.hasWon = false
 
   let message =
     if not hit:
-      gCaptainName & " reports miss at " & toCoordLabel(row, col)
+      c.name & " reports miss at " & toCoordLabel(row, col)
     elif sunk:
-      gCaptainName & " loses " & shipName & " at " & toCoordLabel(row, col)
+      c.name & " loses " & shipName & " at " & toCoordLabel(row, col)
     else:
-      gCaptainName & " takes a hit at " & toCoordLabel(row, col)
+      c.name & " takes a hit at " & toCoordLabel(row, col)
 
-  appendReplay("defense", turnNumber, message)
+  c.appendReplay("defense", turnNumber, message)
   await ShotResolved.emit(
-    gProviderCtx,
+    c.ctx,
     ShotResolved(
-      captainName: gCaptainName,
+      captainName: c.name,
       turnNumber: turnNumber,
       row: row,
       col: col,
@@ -693,14 +755,15 @@ proc receiveShotInternal(
       gameOver: lost,
     ),
   )
-  await emitBoardChanged(turnNumber)
+  await c.emitBoardChanged(turnNumber)
 
   if lost:
-    await emitMatchEnded("lost", turnNumber, gCaptainName & " has been destroyed")
+    await c.emitMatchEnded("lost", turnNumber, c.name & " has been destroyed")
 
   return ok((hit, sunk, shipName, lost, turnNumber))
 
-proc observeOutcomeInternal(
+proc observeOutcome(
+    c: Captain,
     exchangeId: int32,
     row: int32,
     col: int32,
@@ -709,40 +772,42 @@ proc observeOutcomeInternal(
     shipName: string,
     gameOver: bool,
 ): Future[Result[bool, string]] {.async.} =
+  ## Process the opponent's reply to our outgoing shot.  Updates enemy
+  ## board knowledge, emits ShotResolved + BoardChanged, detects win.
   # Guard: allow a pending shot to resolve even if the game state has
-  # transitioned (e.g. opponent's final shot set gGameOver before our
+  # transitioned (e.g. opponent's final shot set gameOver before our
   # reply arrived).  Only reject if there is genuinely no pending shot.
-  if not gPendingShot:
-    let activeRes = requireLinkedGame()
+  if not c.pendingShot:
+    let activeRes = c.requireLinked()
     if activeRes.isErr():
       return err(activeRes.error())
     return err("no pending shot to observe")
-  if exchangeId != gPendingExchangeId:
+  if exchangeId != c.pendingExchangeId:
     return err("reply exchange id does not match pending shot")
-  if row != gPendingRow or col != gPendingCol:
+  if row != c.pendingRow or col != c.pendingCol:
     return err("shot outcome does not match pending coordinate")
 
-  gStarted = true
+  c.started = true
 
   if hit:
-    gEnemyState[int(row)][int(col)] = if sunk: ShotSunk else: ShotHit
+    c.enemyState[int(row)][int(col)] = if sunk: ShotSunk else: ShotHit
   else:
-    gEnemyState[int(row)][int(col)] = ShotMiss
+    c.enemyState[int(row)][int(col)] = ShotMiss
 
-  let turnNumber = gPendingTurn
+  let turnNumber = c.pendingTurn
   let message =
     if not hit:
-      gCaptainName & " confirms miss at " & toCoordLabel(row, col)
+      c.name & " confirms miss at " & toCoordLabel(row, col)
     elif sunk:
-      gCaptainName & " sinks " & shipName & " at " & toCoordLabel(row, col)
+      c.name & " sinks " & shipName & " at " & toCoordLabel(row, col)
     else:
-      gCaptainName & " scores a hit at " & toCoordLabel(row, col)
+      c.name & " scores a hit at " & toCoordLabel(row, col)
 
-  appendReplay("attack", turnNumber, message)
+  c.appendReplay("attack", turnNumber, message)
   await ShotResolved.emit(
-    gProviderCtx,
+    c.ctx,
     ShotResolved(
-      captainName: gCaptainName,
+      captainName: c.name,
       turnNumber: turnNumber,
       row: row,
       col: col,
@@ -755,77 +820,94 @@ proc observeOutcomeInternal(
   )
 
   if gameOver:
-    gGameOver = true
-    gHasWon = true
-    await emitMatchEnded("won", turnNumber, gCaptainName & " wins the duel")
+    c.gameOver = true
+    c.hasWon = true
+    await c.emitMatchEnded("won", turnNumber, c.name & " wins the duel")
 
-  clearPendingShot()
-  await emitBoardChanged(turnNumber)
+  c.clearPendingShot()
+  await c.emitBoardChanged(turnNumber)
   ok(not gameOver)
 
-proc fireNextVolley(trigger: string): Future[Result[void, string]] {.async.}
+# ---------------------------------------------------------------------------
+# Captain — volley exchange (the autonomous duel loop)
+# ---------------------------------------------------------------------------
+# Once started, the duel is self-driven: fireNextVolley emits a "fire"
+# VolleyEvent on our context.  The opponent's peer listener picks it up,
+# calls receiveShot, and emits a "reply" VolleyEvent back.  Our peer
+# listener picks up the reply, calls observeOutcome, and — if the game
+# isn't over — fires the next volley as a counter-attack.
 
-proc handlePeerVolley(event: VolleyEvent): Future[void] {.async.} =
-  if gGameOver:
+proc fireNextVolley(c: Captain, trigger: string): Future[Result[void, string]] {.async.}
+
+proc handlePeerVolley(c: Captain, event: VolleyEvent): Future[void] {.async.} =
+  ## Called when the opponent emits a VolleyEvent on their context.
+  ## We are listening on their context, so this runs on our processing thread.
+  if c.gameOver:
     return
 
   case event.stage
   of "fire":
-    gStarted = true
-    await emitRemark(
+    # Opponent fired at us — resolve the incoming shot and reply
+    c.started = true
+    await c.emitRemark(
       "contact",
-      max(event.exchangeId, gShotsReceived + 1),
-      gCaptainName & " receives torpedo at " & toCoordLabel(event.row, event.col),
+      max(event.exchangeId, c.shotsReceived + 1),
+      c.name & " receives torpedo at " & toCoordLabel(event.row, event.col),
     )
-    await applyTurnDelay()
-    let receiveRes = await receiveShotInternal(event.exchangeId, event.row, event.col)
+    await c.applyTurnDelay()
+    let receiveRes = await c.receiveShot(event.exchangeId, event.row, event.col)
     if receiveRes.isErr():
-      await emitRemark("error", event.exchangeId, receiveRes.error())
+      await c.emitRemark("error", event.exchangeId, receiveRes.error())
       return
 
     let (hit, sunk, shipName, ended, _) = receiveRes.get()
     let replyMessage =
       if not hit:
-        gCaptainName & " replies miss"
+        c.name & " replies miss"
       elif sunk:
-        gCaptainName & " replies sunk " & shipName
+        c.name & " replies sunk " & shipName
       else:
-        gCaptainName & " replies hit"
+        c.name & " replies hit"
 
-    await emitVolley(
+    await c.emitVolley(
       event.exchangeId, "reply", event.row, event.col, "", hit, sunk, shipName, ended,
       replyMessage,
     )
+    # If we survived, counter-attack
     if not ended:
-      let counterRes = await fireNextVolley("counter")
+      let counterRes = await c.fireNextVolley("counter")
       if counterRes.isErr():
-        await emitRemark("error", event.exchangeId, counterRes.error())
+        await c.emitRemark("error", event.exchangeId, counterRes.error())
   of "reply":
-    let observeRes = await observeOutcomeInternal(
+    # Opponent replied to our shot — observe the outcome
+    let observeRes = await c.observeOutcome(
       event.exchangeId, event.row, event.col, event.hit, event.sunk, event.shipName,
       event.gameOver,
     )
     if observeRes.isErr():
-      await emitRemark("error", event.exchangeId, observeRes.error())
+      await c.emitRemark("error", event.exchangeId, observeRes.error())
       return
     discard observeRes.get()
   else:
     discard
 
-proc fireNextVolley(trigger: string): Future[Result[void, string]] {.async.} =
-  let planRes = planNextShotInternal()
+proc fireNextVolley(
+    c: Captain, trigger: string
+): Future[Result[void, string]] {.async.} =
+  ## Plan a shot, apply pacing delay, emit remark + fire VolleyEvent.
+  let planRes = c.planNextShot()
   if planRes.isErr():
     return err(planRes.error())
 
   let (exchangeId, turnNumber, row, col, reasoning) = planRes.get()
-  gStarted = true
-  await applyTurnDelay()
-  await emitRemark(
+  c.started = true
+  await c.applyTurnDelay()
+  await c.emitRemark(
     "target",
     turnNumber,
-    gCaptainName & " targets " & toCoordLabel(row, col) & " [" & trigger & "]",
+    c.name & " targets " & toCoordLabel(row, col) & " [" & trigger & "]",
   )
-  await emitVolley(
+  await c.emitVolley(
     exchangeId,
     "fire",
     row,
@@ -835,14 +917,57 @@ proc fireNextVolley(trigger: string): Future[Result[void, string]] {.async.} =
     false,
     "",
     false,
-    gCaptainName & " launches toward " & toCoordLabel(row, col),
+    c.name & " launches toward " & toCoordLabel(row, col),
   )
   ok()
 
+# ---------------------------------------------------------------------------
+# Captain — snapshot builders (for request responses)
+# ---------------------------------------------------------------------------
+
+proc buildAutoPlaceResult(c: Captain): AutoPlaceFleetRequest =
+  AutoPlaceFleetRequest(
+    captainName: c.name,
+    success: true,
+    shipCount: int32(c.ships.len),
+    ownCells: c.ownCells(),
+    fleet: c.fleetStatus(),
+  )
+
+proc buildPublicBoardResult(c: Captain): GetPublicBoardRequest =
+  GetPublicBoardRequest(
+    captainName: c.name,
+    boardSize: c.boardSize,
+    aiMode: c.aiMode,
+    turnDelayMs: c.turnDelayMs,
+    ownCells: c.ownCells(),
+    enemyCells: c.enemyCells(),
+    fleet: c.fleetStatus(),
+    replayTail: c.replayTail(),
+    fleetPlaced: c.fleetPlaced,
+    linked: c.linked,
+    started: c.started,
+    gameOver: c.gameOver,
+    hasWon: c.hasWon,
+    opponentCtx: uint32(c.opponentCtx),
+    totalShotsFired: c.shotsFired,
+    totalShotsReceived: c.shotsReceived,
+  )
+
+# ---------------------------------------------------------------------------
+# setupProviders — register all request handlers for this context
+# ---------------------------------------------------------------------------
+# Called once per context by the framework when the processing thread starts.
+# Each provider closure captures `ctx` (the broker context) and accesses
+# `gCaptain` for state.  Providers that require an initialized captain
+# check `gCaptain.isNil` and return an error if so.
+
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
   gProviderCtx = ctx
-  resetState()
+  gCaptain = nil # No captain until InitializeCaptainRequest
 
+  # --- InitializeCaptainRequest ---
+  # Creates a new Captain instance, tearing down any previous one.
   let initializeProviderRes = InitializeCaptainRequest.setProvider(
     ctx,
     proc(
@@ -857,34 +982,42 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       if turnDelayMs < 0 or turnDelayMs > 10000:
         return err("turn delay must be between 0 and 10000 milliseconds")
 
-      dropPeerLink()
-      resetState()
-      gProviderCtx = ctx
-      gCaptainName = if captainName.strip().len == 0: "Captain" else: captainName
-      gBoardSize = boardSize
-      gAiMode = normalizeAiMode(aiMode)
-      gSeed = seed
-      gTurnDelayMs = turnDelayMs
-      gRngState = uint64(seed)
-      if gRngState == 0'u64:
-        gRngState = 0xCAFEBABE12345678'u64
-      initBoardState(gBoardSize)
-      gInitialized = true
+      # Tear down any existing captain (drops peer link, etc.)
+      if not gCaptain.isNil:
+        gCaptain.dropPeerLink()
 
-      await emitRemark(
+      # Create a fresh captain with the requested configuration
+      let c = Captain(
+        ctx: ctx,
+        name: if captainName.strip().len == 0: "Captain" else: captainName,
+        boardSize: boardSize,
+        aiMode: normalizeAiMode(aiMode),
+        seed: seed,
+        turnDelayMs: turnDelayMs,
+        rngState: uint64(seed),
+        pendingRow: -1,
+        pendingCol: -1,
+      )
+      # Guard against zero RNG state (would stall the generator)
+      if c.rngState == 0'u64:
+        c.rngState = 0xCAFEBABE12345678'u64
+      c.initBoardState()
+      gCaptain = c
+
+      await c.emitRemark(
         "init",
         0,
-        gCaptainName & " ready on " & $gBoardSize & "x" & $gBoardSize & " board using " &
-          gAiMode & " AI with " & $gTurnDelayMs & "ms pacing",
+        c.name & " ready on " & $c.boardSize & "x" & $c.boardSize & " board using " &
+          c.aiMode & " AI with " & $c.turnDelayMs & "ms pacing",
       )
 
       return ok(
         InitializeCaptainRequest(
-          captainName: gCaptainName,
-          boardSize: gBoardSize,
-          aiMode: gAiMode,
-          seed: gSeed,
-          turnDelayMs: gTurnDelayMs,
+          captainName: c.name,
+          boardSize: c.boardSize,
+          aiMode: c.aiMode,
+          seed: c.seed,
+          turnDelayMs: c.turnDelayMs,
           initialized: true,
         )
       ),
@@ -895,33 +1028,37 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
         initializeProviderRes.error()
     )
 
+  # --- ShutdownRequest ---
+  # Tears down the captain: drops the peer link and nils the threadvar.
   let shutdownProviderRes = ShutdownRequest.setProvider(
     ctx,
     proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
-      dropPeerLink()
-      resetState()
-      gProviderCtx = ctx
+      if not gCaptain.isNil:
+        gCaptain.dropPeerLink()
+        gCaptain = nil
       return ok(ShutdownRequest(status: 0)),
   )
   if shutdownProviderRes.isErr():
     return
       err("failed to register ShutdownRequest provider: " & shutdownProviderRes.error())
 
+  # --- AutoPlaceFleetRequest ---
+  # Deterministically places the fleet using the seeded PRNG.
   let autoPlaceProviderRes = AutoPlaceFleetRequest.setProvider(
     ctx,
     proc(): Future[Result[AutoPlaceFleetRequest, string]] {.closure, async.} =
-      let activeRes = requireInitialized()
-      if activeRes.isErr():
-        return err(activeRes.error())
+      if gCaptain.isNil:
+        return err("captain not initialized")
 
-      let placeRes = placeFleet()
+      let c = gCaptain
+      let placeRes = c.placeFleet()
       if placeRes.isErr():
         return err(placeRes.error())
 
-      await emitRemark("setup", 0, gCaptainName & " deployed " & $gShips.len & " ships")
-      await emitBoardChanged(0)
+      await c.emitRemark("setup", 0, c.name & " deployed " & $c.ships.len & " ships")
+      await c.emitBoardChanged(0)
 
-      return ok(buildAutoPlaceResult()),
+      return ok(c.buildAutoPlaceResult()),
   )
   if autoPlaceProviderRes.isErr():
     return err(
@@ -929,30 +1066,44 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
         autoPlaceProviderRes.error()
     )
 
+  # --- LinkOpponentRequest ---
+  # Installs a native Nim listener on the opponent's VolleyEvent so the
+  # duel can proceed autonomously without foreign-app relay.
   let linkOpponentProviderRes = LinkOpponentRequest.setProvider(
     ctx,
     proc(
         opponentCtx: uint32
     ): Future[Result[LinkOpponentRequest, string]] {.closure, async.} =
-      let activeRes = requireActiveGame()
+      if gCaptain.isNil:
+        return err("captain not initialized")
+
+      let c = gCaptain
+      let activeRes = c.requireActive()
       if activeRes.isErr():
         return err(activeRes.error())
       if opponentCtx == 0'u32:
         return err("opponent context must be non-zero")
-      if BrokerContext(opponentCtx) == gProviderCtx:
+      if BrokerContext(opponentCtx) == c.ctx:
         return err("opponent context must differ from local context")
 
-      dropPeerLink()
+      # Drop any existing link before establishing a new one
+      c.dropPeerLink()
+
+      # Install a native listener on the opponent's VolleyEvent.
+      # The closure captures `c` (the Captain ref) so all state access
+      # goes through the object, not bare threadvars.
+      let captainRef = c
       let peerVolleyHandler: VolleyEventListenerProc = proc(
           event: VolleyEvent
       ): Future[void] {.closure, async: (raises: []), gcsafe.} =
         try:
-          await handlePeerVolley(event)
+          await captainRef.handlePeerVolley(event)
         except CatchableError as e:
           try:
-            await emitRemark(
-              "error", event.exchangeId,
-              gCaptainName & " peer handler failed: " & e.msg,
+            await captainRef.emitRemark(
+              "error",
+              event.exchangeId,
+              captainRef.name & " peer handler failed: " & e.msg,
             )
           except CatchableError:
             discard
@@ -960,13 +1111,13 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       if listenRes.isErr():
         return err("failed to link opponent listener: " & listenRes.error())
 
-      gOpponentCtx = BrokerContext(opponentCtx)
-      gPeerVolleyHandle = listenRes.get()
-      gPeerListenerInstalled = true
-      gLinked = true
+      c.opponentCtx = BrokerContext(opponentCtx)
+      c.peerVolleyHandle = listenRes.get()
+      c.peerListenerInstalled = true
+      c.linked = true
 
-      await emitRemark(
-        "link", 0, gCaptainName & " linked to opponent context " & $opponentCtx
+      await c.emitRemark(
+        "link", 0, c.name & " linked to opponent context " & $opponentCtx
       )
 
       return ok(LinkOpponentRequest(accepted: true, opponentCtx: opponentCtx)),
@@ -977,17 +1128,23 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
         linkOpponentProviderRes.error()
     )
 
+  # --- StartGameRequest ---
+  # Fires the opening volley, kicking off the autonomous duel loop.
   let startGameProviderRes = StartGameRequest.setProvider(
     ctx,
     proc(): Future[Result[StartGameRequest, string]] {.closure, async.} =
-      let activeRes = requireLinkedGame()
+      if gCaptain.isNil:
+        return err("captain not initialized")
+
+      let c = gCaptain
+      let activeRes = c.requireLinked()
       if activeRes.isErr():
         return err(activeRes.error())
-      if gStarted:
+      if c.started:
         return err("game already started")
 
-      await emitRemark("start", 0, gCaptainName & " begins the duel")
-      let fireRes = await fireNextVolley("opening")
+      await c.emitRemark("start", 0, c.name & " begins the duel")
+      let fireRes = await c.fireNextVolley("opening")
       if fireRes.isErr():
         return err(fireRes.error())
 
@@ -998,14 +1155,15 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       "failed to register StartGameRequest provider: " & startGameProviderRes.error()
     )
 
+  # --- GetPublicBoardRequest ---
+  # Returns a snapshot of both boards, fleet status, replay tail, etc.
   let getPublicBoardProviderRes = GetPublicBoardRequest.setProvider(
     ctx,
     proc(): Future[Result[GetPublicBoardRequest, string]] {.closure, async.} =
-      let initializedRes = requireInitialized()
-      if initializedRes.isErr():
-        return err(initializedRes.error())
+      if gCaptain.isNil:
+        return err("captain not initialized")
 
-      return ok(buildPublicBoardResult()),
+      return ok(gCaptain.buildPublicBoardResult()),
   )
   if getPublicBoardProviderRes.isErr():
     return err(
@@ -1014,6 +1172,10 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
     )
 
   ok()
+
+# ---------------------------------------------------------------------------
+# Library registration — generates C exports, header, Python wrapper
+# ---------------------------------------------------------------------------
 
 when defined(BrokerFfiApi):
   registerBrokerLibrary:
