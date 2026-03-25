@@ -563,6 +563,35 @@ Current lifecycle shape:
 - event wrapper methods such as `onDeviceDiscovered(...)` and
   `offDeviceDiscovered(...)`
 
+The generated header now includes a compact comment block directly above the
+wrapper class so users can scan the public surface without reading the full
+implementation.
+
+Example extract from the generated `mylib.h`:
+
+```cpp
+// Quick C++ wrapper interface summary (names only)
+// class Mylib {
+// public:
+//   createContext();
+//   validContext() const;
+//   operator bool() const;
+//   shutdown();
+//   ctx() const;
+//   initializeRequest(configPath);
+//   addDevice(devices);
+//   removeDevice(deviceId);
+//   getDevice(deviceId);
+//   listDevices();
+//   DeviceStatusChangedCallback(owner, deviceId, name, online, timestampMs);
+//   onDeviceStatusChanged(fn);
+//   offDeviceStatusChanged(handle = 0);
+//   DeviceDiscoveredCallback(owner, deviceId, name, deviceType, address);
+//   onDeviceDiscovered(fn);
+//   offDeviceDiscovered(handle = 0);
+// };
+```
+
 The generated event machinery no longer uses class-static callback registries.
 Instead it emits:
 
@@ -631,6 +660,46 @@ The Python wrapper mirrors the C++ lifecycle shape closely:
 - `createContext()` performs per-context creation explicitly
 - `validContext()` and truthiness reflect whether a live context exists
 - `shutdown()` is exposed for explicit teardown
+
+The generated Python module now also includes a compact comment summary above
+the wrapper class so the available methods and callback shapes are visible at a
+glance.
+
+Example extract from the generated `mylib.py`:
+
+```python
+# Quick Python wrapper interface summary (names only)
+# class Mylib:
+#   __enter__()
+#   __exit__()
+#   createContext()
+#   create_context()
+#   validContext()
+#   valid_context()
+#   __bool__()
+#   shutdown()
+#   ctx
+#   initializeRequest(configPath)
+#   initialize_request(configPath)
+#   addDevice(devices)
+#   add_device(devices)
+#   removeDevice(deviceId)
+#   remove_device(deviceId)
+#   getDevice(deviceId)
+#   get_device(deviceId)
+#   listDevices()
+#   list_devices()
+#   DeviceStatusChangedCallback(owner, device_id, name, online, timestamp_ms)
+#   onDeviceStatusChanged(callback)
+#   on_device_status_changed(callback)
+#   offDeviceStatusChanged(handle = 0)
+#   off_device_status_changed(handle = 0)
+#   DeviceDiscoveredCallback(owner, device_id, name, device_type, address)
+#   onDeviceDiscovered(callback)
+#   on_device_discovered(callback)
+#   offDeviceDiscovered(handle = 0)
+#   off_device_discovered(handle = 0)
+```
 
 For events, the generated Python wrapper still hides the low-level `ctx` and
 `userData` ABI parameters, but it now exposes ownership at the wrapper level:

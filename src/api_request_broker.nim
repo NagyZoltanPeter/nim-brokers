@@ -687,11 +687,13 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
     )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
+    gApiCppInterfaceSummary.add(camelName & "();")
 
   if not hideFromForeignSurface and not argSig.isNil():
     let funcName = apiPublicCName(exportedFuncName(argSigName))
     # Build C++ method params and C call args
     var cppParams: seq[string] = @[]
+    var summaryParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
     var cppPreCall = ""
     for paramDef in argParams:
@@ -704,6 +706,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
           else:
             nimTypeToCppParam(paramType)
         cppParams.add(cppParamType & " " & paramName)
+        summaryParams.add(paramName)
         if isSeqType(paramType):
           let itemTypeName = seqItemTypeName(paramType)
           cppPreCall.add(
@@ -735,6 +738,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
     )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
+    gApiCppInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ");")
 
   # Step 6c: Generate Python ctypes + dataclass + methods (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):
@@ -880,6 +884,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
         var pyParams = "self"
         var callArgs = "self._ctx"
         var aliasArgs: seq[string] = @[]
+        var summaryParams: seq[string] = @[]
         var pyPreCall = ""
         for paramDef in argParams:
           for i in 0 ..< paramDef.len - 2:
@@ -888,6 +893,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
             let pyType = nimTypeToPyAnnotation(paramType)
             pyParams.add(", " & paramName & ": " & pyType)
             aliasArgs.add(paramName)
+            summaryParams.add(paramName)
             if isSeqType(paramType):
               let itemTypeName = seqItemTypeName(paramType)
               pyPreCall.add(
@@ -917,6 +923,8 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
           "        return self." & camelName & "(" & aliasArgs.join(", ") & ")"
         )
         gApiPyMethods.add(pyMethod)
+        gApiPyInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ")")
+        gApiPyInterfaceSummary.add(pySnakeName & "(" & summaryParams.join(", ") & ")")
       elif not zeroArgSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
         var pyMethod = "    def " & camelName & "(self) -> " & pyResultName & ":\n"
@@ -929,6 +937,8 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
         pyMethod.add("    def " & pySnakeName & "(self) -> " & pyResultName & ":\n")
         pyMethod.add("        return self." & camelName & "()")
         gApiPyMethods.add(pyMethod)
+        gApiPyInterfaceSummary.add(camelName & "()")
+        gApiPyInterfaceSummary.add(pySnakeName & "()")
 
   # Step 7: Append free_result header declaration (C side still needs it)
   if not hideFromForeignSurface:

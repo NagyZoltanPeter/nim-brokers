@@ -570,7 +570,8 @@ private:
 """
     )
 
-  var cppCbParams: seq[string] = @["Owner& owner"]
+  var cppCbParams: seq[string] = @[("Owner& owner")]
+  var cppCbSummaryParams: seq[string] = @[("owner")]
   var cTrampolineParams: seq[string] = @[]
   var traitInvokeArgs: seq[string] = @["owner"]
   if hasInlineFields:
@@ -579,6 +580,7 @@ private:
       let cbType = nimTypeToCppCallbackParam(fieldTypes[i])
       let cType = nimTypeToCInput(fieldTypes[i])
       cppCbParams.add(cbType & " " & fName)
+      cppCbSummaryParams.add(fName)
       cTrampolineParams.add(cType & " " & fName)
       if isCStringType(fieldTypes[i]):
         traitInvokeArgs.add(
@@ -654,6 +656,9 @@ private:
   gApiCppClassMethods.add(
     "using " & typeDisplayName & "Callback = " & traitName & "::Callback<__CPP_CLASS__>;"
   )
+  gApiCppInterfaceSummary.add(
+    typeDisplayName & "Callback(" & cppCbSummaryParams.join(", ") & ");"
+  )
 
   var onMethod =
     "uint64_t on" & typeDisplayName & "(" & typeDisplayName & "Callback fn) noexcept {\n"
@@ -663,6 +668,7 @@ private:
   )
   onMethod.add("    }")
   gApiCppClassMethods.add(onMethod)
+  gApiCppInterfaceSummary.add("on" & typeDisplayName & "(fn);")
 
   var offMethod = "void off" & typeDisplayName & "(uint64_t handle = 0) noexcept {\n"
   offMethod.add("        if (handle == 0) {\n")
@@ -676,6 +682,7 @@ private:
   offMethod.add("        }\n")
   offMethod.add("    }")
   gApiCppClassMethods.add(offMethod)
+  gApiCppInterfaceSummary.add("off" & typeDisplayName & "(handle = 0);")
 
   # Step 11: Generate Python on/off event methods (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):
@@ -733,6 +740,8 @@ private:
       for i in 0 ..< fieldNames.len:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
     let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
+    var pySummaryParams: seq[string] = @[("owner")]
+    pySummaryParams.add(pyCallbackParams)
 
     # on_<event> method
     block:
@@ -770,6 +779,11 @@ private:
       )
       m.add("        return self." & pyCamelEvent & "(callback)")
       gApiPyEventMethods.add(m)
+      gApiPyInterfaceSummary.add(
+        typeDisplayName & "Callback(" & pySummaryParams.join(", ") & ")"
+      )
+      gApiPyInterfaceSummary.add(pyCamelEvent & "(callback)")
+      gApiPyInterfaceSummary.add("on_" & pySnakeEvent & "(callback)")
 
     # off_<event> method
     block:
@@ -795,6 +809,8 @@ private:
       m.add("    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n")
       m.add("        self." & pyCamelEvent & "(handle)")
       gApiPyEventMethods.add(m)
+      gApiPyInterfaceSummary.add(pyCamelEvent & "(handle = 0)")
+      gApiPyInterfaceSummary.add("off_" & pySnakeEvent & "(handle = 0)")
 
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))

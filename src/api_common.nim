@@ -184,6 +184,9 @@ var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiCppClassMethods* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ wrapper class method declarations.
 
+var gApiCppInterfaceSummary* {.compileTime.}: seq[string] =
+  @[] ## Accumulates dense, type-free C++ wrapper interface summary lines.
+
 var gApiCppPreamble* {.compileTime.}: seq[string] =
   @[] ## Accumulates reusable C++ helper templates and event traits.
 
@@ -217,6 +220,9 @@ var gApiPyMethods* {.compileTime.}: seq[string] =
 
 var gApiPyEventMethods* {.compileTime.}: seq[string] =
   @[] ## Python wrapper class on/off event method definitions.
+
+var gApiPyInterfaceSummary* {.compileTime.}: seq[string] =
+  @[] ## Accumulates dense, type-free Python wrapper interface summary lines.
 
 var gApiPyCallbackSetup* {.compileTime.}: seq[string] =
   @[] ## Python CFUNCTYPE definitions and argtypes/restype setup lines.
@@ -546,6 +552,18 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
 
     header.add("#ifdef __cplusplus\n\n")
 
+    header.add("// Quick C++ wrapper interface summary (names only)\n")
+    header.add("// class " & className & " {\n")
+    header.add("// public:\n")
+    for summaryLine in [
+      "createContext();", "validContext() const;", "operator bool() const;",
+      "shutdown();", "ctx() const;",
+    ]:
+      header.add("//   " & summaryLine & "\n")
+    for summaryLine in gApiCppInterfaceSummary:
+      header.add("//   " & summaryLine & "\n")
+    header.add("// };\n\n")
+
     # C++ standard includes
     header.add("#include <string>\n")
     header.add("#include <string_view>\n")
@@ -828,6 +846,16 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
+  py.add("# Quick Python wrapper interface summary (names only)\n")
+  py.add("# class " & className & ":\n")
+  for summaryLine in [
+    "__enter__()", "__exit__()", "createContext()", "create_context()",
+    "validContext()", "valid_context()", "__bool__()", "shutdown()", "ctx",
+  ]:
+    py.add("#   " & summaryLine & "\n")
+  for summaryLine in gApiPyInterfaceSummary:
+    py.add("#   " & summaryLine & "\n")
+  py.add("\n")
   py.add("class " & className & ":\n")
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
