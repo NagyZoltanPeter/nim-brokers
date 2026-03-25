@@ -1655,15 +1655,19 @@ if (!created.ok()) {
 }
 
 auto h_disc = lib.onDeviceDiscovered(
-  [](int64_t id, const std::string_view name,
+    [](Mylib& owner, int64_t id, const std::string_view name,
      const std::string_view type,
      const std::string_view addr) {
+      (void)owner;
     printf("discovered: %.*s\n",
            (int)name.size(), name.data());
   });
 
 auto res = lib.initializeRequest("/opt/devices.yaml");
-auto add = lib.addDevice("Core-Router", "router", "10.0.0.1");
+  std::vector<AddDeviceSpec> fleet = {
+    AddDeviceSpec{"Core-Router", "router", "10.0.0.1"}
+  };
+  auto add = lib.addDevice(fleet);
 auto list = lib.listDevices();
 
 lib.offDeviceDiscovered(h_disc);
@@ -1677,6 +1681,7 @@ lib.shutdown();
           <li>No manual <code>free_*_result</code> calls in user code</li>
           <li><code>Result&lt;T&gt;</code> wrappers preserve the broker success/error model</li>
           <li>Callbacks use C++ lambdas while the generated code keeps the C ABI underneath</li>
+          <li>Event callbacks are routed through the owning <code>Mylib</code> instance, so registration and delivery stay instance-specific</li>
           <li>The library consumer never needs to call <code>ShutdownRequest</code> directly; <code>shutdown()</code> handles teardown</li>
         </ul>
 

@@ -270,6 +270,16 @@ The process-wide runtime init and per-context lifecycle are intentionally separa
 - `InitializeRequest` is the broker request used for post-create configuration.
 - `ShutdownRequest` is the broker request used for orderly application teardown during shutdown.
 
+For API events, the generated C ABI now includes both the emitting `ctx` and an
+opaque `userData` pointer in the callback signature. The generated C++ wrapper
+builds on that with an owner-aware dispatcher template: public C++ event
+callbacks receive `Mylib& owner` as their first argument, callback exceptions
+are swallowed before they can cross the C boundary, and the wrapper is
+intentionally non-copyable and non-movable so callback identity stays stable.
+
+If you need multiple wrapper instances in a container, store
+`std::unique_ptr<Mylib>` rather than `Mylib` values directly.
+
 Build the example shared library with:
 
 ```sh

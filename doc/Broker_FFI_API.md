@@ -78,7 +78,7 @@ EventBroker(API):
 This generates:
 
 - a C callback typedef
-- `on<EventType>(ctx, callback)`
+- `on<EventType>(ctx, callback, userData)`
 - `off<EventType>(ctx, handle)`
 - generated wrapper registration methods in C++ and Python
 
@@ -248,7 +248,8 @@ When foreign code registers an event callback:
 - the registration call goes through the generated `RegisterEventListenerResult`
   request broker
 - that request is served on the delivery thread
-- the delivery thread stores the listener handle and callback wrapper
+- the delivery thread stores the listener handle, callback function pointer, and
+  opaque `userData` pointer
 
 When the Nim side emits an API event:
 
@@ -459,6 +460,47 @@ Current limitation:
   and the broker already has another argument-bearing signature, replace that
   signature or model the variants as separate request broker types
 
+### Event callback ABI
+
+The generated C event ABI now includes two identity parameters ahead of the
+event payload:
+
+- `ctx`, the library context that emitted the event
+- `userData`, an opaque pointer supplied by the foreign caller during
+  registration
+
+For an event such as `DeviceDiscovered`, the generated C typedef looks like:
+
+```c
+typedef void (*DeviceDiscoveredCCallback)(
+  uint32_t ctx,
+  void* userData,
+  int64_t deviceId,
+  const char* name,
+  const char* deviceType,
+  const char* address
+);
+```
+
+The matching registration export is:
+
+```c
+uint64_t mylib_onDeviceDiscovered(
+  uint32_t ctx,
+  DeviceDiscoveredCCallback callback,
+  void* userData
+);
+```
+
+This shape has two purposes:
+
+- `ctx` tells the callback which library instance emitted the event
+- `userData` lets the foreign caller carry its own ownership or routing token
+  through the C ABI unchanged
+
+The Nim runtime does not interpret `userData`; it only stores it and passes it
+back to the callback.
+
 ### Data ownership for request results
 
 The generated C request exports return C structs that may own allocated strings
@@ -498,13 +540,18 @@ void mylib_shutdown(uint32_t ctx);
 InitializeRequestCResult mylib_initialize(uint32_t ctx, const char* configPath);
 void mylib_free_initialize_result(InitializeRequestCResult* r);
 
-uint64_t mylib_onDeviceDiscovered(uint32_t ctx, DeviceDiscoveredCCallback callback);
+uint64_t mylib_onDeviceDiscovered(
+  uint32_t ctx,
+  DeviceDiscoveredCCallback callback,
+  void* userData
+);
 void mylib_offDeviceDiscovered(uint32_t ctx, uint64_t handle);
 ```
 
 ### C++ wrapper
 
-The generated header also contains a wrapper class.
+The generated header also contains a wrapper class and a reusable event
+dispatcher template.
 
 Current lifecycle shape:
 
@@ -513,6 +560,51 @@ Current lifecycle shape:
 - `lib.shutdown()` for shutdown
 - request wrapper methods such as `initializeRequest(...)`, `listDevices()`, and
   `getDevice(...)`
+- event wrapper methods such as `onDeviceDiscovered(...)` and
+  `offDeviceDiscovered(...)`
+
+The generated event machinery no longer uses class-static callback registries.
+Instead it emits:
+
+- a reusable `EventDispatcher<Owner, Traits, ...>` template
+- one traits struct per API event type
+- one dispatcher instance per event type inside each generated wrapper object
+
+This design keeps event callback ownership attached to a single wrapper
+instance, which avoids the cross-instance callback corruption that a shared
+static callback registry would cause.
+
+Public C++ event callbacks are owner-aware. The first callback argument is a
+reference to the wrapper instance that owns the context.
+
+Example:
+
+```cpp
+uint64_t handle = lib.onDeviceDiscovered(
+    [](Mylib& owner,
+       int64_t deviceId,
+       std::string_view name,
+       std::string_view deviceType,
+       std::string_view address) {
+        std::printf("ctx=%u name=%.*s\n",
+                    owner.ctx(),
+                    (int)name.size(),
+                    name.data());
+    }
+);
+```
+
+The generated dispatcher catches and swallows exceptions from user callbacks so
+that no exception crosses the C callback boundary.
+
+The generated wrapper is intentionally non-copyable and non-movable. The event
+dispatcher passes its own address through the C ABI as `userData`, so wrapper
+and dispatcher addresses must remain stable for the lifetime of the
+registration.
+
+If a foreign application needs many library instances in a container, the
+recommended pattern is `std::unique_ptr<Mylib>` in a standard container rather
+than storing `Mylib` values directly.
 
 Example:
 
@@ -540,18 +632,27 @@ The Python wrapper mirrors the C++ lifecycle shape closely:
 - `validContext()` and truthiness reflect whether a live context exists
 - `shutdown()` is exposed for explicit teardown
 
+For events, the generated Python wrapper hides the low-level `userData`
+parameter. Python callbacks still receive only decoded event payload values,
+while the wrapper keeps the underlying ctypes trampoline alive internally until
+shutdown.
+
 Example:
 
 ```python
 from mylib import Mylib
 
 with Mylib() as lib:
-  create_res = lib.createContext()
-  if not create_res.ok:
-    raise RuntimeError(create_res.error)
+  lib.createContext()
 
   res = lib.initializeRequest("/opt/devices.yaml")
   print(res.configPath)
+
+  handle = lib.onDeviceDiscovered(
+      lambda deviceId, name, deviceType, address:
+          print(deviceId, name, deviceType, address)
+  )
+  lib.offDeviceDiscovered(handle)
 ```
 
 ---
@@ -645,6 +746,12 @@ Recommended practice:
 - do lightweight work in the callback
 - hand off expensive processing to your own queue or thread
 - avoid blocking the delivery thread for long periods
+- treat `userData` lifetime as owned by the foreign side; unregister the
+  listener before destroying the object referenced by that pointer
+
+For generated C++ wrappers, `userData` is managed internally by the dispatcher.
+For direct C consumers, `userData` is the natural place to store callback state
+or an owning object pointer.
 
 ### Provider behavior
 
