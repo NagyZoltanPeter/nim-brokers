@@ -16,6 +16,16 @@ import time
 from collections import deque
 from pathlib import Path
 
+_IS_WINDOWS = sys.platform == "win32"
+
+if _IS_WINDOWS:
+    import msvcrt
+else:
+    import os
+    import select
+    import termios
+    import tty
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nimlib" / "build"))
@@ -73,6 +83,44 @@ def format_fleet(fleet: list[object]) -> list[str]:
         status = "sunk" if ship.sunk else f"{ship.hits}/{ship.length}"
         lines.append(f"{ship.name:<12} {status}")
     return lines
+
+
+class RawTerminal:
+    """Context manager that puts stdin into raw mode for non-blocking key reads.
+
+    Supports macOS, Linux (via termios), and Windows (via msvcrt).
+    """
+
+    def __init__(self) -> None:
+        self._fd: int | None = None
+        self._old_settings: list[object] | None = None
+
+    def __enter__(self) -> RawTerminal:
+        if _IS_WINDOWS:
+            # msvcrt needs no setup — kbhit/getch work immediately
+            self._fd = 0  # sentinel: active
+        elif sys.stdin.isatty():
+            self._fd = sys.stdin.fileno()
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if not _IS_WINDOWS and self._fd is not None and self._old_settings is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+
+    def key_pressed(self) -> str | None:
+        """Return a single character if one is available, else None."""
+        if self._fd is None:
+            return None
+        if _IS_WINDOWS:
+            if msvcrt.kbhit():
+                return msvcrt.getwch()
+            return None
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+        if readable:
+            return os.read(self._fd, 1).decode("utf-8", errors="ignore")
+        return None
 
 
 def clear_screen() -> None:
@@ -148,6 +196,8 @@ def draw_screen(red_view: object, blue_view: object, event_log: deque[str], bann
     print("Event Log")
     for line in event_log:
         print(f"- {line}")
+    print()
+    print("Press q to quit")
 
 
 def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> list[tuple[str, int]]:
@@ -250,7 +300,7 @@ def run_duel(args: argparse.Namespace) -> int:
     end_delay = 0.20 if args.fast else DEFAULT_END_DELAY
     event_log: deque[str] = deque(maxlen=24)
 
-    with Torpedolib() as red, Torpedolib() as blue:
+    with Torpedolib() as red, Torpedolib() as blue, RawTerminal() as term:
         red.createContext()
         blue.createContext()
 
@@ -276,6 +326,11 @@ def run_duel(args: argparse.Namespace) -> int:
         banner = f"{starter_name} opens the duel"
         try:
             while True:
+                # Check for quit key
+                key = term.key_pressed()
+                if key in ("q", "Q"):
+                    return 0
+
                 red_view = red.getPublicBoardRequest()
                 blue_view = blue.getPublicBoardRequest()
                 if event_log:

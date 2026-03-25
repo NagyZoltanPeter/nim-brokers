@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -27,6 +28,14 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#include <sys/select.h>
+#endif
 
 #include "torpedolib.h"
 
@@ -48,11 +57,33 @@ struct Config {
     double endDelay()     const { return fast ? 0.20  : 1.0;   }
 };
 
+static void printUsage(const char* prog) {
+    std::fprintf(stderr,
+        "Usage: %s [OPTIONS]\n"
+        "\n"
+        "Run the Torpedo Duel text UI\n"
+        "\n"
+        "Options:\n"
+        "  --fast              reduce delays for quicker runs\n"
+        "  --seed-red N        seed for Red Fleet (default: 101)\n"
+        "  --seed-blue N       seed for Blue Fleet (default: 202)\n"
+        "  --board-size N      board size (default: 8)\n"
+        "  --starter red|blue  which fleet opens the duel (default: red)\n"
+        "  --help              show this message and exit\n"
+        "\n"
+        "Controls:\n"
+        "  q / Q               quit immediately\n", prog);
+}
+
 static Config parseArgs(int argc, char* argv[]) {
     Config cfg;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
-        if (arg == "--fast")                            cfg.fast = true;
+        if (arg == "--help" || arg == "-h") {
+            printUsage(argv[0]);
+            std::exit(0);
+        }
+        else if (arg == "--fast")                            cfg.fast = true;
         else if (arg == "--starter" && i + 1 < argc)  { cfg.starterIsRed = std::string_view(argv[++i]) != "blue"; }
         else if (arg == "--seed-red" && i + 1 < argc)   cfg.seedRed = std::atoi(argv[++i]);
         else if (arg == "--seed-blue" && i + 1 < argc)  cfg.seedBlue = std::atoi(argv[++i]);
@@ -60,6 +91,72 @@ static Config parseArgs(int argc, char* argv[]) {
     }
     return cfg;
 }
+
+// ---------------------------------------------------------------------------
+// Non-blocking keyboard input (portable: macOS, Linux, Windows)
+// ---------------------------------------------------------------------------
+
+class RawTerminal {
+public:
+    RawTerminal() noexcept {
+#ifdef _WIN32
+        active_ = true;  // _kbhit/_getch need no setup
+#else
+        if (::isatty(STDIN_FILENO)) {
+            ::tcgetattr(STDIN_FILENO, &oldSettings_);
+            struct termios raw = oldSettings_;
+            raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+            raw.c_cc[VMIN] = 0;
+            raw.c_cc[VTIME] = 0;
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+            active_ = true;
+        }
+#endif
+    }
+
+    ~RawTerminal() { restore(); }
+
+    RawTerminal(const RawTerminal&) = delete;
+    RawTerminal& operator=(const RawTerminal&) = delete;
+
+    void restore() noexcept {
+#ifndef _WIN32
+        if (active_) {
+            ::tcsetattr(STDIN_FILENO, TCSADRAIN, &oldSettings_);
+            active_ = false;
+        }
+#else
+        active_ = false;
+#endif
+    }
+
+    /// Returns the key character if one is available, or '\0' if none.
+    char keyPressed() const noexcept {
+        if (!active_) return '\0';
+#ifdef _WIN32
+        if (_kbhit())
+            return static_cast<char>(_getch());
+        return '\0';
+#else
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv = {0, 0};
+        if (::select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) > 0) {
+            char ch = '\0';
+            if (::read(STDIN_FILENO, &ch, 1) == 1)
+                return ch;
+        }
+        return '\0';
+#endif
+    }
+
+private:
+#ifndef _WIN32
+    struct termios oldSettings_ {};
+#endif
+    bool active_ = false;
+};
 
 // ---------------------------------------------------------------------------
 // Thread-safe event log
@@ -444,6 +541,8 @@ static void drawScreen(
     for (const auto& line : entries)
         std::fprintf(stdout, "  %s- %s%s\n", ansi::dim, line.c_str(), ansi::reset);
 
+    std::fprintf(stdout, "\n%sPress q to quit%s\n", ansi::dim, ansi::reset);
+
     std::fflush(stdout);
 }
 
@@ -623,6 +722,9 @@ int main(int argc, char* argv[]) {
 
     std::string banner = starterName + " opens the duel";
 
+    // ── Set up raw terminal for non-blocking key input ──
+    RawTerminal term;
+
     // ── Observer loop ──
     auto sleepMs = [](double seconds) {
         std::this_thread::sleep_for(
@@ -633,11 +735,19 @@ int main(int argc, char* argv[]) {
     // Use try-equivalent: unregister before shutdown to prevent
     // use-after-free on callback function objects.
     auto cleanup = [&]() {
+        // Restore terminal before any final output
+        term.restore();
         unregisterCallbacks(red,  redHandles);
         unregisterCallbacks(blue, blueHandles);
     };
 
     for (;;) {
+        // Check for quit key
+        char key = term.keyPressed();
+        if (key == 'q' || key == 'Q') {
+            break;
+        }
+
         auto redView  = red.getPublicBoardRequest();
         auto blueView = blue.getPublicBoardRequest();
 
