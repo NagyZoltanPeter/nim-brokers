@@ -101,6 +101,25 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
   else:
     joinPath(exampleDir, "build", "example")
 
+proc torpedoCmakeBuildDir(): string =
+  "examples/torpedo/cmake-build"
+
+proc buildTorpedoCmakeTarget(target = "") =
+  let cmakeDir = "examples/torpedo"
+  let buildDir = torpedoCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc torpedoExecutablePath(): string =
+  when defined(windows):
+    joinPath("examples", "torpedo", "cpp_example", "build", "torpedo.exe")
+  else:
+    joinPath("examples", "torpedo", "cpp_example", "build", "torpedo")
+
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
   let label = path & " [" & env & "]"
@@ -370,6 +389,17 @@ task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example
   buildTorpedoExampleLibrary(true)
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
+
+task buildTorpedoExampleCpp,
+  "Build the Torpedo Duel C++ application (via CMake)":
+  buildTorpedoExampleLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp")
+
+task runTorpedoExampleCpp,
+  "Build and run the Torpedo Duel C++ text UI example":
+  buildTorpedoExampleLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp")
+  exec quoteArg(torpedoExecutablePath())
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
