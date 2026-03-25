@@ -554,13 +554,14 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
     # on_<event> method
     block:
+      let pyCamelEvent = "on" & typeDisplayName
       var m =
-        "    def on_" & pySnakeEvent & "(self, callback: " & pyCallableHint &
-        ") -> int:\n"
+        "    def " & pyCamelEvent & "(self, callback: " & pyCallableHint & ") -> int:\n"
       m.add(
         "        \"\"\"Subscribe to " & typeDisplayName &
           " events. Returns a handle for removal.\"\"\"\n"
       )
+      m.add("        self._requireContext()\n")
       # Build the trampoline that decodes strings
       m.add("        @" & cfuncTypeName & "\n")
       m.add("        def _trampoline(" & pyCallbackParams.join(", ") & "):\n")
@@ -573,12 +574,18 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         "            self._cb_refs[(\"" & typeDisplayName &
           "\", handle)] = _trampoline\n"
       )
-      m.add("        return handle")
+      m.add("        return handle\n\n")
+      m.add(
+        "    def on_" & pySnakeEvent & "(self, callback: " & pyCallableHint &
+          ") -> int:\n"
+      )
+      m.add("        return self." & pyCamelEvent & "(callback)")
       gApiPyEventMethods.add(m)
 
     # off_<event> method
     block:
-      var m = "    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n"
+      let pyCamelEvent = "off" & typeDisplayName
+      var m = "    def " & pyCamelEvent & "(self, handle: int = 0) -> None:\n"
       m.add("        \"\"\"Unsubscribe from " & typeDisplayName & " events.\n\n")
       m.add("        Args:\n")
       m.add(
@@ -586,13 +593,18 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
           "(). 0 removes all.\n"
       )
       m.add("        \"\"\"\n")
+      m.add("        self._requireContext()\n")
       m.add("        self._lib." & deregFuncName & "(self._ctx, handle)\n")
       m.add("        # Note: callback references are intentionally kept alive in\n")
       m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
       m.add(
         "        # have in-flight event futures holding the raw function pointer;\n"
       )
-      m.add("        # releasing the ctypes object here could cause a use-after-free.")
+      m.add(
+        "        # releasing the ctypes object here could cause a use-after-free.\n\n"
+      )
+      m.add("    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n")
+      m.add("        self." & pyCamelEvent & "(handle)")
       gApiPyEventMethods.add(m)
 
   # Step 12: Append to compile-time accumulators

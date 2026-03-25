@@ -592,10 +592,9 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         for i in 0 ..< fieldNames.len:
           let fName = $fieldNames[i]
           let fType = fieldTypes[i]
-          let snakeFname = toSnakeCase(fName)
           let pyType = nimTypeToPyAnnotation(fType)
           let pyDefault = nimTypeToPyDefault(fType)
-          pyDc.add("    " & snakeFname & ": " & pyType & " = " & pyDefault & "\n")
+          pyDc.add("    " & fName & ": " & pyType & " = " & pyDefault & "\n")
       else:
         pyDc.add("    pass\n")
       gApiPyDataclasses.add(pyDc)
@@ -626,15 +625,12 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     const I = "            "
 
     # Helper to build field extraction code
-    proc pyExtractField(
-        fName, snakeFname: string, fType: NimNode
-    ): string {.compileTime.} =
+    proc pyExtractField(fName: string, fType: NimNode): string {.compileTime.} =
       if isCStringType(fType):
-        I & snakeFname & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
-          " else \"\"\n"
+        I & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName & " else \"\"\n"
       elif isSeqType(fType):
         let itemType = seqItemTypeName(fType)
-        var s = I & snakeFname & "_list: list[" & itemType & "] = []\n"
+        var s = I & fName & "_list: list[" & itemType & "] = []\n"
         s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
         s.add(
           I & "    arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & itemType &
@@ -646,31 +642,31 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         let itemFields = lookupFfiStruct(itemType)
         var itemArgs: seq[string] = @[]
         for (ifName, ifType) in itemFields:
-          let snakeIfName = toSnakeCase(ifName)
           if ifType.toLowerAscii() in ["string", "cstring"]:
             itemArgs.add(
-              snakeIfName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
+              ifName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
                 " else \"\""
             )
           else:
-            itemArgs.add(snakeIfName & "=_item." & ifName)
-        s.add(I & "        " & snakeFname & "_list.append(" & itemType & "(\n")
+            itemArgs.add(ifName & "=_item." & ifName)
+        s.add(I & "        " & fName & "_list.append(" & itemType & "(\n")
         for j, arg in itemArgs:
           s.add(I & "            " & arg)
           if j < itemArgs.len - 1:
             s.add(",")
           s.add("\n")
         s.add(I & "        ))\n")
-        s.add(I & snakeFname & " = " & snakeFname & "_list\n")
+        s.add(I & fName & " = " & fName & "_list\n")
         s
       else:
-        I & snakeFname & " = c." & fName & "\n"
+        I & fName & " = c." & fName & "\n"
 
     # Generate Python method body (shared between zero-arg and arg variants)
     proc buildPyMethodBody(
         funcName, callArgs, pyResultName2, pyFreeFuncName2: string
     ): string {.compileTime.} =
-      result = "        c = self._lib." & funcName & "(" & callArgs & ")\n"
+      result = "        self._requireContext()\n"
+      result.add("        c = self._lib." & funcName & "(" & callArgs & ")\n")
       result.add("        try:\n")
       result.add("            if c.error_message:\n")
       result.add(
@@ -679,12 +675,11 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
           let fName = $fieldNames[i]
-          let snakeFname = toSnakeCase(fName)
-          result.add(pyExtractField(fName, snakeFname, fieldTypes[i]))
+          result.add(pyExtractField(fName, fieldTypes[i]))
         var dcArgs: seq[string] = @[]
         for i in 0 ..< fieldNames.len:
-          let snakeFname = toSnakeCase($fieldNames[i])
-          dcArgs.add(snakeFname & "=" & snakeFname)
+          let fName = $fieldNames[i]
+          dcArgs.add(fName & "=" & fName)
         result.add("            return " & pyResultName2 & "(\n")
         for j, arg in dcArgs:
           result.add("                " & arg)
@@ -702,30 +697,41 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       let funcName = pySnakeName & "_request_with_args"
       var pyParams = "self"
       var callArgs = "self._ctx"
+      var aliasArgs: seq[string] = @[]
       for paramDef in argParams:
         for i in 0 ..< paramDef.len - 2:
           let paramName = $paramDef[i]
           let paramType = paramDef[paramDef.len - 2]
-          let snakeParamName = toSnakeCase(paramName)
           let pyType = nimTypeToPyAnnotation(paramType)
-          pyParams.add(", " & snakeParamName & ": " & pyType)
+          pyParams.add(", " & paramName & ": " & pyType)
+          aliasArgs.add(paramName)
           if isCStringType(paramType):
-            callArgs.add(", " & snakeParamName & ".encode(\"utf-8\")")
+            callArgs.add(", " & paramName & ".encode(\"utf-8\")")
           else:
-            callArgs.add(", " & snakeParamName)
+            callArgs.add(", " & paramName)
 
       var pyMethod =
-        "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+        "    def " & camelName & "(" & pyParams & ") -> " & pyResultName & ":\n"
       pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
       pyMethod.add(buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName))
+      pyMethod.add("\n\n")
+      pyMethod.add(
+        "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+      )
+      pyMethod.add(
+        "        return self." & camelName & "(" & aliasArgs.join(", ") & ")"
+      )
       gApiPyMethods.add(pyMethod)
     elif not zeroArgSig.isNil():
       let funcName = pySnakeName & "_request"
-      var pyMethod = "    def " & pySnakeName & "(self) -> " & pyResultName & ":\n"
+      var pyMethod = "    def " & camelName & "(self) -> " & pyResultName & ":\n"
       pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
       pyMethod.add(
         buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
       )
+      pyMethod.add("\n\n")
+      pyMethod.add("    def " & pySnakeName & "(self) -> " & pyResultName & ":\n")
+      pyMethod.add("        return self." & camelName & "()")
       gApiPyMethods.add(pyMethod)
 
   # Step 7: Append free_result header declaration (C side still needs it)

@@ -779,8 +779,9 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
   py.add("        with " & className & "() as lib:\n")
-  py.add("            result = lib.create_request(\"/path/to/config\")\n")
-  py.add("            print(result.config_path)\n")
+  py.add("            lib.createContext()\n")
+  py.add("            result = lib.initializeRequest(\"/path/to/config\")\n")
+  py.add("            print(result.configPath)\n")
   py.add("    \"\"\"\n\n")
 
   # __init__
@@ -793,22 +794,7 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
     "        self._cb_refs: dict[tuple[str, int], ctypes._CFuncPtr] = {}  # prevent GC\n"
   )
   py.add("        self._lock = threading.Lock()\n")
-  py.add("        self._setup_signatures()\n")
-  py.add("        c = self._lib." & libName & "_createContext()\n")
-  py.add("        try:\n")
-  py.add("            if c.error_message:\n")
-  py.add(
-    "                raise " & className & "Error(c.error_message.decode(\"utf-8\"))\n"
-  )
-  py.add("            self._ctx = c.ctx\n")
-  py.add("            if self._ctx == 0:\n")
-  py.add(
-    "                raise " & className & "Error(\"Library context creation failed\")\n"
-  )
-  py.add("        finally:\n")
-  py.add(
-    "            self._lib." & freeCreateContextResultFuncName & "(ctypes.byref(c))\n\n"
-  )
+  py.add("        self._setup_signatures()\n\n")
 
   # _setup_signatures
   py.add("    def _setup_signatures(self) -> None:\n")
@@ -836,6 +822,44 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("        return self\n\n")
   py.add("    def __exit__(self, *_: object) -> None:\n")
   py.add("        self.shutdown()\n\n")
+
+  py.add("    def createContext(self) -> None:\n")
+  py.add("        \"\"\"Create the library context explicitly.\"\"\"\n")
+  py.add("        if self._ctx != 0:\n")
+  py.add("            raise " & className & "Error(\"Context already created\")\n")
+  py.add("        c = self._lib." & libName & "_createContext()\n")
+  py.add("        try:\n")
+  py.add("            if c.error_message:\n")
+  py.add(
+    "                raise " & className & "Error(c.error_message.decode(\"utf-8\"))\n"
+  )
+  py.add("            self._ctx = c.ctx\n")
+  py.add("            if self._ctx == 0:\n")
+  py.add(
+    "                raise " & className & "Error(\"Library context creation failed\")\n"
+  )
+  py.add("        finally:\n")
+  py.add(
+    "            self._lib." & freeCreateContextResultFuncName & "(ctypes.byref(c))\n\n"
+  )
+
+  py.add("    def create_context(self) -> None:\n")
+  py.add("        self.createContext()\n\n")
+
+  py.add("    def validContext(self) -> bool:\n")
+  py.add("        return self._ctx != 0\n\n")
+
+  py.add("    def valid_context(self) -> bool:\n")
+  py.add("        return self.validContext()\n\n")
+
+  py.add("    def __bool__(self) -> bool:\n")
+  py.add("        return self.validContext()\n\n")
+
+  py.add("    def _requireContext(self) -> None:\n")
+  py.add("        if self._ctx == 0:\n")
+  py.add(
+    "            raise " & className & "Error(\"Library context is not created\")\n\n"
+  )
 
   # shutdown
   py.add("    def shutdown(self) -> None:\n")

@@ -29,46 +29,50 @@ def main() -> int:
 
     try:
         with Mylib() as lib:
+            lib.createContext()
+            if not lib:
+                raise MylibError("createContext() returned success without a context")
+
             print(f"Library context: 0x{lib.ctx:08X}\n")
 
             print("--- Subscribing to events ---")
 
             def on_discovered(
-                device_id: int, name: str, device_type: str, address: str
+                deviceId: int, name: str, deviceType: str, address: str
             ) -> None:
                 nonlocal discovery_count
                 discovery_count += 1
                 print(
                     f'  >>> DeviceDiscovered #{discovery_count}: '
-                    f'id={device_id}  "{name}"  [{device_type}]  {address}'
+                    f'id={deviceId}  "{name}"  [{deviceType}]  {address}'
                 )
 
             def on_status(
-                device_id: int, name: str, online: bool, timestamp_ms: int
+                deviceId: int, name: str, online: bool, timestampMs: int
             ) -> None:
                 nonlocal status_count
                 status_count += 1
                 state = "ONLINE" if online else "OFFLINE"
                 print(
                     f'  >>> DeviceStatusChanged #{status_count}: '
-                    f'id={device_id}  "{name}"  {state}  (ts={timestamp_ms})'
+                    f'id={deviceId}  "{name}"  {state}  (ts={timestampMs})'
                 )
 
             def on_status_logger(_: int, name: str, online: bool, __: int) -> None:
                 print(f'  >>> [Logger] {name} is now {"UP" if online else "DOWN"}')
 
-            h_disc = lib.on_device_discovered(on_discovered)
-            h_status = lib.on_device_status_changed(on_status)
-            h_status2 = lib.on_device_status_changed(on_status_logger)
+            h_disc = lib.onDeviceDiscovered(on_discovered)
+            h_status = lib.onDeviceStatusChanged(on_status)
+            h_status2 = lib.onDeviceStatusChanged(on_status_logger)
 
             print(
                 f"  Handles: discovered={h_disc}  status={h_status}  status2={h_status2}\n"
             )
 
             print("--- Configuring library ---")
-            initialize_result = lib.initialize_request("/opt/devices.yaml")
+            initialize_result = lib.initializeRequest("/opt/devices.yaml")
             print(
-                f"  config={initialize_result.config_path}  "
+                f"  config={initialize_result.configPath}  "
                 f"initialized={'yes' if initialize_result.initialized else 'no'}\n"
             )
 
@@ -82,31 +86,31 @@ def main() -> int:
             ]
 
             ids: list[int] = []
-            for name, device_type, address in fleet:
-                result = lib.add_device(name, device_type, address)
-                ids.append(result.device_id)
-                print(f"  + {name} -> id={result.device_id}")
+            for name, deviceType, address in fleet:
+                result = lib.addDevice(name, deviceType, address)
+                ids.append(result.deviceId)
+                print(f"  + {name} -> id={result.deviceId}")
 
             time.sleep(0.3)
             print()
 
             print(f"--- Device inventory ({len(ids)} added) ---")
-            listed = lib.list_devices()
+            listed = lib.listDevices()
             print(f"  Count: {len(listed.devices)}")
             for index, device in enumerate(listed.devices):
                 state = "online" if device.online else "offline"
                 print(
-                    f"  [{index}] id={device.device_id:<3}  {device.name:<18}  "
-                    f"type={device.device_type:<10}  addr={device.address:<16}  {state}"
+                    f"  [{index}] id={device.deviceId:<3}  {device.name:<18}  "
+                    f"type={device.deviceType:<10}  addr={device.address:<16}  {state}"
                 )
             print()
 
             if len(ids) > 2:
-                query_id = ids[2]
-                print(f"--- Query device id={query_id} ---")
-                device = lib.get_device(query_id)
+                queryId = ids[2]
+                print(f"--- Query device id={queryId} ---")
+                device = lib.getDevice(queryId)
                 print(
-                    f'  name="{device.name}"  type="{device.device_type}"  '
+                    f'  name="{device.name}"  type="{device.deviceType}"  '
                     f'addr="{device.address}"  online={"yes" if device.online else "no"}'
                 )
                 print()
@@ -115,7 +119,7 @@ def main() -> int:
             for index in (0, 3):
                 if index >= len(ids):
                     continue
-                removed = lib.remove_device(ids[index])
+                removed = lib.removeDevice(ids[index])
                 print(
                     f"  Removed id={ids[index]}  success={'yes' if removed.success else 'no'}"
                 )
@@ -123,31 +127,31 @@ def main() -> int:
             print()
 
             print("--- Removing first status listener (keeping logger) ---")
-            lib.off_device_status_changed(h_status)
+            lib.offDeviceStatusChanged(h_status)
             print(f"  Removed handle {h_status}\n")
 
             print("--- Removing one more device (only logger active) ---")
             if len(ids) > 1:
-                removed = lib.remove_device(ids[1])
+                removed = lib.removeDevice(ids[1])
                 if removed.success:
                     print(f"  Removed id={ids[1]}")
             time.sleep(0.2)
             print()
 
             print("--- Remaining devices ---")
-            listed = lib.list_devices()
+            listed = lib.listDevices()
             print(f"  Count: {len(listed.devices)}")
             for device in listed.devices:
                 state = "online" if device.online else "offline"
                 print(
-                    f"  id={device.device_id:<3}  {device.name:<18}  "
-                    f"type={device.device_type:<10}  addr={device.address:<16}  {state}"
+                    f"  id={device.deviceId:<3}  {device.name:<18}  "
+                    f"type={device.deviceType:<10}  addr={device.address:<16}  {state}"
                 )
             print()
 
             print("--- Unsubscribing all ---")
-            lib.off_device_discovered()
-            lib.off_device_status_changed()
+            lib.offDeviceDiscovered()
+            lib.offDeviceStatusChanged()
             print("  All event listeners removed.\n")
 
             print(f"  Total discovery events received: {discovery_count}")
