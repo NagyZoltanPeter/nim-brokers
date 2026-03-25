@@ -57,8 +57,9 @@ RequestBroker(API):
 This generates:
 
 - a C result struct
-- a C-exported request function such as `get_device_request_with_args(...)`
-- a `free_*_result(...)` function for result-owned memory
+- a C-exported request function such as `mylib_get_device(...)` once the broker is
+  registered into a library
+- a library-prefixed `mylib_free_*_result(...)` function for result-owned memory
 - C++ and Python wrapper methods built from the same declaration
 
 ### 2. `EventBroker(API)`
@@ -92,7 +93,7 @@ Example:
 registerBrokerLibrary:
   name: "mylib"
   initializeRequest: InitializeRequest
-  destroyRequest: DestroyRequest
+  shutdownRequest: ShutdownRequest
 ```
 
 This generates:
@@ -175,17 +176,14 @@ Typical responsibilities:
 
 ### Shutdown
 
-`DestroyRequest` is the broker request type for orderly application-level
+`ShutdownRequest` is the broker request type for orderly application-level
 teardown.
 
-`<lib>_shutdown(ctx)` stops the delivery and processing threads and marks the
-context inactive in the registry.
+`<lib>_shutdown(ctx)` first invokes `ShutdownRequest` on the processing thread,
+then stops the delivery and processing threads and marks the context inactive in
+the registry.
 
-Recommended order:
-
-1. call `DestroyRequest`
-2. unregister or drop external listeners if needed
-3. call `<lib>_shutdown(ctx)`
+Foreign callers only need to call `<lib>_shutdown(ctx)`.
 
 ---
 
@@ -323,25 +321,26 @@ level request-routing behavior that the FFI API builds on.
 
 ---
 
-## Requirements on `InitializeRequest` and `DestroyRequest`
+## Requirements on `InitializeRequest` and `ShutdownRequest`
 
 `registerBrokerLibrary` requires that the types named in `initializeRequest:` and
-`destroyRequest:` exist at compile time.
+`shutdownRequest:` exist at compile time. The legacy `destroyRequest:` alias is
+still accepted for compatibility.
 
 It does not itself force those providers to be registered.
 
 In practice:
 
 - `InitializeRequest.setProvider(ctx, ...)` should be installed in `setupProviders`
-  if you want the generated `initialize_request_*` export to be immediately usable
-- `DestroyRequest.setProvider(ctx, ...)` should also usually be installed there
-  if you want a stable always-available lifecycle API
+  if you want the generated `mylib_initialize(...)` export to be immediately usable
+- `ShutdownRequest.setProvider(ctx, ...)` should also usually be installed there
+  if you want `mylib_shutdown(ctx)` to perform orderly application teardown
 
 For other API request brokers, lazy registration is allowed.
 
 For example, a library may:
 
-- register `InitializeRequest` and `DestroyRequest` during startup
+- register `InitializeRequest` and `ShutdownRequest` during startup
 - use `InitializeRequest.request(...)` to install additional API broker providers
 
 This works because `InitializeRequest` executes on the processing thread, which is
@@ -368,10 +367,10 @@ RequestBroker(API):
   proc signature*(configPath: string): Future[Result[InitializeRequest, string]] {.async.}
 
 RequestBroker(API):
-  type DestroyRequest = object
+  type ShutdownRequest = object
     status*: int32
 
-  proc signature*(): Future[Result[DestroyRequest, string]] {.async.}
+  proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
 EventBroker(API):
   type StatusChanged = object
@@ -388,17 +387,17 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(InitializeRequest(initialized: true))
   )
 
-  discard DestroyRequest.setProvider(
+  discard ShutdownRequest.setProvider(
     ctx,
-    proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
-      return ok(DestroyRequest(status: 0))
+    proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      return ok(ShutdownRequest(status: 0))
   )
 
 when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name: "mylib"
     initializeRequest: InitializeRequest
-    destroyRequest: DestroyRequest
+    shutdownRequest: ShutdownRequest
 ```
 
 ### `setupProviders(ctx)` convention
@@ -419,6 +418,8 @@ The generated C request exports return C structs that may own allocated strings
 or arrays.
 
 Foreign code must free them using the generated `free_*_result(...)` function.
+For registered libraries these functions are library-prefixed, for example
+`mylib_free_initialize_result(...)`.
 
 The generated C++ and Python wrappers hide that cleanup automatically.
 
@@ -447,11 +448,11 @@ mylibCreateContextResult mylib_createContext(void);
 void free_mylib_create_context_result(mylibCreateContextResult* r);
 void mylib_shutdown(uint32_t ctx);
 
-InitializeRequestCResult initialize_request_request_with_args(uint32_t ctx, const char* configPath);
-void free_initialize_request_result(InitializeRequestCResult* r);
+InitializeRequestCResult mylib_initialize(uint32_t ctx, const char* configPath);
+void mylib_free_initialize_result(InitializeRequestCResult* r);
 
-uint64_t onDeviceDiscovered(uint32_t ctx, DeviceDiscoveredCCallback callback);
-void offDeviceDiscovered(uint32_t ctx, uint64_t handle);
+uint64_t mylib_onDeviceDiscovered(uint32_t ctx, DeviceDiscoveredCCallback callback);
+void mylib_offDeviceDiscovered(uint32_t ctx, uint64_t handle);
 ```
 
 ### C++ wrapper
@@ -485,10 +486,11 @@ if (!res.ok()) {
 
 When Python generation is enabled, a ctypes wrapper module is emitted.
 
-The Python wrapper differs slightly from C and C++:
+The Python wrapper mirrors the C++ lifecycle shape closely:
 
-- `Mylib()` automatically loads the library
-- the constructor creates a context immediately via `mylib_createContext()`
+- `Mylib()` loads the library but starts without a context
+- `createContext()` performs per-context creation explicitly
+- `validContext()` and truthiness reflect whether a live context exists
 - `shutdown()` is exposed for explicit teardown
 
 Example:
@@ -497,8 +499,12 @@ Example:
 from mylib import Mylib
 
 with Mylib() as lib:
-  res = lib.initialize_request("/opt/devices.yaml")
-    print(res.config_path)
+  create_res = lib.createContext()
+  if not create_res.ok:
+    raise RuntimeError(create_res.error)
+
+  res = lib.initializeRequest("/opt/devices.yaml")
+  print(res.configPath)
 ```
 
 ---

@@ -2,7 +2,7 @@
 ## ------------------------
 ## Provides the `registerBrokerLibrary` macro that generates:
 ## 1. Library context lifecycle management (createContext/shutdown C exports)
-## 2. Compile-time validation of mandatory InitializeRequest/DestroyRequest types
+## 2. Compile-time validation of mandatory InitializeRequest/ShutdownRequest types
 ## 3. C header file generation from accumulated broker declarations
 ## 4. Memory management helpers (free_string)
 ## 5. Delivery thread creation (hosts event listeners, calls C callbacks)
@@ -14,7 +14,7 @@
 ## registerBrokerLibrary:
 ##   name: "mylib"
 ##   initializeRequest: InitializeRequest
-##   destroyRequest: DestroyRequest
+##   shutdownRequest: ShutdownRequest
 ##   refType: MyLibObject  # optional
 ## ```
 ##
@@ -38,11 +38,11 @@ export results, chronos, chronicles, broker_context, api_common, asyncchannels
 proc parseLibraryConfig(
     body: NimNode
 ): tuple[
-  name: string, initializeRequest: NimNode, destroyRequest: NimNode, refType: NimNode
+  name: string, initializeRequest: NimNode, shutdownRequest: NimNode, refType: NimNode
 ] {.compileTime.} =
   var name = ""
   var initializeReq: NimNode = nil
-  var destroyReq: NimNode = nil
+  var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
 
   for stmt in body:
@@ -62,11 +62,11 @@ proc parseLibraryConfig(
           initializeReq = value[0]
         else:
           initializeReq = value
-      of "destroyrequest":
+      of "shutdownrequest", "destroyrequest":
         if value.kind == nnkStmtList and value.len == 1:
-          destroyReq = value[0]
+          shutdownReq = value[0]
         else:
-          destroyReq = value
+          shutdownReq = value
       of "reftype":
         if value.kind == nnkStmtList and value.len == 1:
           refTy = value[0]
@@ -81,13 +81,16 @@ proc parseLibraryConfig(
     error("registerBrokerLibrary requires a 'name' field", body)
   if initializeReq.isNil():
     error("registerBrokerLibrary requires a 'initializeRequest' field", body)
-  if destroyReq.isNil():
-    error("registerBrokerLibrary requires a 'destroyRequest' field", body)
+  if shutdownReq.isNil():
+    error(
+      "registerBrokerLibrary requires a 'shutdownRequest' field (the legacy 'destroyRequest' alias is still accepted)",
+      body,
+    )
 
   (
     name: name,
     initializeRequest: initializeReq,
-    destroyRequest: destroyReq,
+    shutdownRequest: shutdownReq,
     refType: refTy,
   )
 
@@ -100,7 +103,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let libName = config.name
   let libNameLit = newLit(libName)
   let initializeReqIdent = config.initializeRequest
-  let destroyReqIdent = config.destroyRequest
+  let shutdownReqIdent = config.shutdownRequest
 
   # Set library name for header generation
   gApiLibraryName = libName
@@ -138,7 +141,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
   result = newStmtList()
 
-  # Compile-time validation: ensure InitializeRequest and DestroyRequest types exist
+  # Compile-time validation: ensure InitializeRequest and ShutdownRequest types exist
   result.add(
     quote do:
       when not compiles(typeof(`initializeReqIdent`)):
@@ -149,10 +152,11 @@ macro registerBrokerLibrary*(body: untyped): untyped =
             "' is not defined. Ensure a RequestBroker(API) declaring this type " &
             "appears before registerBrokerLibrary."
         .}
-      when not compiles(typeof(`destroyReqIdent`)):
+      when not compiles(typeof(`shutdownReqIdent`)):
         {.
           error:
-            "registerBrokerLibrary: destroyRequest type '" & astToStr(`destroyReqIdent`) &
+            "registerBrokerLibrary: shutdownRequest type '" &
+            astToStr(`shutdownReqIdent`) &
             "' is not defined. Ensure a RequestBroker(API) declaring this type " &
             "appears before registerBrokerLibrary."
         .}
@@ -859,8 +863,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         result.ctx = uint32(ctx)
 
   )
-
-  # shutdown function — stops both threads
+  # shutdown function — runs application shutdown work, then stops both threads
   result.add(
     quote do:
       proc `shutdownFuncIdent`(
@@ -887,6 +890,11 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
         if entryPtr.isNil:
           return
+
+        let shutdownRes = waitFor `shutdownReqIdent`.request(brokerCtx)
+        if shutdownRes.isErr():
+          error "Library shutdown request failed",
+            library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
 
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
@@ -923,6 +931,53 @@ macro registerBrokerLibrary*(body: untyped): untyped =
         freeCString(s)
 
   )
+
+  # Public library-prefixed wrappers for request/event/free helper exports.
+  for wrapper in gApiCExportWrappers:
+    let publicFuncName = libName & "_" & wrapper.publicSuffix
+    let publicFuncIdent = ident(publicFuncName)
+    let publicFuncNameLit = newLit(publicFuncName)
+    let rawFuncIdent = ident(wrapper.rawName)
+
+    var formalParams = newTree(nnkFormalParams)
+    if wrapper.returnType == "void":
+      formalParams.add(newEmptyNode())
+    else:
+      formalParams.add(parseExpr(wrapper.returnType))
+
+    var callExpr = newCall(rawFuncIdent)
+    for (paramName, paramType) in wrapper.params:
+      let paramIdent = ident(paramName)
+      formalParams.add(
+        newTree(nnkIdentDefs, paramIdent, parseExpr(paramType), newEmptyNode())
+      )
+      callExpr.add(paramIdent)
+
+    let pragmas = newTree(
+      nnkPragma,
+      newTree(nnkExprColonExpr, ident("exportc"), publicFuncNameLit),
+      ident("cdecl"),
+      ident("dynlib"),
+    )
+
+    let body =
+      if wrapper.returnType == "void":
+        newStmtList(callExpr)
+      else:
+        newStmtList(newTree(nnkReturnStmt, callExpr))
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(publicFuncIdent, "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        formalParams,
+        pragmas,
+        newEmptyNode(),
+        body,
+      )
+    )
 
   # Append lifecycle function prototypes to header
   appendHeaderDecl(

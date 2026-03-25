@@ -268,7 +268,7 @@ The process-wide runtime init and per-context lifecycle are intentionally separa
 
 - `mylib_createContext()` creates one broker-backed library context and performs any required one-time runtime initialization internally.
 - `InitializeRequest` is the broker request used for post-create configuration.
-- `DestroyRequest` is the broker request used for orderly teardown before shutdown.
+- `ShutdownRequest` is the broker request used for orderly application teardown during shutdown.
 
 Build the example shared library with:
 

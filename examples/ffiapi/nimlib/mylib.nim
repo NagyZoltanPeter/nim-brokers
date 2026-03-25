@@ -50,12 +50,12 @@ RequestBroker(API):
     configPath: string
   ): Future[Result[InitializeRequest, string]] {.async.}
 
-## DestroyRequest: called before mylib_shutdown() to tear down state.
+## ShutdownRequest: called by mylib_shutdown() to tear down state.
 RequestBroker(API):
-  type DestroyRequest = object
+  type ShutdownRequest = object
     status*: int32
 
-  proc signature*(): Future[Result[DestroyRequest, string]] {.async.}
+  proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
 ## AddDevice: register a new device for monitoring.
 RequestBroker(API):
@@ -153,17 +153,17 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       "failed to register InitializeRequest provider: " & initializeProviderRes.error()
     )
 
-  # DestroyRequest provider
-  let destroyProviderRes = DestroyRequest.setProvider(
+  # ShutdownRequest provider
+  let shutdownProviderRes = ShutdownRequest.setProvider(
     ctx,
-    proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
+    proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
       gInitialized = false
       gDevices = @[]
-      return ok(DestroyRequest(status: 0)),
+      return ok(ShutdownRequest(status: 0)),
   )
-  if destroyProviderRes.isErr():
+  if shutdownProviderRes.isErr():
     return
-      err("failed to register DestroyRequest provider: " & destroyProviderRes.error())
+      err("failed to register ShutdownRequest provider: " & shutdownProviderRes.error())
 
   # AddDevice provider
   let addDeviceProviderRes = AddDevice.setProvider(
@@ -274,7 +274,7 @@ when defined(BrokerFfiApi):
       "mylib"
     initializeRequest:
       InitializeRequest
-    destroyRequest:
-      DestroyRequest
+    shutdownRequest:
+      ShutdownRequest
 
 {.pop.}

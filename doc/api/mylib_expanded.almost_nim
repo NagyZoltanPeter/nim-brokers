@@ -7,17 +7,24 @@
 ## The gensym suffixes (e.g. `gensym11) are normal Nim macro hygiene artifacts.
 ##
 ## NOT compilable — for documentation purposes only.
+## Historical note:
+##   This snapshot is only partially refreshed. The modern public lifecycle is
+##   createContext + shutdown, the author-facing teardown broker is
+##   ShutdownRequest, and registered foreign exports are library-prefixed.
+##   Remaining DestroyRequest-era names below are preserved as historical macro
+##   expansion reference, not as current API guidance.
 ##
 ## Structure:
 ##   1. ApiType: DeviceInfo (shared struct for seq[T] results)
-##   2. RequestBroker(API) × 6: InitRequest, DestroyRequest, AddDevice,
+##   2. RequestBroker(API) × 6: InitializeRequest, ShutdownRequest, AddDevice,
 ##      RemoveDevice, GetDevice, ListDevices
 ##      Each generates: MT broker infra + C result struct + encode/free + C export
 ##   3. EventBroker(API) × 2: DeviceStatusChanged, DeviceDiscovered
 ##      Each generates: MT event infra + C callback type + handler + on/off exports
 ##      First expansion also generates shared RegisterEventListenerResult broker
 ##   4. registerBrokerLibrary: "mylib"
-##      Generates: initialize, init, shutdown, free_string, threads, event routing
+##      Generates: internal runtime init, createContext, shutdown, public C wrappers,
+##      free_string, threads, and event routing
 
 
 # ===== ApiType: DeviceInfo =====
@@ -45,7 +52,7 @@ proc encodeDeviceInfoToCItem*(item: DeviceInfo): DeviceInfoCItem =
 
 
 
-# ===== RequestBroker(API): InitRequest =====
+# ===== RequestBroker(API): InitializeRequest =====
 # Generates: MT broker infra + C result struct + encode/free + C-exported request function
 type
   InitRequest* = object
@@ -383,16 +390,16 @@ proc clearProvider*(_: typedesc[InitRequest]) =
   clearProvider(InitRequest, DefaultBrokerContext)
 
 type
-  InitRequestCResult* {.exportc.} = object
+  InitializeRequestCResult* {.exportc.} = object
     error_message*: cstring
     configPath*: cstring
     initialized*: bool
-proc encodeInitRequestToC(obj: InitRequest): InitRequestCResult =
+proc encodeInitializeRequestToC(obj: InitializeRequest): InitializeRequestCResult =
   result.configPath = allocCStringCopy(obj.configPath)
   result.initialized = obj.initialized
 
-proc free_init_request_result(r: ptr InitRequestCResult) {.
-    exportc: "free_init_request_result", cdecl, dynlib.} =
+proc free_initialize_result(r: ptr InitializeRequestCResult) {.
+  exportc: "free_initialize_result", cdecl, dynlib.} =
   if r.isNil:
     return
   if not r.error_message.isNil:
@@ -402,15 +409,15 @@ proc free_init_request_result(r: ptr InitRequestCResult) {.
 
 
 # --- C-exported request function ---
-proc init_request_request_with_args*(ctx: uint32; c_configPath: cstring): InitRequestCResult {.
-    exportc: "init_request_request_with_args", cdecl, dynlib.} =
+proc initialize*(ctx: uint32; configPath: cstring): InitializeRequestCResult {.
+    exportc: "initialize", cdecl, dynlib.} =
   let brokerCtx = BrokerContext(ctx)
-  let nim_configPath = $c_configPath
-  let res`gensym38 = waitFor request(InitRequest, brokerCtx, nim_configPath)
+  let nim_configPath = $configPath
+  let res`gensym38 = waitFor request(InitializeRequest, brokerCtx, nim_configPath)
   if res`gensym38.isOk():
-    return encodeInitRequestToC(res`gensym38.get())
+    return encodeInitializeRequestToC(res`gensym38.get())
   else:
-    var errResult`gensym38: InitRequestCResult
+    var errResult`gensym38: InitializeRequestCResult
     errResult`gensym38.error_message = allocCStringCopy(res`gensym38.error())
     return errResult`gensym38
 
@@ -760,8 +767,8 @@ type
 proc encodeDestroyRequestToC(obj: DestroyRequest): DestroyRequestCResult =
   result.status = obj.status
 
-proc free_destroy_request_result(r: ptr DestroyRequestCResult) {.
-    exportc: "free_destroy_request_result", cdecl, dynlib.} =
+proc free_destroy_result(r: ptr DestroyRequestCResult) {.
+  exportc: "free_destroy_result", cdecl, dynlib.} =
   if r.isNil:
     return
   if not r.error_message.isNil:
@@ -769,8 +776,8 @@ proc free_destroy_request_result(r: ptr DestroyRequestCResult) {.
 
 
 # --- C-exported request function ---
-proc destroy_request_request(ctx`gensym359: uint32): DestroyRequestCResult {.
-    exportc: "destroy_request_request", cdecl, dynlib.} =
+proc destroy(ctx`gensym359: uint32): DestroyRequestCResult {.
+  exportc: "destroy", cdecl, dynlib.} =
   let brokerCtx`gensym359 = BrokerContext(ctx`gensym359)
   let res`gensym359 = waitFor DestroyRequest.request(brokerCtx`gensym359)
   if res`gensym359.isOk():
@@ -1140,13 +1147,13 @@ proc free_add_device_result(r: ptr AddDeviceCResult) {.
 
 
 # --- C-exported request function ---
-proc add_device_request_with_args*(ctx: uint32; c_name: cstring;
-                                   c_deviceType: cstring; c_address: cstring): AddDeviceCResult {.
-    exportc: "add_device_request_with_args", cdecl, dynlib.} =
+proc add_device*(ctx: uint32; name: cstring; deviceType: cstring;
+                 address: cstring): AddDeviceCResult {.
+    exportc: "add_device", cdecl, dynlib.} =
   let brokerCtx = BrokerContext(ctx)
-  let nim_name = $c_name
-  let nim_deviceType = $c_deviceType
-  let nim_address = $c_address
+  let nim_name = $name
+  let nim_deviceType = $deviceType
+  let nim_address = $address
   let res`gensym660 = waitFor request(AddDevice, brokerCtx, nim_name,
                                       nim_deviceType, nim_address)
   if res`gensym660.isOk():
@@ -1517,10 +1524,10 @@ proc free_remove_device_result(r: ptr RemoveDeviceCResult) {.
 
 
 # --- C-exported request function ---
-proc remove_device_request_with_args*(ctx: uint32; c_deviceId: int64): RemoveDeviceCResult {.
-    exportc: "remove_device_request_with_args", cdecl, dynlib.} =
+proc remove_device*(ctx: uint32; deviceId: int64): RemoveDeviceCResult {.
+    exportc: "remove_device", cdecl, dynlib.} =
   let brokerCtx = BrokerContext(ctx)
-  let res`gensym966 = waitFor request(RemoveDevice, brokerCtx, c_deviceId)
+  let res`gensym966 = waitFor request(RemoveDevice, brokerCtx, deviceId)
   if res`gensym966.isOk():
     return encodeRemoveDeviceToC(res`gensym966.get())
   else:
@@ -1896,10 +1903,10 @@ proc free_get_device_result(r: ptr GetDeviceCResult) {.
 
 
 # --- C-exported request function ---
-proc get_device_request_with_args*(ctx: uint32; c_deviceId: int64): GetDeviceCResult {.
-    exportc: "get_device_request_with_args", cdecl, dynlib.} =
+proc get_device*(ctx: uint32; deviceId: int64): GetDeviceCResult {.
+    exportc: "get_device", cdecl, dynlib.} =
   let brokerCtx = BrokerContext(ctx)
-  let res`gensym1273 = waitFor request(GetDevice, brokerCtx, c_deviceId)
+  let res`gensym1273 = waitFor request(GetDevice, brokerCtx, deviceId)
   if res`gensym1273.isOk():
     return encodeGetDeviceToC(res`gensym1273.get())
   else:
@@ -2275,8 +2282,8 @@ proc free_list_devices_result(r: ptr ListDevicesCResult) {.
 
 
 # --- C-exported request function ---
-proc list_devices_request(ctx`gensym1598: uint32): ListDevicesCResult {.
-    exportc: "list_devices_request", cdecl, dynlib.} =
+proc list_devices(ctx`gensym1598: uint32): ListDevicesCResult {.
+  exportc: "list_devices", cdecl, dynlib.} =
   let brokerCtx`gensym1598 = BrokerContext(ctx`gensym1598)
   let res`gensym1598 = waitFor ListDevices.request(brokerCtx`gensym1598)
   if res`gensym1598.isOk():
@@ -2579,188 +2586,14 @@ proc dropDeviceStatusChangedMtListenerImpl(brokerCtx`gensym1939: BrokerContext;
     error "dropListener called from wrong thread",
           eventType = "DeviceStatusChanged",
           handleThread = repr(handle`gensym1939.threadId),
-          currentThread = repr(currentMtThreadId())
-    return
-  var tvIdx`gensym1939 = -1
-  for i`gensym1939 in 0 ..< gDeviceStatusChangedTvListenerCtxs.len:
-    if gDeviceStatusChangedTvListenerCtxs[i`gensym1939] ==
-        brokerCtx`gensym1939:
-      tvIdx`gensym1939 = i`gensym1939
-      break
-  if tvIdx`gensym1939 < 0:
-    return
-  gDeviceStatusChangedTvListenerHandlers[tvIdx`gensym1939].del(
-      handle`gensym1939.id)
-  if gDeviceStatusChangedTvListenerHandlers[tvIdx`gensym1939].len == 0:
-    gDeviceStatusChangedTvListenerCtxs.del(tvIdx`gensym1939)
-    gDeviceStatusChangedTvListenerHandlers.del(tvIdx`gensym1939)
-    gDeviceStatusChangedTvNextIds.del(tvIdx`gensym1939)
-    let myThreadId`gensym1939 = currentMtThreadId()
-    let myThreadGen`gensym1939 = currentMtThreadGen()
-    withLock(gDeviceStatusChangedMtLock):
-      for i`gensym1939 in 0 ..< gDeviceStatusChangedMtBucketCount:
-        if gDeviceStatusChangedMtBuckets[i`gensym1939].brokerCtx ==
-            brokerCtx`gensym1939 and
-            gDeviceStatusChangedMtBuckets[i`gensym1939].threadId ==
-            myThreadId`gensym1939 and
-            gDeviceStatusChangedMtBuckets[i`gensym1939].threadGen ==
-            myThreadGen`gensym1939:
-          gDeviceStatusChangedMtBuckets[i`gensym1939].hasListeners = false
-          break
-
-proc dropAllDeviceStatusChangedMtListenersImpl(
-    brokerCtx`gensym1940: BrokerContext) =
-  ensureInitDeviceStatusChangedMtBroker()
-  let myThreadId`gensym1940 = currentMtThreadId()
-  var chansToClear`gensym1940: seq[ptr AsyncChannel[
-      DeviceStatusChangedMtEventMsg]] = @[]
-  withLock(gDeviceStatusChangedMtLock):
-    for i`gensym1940 in 0 ..< gDeviceStatusChangedMtBucketCount:
-      if gDeviceStatusChangedMtBuckets[i`gensym1940].brokerCtx ==
-          brokerCtx`gensym1940 and
-          gDeviceStatusChangedMtBuckets[i`gensym1940].hasListeners:
-        gDeviceStatusChangedMtBuckets[i`gensym1940].hasListeners = false
-        if gDeviceStatusChangedMtBuckets[i`gensym1940].threadId !=
-            myThreadId`gensym1940:
-          chansToClear`gensym1940.add(gDeviceStatusChangedMtBuckets[i`gensym1940].eventChan)
-  var tvIdx`gensym1940 = -1
-  for i`gensym1940 in 0 ..< gDeviceStatusChangedTvListenerCtxs.len:
-    if gDeviceStatusChangedTvListenerCtxs[i`gensym1940] ==
-        brokerCtx`gensym1940:
-      tvIdx`gensym1940 = i`gensym1940
-      break
-  if tvIdx`gensym1940 >= 0:
-    gDeviceStatusChangedTvListenerHandlers[tvIdx`gensym1940].clear()
-    gDeviceStatusChangedTvListenerCtxs.del(tvIdx`gensym1940)
-    gDeviceStatusChangedTvListenerHandlers.del(tvIdx`gensym1940)
-    gDeviceStatusChangedTvNextIds.del(tvIdx`gensym1940)
-  for chan`gensym1940 in chansToClear`gensym1940:
-    chan`gensym1940[].sendSync(DeviceStatusChangedMtEventMsg(
-        kind: DeviceStatusChangedMtEventMsgKind.emkClearListeners))
-
-proc dropListener*(_: typedesc[DeviceStatusChanged];
-                   handle`gensym1941: DeviceStatusChangedListener) =
-  dropDeviceStatusChangedMtListenerImpl(DefaultBrokerContext, handle`gensym1941)
-
-proc dropListener*(_: typedesc[DeviceStatusChanged];
-                   brokerCtx`gensym1941: BrokerContext;
-                   handle`gensym1941: DeviceStatusChangedListener) =
-  dropDeviceStatusChangedMtListenerImpl(brokerCtx`gensym1941, handle`gensym1941)
-
-proc dropAllListeners*(_: typedesc[DeviceStatusChanged]) =
-  dropAllDeviceStatusChangedMtListenersImpl(DefaultBrokerContext)
-
-proc dropAllListeners*(_: typedesc[DeviceStatusChanged];
-                       brokerCtx`gensym1941: BrokerContext) =
-  dropAllDeviceStatusChangedMtListenersImpl(brokerCtx`gensym1941)
-
-const
-  DeviceStatusChangedApiTypeId* = 0
-type
-  DeviceStatusChangedCCallback* = proc (deviceId: int64; name: cstring;
-                                        online: bool; timestampMs: int64) {.
-      cdecl.}
-
-# --- Shared RegisterEventListenerResult RequestBroker (internal, generated once) ---
-type
-  RegisterEventListenerResult* = object
-    handle*: uint64
-    success*: bool
-  RegisterEventListenerResultProviderWithArgs = proc (action: int32;
-      eventTypeId: int32; callbackPtr: pointer): Future[
-      Result[RegisterEventListenerResult, string]] {.async.}
-  RegisterEventListenerResultMtRequestMsg = object
-    isShutdown: bool
-    requestKind: int
-    action: int32
-    eventTypeId: int32
-    callbackPtr: pointer
-    responseChan: ptr AsyncChannel[Result[RegisterEventListenerResult, string]]
-  RegisterEventListenerResultMtBucket = object
-    brokerCtx: BrokerContext
-    requestChan: ptr AsyncChannel[RegisterEventListenerResultMtRequestMsg]
-    threadId: pointer
-    threadGen: uint64
-var gRegisterEventListenerResultMtBuckets: ptr UncheckedArray[
-    RegisterEventListenerResultMtBucket]
-var gRegisterEventListenerResultMtBucketCount: int
-var gRegisterEventListenerResultMtBucketCap: int
-var gRegisterEventListenerResultMtLock: Lock
-var gRegisterEventListenerResultMtInit: Atomic[int] ## 0 = uninitialised, 1 = initialising, 2 = ready.
-                                                    ## CAS(0→1) wins the race; losers spin until 2.
-proc ensureInitRegisterEventListenerResultMtBroker() =
-  if gRegisterEventListenerResultMtInit.load(moRelaxed) == 2:
-    return
-  var expected`gensym1947 = 0
-  if gRegisterEventListenerResultMtInit.compareExchange(expected`gensym1947, 1,
-      moAcquire, moRelaxed):
-    initLock(gRegisterEventListenerResultMtLock)
-    gRegisterEventListenerResultMtBucketCap = 4
-    gRegisterEventListenerResultMtBuckets = cast[ptr UncheckedArray[
-        RegisterEventListenerResultMtBucket]](createShared(
-        RegisterEventListenerResultMtBucket,
-        gRegisterEventListenerResultMtBucketCap))
-    gRegisterEventListenerResultMtBucketCount = 0
-    gRegisterEventListenerResultMtInit.store(2, moRelease)
-  else:
-    while gRegisterEventListenerResultMtInit.load(moAcquire) != 2:
-      discard
-
-proc growRegisterEventListenerResultMtBuckets() =
-  ## Must be called under lock.
-  let newCap`gensym1948 = gRegisterEventListenerResultMtBucketCap * 2
-  let newBuf`gensym1948 = cast[ptr UncheckedArray[
-      RegisterEventListenerResultMtBucket]](createShared(
-      RegisterEventListenerResultMtBucket, newCap`gensym1948))
-  for i`gensym1948 in 0 ..< gRegisterEventListenerResultMtBucketCount:
-    newBuf`gensym1948[i`gensym1948] = gRegisterEventListenerResultMtBuckets[
-        i`gensym1948]
-  deallocShared(gRegisterEventListenerResultMtBuckets)
-  gRegisterEventListenerResultMtBuckets = newBuf`gensym1948
-  gRegisterEventListenerResultMtBucketCap = newCap`gensym1948
-
-var gRegisterEventListenerResultMtRequestTimeout*: Duration = seconds(5) ## Default timeout for cross-thread requests. Same-thread requests
-                                                                         ## bypass this (they call the provider directly).
-                                                                         ## NOTE: Set during initialization before spawning worker threads.
-                                                                         ## Reading from multiple threads is safe on x86-64 (aligned int64),
-                                                                         ## but concurrent writes are not guaranteed atomic on all platforms.
-proc setRequestTimeout*(_: typedesc[RegisterEventListenerResult];
-                        timeout`gensym1949: Duration) =
-  ## Set the cross-thread request timeout for this broker type.
-  ## Call this during initialization before spawning worker threads.
-  gRegisterEventListenerResultMtRequestTimeout = timeout`gensym1949
-
-proc requestTimeout*(_: typedesc[RegisterEventListenerResult]): Duration =
-  ## Get the current cross-thread request timeout for this broker type.
-  gRegisterEventListenerResultMtRequestTimeout
-
-var gRegisterEventListenerResultTvWithArgCtxs {.threadvar.}: seq[BrokerContext]
-var gRegisterEventListenerResultTvWithArgHandlers {.threadvar.}: seq[
-    RegisterEventListenerResultProviderWithArgs]
-proc processLoopRegisterEventListenerResult(
-    requestChan: ptr AsyncChannel[RegisterEventListenerResultMtRequestMsg];
-    loopCtx: BrokerContext) {.async: (raises: []).} =
-  while true:
-    let recvRes`gensym1951 = catch do:
-      await requestChan.recv()
-    if recvRes`gensym1951.isErr():
-      break
-    let msg = recvRes`gensym1951.get()
-    if msg.isShutdown:
-      break
-    if msg.requestKind == 1:
-      var handler1: RegisterEventListenerResultProviderWithArgs
-      for i`gensym1953 in 0 ..< gRegisterEventListenerResultTvWithArgCtxs.len:
-        if gRegisterEventListenerResultTvWithArgCtxs[i`gensym1953] ==
-            loopCtx:
-          handler1 = gRegisterEventListenerResultTvWithArgHandlers[i`gensym1953]
-          break
-      if handler1.isNil():
-        msg.responseChan[].sendSync(err(Result[RegisterEventListenerResult,
-            string], "RequestBroker(" & "RegisterEventListenerResult" &
-            "): no provider registered for input signature"))
-      else:
-        let catchedRes`gensym1953 = catch do:
+          ## Current expansion note:
+          ## The registerBrokerLibrary section below predates the createContext/error-propagation
+          ## refactor. The generated public wrapper names now include:
+          ##   mylib_createContext, mylib_initialize, mylib_destroy, mylib_add_device,
+          ##   mylib_remove_device, mylib_get_device, mylib_list_devices,
+          ##   mylib_onDeviceStatusChanged, mylib_offDeviceStatusChanged,
+          ##   mylib_onDeviceDiscovered, mylib_offDeviceDiscovered,
+          ##   plus matching mylib_free_*_result helpers.
           await handler1(msg.action, msg.eventTypeId, msg.callbackPtr)
         if catchedRes`gensym1953.isErr():
           msg.responseChan[].sendSync(err(
@@ -3561,8 +3394,8 @@ proc offDeviceDiscovered(ctx`gensym2757: uint32; handle`gensym2757: uint64) {.
 
 # ===== registerBrokerLibrary: "mylib" =====
 # Compile-time validation
-when not compiles(typeof(InitRequest)):
-  {.error: "registerBrokerLibrary: initRequest type \'" & astToStr(InitRequest) &
+when not compiles(typeof(InitializeRequest)):
+  {.error: "registerBrokerLibrary: initializeRequest type \"'" & astToStr(InitializeRequest) &
       "\' is not defined. Ensure a RequestBroker(API) declaring this type " &
       "appears before registerBrokerLibrary.".}
 when not compiles(typeof(DestroyRequest)):
@@ -3670,7 +3503,9 @@ proc mylibDeliveryThread(arg`gensym3493: ptr mylibDelivThreadArg) {.thread.} =
   cleanupAllApiEventListeners(arg`gensym3493.ctx)
 
 
-# --- mylib_init: create context + start both threads ---
+# --- Historical create block from an older captured expansion ---
+# Current generated public lifecycle entry point is mylib_createContext.
+# The block below is kept only as an internal expansion reference.
 proc mylib_init(): uint32 {.exportc: "mylib_init", cdecl, dynlib.} =
   ensureLibCtxInit()
   var ctx`gensym3494 = NewBrokerContext()

@@ -46,10 +46,6 @@ int main() {
         fprintf(stderr, "FATAL: %s\n", createContextResult.error().c_str());
         return 1;
     }
-    if (!lib) {
-        fprintf(stderr, "FATAL: createContext() returned success without a context\n");
-        return 1;
-    }
     printf("Library context: 0x%08X\n\n", lib.ctx());
 
     // ── 2. Subscribe to events using lambdas ─────────────────────────

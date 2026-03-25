@@ -331,6 +331,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
   # Step 8: Generate C-exported on<TypeName>(ctx, callback) -> uint64
   let regFuncName = "on" & typeDisplayName
+  let publicRegFuncName = apiPublicCName(regFuncName)
   let regFuncIdent = ident(regFuncName)
   let regFuncNameLit = newLit(regFuncName)
   let callbackParamIdent = ident("callback")
@@ -356,6 +357,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
   # Step 9: Generate C-exported off<TypeName>(ctx, handle)
   let deregFuncName = "off" & typeDisplayName
+  let publicDeregFuncName = apiPublicCName(deregFuncName)
   let deregFuncIdent = ident(deregFuncName)
   let deregFuncNameLit = newLit(deregFuncName)
 
@@ -396,17 +398,26 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
   # Registration function prototype: returns uint64_t (listener handle)
   let regProto = generateCFuncProto(
-    regFuncName,
+    publicRegFuncName,
     "uint64_t",
     @[("ctx", "uint32_t"), ("callback", typeDisplayName & "CCallback")],
   )
   appendHeaderDecl(regProto)
+  registerApiCExportWrapper(
+    regFuncName,
+    regFuncName,
+    "uint64",
+    @[("ctx", "uint32"), ("callback", typeDisplayName & "CCallback")],
+  )
 
   # Deregistration function prototype: takes handle (0 = remove all)
   let deregProto = generateCFuncProto(
-    deregFuncName, "void", @[("ctx", "uint32_t"), ("handle", "uint64_t")]
+    publicDeregFuncName, "void", @[("ctx", "uint32_t"), ("handle", "uint64_t")]
   )
   appendHeaderDecl(deregProto)
+  registerApiCExportWrapper(
+    deregFuncName, deregFuncName, "void", @[("ctx", "uint32"), ("handle", "uint64")]
+  )
 
   # C++ wrapper: trampoline + multiplexed std::function callbacks
   # Build the std::function signature from event fields
@@ -466,7 +477,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   onMethod.add("        // Register C trampoline once with the Nim layer\n")
   onMethod.add("        if (" & prefix & "CHandle_ == 0) {\n")
   onMethod.add(
-    "            " & prefix & "CHandle_ = ::" & regFuncName & "(ctx_, " & prefix &
+    "            " & prefix & "CHandle_ = ::" & publicRegFuncName & "(ctx_, " & prefix &
       "Trampoline_);\n"
   )
   onMethod.add("        }\n")
@@ -483,7 +494,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   offMethod.add("            " & prefix & "Cbs_.clear();\n")
   offMethod.add("            if (" & prefix & "CHandle_) {\n")
   offMethod.add(
-    "                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
+    "                ::" & publicDeregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
   )
   offMethod.add("                " & prefix & "CHandle_ = 0;\n")
   offMethod.add("            }\n")
@@ -493,7 +504,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     "            if (" & prefix & "Cbs_.empty() && " & prefix & "CHandle_) {\n"
   )
   offMethod.add(
-    "                ::" & deregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
+    "                ::" & publicDeregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
   )
   offMethod.add("                " & prefix & "CHandle_ = 0;\n")
   offMethod.add("            }\n")
@@ -519,13 +530,15 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         cfuncName & " = ctypes.CFUNCTYPE(" & cfuncArgs.join(", ") & ")"
       )
       gApiPyCallbackSetup.add(
-        "_lib." & regFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName & "]"
+        "_lib." & publicRegFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName & "]"
       )
-      gApiPyCallbackSetup.add("_lib." & regFuncName & ".restype = ctypes.c_uint64")
       gApiPyCallbackSetup.add(
-        "_lib." & deregFuncName & ".argtypes = [ctypes.c_uint32, ctypes.c_uint64]"
+        "_lib." & publicRegFuncName & ".restype = ctypes.c_uint64"
       )
-      gApiPyCallbackSetup.add("_lib." & deregFuncName & ".restype = None")
+      gApiPyCallbackSetup.add(
+        "_lib." & publicDeregFuncName & ".argtypes = [ctypes.c_uint32, ctypes.c_uint64]"
+      )
+      gApiPyCallbackSetup.add("_lib." & publicDeregFuncName & ".restype = None")
 
     # Build Python callback parameter list and forwarding
     var pyCallbackParams: seq[string] = @[]
@@ -566,7 +579,9 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       m.add("        @" & cfuncTypeName & "\n")
       m.add("        def _trampoline(" & pyCallbackParams.join(", ") & "):\n")
       m.add("            callback(" & pyForwards.join(", ") & ")\n")
-      m.add("        handle = self._lib." & regFuncName & "(self._ctx, _trampoline)\n")
+      m.add(
+        "        handle = self._lib." & publicRegFuncName & "(self._ctx, _trampoline)\n"
+      )
       m.add("        if handle == 0:\n")
       m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")
       m.add("        with self._lock:\n")
@@ -594,7 +609,7 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       )
       m.add("        \"\"\"\n")
       m.add("        self._requireContext()\n")
-      m.add("        self._lib." & deregFuncName & "(self._ctx, handle)\n")
+      m.add("        self._lib." & publicDeregFuncName & "(self._ctx, handle)\n")
       m.add("        # Note: callback references are intentionally kept alive in\n")
       m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
       m.add(

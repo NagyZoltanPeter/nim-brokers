@@ -148,6 +148,17 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
 
 var gApiHeaderDeclarations* {.compileTime.}: seq[string] = @[]
 var gApiLibraryName* {.compileTime.}: string = ""
+const ApiLibPrefixPlaceholder* = "__BROKERS_API_LIB_PREFIX__"
+
+type ApiCExportWrapper* =
+  tuple[
+    publicSuffix: string,
+    rawName: string,
+    returnType: string,
+    params: seq[(string, string)],
+  ]
+
+var gApiCExportWrappers* {.compileTime.}: seq[ApiCExportWrapper] = @[]
 
 # ---------------------------------------------------------------------------
 # Compile-time accumulators for delivery thread event system
@@ -222,6 +233,17 @@ proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
   gApiHeaderDeclarations.add(decl)
+
+proc apiPublicCName*(suffix: string): string {.compileTime.} =
+  ApiLibPrefixPlaceholder & suffix
+
+proc registerApiCExportWrapper*(
+    publicSuffix: string,
+    rawName: string,
+    returnType: string,
+    params: seq[(string, string)],
+) {.compileTime.} =
+  gApiCExportWrappers.add((publicSuffix, rawName, returnType, params))
 
 # ---------------------------------------------------------------------------
 # Compile-time C++ type mapping
@@ -484,6 +506,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
       outDir & "/" & libName & ".h"
     else:
       libName & ".h"
+  let apiPrefix = libName & "_"
   var header = "#ifndef " & guardName & "\n"
   header.add("#define " & guardName & "\n\n")
   header.add("#include <stdint.h>\n")
@@ -491,7 +514,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
   header.add("#include <stddef.h>\n\n")
   header.add("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
   for decl in gApiHeaderDeclarations:
-    header.add(decl)
+    header.add(decl.replace(ApiLibPrefixPlaceholder, apiPrefix))
     header.add("\n")
   header.add("\n#ifdef __cplusplus\n}\n#endif\n\n")
 
@@ -561,7 +584,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
 
     # C++ structs (ApiType structs, then RequestBroker result structs)
     for s in gApiCppStructs:
-      header.add(s)
+      header.add(s.replace(ApiLibPrefixPlaceholder, apiPrefix))
       header.add("\n")
 
     header.add("struct " & createContextResultName & " {\n")
@@ -588,7 +611,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     # Private members (trampolines, callback storage)
     if gApiCppPrivateMembers.len > 0:
       for m in gApiCppPrivateMembers:
-        header.add(m & "\n")
+        header.add(m.replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n")
       header.add("\n")
 
     header.add("public:\n")
@@ -641,7 +664,12 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     )
     header.add("    uint32_t ctx() const noexcept { return ctx_; }\n\n")
     for cppMethod in gApiCppClassMethods:
-      header.add("    " & cppMethod.replace("__CPP_NS__", nsName) & "\n")
+      header.add(
+        "    " &
+          cppMethod.replace("__CPP_NS__", nsName).replace(
+            ApiLibPrefixPlaceholder, apiPrefix
+          ) & "\n"
+      )
     header.add("};\n\n")
     header.add("#endif /* __cplusplus */\n\n")
 
@@ -665,6 +693,7 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
       outDir & "/" & libName & ".py"
     else:
       libName & ".py"
+  let apiPrefix = libName & "_"
 
   # Derive class name from library name (PascalCase)
   var className = ""
@@ -814,7 +843,7 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("        _lib." & libName & "_shutdown.argtypes = [ctypes.c_uint32]\n")
   py.add("        _lib." & libName & "_shutdown.restype = None\n")
   for setup in gApiPyCallbackSetup:
-    py.add("        " & setup & "\n")
+    py.add("        " & setup.replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n")
   py.add("\n")
 
   # Context manager
@@ -884,12 +913,16 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   # Request methods
   let pyErrClass = className & "Error"
   for m in gApiPyMethods:
-    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add(
+      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+    )
     py.add("\n\n")
 
   # Event methods
   for m in gApiPyEventMethods:
-    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add(
+      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+    )
     py.add("\n\n")
 
   try:

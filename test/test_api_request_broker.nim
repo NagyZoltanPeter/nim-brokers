@@ -74,7 +74,7 @@ var gZeroArgCtx: BrokerContext
 
 proc requesterZeroArg() {.thread.} =
   ## Calls the exported C function from a separate thread (no event loop).
-  let result = api_test_req_request(uint32(gZeroArgCtx))
+  let result = api_test_req(uint32(gZeroArgCtx))
   if result.error_message.isNil() and $result.name == "test-item" and result.value == 42 and
       result.active:
     gZeroArgResult.store(true)
@@ -86,7 +86,7 @@ var gArgCtx: BrokerContext
 
 proc requesterWithArgs() {.thread.} =
   ## Calls the arg-based exported C function from a separate thread.
-  let result = api_test_req_args_request_with_args(uint32(gArgCtx), cstring("hello"), 5)
+  let result = api_test_req_args(uint32(gArgCtx), cstring("hello"), 5)
   if result.error_message.isNil() and $result.result_text == "echo:hello" and
       result.result_num == 10:
     gArgResult.store(true)
@@ -98,7 +98,7 @@ var gNoProviderResult: Atomic[bool]
 proc requesterNoProvider() {.thread.} =
   ## Calls exported C function when no provider is set — should return error.
   let ctx = NewBrokerContext()
-  let result = api_test_req_request(uint32(ctx))
+  let result = api_test_req(uint32(ctx))
   if not result.error_message.isNil() and ($result.error_message).len > 0:
     gNoProviderResult.store(true)
     freeCString(result.error_message)
