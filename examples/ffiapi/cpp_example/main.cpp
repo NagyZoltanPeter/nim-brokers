@@ -9,6 +9,7 @@
  *   - Result<T> return type with ok()/error()/value() + operator->
  *   - Explicit lifecycle with inert construction and createContext()
  *   - std::string inputs (no raw const char*)
+ *   - std::vector<AddDeviceSpec> batch request input
  *   - const std::string_view in event callbacks (zero-copy, lifetime-safe)
  *   - Lambda callbacks with captures via std::function
  *   - std::vector<DeviceInfo> in ListDevicesResult (no raw arrays)
@@ -108,25 +109,32 @@ int main() {
 
     // ── 4. Add a fleet of devices ────────────────────────────────────
     printf("--- Adding devices ---\n");
-    struct DeviceDef { std::string name, type, addr; };
-    std::vector<DeviceDef> fleet = {
-        {"Core-Router",    "router",  "10.0.0.1"},
-        {"Edge-Switch-A",  "switch",  "10.0.1.1"},
-        {"Edge-Switch-B",  "switch",  "10.0.1.2"},
-        {"AP-Floor-3",     "ap",      "10.0.2.10"},
-        {"TempSensor-DC1", "sensor",  "10.0.3.50"},
+    auto makeDeviceSpec = [](std::string name, std::string deviceType, std::string address) {
+        AddDeviceSpec spec;
+        spec.name = std::move(name);
+        spec.deviceType = std::move(deviceType);
+        spec.address = std::move(address);
+        return spec;
+    };
+    std::vector<AddDeviceSpec> fleet = {
+        makeDeviceSpec("Core-Router", "router", "10.0.0.1"),
+        makeDeviceSpec("Edge-Switch-A", "switch", "10.0.1.1"),
+        makeDeviceSpec("Edge-Switch-B", "switch", "10.0.1.2"),
+        makeDeviceSpec("AP-Floor-3", "ap", "10.0.2.10"),
+        makeDeviceSpec("TempSensor-DC1", "sensor", "10.0.3.50"),
     };
 
     std::vector<int64_t> ids;
-    for (auto& [name, type, addr] : fleet) {
-        // std::string args → const std::string& params, no .c_str() needed
-        auto res = lib.addDevice(name, type, addr);
+    {
+        auto res = lib.addDevice(fleet);
         if (!res.ok()) {
             fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
-            continue;
+            return 1;
         }
-        ids.push_back(res->deviceId);
-        printf("  + %s -> id=%lld\n", name.c_str(), (long long)res->deviceId);
+        for (const auto& device : res->devices) {
+            ids.push_back(device.deviceId);
+            printf("  + %s -> id=%lld\n", device.name.c_str(), (long long)device.deviceId);
+        }
     }
     // Let discovery events fire
     std::this_thread::sleep_for(std::chrono::milliseconds(300));

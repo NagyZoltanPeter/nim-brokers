@@ -5,7 +5,7 @@
  *
  * Exercises:
  *   - Library lifecycle (createContext / shutdown)
- *   - Adding devices (AddDevice request with string args)
+ *   - Adding devices in a single AddDevice batch request
  *   - Querying a single device (GetDevice request)
  *   - Listing all devices (ListDevices — returns an array of structs)
  *   - Removing a device (RemoveDevice request)
@@ -110,35 +110,26 @@ int main(void) {
     printf("4. Add devices\n");
     int64_t id_gw = 0, id_sensor = 0, id_cam = 0;
     {
-        AddDeviceCResult r = mylib_add_device(
-            ctx, "Gateway-01", "gateway", "192.168.1.1");
+        AddDeviceSpecCItem fleet[] = {
+            {(char *)"Gateway-01", (char *)"gateway", (char *)"192.168.1.1"},
+            {(char *)"TempSensor-A3", (char *)"sensor", (char *)"192.168.1.42"},
+            {(char *)"Camera-North", (char *)"camera", (char *)"192.168.1.80"},
+        };
+        AddDeviceCResult r = mylib_add_device(ctx, fleet, 3);
         if (r.error_message) {
             fprintf(stderr, "   ERROR: %s\n", r.error_message);
         } else {
-            id_gw = r.deviceId;
-            printf("   Added Gateway-01    -> id=%lld\n", (long long)id_gw);
-        }
-        mylib_free_add_device_result(&r);
-    }
-    {
-        AddDeviceCResult r = mylib_add_device(
-            ctx, "TempSensor-A3", "sensor", "192.168.1.42");
-        if (r.error_message) {
-            fprintf(stderr, "   ERROR: %s\n", r.error_message);
-        } else {
-            id_sensor = r.deviceId;
-            printf("   Added TempSensor-A3 -> id=%lld\n", (long long)id_sensor);
-        }
-        mylib_free_add_device_result(&r);
-    }
-    {
-        AddDeviceCResult r = mylib_add_device(
-            ctx, "Camera-North", "camera", "192.168.1.80");
-        if (r.error_message) {
-            fprintf(stderr, "   ERROR: %s\n", r.error_message);
-        } else {
-            id_cam = r.deviceId;
-            printf("   Added Camera-North  -> id=%lld\n", (long long)id_cam);
+            DeviceInfoCItem* added = r.devices;
+            if (r.devices_count >= 3 && added != NULL) {
+                id_gw = added[0].deviceId;
+                id_sensor = added[1].deviceId;
+                id_cam = added[2].deviceId;
+            }
+            for (int32_t i = 0; i < r.devices_count; ++i) {
+                printf("   Added %-14s -> id=%lld\n",
+                       added[i].name ? added[i].name : "(null)",
+                       (long long)added[i].deviceId);
+            }
         }
         mylib_free_add_device_result(&r);
     }

@@ -23,7 +23,7 @@ when defined(BrokerFfiApi):
   import brokers/api_library
 
 # ---------------------------------------------------------------------------
-# Shared item types (used in seq[T] result fields)
+# Shared item types (used in seq[T] request and result fields)
 # ---------------------------------------------------------------------------
 
 ## DeviceInfo — flat struct describing a single device.
@@ -35,6 +35,13 @@ ApiType:
     deviceType*: string
     address*: string
     online*: bool
+
+## AddDeviceSpec — FFI-safe batch input item for AddDevice.
+ApiType:
+  type AddDeviceSpec = object
+    name*: string
+    deviceType*: string
+    address*: string
 
 # ---------------------------------------------------------------------------
 # Request Brokers
@@ -57,14 +64,14 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
-## AddDevice: register a new device for monitoring.
+## AddDevice: register one or more devices for monitoring.
 RequestBroker(API):
   type AddDevice = object
-    deviceId*: int64
+    devices*: seq[DeviceInfo]
     success*: bool
 
   proc signature*(
-    name: string, deviceType: string, address: string
+    devices: seq[AddDeviceSpec]
   ): Future[Result[AddDevice, string]] {.async.}
 
 ## RemoveDevice: stop monitoring a device and remove it.
@@ -169,25 +176,42 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   let addDeviceProviderRes = AddDevice.setProvider(
     ctx,
     proc(
-        name: string, deviceType: string, address: string
+        devices: seq[AddDeviceSpec]
     ): Future[Result[AddDevice, string]] {.closure, async.} =
       if not gInitialized:
         return err("Library not initialized")
-      let id = gNextDeviceId
-      inc gNextDeviceId
-      gDevices.add(
-        Device(
-          id: id, name: name, deviceType: deviceType, address: address, online: true
+      var addedDevices: seq[DeviceInfo] = @[]
+      for device in devices:
+        let id = gNextDeviceId
+        inc gNextDeviceId
+        gDevices.add(
+          Device(
+            id: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+            online: true,
+          )
         )
-      )
-      # Emit a discovery event
-      await DeviceDiscovered.emit(
-        gProviderCtx,
-        DeviceDiscovered(
-          deviceId: id, name: name, deviceType: deviceType, address: address
-        ),
-      )
-      return ok(AddDevice(deviceId: id, success: true)),
+        addedDevices.add(
+          DeviceInfo(
+            deviceId: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+            online: true,
+          )
+        )
+        await DeviceDiscovered.emit(
+          gProviderCtx,
+          DeviceDiscovered(
+            deviceId: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+          ),
+        )
+      return ok(AddDevice(devices: addedDevices, success: true)),
   )
   if addDeviceProviderRes.isErr():
     return err("failed to register AddDevice provider: " & addDeviceProviderRes.error())

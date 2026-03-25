@@ -24,7 +24,7 @@ export results, chronos, chronicles, broker_context, mt_request_broker, api_comm
 # Macro code generator
 # ---------------------------------------------------------------------------
 
-proc generateApiRequestBroker*(body: NimNode): NimNode =
+proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: API"
@@ -102,6 +102,89 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       baseExportName & "_" & sigSuffix
     else:
       baseExportName
+
+  proc buildSeqDecodeStmt(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): NimNode {.compileTime, raises: [ValueError].} =
+    let countName = paramName & "_count"
+    let arrName = "arr_" & paramName
+    let idxName = "i_" & paramName
+    let nimName = "nim_" & paramName
+    var code = "var " & nimName & ": seq[" & itemTypeName & "] = @[]\n"
+    code.add("if " & countName & " > 0 and not " & paramName & ".isNil:\n")
+    code.add(
+      "  let " & arrName & " = cast[ptr UncheckedArray[" & itemTypeName & "CItem]](" &
+        paramName & ")\n"
+    )
+    code.add(
+      "  " & nimName & " = newSeqOfCap[" & itemTypeName & "](int(" & countName & "))\n"
+    )
+    code.add("  for " & idxName & " in 0 ..< int(" & countName & "):\n")
+    code.add("    " & nimName & ".add(" & itemTypeName & "(\n")
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      code.add("      " & fieldName & ": ")
+      let fieldExpr = arrName & "[" & idxName & "]." & fieldName
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        code.add("(if " & fieldExpr & ".isNil: \"\" else: $" & fieldExpr & ")")
+      else:
+        code.add(fieldExpr)
+      if fieldIndex < itemFields.len - 1:
+        code.add(",")
+      code.add("\n")
+    code.add("    ))")
+    parseStmt(code)
+
+  proc buildCppSeqParamSetup(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): string {.compileTime.} =
+    result = "        std::vector<" & itemTypeName & "CItem> " & paramName & "CItems;\n"
+    result.add("        " & paramName & "CItems.reserve(" & paramName & ".size());\n")
+    result.add("        for (const auto& item : " & paramName & ") {\n")
+    result.add(
+      "            " & paramName & "CItems.push_back(" & itemTypeName & "CItem{\n"
+    )
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      result.add("                ")
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        result.add("const_cast<char*>(item." & fieldName & ".c_str())")
+      else:
+        result.add("item." & fieldName)
+      if fieldIndex < itemFields.len - 1:
+        result.add(",")
+      result.add("\n")
+    result.add("            });\n")
+    result.add("        }\n")
+
+  proc buildPySeqParamSetup(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): string {.compileTime.} =
+    result = "        " & paramName & "_items: list[" & itemTypeName & "CItem] = []\n"
+    result.add("        " & paramName & "_refs: list[object] = []\n")
+    result.add("        for _item in " & paramName & ":\n")
+    for (fieldName, fieldType) in itemFields:
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        let encodedName = "_" & paramName & "_" & fieldName
+        result.add(
+          "            " & encodedName & " = _item." & fieldName & ".encode(\"utf-8\")\n"
+        )
+        result.add("            " & paramName & "_refs.append(" & encodedName & ")\n")
+    result.add(
+      "            " & paramName & "_items.append(" & itemTypeName & "CItem(\n"
+    )
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      result.add("                ")
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        result.add("_" & paramName & "_" & fieldName)
+      else:
+        result.add("_item." & fieldName)
+      if fieldIndex < itemFields.len - 1:
+        result.add(",")
+      result.add("\n")
+    result.add("            ))\n")
+    result.add(
+      "        " & paramName & "_array = (" & itemTypeName & "CItem * len(" & paramName &
+        "_items))(*" & paramName & "_items) if " & paramName & "_items else None\n"
+    )
 
   # Step 2: Generate all MT broker code
   result = newStmtList()
@@ -398,26 +481,50 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       for i in 0 ..< paramDef.len - 2:
         let paramName = paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
-        let cParamType = toCFieldType(paramType)
-        let cParamIdent = ident($paramName)
+        let paramNameStr = $paramName
+        if isSeqType(paramType):
+          let itemTypeName = seqItemTypeName(paramType)
+          let cParamIdent = ident(paramNameStr)
+          let countIdent = ident(paramNameStr & "_count")
 
-        cFormalParams.add(
-          newTree(nnkIdentDefs, cParamIdent, cParamType, newEmptyNode())
-        )
-
-        # Decode C param to Nim type
-        if isCStringType(paramType):
-          let nimParamIdent = ident("nim_" & $paramName)
-          decodeStmts.add(
-            quote do:
-              let `nimParamIdent` = $`cParamIdent`
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, ident("pointer"), newEmptyNode())
           )
-          nimCallArgs.add(nimParamIdent)
-        else:
-          nimCallArgs.add(cParamIdent)
+          cFormalParams.add(
+            newTree(nnkIdentDefs, countIdent, ident("cint"), newEmptyNode())
+          )
 
-        headerParams.add(($paramName, nimTypeToCInput(paramType)))
-        wrapperParams.add(($paramName, $cParamType))
+          decodeStmts.add(
+            buildSeqDecodeStmt(
+              paramNameStr, itemTypeName, lookupFfiStruct(itemTypeName)
+            )
+          )
+          nimCallArgs.add(ident("nim_" & paramNameStr))
+
+          headerParams.add((paramNameStr, itemTypeName & "CItem*"))
+          headerParams.add((paramNameStr & "_count", "int32_t"))
+          wrapperParams.add((paramNameStr, "pointer"))
+          wrapperParams.add((paramNameStr & "_count", "cint"))
+        else:
+          let cParamType = toCFieldType(paramType)
+          let cParamIdent = ident(paramNameStr)
+
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, cParamType, newEmptyNode())
+          )
+
+          if isCStringType(paramType):
+            let nimParamIdent = ident("nim_" & paramNameStr)
+            decodeStmts.add(
+              quote do:
+                let `nimParamIdent` = $`cParamIdent`
+            )
+            nimCallArgs.add(nimParamIdent)
+          else:
+            nimCallArgs.add(cParamIdent)
+
+          headerParams.add((paramNameStr, nimTypeToCInput(paramType)))
+          wrapperParams.add((paramNameStr, $cParamType))
 
     # Build the request call with decoded args
     let brokerCtxIdent = ident("brokerCtx")
@@ -586,18 +693,36 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     # Build C++ method params and C call args
     var cppParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
+    var cppPreCall = ""
     for paramDef in argParams:
       for i in 0 ..< paramDef.len - 2:
         let paramName = $paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
-        let cppParamType = nimTypeToCppParam(paramType)
+        let cppParamType =
+          if isSeqType(paramType):
+            "const std::vector<" & cppNs & "::" & seqItemTypeName(paramType) & ">&"
+          else:
+            nimTypeToCppParam(paramType)
         cppParams.add(cppParamType & " " & paramName)
-        if isCStringType(paramType):
+        if isSeqType(paramType):
+          let itemTypeName = seqItemTypeName(paramType)
+          cppPreCall.add(
+            buildCppSeqParamSetup(
+              paramName, itemTypeName, lookupFfiStruct(itemTypeName)
+            )
+          )
+          cppCallArgs.add(
+            ", " & paramName & "CItems.empty() ? nullptr : " & paramName &
+              "CItems.data()"
+          )
+          cppCallArgs.add(", static_cast<int32_t>(" & paramName & "CItems.size())")
+        elif isCStringType(paramType):
           cppCallArgs.add(", " & paramName & ".c_str()")
         else:
           cppCallArgs.add(", " & paramName)
     var cppMethod =
       "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
+    cppMethod.add(cppPreCall)
     cppMethod.add("        auto c = " & funcName & "(" & cppCallArgs & ");\n")
     cppMethod.add("        if (c.error_message) {\n")
     cppMethod.add("            std::string err(c.error_message);\n")
@@ -663,7 +788,13 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           for paramDef in argParams:
             for i in 0 ..< paramDef.len - 2:
               let paramType = paramDef[paramDef.len - 2]
-              argTypes.add(", " & nimTypeToCtypes(paramType))
+              if isSeqType(paramType):
+                let itemTypeName = seqItemTypeName(paramType)
+                argTypes.add(
+                  ", ctypes.POINTER(" & itemTypeName & "CItem), ctypes.c_int32"
+                )
+              else:
+                argTypes.add(", " & nimTypeToCtypes(paramType))
           argTypes.add("]")
           let argtypesLine = "_lib." & funcName & ".argtypes = " & argTypes
           let restypeLine = "_lib." & funcName & ".restype = " & pyCResultName
@@ -717,7 +848,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       proc buildPyMethodBody(
           funcName, callArgs, pyResultName2, pyFreeFuncName2: string
       ): string {.compileTime.} =
-        result = "        self._requireContext()\n"
+        result = ""
         result.add("        c = self._lib." & funcName & "(" & callArgs & ")\n")
         result.add("        try:\n")
         result.add("            if c.error_message:\n")
@@ -749,6 +880,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         var pyParams = "self"
         var callArgs = "self._ctx"
         var aliasArgs: seq[string] = @[]
+        var pyPreCall = ""
         for paramDef in argParams:
           for i in 0 ..< paramDef.len - 2:
             let paramName = $paramDef[i]
@@ -756,7 +888,15 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
             let pyType = nimTypeToPyAnnotation(paramType)
             pyParams.add(", " & paramName & ": " & pyType)
             aliasArgs.add(paramName)
-            if isCStringType(paramType):
+            if isSeqType(paramType):
+              let itemTypeName = seqItemTypeName(paramType)
+              pyPreCall.add(
+                buildPySeqParamSetup(
+                  paramName, itemTypeName, lookupFfiStruct(itemTypeName)
+                )
+              )
+              callArgs.add(", " & paramName & "_array, len(" & paramName & "_items)")
+            elif isCStringType(paramType):
               callArgs.add(", " & paramName & ".encode(\"utf-8\")")
             else:
               callArgs.add(", " & paramName)
@@ -764,6 +904,8 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         var pyMethod =
           "    def " & camelName & "(" & pyParams & ") -> " & pyResultName & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+        pyMethod.add("        self._requireContext()\n")
+        pyMethod.add(pyPreCall)
         pyMethod.add(
           buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName)
         )
@@ -779,6 +921,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
         var pyMethod = "    def " & camelName & "(self) -> " & pyResultName & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+        pyMethod.add("        self._requireContext()\n")
         pyMethod.add(
           buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
         )

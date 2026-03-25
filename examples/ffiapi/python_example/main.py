@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nimlib" / "build"))
 
-from mylib import Mylib, MylibError
+from mylib import AddDeviceSpec, Mylib, MylibError
 
 
 def main() -> int:
@@ -78,18 +78,17 @@ def main() -> int:
 
             print("--- Adding devices ---")
             fleet = [
-                ("Core-Router", "router", "10.0.0.1"),
-                ("Edge-Switch-A", "switch", "10.0.1.1"),
-                ("Edge-Switch-B", "switch", "10.0.1.2"),
-                ("AP-Floor-3", "ap", "10.0.2.10"),
-                ("TempSensor-DC1", "sensor", "10.0.3.50"),
+                AddDeviceSpec("Core-Router", "router", "10.0.0.1"),
+                AddDeviceSpec("Edge-Switch-A", "switch", "10.0.1.1"),
+                AddDeviceSpec("Edge-Switch-B", "switch", "10.0.1.2"),
+                AddDeviceSpec("AP-Floor-3", "ap", "10.0.2.10"),
+                AddDeviceSpec("TempSensor-DC1", "sensor", "10.0.3.50"),
             ]
 
-            ids: list[int] = []
-            for name, deviceType, address in fleet:
-                result = lib.addDevice(name, deviceType, address)
-                ids.append(result.deviceId)
-                print(f"  + {name} -> id={result.deviceId}")
+            added = lib.addDevice(fleet)
+            ids = [device.deviceId for device in added.devices]
+            for device in added.devices:
+                print(f"  + {device.name} -> id={device.deviceId}")
 
             time.sleep(0.3)
             print()

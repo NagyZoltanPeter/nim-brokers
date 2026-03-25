@@ -412,6 +412,51 @@ That proc is the main hook for:
 - remembering the active provider context
 - installing lazily created providers if desired
 
+### Batch request inputs
+
+For request parameters that need to cross the foreign-function boundary as a
+collection, prefer `seq[ApiType]` over `seq[tuple[...]]`.
+
+Example:
+
+```nim
+ApiType:
+  type AddDeviceSpec = object
+    name*: string
+    deviceType*: string
+    address*: string
+
+RequestBroker(API):
+  type AddDevice = object
+    devices*: seq[DeviceInfo]
+    success*: bool
+
+  proc signature*(devices: seq[AddDeviceSpec]):
+    Future[Result[AddDevice, string]] {.async.}
+```
+
+Why this shape is preferred:
+
+- `ApiType` already generates a stable foreign representation for each item:
+  a C `*CItem` struct, a C++ value type, and a Python dataclass plus
+  `ctypes.Structure`
+- the generated request export can pass the batch as pointer plus count at the
+  C ABI boundary and reconstruct `seq[AddDeviceSpec]` on the Nim side
+- the same declaration maps cleanly into the generated C++, Python, and C
+  surfaces without handwritten marshalling
+
+In contrast, literal tuple sequences are not a good fit for the current FFI
+generator because tuple items do not participate in the `ApiType` registry that
+drives foreign struct generation.
+
+Current limitation:
+
+- `RequestBroker(API)` supports one zero-argument signature and one argument-
+  bearing signature for a broker type
+- if you need to add a batch form such as `AddDevice(devices: seq[AddDeviceSpec])`,
+  replace the existing argument-bearing signature or model the variants as
+  separate request broker types
+
 ### Data ownership for request results
 
 The generated C request exports return C structs that may own allocated strings
