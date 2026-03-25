@@ -725,9 +725,10 @@ private:
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
 
-    # Build specific Callable type hint from event fields
-    # e.g. Callable[[int, str, str, str], None]
-    var pyTypeHintParams: seq[string] = @[]
+    # Build specific Callable type hint from event fields.
+    # Python callbacks are owner-aware like the C++ wrapper surface: the first
+    # argument is the Mylib wrapper instance that owns the registration.
+    var pyTypeHintParams: seq[string] = @["Mylib"]
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
@@ -740,7 +741,7 @@ private:
         "    def " & pyCamelEvent & "(self, callback: " & pyCallableHint & ") -> int:\n"
       m.add(
         "        \"\"\"Subscribe to " & typeDisplayName &
-          " events. Returns a handle for removal.\"\"\"\n"
+          " events.\n\n        The callback receives the owning Mylib instance as its first\n        argument instead of the raw ctx value so ownership stays at the\n        wrapper level while the C ABI details remain hidden. Returns a\n        handle for removal.\"\"\"\n"
       )
       m.add("        self._requireContext()\n")
       # Build the trampoline that decodes strings
@@ -748,7 +749,9 @@ private:
       var trampolineParams = @["_ctx", "_user_data"]
       trampolineParams.add(pyCallbackParams)
       m.add("        def _trampoline(" & trampolineParams.join(", ") & "):\n")
-      m.add("            callback(" & pyForwards.join(", ") & ")\n")
+      var pyCallbackInvokeArgs = @["self"]
+      pyCallbackInvokeArgs.add(pyForwards)
+      m.add("            callback(" & pyCallbackInvokeArgs.join(", ") & ")\n")
       m.add(
         "        handle = self._lib." & publicRegFuncName &
           "(self._ctx, _trampoline, None)\n"

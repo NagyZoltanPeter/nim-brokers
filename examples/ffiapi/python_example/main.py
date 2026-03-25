@@ -38,27 +38,38 @@ def main() -> int:
             print("--- Subscribing to events ---")
 
             def on_discovered(
-                deviceId: int, name: str, deviceType: str, address: str
+                owner: Mylib,
+                deviceId: int,
+                name: str,
+                deviceType: str,
+                address: str,
             ) -> None:
                 nonlocal discovery_count
                 discovery_count += 1
                 print(
                     f'  >>> DeviceDiscovered #{discovery_count}: '
-                    f'id={deviceId}  "{name}"  [{deviceType}]  {address}'
+                    f'ctx=0x{owner.ctx:08X}  id={deviceId}  "{name}"  [{deviceType}]  {address}'
                 )
 
             def on_status(
-                deviceId: int, name: str, online: bool, timestampMs: int
+                owner: Mylib,
+                deviceId: int,
+                name: str,
+                online: bool,
+                timestampMs: int,
             ) -> None:
                 nonlocal status_count
                 status_count += 1
                 state = "ONLINE" if online else "OFFLINE"
                 print(
                     f'  >>> DeviceStatusChanged #{status_count}: '
-                    f'id={deviceId}  "{name}"  {state}  (ts={timestampMs})'
+                    f'ctx=0x{owner.ctx:08X}  id={deviceId}  "{name}"  {state}  (ts={timestampMs})'
                 )
 
-            def on_status_logger(_: int, name: str, online: bool, __: int) -> None:
+            def on_status_logger(
+                owner: Mylib, _: int, name: str, online: bool, __: int
+            ) -> None:
+                _ = owner
                 print(f'  >>> [Logger] {name} is now {"UP" if online else "DOWN"}')
 
             h_disc = lib.onDeviceDiscovered(on_discovered)

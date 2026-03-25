@@ -1680,7 +1680,7 @@ lib.shutdown();
         <ul>
           <li>No manual <code>free_*_result</code> calls in user code</li>
           <li><code>Result&lt;T&gt;</code> wrappers preserve the broker success/error model</li>
-          <li>Callbacks use C++ lambdas while the generated code keeps the C ABI underneath</li>
+          <li>Callbacks are owner-aware in both wrappers: C++ lambdas receive <code>Mylib&amp; owner</code>, Python callbacks receive <code>owner: Mylib</code></li>
           <li>Event callbacks are routed through the owning <code>Mylib</code> instance, so registration and delivery stay instance-specific</li>
           <li>The library consumer never needs to call <code>ShutdownRequest</code> directly; <code>shutdown()</code> handles teardown</li>
         </ul>

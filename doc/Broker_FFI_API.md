@@ -632,10 +632,11 @@ The Python wrapper mirrors the C++ lifecycle shape closely:
 - `validContext()` and truthiness reflect whether a live context exists
 - `shutdown()` is exposed for explicit teardown
 
-For events, the generated Python wrapper hides the low-level `userData`
-parameter. Python callbacks still receive only decoded event payload values,
-while the wrapper keeps the underlying ctypes trampoline alive internally until
-shutdown.
+For events, the generated Python wrapper still hides the low-level `ctx` and
+`userData` ABI parameters, but it now exposes ownership at the wrapper level:
+Python callbacks receive the owning `Mylib` instance as their first argument,
+followed by decoded event payload values. The wrapper keeps the underlying
+ctypes trampoline alive internally until shutdown.
 
 Example:
 
@@ -649,8 +650,8 @@ with Mylib() as lib:
   print(res.configPath)
 
   handle = lib.onDeviceDiscovered(
-      lambda deviceId, name, deviceType, address:
-          print(deviceId, name, deviceType, address)
+      lambda owner, deviceId, name, deviceType, address:
+          print(owner.ctx, deviceId, name, deviceType, address)
   )
   lib.offDeviceDiscovered(handle)
 ```
@@ -750,8 +751,10 @@ Recommended practice:
   listener before destroying the object referenced by that pointer
 
 For generated C++ wrappers, `userData` is managed internally by the dispatcher.
-For direct C consumers, `userData` is the natural place to store callback state
-or an owning object pointer.
+For generated Python wrappers, the ownership signal is surfaced as the first
+callback argument (`owner: Mylib`) while raw `userData` remains hidden. For
+direct C consumers, `userData` is the natural place to store callback state or
+an owning object pointer.
 
 ### Provider behavior
 
