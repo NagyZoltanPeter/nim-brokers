@@ -451,11 +451,13 @@ drives foreign struct generation.
 
 Current limitation:
 
-- `RequestBroker(API)` supports one zero-argument signature and one argument-
-  bearing signature for a broker type
+- `RequestBroker(API)` supports at most two signature categories for a broker
+  type: one zero-argument signature and one argument-bearing signature
+- the zero-argument form is optional; it is auto-generated only when no
+  signatures are declared at all
 - if you need to add a batch form such as `AddDevice(devices: seq[AddDeviceSpec])`,
-  replace the existing argument-bearing signature or model the variants as
-  separate request broker types
+  and the broker already has another argument-bearing signature, replace that
+  signature or model the variants as separate request broker types
 
 ### Data ownership for request results
 
