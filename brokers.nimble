@@ -70,6 +70,18 @@ proc buildFfiExampleFlags(generatePy = false): string =
 proc buildFfiExampleLibrary(generatePy = false) =
   exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
 
+proc buildTorpedoExampleFlags(generatePy = false): string =
+  result =
+    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:torpedolib --path:src --outdir:examples/torpedo/nimlib/build"
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
+
+proc buildTorpedoExampleLibrary(generatePy = false) =
+  exec "nim c " & buildTorpedoExampleFlags(generatePy) &
+    " examples/torpedo/nimlib/torpedolib.nim"
+
 proc ffiExamplesBuildDir(): string =
   "examples/ffiapi/cmake-build"
 
@@ -347,6 +359,17 @@ task testFfiApi,
         continue
       exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
         quoteArg("test_*.py") & " -v"
+task buildTorpedoExample, "Build the torpedo FFI example library":
+  buildTorpedoExampleLibrary()
+
+task buildTorpedoExamplePy,
+  "Build the torpedo FFI example library with generated Python wrapper":
+  buildTorpedoExampleLibrary(true)
+
+task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example":
+  buildTorpedoExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/torpedo/python_example/main.py")
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
