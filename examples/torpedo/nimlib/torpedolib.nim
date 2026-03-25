@@ -177,6 +177,12 @@ const
   ShotHit = 4'i32
   ShotSunk = 5'i32
 
+## Thread-local captain state
+## --------------------------
+## Each library context gets its own processing thread, so all game state
+## is kept in threadvars.  This means exactly one captain per thread; the
+## framework enforces that invariant via registerBrokerLibrary which spawns
+## a dedicated processing thread per context.
 var gProviderCtx {.threadvar.}: BrokerContext
 var gInitialized {.threadvar.}: bool
 var gFleetPlaced {.threadvar.}: bool
@@ -220,6 +226,9 @@ proc normalizeAiMode(aiMode: string): string =
   else: "hunt"
 
 proc nextRandRaw(): uint64 =
+  ## XorShift64 PRNG — Marsaglia "Xorshift RNGs", Journal of Statistical
+  ## Software 2003, triple (13, 7, 17) which is a full-period generator
+  ## for 64-bit state (period 2^64 - 1).
   if gRngState == 0'u64:
     gRngState = 0x9E3779B97F4A7C15'u64
   var value = gRngState
@@ -230,6 +239,8 @@ proc nextRandRaw(): uint64 =
   result = value
 
 proc nextRand(maxExclusive: int): int =
+  ## Returns a value in [0, maxExclusive).  Uses simple modulo reduction
+  ## which has negligible bias for small maxExclusive relative to 2^64.
   if maxExclusive <= 0:
     return 0
   int(nextRandRaw() mod uint64(maxExclusive))
@@ -282,7 +293,13 @@ proc allShipsSunk(): bool =
       return false
   true
 
+const MaxReplayLogSize = 256
+
 proc appendReplay(phase: string, turnNumber: int32, message: string) =
+  if gReplayLog.len >= MaxReplayLogSize:
+    # Trim oldest half to amortize the copy cost
+    let keepFrom = gReplayLog.len - (MaxReplayLogSize div 2)
+    gReplayLog = gReplayLog[keepFrom ..< gReplayLog.len]
   gReplayLog.add(
     ReplayEntry(
       turnNumber: turnNumber, side: gCaptainName, phase: phase, message: message
@@ -529,22 +546,27 @@ proc chooseShot(): tuple[row: int32, col: int32, reasoning: string] =
       let pick = candidates[nextRand(candidates.len)]
       return (pick[0], pick[1], "finish-contact")
 
-  if gAiMode == "sweep":
-    for row in 0 ..< int(gBoardSize):
-      for col in 0 ..< int(gBoardSize):
-        if gEnemyState[row][col] == EnemyUnknown:
-          return (int32(row), int32(col), "sweep")
-  else:
-    for row in 0 ..< int(gBoardSize):
-      for col in 0 ..< int(gBoardSize):
-        if gEnemyState[row][col] == EnemyUnknown:
-          candidates.add((int32(row), int32(col)))
-    if candidates.len > 0:
-      let pick = candidates[nextRand(candidates.len)]
-      let reasoning = if gAiMode == "random": "random-search" else: "search"
-      return (pick[0], pick[1], reasoning)
+  # Fallback: hunt found no adjacent targets, or mode is sweep/random.
+  # Collect all unknown cells and pick one according to mode.
+  candidates.setLen(0)
+  for row in 0 ..< int(gBoardSize):
+    for col in 0 ..< int(gBoardSize):
+      if gEnemyState[row][col] == EnemyUnknown:
+        candidates.add((int32(row), int32(col)))
 
-  (-1'i32, -1'i32, "no-target")
+  if candidates.len == 0:
+    return (-1'i32, -1'i32, "no-target")
+
+  if gAiMode == "sweep":
+    # Deterministic top-left-to-bottom-right scan
+    return (candidates[0][0], candidates[0][1], "sweep")
+
+  let pick = candidates[nextRand(candidates.len)]
+  let reasoning =
+    if gAiMode == "hunt": "search"
+    elif gAiMode == "random": "random-search"
+    else: "search"
+  (pick[0], pick[1], reasoning)
 
 proc requireInitialized(): Result[void, string] =
   if not gInitialized:
@@ -584,6 +606,8 @@ proc dropPeerLink() =
   gOpponentCtx = BrokerContext(0'u32)
   gLinked = false
   gStarted = false
+  gGameOver = false
+  gHasWon = false
   clearPendingShot()
 
 proc planNextShotInternal(): Result[(int32, int32, int32, int32, string), string] =
@@ -685,10 +709,13 @@ proc observeOutcomeInternal(
     shipName: string,
     gameOver: bool,
 ): Future[Result[bool, string]] {.async.} =
-  let activeRes = requireLinkedGame()
-  if activeRes.isErr() and not gPendingShot:
-    return err(activeRes.error())
+  # Guard: allow a pending shot to resolve even if the game state has
+  # transitioned (e.g. opponent's final shot set gGameOver before our
+  # reply arrived).  Only reject if there is genuinely no pending shot.
   if not gPendingShot:
+    let activeRes = requireLinkedGame()
+    if activeRes.isErr():
+      return err(activeRes.error())
     return err("no pending shot to observe")
   if exchangeId != gPendingExchangeId:
     return err("reply exchange id does not match pending shot")
@@ -770,7 +797,9 @@ proc handlePeerVolley(event: VolleyEvent): Future[void] {.async.} =
       replyMessage,
     )
     if not ended:
-      discard await fireNextVolley("counter")
+      let counterRes = await fireNextVolley("counter")
+      if counterRes.isErr():
+        await emitRemark("error", event.exchangeId, counterRes.error())
   of "reply":
     let observeRes = await observeOutcomeInternal(
       event.exchangeId, event.row, event.col, event.hit, event.sunk, event.shipName,
@@ -919,8 +948,14 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       ): Future[void] {.closure, async: (raises: []), gcsafe.} =
         try:
           await handlePeerVolley(event)
-        except CatchableError:
-          discard
+        except CatchableError as e:
+          try:
+            await emitRemark(
+              "error", event.exchangeId,
+              gCaptainName & " peer handler failed: " & e.msg,
+            )
+          except CatchableError:
+            discard
       let listenRes = VolleyEvent.listen(BrokerContext(opponentCtx), peerVolleyHandler)
       if listenRes.isErr():
         return err("failed to link opponent listener: " & listenRes.error())

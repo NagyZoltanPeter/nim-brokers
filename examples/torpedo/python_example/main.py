@@ -43,24 +43,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_OWN_SYMBOLS = {0: ".", 1: ".", 2: "S", 3: "o", 4: "x", 5: "*"}
+_ENEMY_SYMBOLS = {0: ".", 1: ".", 3: "o", 4: "x", 5: "*"}
+
+
 def state_symbol(state_code: int, own_board: bool) -> str:
     if own_board:
-        return {
-            0: ".",
-            1: ".",
-            2: "S",
-            3: "o",
-            4: "x",
-            5: "*",
-        }.get(state_code, "?")
-    return {
-        0: ".",
-        1: ".",
-        2: "?",
-        3: "o",
-        4: "x",
-        5: "*",
-    }.get(state_code, "?")
+        return _OWN_SYMBOLS.get(state_code, "?")
+    # stateCode 2 (OwnShip) should never appear in enemy cells — flag it
+    if state_code == 2:
+        return "!"
+    return _ENEMY_SYMBOLS.get(state_code, "?")
 
 
 def build_matrix(cells: list[object], board_size: int, own_board: bool) -> list[str]:
@@ -157,7 +150,10 @@ def draw_screen(red_view: object, blue_view: object, event_log: deque[str], bann
         print(f"- {line}")
 
 
-def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> None:
+def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> list[tuple[str, int]]:
+    """Subscribe to all event types.  Returns [(event_name, handle), ...] for cleanup."""
+    handles: list[tuple[str, int]] = []
+
     def on_remark(owner: Torpedolib, captainName: str, phase: str, message: str, turnNumber: int) -> None:
         _ = owner
         event_log.append(f"{captainName} [{phase}] t{turnNumber}: {message}")
@@ -222,11 +218,30 @@ def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> Non
             detail += f": {message}"
         event_log.append(detail)
 
-    lib.onCaptainRemark(on_remark)
-    lib.onShotResolved(on_shot)
-    lib.onMatchEnded(on_match)
-    lib.onVolleyEvent(on_volley)
+    handles.append(("CaptainRemark", lib.onCaptainRemark(on_remark)))
+    handles.append(("ShotResolved", lib.onShotResolved(on_shot)))
+    handles.append(("MatchEnded", lib.onMatchEnded(on_match)))
+    handles.append(("VolleyEvent", lib.onVolleyEvent(on_volley)))
     event_log.append(f"{side} event listeners attached")
+    return handles
+
+
+def unregister_callbacks(lib: Torpedolib, handles: list[tuple[str, int]]) -> None:
+    """Unsubscribe all event listeners before shutdown.
+
+    This must be called while the library context is still alive so the
+    Nim delivery thread stops invoking the ctypes function pointers before
+    Python releases the CFUNCTYPE objects.
+    """
+    for event_name, handle in handles:
+        if event_name == "CaptainRemark":
+            lib.offCaptainRemark(handle)
+        elif event_name == "ShotResolved":
+            lib.offShotResolved(handle)
+        elif event_name == "MatchEnded":
+            lib.offMatchEnded(handle)
+        elif event_name == "VolleyEvent":
+            lib.offVolleyEvent(handle)
 
 
 def run_duel(args: argparse.Namespace) -> int:
@@ -239,8 +254,8 @@ def run_duel(args: argparse.Namespace) -> int:
         red.createContext()
         blue.createContext()
 
-        register_callbacks(red, "Red Fleet", event_log)
-        register_callbacks(blue, "Blue Fleet", event_log)
+        red_handles = register_callbacks(red, "Red Fleet", event_log)
+        blue_handles = register_callbacks(blue, "Blue Fleet", event_log)
 
         red.initializeCaptainRequest("Red Fleet", args.board_size, "hunt", args.seed_red, turn_delay_ms)
         blue.initializeCaptainRequest("Blue Fleet", args.board_size, "hunt", args.seed_blue, turn_delay_ms)
@@ -259,23 +274,31 @@ def run_duel(args: argparse.Namespace) -> int:
         starter.startGameRequest()
 
         banner = f"{starter_name} opens the duel"
-        while True:
-            red_view = red.getPublicBoardRequest()
-            blue_view = blue.getPublicBoardRequest()
-            if event_log:
-                banner = event_log[-1]
-            draw_screen(red_view, blue_view, event_log, banner, refresh_delay)
+        try:
+            while True:
+                red_view = red.getPublicBoardRequest()
+                blue_view = blue.getPublicBoardRequest()
+                if event_log:
+                    banner = event_log[-1]
+                draw_screen(red_view, blue_view, event_log, banner, refresh_delay)
 
-            if red_view.gameOver or blue_view.gameOver:
-                final_red = red.getPublicBoardRequest()
-                final_blue = blue.getPublicBoardRequest()
-                winner = "Red Fleet" if final_red.hasWon else "Blue Fleet" if final_blue.hasWon else "Unknown"
-                banner = f"{winner} wins the duel"
-                draw_screen(final_red, final_blue, event_log, banner, refresh_delay)
-                time.sleep(end_delay)
-                return 0
+                if red_view.gameOver or blue_view.gameOver:
+                    final_red = red.getPublicBoardRequest()
+                    final_blue = blue.getPublicBoardRequest()
+                    winner = "Red Fleet" if final_red.hasWon else "Blue Fleet" if final_blue.hasWon else "Unknown"
+                    banner = f"{winner} wins the duel"
+                    draw_screen(final_red, final_blue, event_log, banner, refresh_delay)
+                    time.sleep(end_delay)
+                    return 0
 
-            time.sleep(refresh_delay)
+                time.sleep(refresh_delay)
+        finally:
+            # Unsubscribe all event listeners BEFORE the context manager
+            # calls shutdown().  This ensures the Nim delivery thread stops
+            # invoking ctypes function pointers before Python releases the
+            # CFUNCTYPE objects — preventing a use-after-free crash.
+            unregister_callbacks(red, red_handles)
+            unregister_callbacks(blue, blue_handles)
 
 
 def main() -> int:
