@@ -94,6 +94,13 @@ proc parseLibraryConfig(
     refType: refTy,
   )
 
+proc parseTypeExpr(exprText: string; context: NimNode): NimNode
+    {.compileTime, raises: [].} =
+  try:
+    parseExpr(exprText)
+  except ValueError as exc:
+    error("Failed to parse generated type expression '" & exprText & "': " & exc.msg, context)
+
 # ---------------------------------------------------------------------------
 # Macro
 # ---------------------------------------------------------------------------
@@ -945,13 +952,18 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     if wrapper.returnType == "void":
       formalParams.add(newEmptyNode())
     else:
-      formalParams.add(parseExpr(wrapper.returnType))
+      formalParams.add(parseTypeExpr(wrapper.returnType, rawFuncIdent))
 
     var callExpr = newCall(rawFuncIdent)
     for (paramName, paramType) in wrapper.params:
       let paramIdent = ident(paramName)
       formalParams.add(
-        newTree(nnkIdentDefs, paramIdent, parseExpr(paramType), newEmptyNode())
+        newTree(
+          nnkIdentDefs,
+          paramIdent,
+          parseTypeExpr(paramType, paramIdent),
+          newEmptyNode(),
+        )
       )
       callExpr.add(paramIdent)
 
