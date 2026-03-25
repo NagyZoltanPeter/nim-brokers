@@ -2,251 +2,187 @@
 
 ## Objective
 
-Design a realistic Broker FFI API example in which a Nim shared library owns a
-non-trivial state machine and a foreign application presents that state through
-a text UI.
+Torpedo Duel is a demonstration-oriented FFI example for `nim-brokers` in which
+the Nim shared library owns the full duel state machine and two library
+contexts can play against each other directly.
 
-The example is meant to show how nim-brokers can be used to expose a rich,
-stateful backend through generated C, C++, and Python interfaces while keeping
-the authoritative logic inside Nim.
+The foreign application is intentionally reduced to setup and observation.
+
+That is the point of the example: show that an exported Broker API can expose a
+rich, stateful system while still allowing internal context-to-context behavior
+to remain inside Nim.
 
 ## Design Goals
 
-The example should demonstrate all of the following clearly:
+The implemented design demonstrates all of the following:
 
 - one shared library with multiple independent contexts
-- request-driven commands and queries
-- event-driven notifications for streaming state changes
-- hidden state kept entirely inside Nim
-- foreign code acting as a coordinator rather than as the game engine
-- deterministic execution for tests and demos
-- human-followable pacing via explicit delays in the foreign app
+- request brokers for setup, linking, starting, and querying state
+- event brokers for streaming state changes to foreign code
+- native Nim listeners attached to `EventBroker(API)` events across contexts
+- hidden authoritative game state kept entirely inside Nim
+- deterministic execution via seeds
+- human-followable pacing controlled by backend delay settings
 
 ## Non-Goals
 
-The first version should not attempt to solve every game problem.
+The current example does not try to solve everything.
 
-Avoid in version 1:
+Out of scope for now:
 
 - human-vs-AI interaction
 - networking
 - graphical UI
-- advanced weapons or fog-of-war variants
-- physics simulation
-- direct context-to-context communication inside the library
+- advanced weapons or variant rules
+- cheating prevention or a referee context
+- strict event ordering guarantees for foreign observers
 
-## Core Runtime Model
+## Implemented Runtime Model
 
-The example uses a single shared library, `torpedolib`, but creates two active
-contexts from it in one foreign process.
+The example uses one shared library, `torpedolib`, with two active contexts in
+the same foreign process.
 
-Each context represents one captain and owns:
+Each context owns:
 
 - its own board and ship placement
-- its own attack history and enemy knowledge map
-- its own random seed and AI mode
+- its own enemy knowledge map
 - its own replay log
-- its own internal broker providers
-- its own FFI lifecycle, request surface, and event subscriptions
+- its own AI state
+- its own provider registrations
+- its own event subscriptions
 
-The foreign application owns the match loop.
+Python creates both contexts, initializes them, and links them together by
+passing the peer `BrokerContext` handle through `LinkOpponentRequest`.
 
-That separation is intentional.
-
-The library decides game state.
-
-The foreign application decides when to ask for the next action, when to redraw
-the screen, how much to delay between steps, and how to forward requests between
-the two contexts.
+Once linked, each side installs a native Nim listener on the peer context's
+`VolleyEvent`. After Python calls `StartGameRequest` on one side, the captains
+exchange volleys autonomously inside Nim until one side loses.
 
 ## Control And Event Flow
 
-Solid arrows show control and request flow. Dashed arrows show event callbacks
-coming back from each library context into the Python coordinator.
+Solid arrows show control and request flow. Dashed arrows show observable event
+callbacks delivered back to Python.
 
 ```mermaid
 flowchart LR
-  subgraph App["Python TUI / Coordinator"]
-    UI["Screen redraw\npacing delays\nevent log"]
-    Loop["Turn loop"]
-    RedWrap["Red wrapper\nTorpedolib()"]
-    BlueWrap["Blue wrapper\nTorpedolib()"]
+  subgraph App["Python observer / bootstrap"]
+    PyUI["Text UI\nboard redraw\nevent log"]
+    RedPy["Red wrapper\nTorpedolib()"]
+    BluePy["Blue wrapper\nTorpedolib()"]
   end
 
   subgraph RedCtx["torpedolib ctxRed"]
-    RedReq["Request providers\nInitializeCaptainRequest\nAutoPlaceFleetRequest\nGetNextShotRequest\nObserveShotOutcomeRequest\nGetPublicBoardRequest"]
-    RedState["Private captain state\nboard\nAI memory\nreplay log"]
-    RedEvt["Event brokers\nCaptainRemark\nShotResolved\nBoardChanged\nMatchEnded"]
+    RedReq["Request providers\nInitializeCaptainRequest\nAutoPlaceFleetRequest\nLinkOpponentRequest\nStartGameRequest\nGetPublicBoardRequest"]
+    RedState["Private state\nboard\nAI memory\nreplay log"]
+    RedVolley["VolleyEvent\npeer protocol + foreign observable"]
+    RedObs["CaptainRemark\nShotResolved\nBoardChanged\nMatchEnded"]
   end
 
   subgraph BlueCtx["torpedolib ctxBlue"]
-    BlueReq["Request providers\nInitializeCaptainRequest\nAutoPlaceFleetRequest\nReceiveShotRequest\nGetPublicBoardRequest"]
-    BlueState["Private captain state\nboard\nAI memory\nreplay log"]
-    BlueEvt["Event brokers\nCaptainRemark\nShotResolved\nBoardChanged\nMatchEnded"]
+    BlueReq["Request providers\nInitializeCaptainRequest\nAutoPlaceFleetRequest\nLinkOpponentRequest\nStartGameRequest\nGetPublicBoardRequest"]
+    BlueState["Private state\nboard\nAI memory\nreplay log"]
+    BlueVolley["VolleyEvent\npeer protocol + foreign observable"]
+    BlueObs["CaptainRemark\nShotResolved\nBoardChanged\nMatchEnded"]
   end
 
-  Loop -->|"createContext + initialize + autoPlace"| RedWrap
-  Loop -->|"createContext + initialize + autoPlace"| BlueWrap
+  RedPy -->|"createContext + initialize + autoPlace"| RedReq
+  BluePy -->|"createContext + initialize + autoPlace"| BlueReq
 
-  Loop -->|"GetNextShotRequest()"| RedWrap
-  RedWrap --> RedReq
+  RedPy -->|"LinkOpponentRequest(ctxBlue)"| RedReq
+  BluePy -->|"LinkOpponentRequest(ctxRed)"| BlueReq
+
   RedReq --> RedState
-  RedState -->|"planned shot row,col"| Loop
-
-  Loop -->|"ReceiveShotRequest(row,col)"| BlueWrap
-  BlueWrap --> BlueReq
   BlueReq --> BlueState
-  BlueState -->|"sanitized outcome\nhit miss sunk gameOver"| Loop
 
-  Loop -->|"ObserveShotOutcomeRequest(...)"| RedWrap
-  RedWrap --> RedReq
-  RedReq --> RedState
+  RedReq -. installs listener on .-> BlueVolley
+  BlueReq -. installs listener on .-> RedVolley
 
-  Loop -->|"GetPublicBoardRequest()"| RedWrap
-  Loop -->|"GetPublicBoardRequest()"| BlueWrap
-  RedWrap --> RedReq
-  BlueWrap --> BlueReq
-  RedReq -->|"public board view"| UI
-  BlueReq -->|"public board view"| UI
+  RedPy -->|"StartGameRequest()"| RedReq
 
-  RedState -.-> RedEvt
-  BlueState -.-> BlueEvt
-  RedEvt -.->|"callbacks tagged with ctxRed"| RedWrap
-  BlueEvt -.->|"callbacks tagged with ctxBlue"| BlueWrap
-  RedWrap -.-> UI
-  BlueWrap -.-> UI
+  RedState --> RedVolley
+  RedVolley -->|"fire"| BlueState
+  BlueState --> BlueVolley
+  BlueVolley -->|"reply"| RedState
+  BlueState -->|"counter-fire"| BlueVolley
+  BlueVolley -->|"fire"| RedState
+
+  RedState -.-> RedObs
+  BlueState -.-> BlueObs
+  RedVolley -.-> RedPy
+  BlueVolley -.-> BluePy
+  RedObs -.-> RedPy
+  BlueObs -.-> BluePy
+  RedPy -.-> PyUI
+  BluePy -.-> PyUI
+
+  RedPy -->|"GetPublicBoardRequest()"| RedReq
+  BluePy -->|"GetPublicBoardRequest()"| BlueReq
+  RedReq -->|"public board snapshot"| PyUI
+  BlueReq -->|"public board snapshot"| PyUI
 ```
 
 ## Context Interaction Pattern
 
-Contexts do not directly invoke each other.
+This is no longer a foreign-app relay model.
 
-The foreign app acts as the relay:
+The implemented interaction is:
 
-1. call `GetNextShotRequest` on attacker context
-2. submit returned coordinate to defender context through `ReceiveShotRequest`
-3. render the outcome in the text UI
-4. call `ObserveShotOutcomeRequest` on attacker context so it can update its
-   own targeting model
-5. continue until one side emits or returns a terminal state
+1. Python creates and initializes both contexts.
+2. Python links each side to the other.
+3. Each context installs a native listener on the peer's `VolleyEvent`.
+4. One side starts the duel.
+5. A `fire` volley emitted by one context is consumed by the other.
+6. The defender resolves the shot, emits a `reply`, and if still alive plans
+   the next attack.
+7. Python watches events and polls public board state for redraws.
 
-This keeps the per-context isolation honest and visible.
+This shows that `EventBroker(API)` is usable both as a foreign-observable API
+surface and as an internal multi-context protocol channel.
 
-## Suggested Foreign Consumer
+## Game Rules
 
-Python should be the first-class consumer for this example.
+The duel uses a simple torpedo-flavored Battleship ruleset.
 
-Reasons:
-
-- fastest path to an expressive text UI
-- existing generated Python wrapper support already fits the repo well
-- easy sleep-based pacing for a spectator-friendly demo
-- simpler replay and event-log rendering than in the first C++ pass
-
-A C++ application can still be added later as a parity example, but it should
-not block the first version.
-
-## Game Rules For Version 1
-
-Use a simple Battleship-style ruleset with torpedo flavor.
-
-Recommended rules:
-
-- board size: `8x8`
-- fixed fleet: ship lengths `4, 3, 3, 2`
+- board size defaults to `8x8`
+- fleet lengths are `4, 3, 3, 2`
 - one shot per turn
-- shot outcomes: miss, hit, sunk, game over
-- no special actions
-- automatic ship placement only
-- alternating turns only
-
-This is enough to keep the example interesting without burying the FFI story.
+- outcomes are miss, hit, sunk, and game over
+- fleet placement is automatic
+- AI targeting is deterministic for a given seed
 
 ## State Model
 
-Each context should maintain three conceptual views of state.
+### Private authoritative state
 
-### 1. Private authoritative state
+Kept inside Nim only:
 
-Only available inside the Nim backend.
+- own ship positions
+- damage state
+- incoming hit and miss map
+- enemy belief map
+- replay log
+- pending volley state
+- peer link state
 
-Contains:
+### Public observer state
 
-- full own board with ship positions
-- damage state for all own ships
-- enemy belief map used by AI
-- shot history
-- internal replay log
-- current turn counters and match status
+Exposed through `GetPublicBoardRequest`:
 
-### 2. Public spectator state
+- captain name
+- board size and AI mode
+- configured turn delay
+- own board view
+- enemy knowledge board
+- fleet summary
+- replay tail
+- linked and started flags
+- winner / loser state
+- shot counters
+- peer context handle
 
-Safe to expose to the foreign app.
+## Exported API Surface
 
-Contains:
-
-- own fleet health summary
-- known enemy hits and misses
-- last action summary
-- whose turn it is
-- winner if the game is over
-
-### 3. Optional debug state
-
-Useful for tests, traceability, and screenshot generation.
-
-Contains:
-
-- full own board plus full known enemy board
-- ship positions and sunk markers
-- AI reasoning hints
-- seed and move counters
-
-This should be gated behind a debug-only request or an explicit `debugMode`
-configuration flag.
-
-## Exported FFI API Sketch
-
-The exported API should remain small and procedural. The foreign app should be
-able to drive a whole match without reading internal data structures directly.
-
-### Shared API types
-
-Suggested FFI-safe value types:
-
-- `Coord`
-- `ShipStatus`
-- `PublicCell`
-- `PublicBoardView`
-- `ShotOutcome`
-- `ReplayEntry`
-
-Possible Nim sketch:
-
-```nim
-ApiType:
-  type Coord = object
-    row*: int32
-    col*: int32
-
-ApiType:
-  type ShotOutcome = object
-    row*: int32
-    col*: int32
-    hit*: bool
-    sunk*: bool
-    shipName*: string
-    gameOver*: bool
-
-ApiType:
-  type ReplayEntry = object
-    turnNumber*: int32
-    side*: string
-    phase*: string
-    message*: string
-```
-
-### Request brokers to export
+### Requests
 
 #### `InitializeCaptainRequest`
 
@@ -256,108 +192,109 @@ Inputs:
 - board size
 - AI mode
 - seed
-- optional debug flag
+- `turnDelayMs`
 
 Purpose:
 
-- initialize per-context game state
-- select deterministic AI behavior
-- configure any replay verbosity
+- configure deterministic captain state
+- configure backend pacing
 
 #### `AutoPlaceFleetRequest`
 
-Inputs:
+Purpose:
 
-- none, or optional placement policy string
+- place the fleet from the configured seed
+- return the initial own-board snapshot and fleet summary
+
+#### `LinkOpponentRequest`
+
+Input:
+
+- raw peer `BrokerContext` handle as `uint32`
 
 Purpose:
 
-- place the fleet deterministically from the configured seed
+- bind this context to its opponent
+- install the native peer listener on the opponent's `VolleyEvent`
 
-#### `GetNextShotRequest`
-
-Inputs:
-
-- none
-
-Outputs:
-
-- turn number
-- coordinate
-- optional reasoning label
+#### `StartGameRequest`
 
 Purpose:
 
-- ask the current captain to choose its next torpedo target
-
-#### `ReceiveShotRequest`
-
-Inputs:
-
-- coordinate fired by the opponent
-
-Outputs:
-
-- sanitized `ShotOutcome`
-
-Purpose:
-
-- apply the incoming shot to the defending captain's private board
-
-#### `ObserveShotOutcomeRequest`
-
-Inputs:
-
-- `ShotOutcome` returned by the opponent context
-
-Purpose:
-
-- let the attacker update its knowledge map and AI state
+- trigger the opening volley from one side
 
 #### `GetPublicBoardRequest`
 
-Inputs:
-
-- none
-
-Outputs:
-
-- current public board view
-- fleet summary
-- last known result
-
 Purpose:
 
-- give the UI enough state to redraw the match without leaking private board
-  data
-
-#### `GetReplaySliceRequest`
-
-Inputs:
-
-- starting index
-- maximum count
-
-Outputs:
-
-- recent replay entries
-
-Purpose:
-
-- support a scrolling log in the Python TUI without forcing the app to infer
-  every message from low-level events
+- provide enough public state for the foreign UI to redraw at any point
 
 #### `ShutdownRequest`
 
 Purpose:
 
-- orderly teardown through the generated library lifecycle
+- stop the context and drop any installed peer listener
 
-### Event brokers to export
+### Events
 
-The exported events should complement the request API instead of duplicating it.
+#### `VolleyEvent`
 
-Recommended event types:
+Used for both internal protocol and foreign observation.
+
+Payload includes:
+
+- `exchangeId`
+- `stage` (`fire` or `reply`)
+- coordinate
+- reasoning
+- hit / sunk / gameOver flags
+- human-readable message
+
+#### `CaptainRemark`
+
+High-level lifecycle and narration messages.
+
+#### `ShotResolved`
+
+Normalized attack/defense outcome for the current side.
+
+#### `BoardChanged`
+
+Shot counters changed and a new board snapshot is worth fetching.
+
+#### `MatchEnded`
+
+Winner / loser terminal event.
+
+## Foreign Consumer Role
+
+Python is currently the reference foreign consumer because it is the fastest way
+to show a readable text UI and to prove the generated wrapper surface.
+
+Its role is intentionally narrow:
+
+- create contexts
+- initialize them
+- auto-place fleets
+- link them
+- subscribe to events
+- start one side
+- poll public board state for redraws
+
+It does not drive turns anymore.
+
+## Important Tradeoffs
+
+The example deliberately accepts the following tradeoffs because it is a demo of
+broker flexibility rather than a production protocol design:
+
+- `VolleyEvent` is both protocol traffic and UI-visible telemetry
+- Python observers are not promised a strict causal ordering across all events
+- protocol payloads stay within FFI-safe exported types
+- foreign listeners still run through the generated API delivery mechanism
+
+Those constraints are acceptable here because they make the underlying broker
+design easier to see.
 
 - `ThinkingStarted`
 - `ThinkingFinished`

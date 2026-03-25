@@ -23,9 +23,8 @@ sys.path.insert(0, str(ROOT / "nimlib" / "build"))
 from torpedolib import Torpedolib, TorpedolibError
 
 
-DEFAULT_THINK_DELAY = 0.8
-DEFAULT_TRAVEL_DELAY = 0.35
-DEFAULT_RESOLVE_DELAY = 0.45
+DEFAULT_REFRESH_DELAY = 0.18
+DEFAULT_TURN_DELAY_MS = 650
 DEFAULT_END_DELAY = 1.0
 
 
@@ -35,6 +34,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-red", type=int, default=101, help="seed for Red Fleet")
     parser.add_argument("--seed-blue", type=int, default=202, help="seed for Blue Fleet")
     parser.add_argument("--board-size", type=int, default=8, help="board size")
+    parser.add_argument(
+        "--starter",
+        choices=("red", "blue"),
+        default="red",
+        help="which fleet opens the duel",
+    )
     return parser.parse_args()
 
 
@@ -98,9 +103,20 @@ def coord_label(row: int, col: int) -> str:
     return f"{chr(ord('A') + col)}{row + 1}"
 
 
-def draw_screen(red_view: object, blue_view: object, event_log: deque[str], banner: str, delays: tuple[float, float, float]) -> None:
+def format_status(view: object) -> list[str]:
+    return [
+        f"AI         {view.aiMode}",
+        f"Delay      {view.turnDelayMs} ms",
+        f"Placed     {'yes' if view.fleetPlaced else 'no'}",
+        f"Linked     {'yes' if view.linked else 'no'}",
+        f"Started    {'yes' if view.started else 'no'}",
+        f"Opponent   {view.opponentCtx}",
+        f"Outcome    {'won' if view.hasWon else 'lost' if view.gameOver else 'active'}",
+    ]
+
+
+def draw_screen(red_view: object, blue_view: object, event_log: deque[str], banner: str, refresh_delay: float) -> None:
     clear_screen()
-    think_delay, travel_delay, resolve_delay = delays
 
     red_own = build_matrix(red_view.ownCells, red_view.boardSize, own_board=True)
     red_enemy = build_matrix(red_view.enemyCells, red_view.boardSize, own_board=False)
@@ -111,9 +127,7 @@ def draw_screen(red_view: object, blue_view: object, event_log: deque[str], bann
     right_panel = ["BLUE FLEET", "Own Waters"] + blue_own + [""] + ["Enemy Chart"] + blue_enemy
 
     print("Torpedo Duel")
-    print(
-        f"Delay profile | think={think_delay:.2f}s  travel={travel_delay:.2f}s  resolve={resolve_delay:.2f}s"
-    )
+    print(f"Observer refresh={refresh_delay:.2f}s | backend duel is self-driven")
     print(banner)
     print()
     for line in render_side_by_side(left_panel, right_panel):
@@ -123,6 +137,12 @@ def draw_screen(red_view: object, blue_view: object, event_log: deque[str], bann
     fleet_left = ["RED STATUS"] + format_fleet(red_view.fleet)
     fleet_right = ["BLUE STATUS"] + format_fleet(blue_view.fleet)
     for line in render_side_by_side(fleet_left, fleet_right):
+        print(line)
+
+    print()
+    meta_left = ["RED META"] + format_status(red_view)
+    meta_right = ["BLUE META"] + format_status(blue_view)
+    for line in render_side_by_side(meta_left, meta_right):
         print(line)
 
     print()
@@ -171,19 +191,49 @@ def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> Non
         _ = owner
         event_log.append(f"{captainName} {outcome} on turn {turnNumber}: {message}")
 
+    def on_volley(
+        owner: Torpedolib,
+        captainName: str,
+        exchangeId: int,
+        stage: str,
+        row: int,
+        col: int,
+        reasoning: str,
+        hit: bool,
+        sunk: bool,
+        shipName: str,
+        gameOver: bool,
+        message: str,
+    ) -> None:
+        _ = owner
+        detail = f"{captainName} {stage} #{exchangeId} {coord_label(row, col)}"
+        if stage == "fire" and reasoning:
+            detail += f" [{reasoning}]"
+        if stage == "reply":
+            if sunk:
+                detail += f" => sunk {shipName}"
+            elif hit:
+                detail += " => hit"
+            else:
+                detail += " => miss"
+            if gameOver:
+                detail += " => duel over"
+        if message:
+            detail += f": {message}"
+        event_log.append(detail)
+
     lib.onCaptainRemark(on_remark)
     lib.onShotResolved(on_shot)
     lib.onMatchEnded(on_match)
+    lib.onVolleyEvent(on_volley)
     event_log.append(f"{side} event listeners attached")
 
 
 def run_duel(args: argparse.Namespace) -> int:
-    think_delay = 0.15 if args.fast else DEFAULT_THINK_DELAY
-    travel_delay = 0.08 if args.fast else DEFAULT_TRAVEL_DELAY
-    resolve_delay = 0.10 if args.fast else DEFAULT_RESOLVE_DELAY
+    refresh_delay = 0.05 if args.fast else DEFAULT_REFRESH_DELAY
+    turn_delay_ms = 120 if args.fast else DEFAULT_TURN_DELAY_MS
     end_delay = 0.20 if args.fast else DEFAULT_END_DELAY
-    delays = (think_delay, travel_delay, resolve_delay)
-    event_log: deque[str] = deque(maxlen=18)
+    event_log: deque[str] = deque(maxlen=24)
 
     with Torpedolib() as red, Torpedolib() as blue:
         red.createContext()
@@ -192,72 +242,40 @@ def run_duel(args: argparse.Namespace) -> int:
         register_callbacks(red, "Red Fleet", event_log)
         register_callbacks(blue, "Blue Fleet", event_log)
 
-        red.initializeCaptainRequest("Red Fleet", args.board_size, "hunt", args.seed_red)
-        blue.initializeCaptainRequest("Blue Fleet", args.board_size, "hunt", args.seed_blue)
-        red.autoPlaceFleetRequest()
-        blue.autoPlaceFleetRequest()
+        red.initializeCaptainRequest("Red Fleet", args.board_size, "hunt", args.seed_red, turn_delay_ms)
+        blue.initializeCaptainRequest("Blue Fleet", args.board_size, "hunt", args.seed_blue, turn_delay_ms)
 
-        active = red
-        active_name = "Red Fleet"
-        passive = blue
-        passive_name = "Blue Fleet"
+        red_setup = red.autoPlaceFleetRequest()
+        blue_setup = blue.autoPlaceFleetRequest()
+        event_log.append(f"Red placed {red_setup.shipCount} ships")
+        event_log.append(f"Blue placed {blue_setup.shipCount} ships")
 
-        banner = "Opening salvo sequence"
+        red.linkOpponentRequest(blue.ctx)
+        blue.linkOpponentRequest(red.ctx)
+        event_log.append(f"Linked contexts red={red.ctx} blue={blue.ctx}")
+
+        starter = red if args.starter == "red" else blue
+        starter_name = "Red Fleet" if args.starter == "red" else "Blue Fleet"
+        starter.startGameRequest()
+
+        banner = f"{starter_name} opens the duel"
         while True:
             red_view = red.getPublicBoardRequest()
             blue_view = blue.getPublicBoardRequest()
-            draw_screen(red_view, blue_view, event_log, banner, delays)
+            if event_log:
+                banner = event_log[-1]
+            draw_screen(red_view, blue_view, event_log, banner, refresh_delay)
 
-            event_log.append(f"{active_name} is thinking")
-            banner = f"{active_name} acquiring target"
-            draw_screen(red_view, blue_view, event_log, banner, delays)
-            time.sleep(think_delay)
-
-            shot = active.getNextShotRequest()
-            event_log.append(
-                f"{active_name} fires at {coord_label(shot.row, shot.col)} using {shot.reasoning}"
-            )
-            banner = f"{active_name} launches torpedo toward {coord_label(shot.row, shot.col)}"
-            red_view = red.getPublicBoardRequest()
-            blue_view = blue.getPublicBoardRequest()
-            draw_screen(red_view, blue_view, event_log, banner, delays)
-            time.sleep(travel_delay)
-
-            outcome = passive.receiveShotRequest(shot.row, shot.col)
-            active.observeShotOutcomeRequest(
-                shot.row,
-                shot.col,
-                outcome.hit,
-                outcome.sunk,
-                outcome.shipName,
-                outcome.gameOver,
-            )
-
-            if outcome.hit:
-                if outcome.sunk:
-                    result_text = f"sunk {outcome.shipName}"
-                else:
-                    result_text = "hit"
-            else:
-                result_text = "miss"
-
-            banner = f"{active_name} -> {passive_name}: {coord_label(shot.row, shot.col)} is a {result_text}"
-            red_view = red.getPublicBoardRequest()
-            blue_view = blue.getPublicBoardRequest()
-            draw_screen(red_view, blue_view, event_log, banner, delays)
-            time.sleep(resolve_delay)
-
-            if outcome.gameOver:
+            if red_view.gameOver or blue_view.gameOver:
                 final_red = red.getPublicBoardRequest()
                 final_blue = blue.getPublicBoardRequest()
-                winner = active_name
+                winner = "Red Fleet" if final_red.hasWon else "Blue Fleet" if final_blue.hasWon else "Unknown"
                 banner = f"{winner} wins the duel"
-                draw_screen(final_red, final_blue, event_log, banner, delays)
+                draw_screen(final_red, final_blue, event_log, banner, refresh_delay)
                 time.sleep(end_delay)
                 return 0
 
-            active, passive = passive, active
-            active_name, passive_name = passive_name, active_name
+            time.sleep(refresh_delay)
 
 
 def main() -> int:

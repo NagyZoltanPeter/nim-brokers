@@ -8,8 +8,10 @@ The Python app:
 
 - create two independent `torpedolib` contexts
 - subscribe to both event streams
-- coordinate the turn loop between the two contexts
-- inject pacing delays for a spectator-friendly match
+- initialize and auto-place both fleets
+- link each context to the other
+- start the duel from one selected side
+- observe `VolleyEvent` plus the higher-level status events
 - render a text UI with boards and replay log
 
 Run it from the repository root with:
@@ -22,6 +24,12 @@ For a faster development loop:
 
 ```text
 python3 examples/torpedo/python_example/main.py --fast
+```
+
+You can choose the starting side with:
+
+```text
+python3 examples/torpedo/python_example/main.py --starter blue
 ```
 
 Implementation details and runtime expectations are described in
