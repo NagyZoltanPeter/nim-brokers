@@ -48,6 +48,7 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
   ##         action: int32,
   ##         eventTypeId: int32,
   ##         callbackPtr: pointer,
+  ##         userData: pointer,
   ##         listenerHandle: uint64,
   ##     ):
   ##         Future[Result[RegisterEventListenerResult, string]] {.async.}
@@ -95,6 +96,7 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
     newTree(nnkIdentDefs, ident("action"), ident("int32"), newEmptyNode()),
     newTree(nnkIdentDefs, ident("eventTypeId"), ident("int32"), newEmptyNode()),
     newTree(nnkIdentDefs, ident("callbackPtr"), ident("pointer"), newEmptyNode()),
+    newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode()),
     newTree(nnkIdentDefs, ident("listenerHandle"), ident("uint64"), newEmptyNode()),
   )
 
@@ -154,6 +156,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
   if hasInlineFields:
     var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
+    callbackFormal.add(
+      newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
+    )
+    callbackFormal.add(
+      newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
+    )
     for i in 0 ..< fieldNames.len:
       let cFieldType = toCFieldType(fieldTypes[i])
       callbackFormal.add(
@@ -169,6 +177,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     )
   else:
     var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
+    callbackFormal.add(
+      newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
+    )
+    callbackFormal.add(
+      newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
+    )
     let callbackPragmas = newTree(nnkPragma, ident("cdecl"))
     let callbackProcType = newTree(nnkProcTy, callbackFormal, callbackPragmas)
     result.add(
@@ -200,9 +214,11 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     # Build wrapper lambda body: converts event fields to C types, calls callback
     let evtParam = genSym(nskParam, "evt")
     let cbLocal = genSym(nskLet, "cb")
+    let userDataLocal = genSym(nskLet, "userData")
+    let ctxValueLocal = genSym(nskLet, "ctxValue")
 
     var preCallStmts = newStmtList()
-    var callbackCallArgs: seq[NimNode] = @[]
+    var callbackCallArgs: seq[NimNode] = @[ctxValueLocal, userDataLocal]
     var postCallStmts = newStmtList()
 
     if hasInlineFields:
@@ -248,9 +264,11 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     result.add(
       quote do:
         proc `registerHelperIdent`(
-            ctx: BrokerContext, callbackPtr: pointer
+            ctx: BrokerContext, callbackPtr: pointer, userData: pointer
         ): Result[RegisterEventListenerResult, string] =
           let `cbLocal` = cast[`callbackTypeIdent`](callbackPtr)
+          let `userDataLocal` = userData
+          let `ctxValueLocal` = uint32(ctx)
           let wrapper: `listenerProcType` = proc(
               `evtParam`: `typeIdent`
           ): Future[void] {.async: (raises: []).} =
@@ -304,11 +322,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
             ctx: BrokerContext,
             action: int32,
             callbackPtr: pointer,
+            userData: pointer,
             listenerHandle: uint64,
         ): Future[Result[RegisterEventListenerResult, string]] {.async: (raises: []).} =
           case action
           of 0:
-            return `registerHelperIdent`(ctx, callbackPtr)
+            return `registerHelperIdent`(ctx, callbackPtr, userData)
           of 1:
             return `unregisterHelperIdent`(ctx, listenerHandle)
           of 2:
@@ -339,13 +358,14 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   result.add(
     quote do:
       proc `regFuncIdent`(
-          ctx: uint32, `callbackParamIdent`: `callbackTypeIdent`
+          ctx: uint32, `callbackParamIdent`: `callbackTypeIdent`, userData: pointer
       ): uint64 {.exportc: `regFuncNameLit`, cdecl, dynlib.} =
         let res = waitFor RegisterEventListenerResult.request(
           BrokerContext(ctx),
           0'i32,
           int32(`typeIdConst`),
           cast[pointer](`callbackParamIdent`),
+          userData,
           0'u64,
         )
         if res.isOk():
@@ -369,12 +389,12 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         if handle == 0'u64:
           # Remove all listeners for this event type
           discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil, 0'u64
+            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil, nil, 0'u64
           )
         else:
           # Remove specific listener by handle
           discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), nil, handle
+            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), nil, nil, handle
           )
 
   )
@@ -383,6 +403,8 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
 
   # C callback typedef
   var callbackHeaderParams: seq[string] = @[]
+  callbackHeaderParams.add("uint32_t ctx")
+  callbackHeaderParams.add("void* userData")
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let cType = nimTypeToCInput(fieldTypes[i])
@@ -400,14 +422,22 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
   let regProto = generateCFuncProto(
     publicRegFuncName,
     "uint64_t",
-    @[("ctx", "uint32_t"), ("callback", typeDisplayName & "CCallback")],
+    @[
+      ("ctx", "uint32_t"),
+      ("callback", typeDisplayName & "CCallback"),
+      ("userData", "void*"),
+    ],
   )
   appendHeaderDecl(regProto)
   registerApiCExportWrapper(
     regFuncName,
     regFuncName,
     "uint64",
-    @[("ctx", "uint32"), ("callback", typeDisplayName & "CCallback")],
+    @[
+      ("ctx", "uint32"),
+      ("callback", typeDisplayName & "CCallback"),
+      ("userData", "pointer"),
+    ],
   )
 
   # Deregistration function prototype: takes handle (0 = remove all)
@@ -419,95 +449,230 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     deregFuncName, deregFuncName, "void", @[("ctx", "uint32"), ("handle", "uint64")]
   )
 
-  # C++ wrapper: trampoline + multiplexed std::function callbacks
-  # Build the std::function signature from event fields
-  var cppCbParams: seq[string] = @[]
-  var cppTrampolineForwards: seq[string] = @[]
+  # C++ wrapper: instance-owned dispatcher with owner-aware callbacks.
+  if not gApiCppEventSupportGenerated:
+    gApiCppEventSupportGenerated = true
+    gApiCppPreamble.add(
+      """
+template <typename Owner, typename Traits, typename... CArgs>
+class EventDispatcher {
+public:
+    using Callback = typename Traits::template Callback<Owner>;
+    using CCallback = typename Traits::CCallback;
+
+    explicit EventDispatcher(Owner& owner) noexcept
+        : owner_(&owner) {}
+
+    EventDispatcher(const EventDispatcher&) = delete;
+    EventDispatcher& operator=(const EventDispatcher&) = delete;
+    EventDispatcher(EventDispatcher&&) = delete;
+    EventDispatcher& operator=(EventDispatcher&&) = delete;
+
+    ~EventDispatcher() {
+        clear();
+    }
+
+    uint64_t add(Callback fn) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!owner_ || owner_->ctx() == 0 || !fn) {
+            return 0;
+        }
+
+        if (nativeHandle_ == 0) {
+            nativeHandle_ = Traits::registerWithC(
+                owner_->ctx(),
+                &EventDispatcher::trampoline,
+                static_cast<void*>(this)
+            );
+            if (nativeHandle_ == 0) {
+                return 0;
+            }
+        }
+
+        const uint64_t localHandle = nextLocalHandle_++;
+        try {
+            callbacks_.emplace(localHandle, std::move(fn));
+            return localHandle;
+        } catch (...) {
+            if (callbacks_.empty() && nativeHandle_ != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+                nativeHandle_ = 0;
+            }
+            return 0;
+        }
+    }
+
+    void remove(uint64_t localHandle) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        callbacks_.erase(localHandle);
+        if (callbacks_.empty() && nativeHandle_ != 0) {
+            if (owner_ && owner_->ctx() != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+            }
+            nativeHandle_ = 0;
+        }
+    }
+
+    void clear() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        callbacks_.clear();
+        if (nativeHandle_ != 0) {
+            if (owner_ && owner_->ctx() != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+            }
+            nativeHandle_ = 0;
+        }
+    }
+
+private:
+    static void trampoline(uint32_t ctx, void* userData, CArgs... args) noexcept {
+        auto* self = static_cast<EventDispatcher*>(userData);
+        if (!self) {
+            return;
+        }
+        self->deliver(ctx, args...);
+    }
+
+    void deliver(uint32_t ctx, CArgs... args) noexcept {
+        std::vector<Callback> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!owner_ || ctx != owner_->ctx()) {
+                return;
+            }
+
+            try {
+                snapshot.reserve(callbacks_.size());
+                for (const auto& [id, fn] : callbacks_) {
+                    if (fn) {
+                        snapshot.push_back(fn);
+                    }
+                }
+            } catch (...) {
+                return;
+            }
+        }
+
+        for (const auto& fn : snapshot) {
+            Traits::invoke(fn, *owner_, args...);
+        }
+    }
+
+    Owner* owner_ = nullptr;
+    std::mutex mutex_;
+    std::unordered_map<uint64_t, Callback> callbacks_;
+    uint64_t nativeHandle_ = 0;
+    uint64_t nextLocalHandle_ = 1;
+};
+"""
+    )
+
+  var cppCbParams: seq[string] = @["Owner& owner"]
+  var cTrampolineParams: seq[string] = @[]
+  var traitInvokeArgs: seq[string] = @["owner"]
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fName = $fieldNames[i]
       let cbType = nimTypeToCppCallbackParam(fieldTypes[i])
-      cppCbParams.add(cbType)
-      # Trampoline converts const char* → std::string_view (const in signature, not ctor)
+      let cType = nimTypeToCInput(fieldTypes[i])
+      cppCbParams.add(cbType & " " & fName)
+      cTrampolineParams.add(cType & " " & fName)
       if isCStringType(fieldTypes[i]):
-        cppTrampolineForwards.add(
-          "std::string_view(" & fName & " ? " & fName & " : \"\")"
+        traitInvokeArgs.add(
+          fName & " ? std::string_view(" & fName & ") : std::string_view()"
         )
       else:
-        cppTrampolineForwards.add(fName)
+        traitInvokeArgs.add(fName)
 
-  let cppFuncType = "std::function<void(" & cppCbParams.join(", ") & ")>"
-  let prefix = "s" & typeDisplayName
+  let traitName = typeDisplayName & "EventTraits"
+  var trait = "struct " & traitName & " {\n"
+  trait.add("    template <typename Owner>\n")
+  trait.add(
+    "    using Callback = std::function<void(" & cppCbParams.join(", ") & ")>;\n\n"
+  )
 
-  # Build C callback param list for the trampoline signature
-  var cTrampolineParams: seq[string] = @[]
+  var callbackSignatureParams: seq[string] = @["uint32_t", "void*"]
+  callbackSignatureParams.add(cTrampolineParams)
+  trait.add(
+    "    using CCallback = void (*)(" & callbackSignatureParams.join(", ") & ");\n\n"
+  )
+
+  trait.add(
+    "    static uint64_t registerWithC(uint32_t ctx, CCallback callback, void* userData) noexcept {\n"
+  )
+  trait.add("        return ::" & publicRegFuncName & "(ctx, callback, userData);\n")
+  trait.add("    }\n\n")
+
+  trait.add(
+    "    static void unregisterWithC(uint32_t ctx, uint64_t handle) noexcept {\n"
+  )
+  trait.add("        ::" & publicDeregFuncName & "(ctx, handle);\n")
+  trait.add("    }\n\n")
+
+  trait.add("    template <typename Owner>\n")
+  trait.add("    static void invoke(const Callback<Owner>& fn")
+  if cTrampolineParams.len > 0:
+    trait.add(", ")
+    var invokeParams: seq[string] = @["Owner& owner"]
+    invokeParams.add(cTrampolineParams)
+    trait.add(invokeParams.join(", "))
+  else:
+    trait.add("Owner& owner")
+  trait.add(") noexcept {\n")
+  trait.add("        try {\n")
+  trait.add("            fn(" & traitInvokeArgs.join(", ") & ");\n")
+  trait.add("        } catch (...) {\n")
+  trait.add("        }\n")
+  trait.add("    }\n")
+  trait.add("};")
+  gApiCppPreamble.add(trait)
+
+  let dispatcherAlias = typeDisplayName & "Dispatcher"
+  var cArgTypes: seq[string] = @[]
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      let fName = $fieldNames[i]
-      let cType = nimTypeToCInput(fieldTypes[i])
-      cTrampolineParams.add(cType & " " & fName)
+      cArgTypes.add(nimTypeToCInput(fieldTypes[i]))
 
-  # Private static members
-  var priv = ""
-  priv.add("    // --- " & typeDisplayName & " event callback storage ---\n")
-  priv.add("    static inline std::mutex " & prefix & "Mtx_;\n")
-  priv.add(
-    "    static inline std::unordered_map<uint64_t, " & cppFuncType & "> " & prefix &
-      "Cbs_;\n"
+  var dispatcherDecl =
+    "    using " & dispatcherAlias & " = EventDispatcher<__CPP_CLASS__, " & traitName
+  if cArgTypes.len > 0:
+    dispatcherDecl.add(", " & cArgTypes.join(", "))
+  dispatcherDecl.add(">;\n")
+  dispatcherDecl.add(
+    "    " & dispatcherAlias & " " & toSnakeCase(typeDisplayName) & "Dispatcher_;\n"
   )
-  priv.add(
-    "    static inline uint64_t " & prefix &
-      "CHandle_ = 0; // C-layer trampoline handle\n"
-  )
-  priv.add("    static inline std::atomic<uint64_t> " & prefix & "NextId_{1};\n")
-  # Trampoline function
-  priv.add(
-    "    static void " & prefix & "Trampoline_(" & cTrampolineParams.join(", ") & ") {\n"
-  )
-  priv.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
-  priv.add("        for (auto& [id, fn] : " & prefix & "Cbs_) {\n")
-  priv.add("            if (fn) fn(" & cppTrampolineForwards.join(", ") & ");\n")
-  priv.add("        }\n")
-  priv.add("    }\n")
-  gApiCppPrivateMembers.add(priv)
+  gApiCppPrivateMembers.add(dispatcherDecl)
 
-  # Public on/off methods
-  var onMethod = "uint64_t on" & typeDisplayName & "(" & cppFuncType & " fn) {\n"
-  onMethod.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
-  onMethod.add("        // Register C trampoline once with the Nim layer\n")
-  onMethod.add("        if (" & prefix & "CHandle_ == 0) {\n")
+  gApiCppConstructorInitializers.add(
+    toSnakeCase(typeDisplayName) & "Dispatcher_(*this)"
+  )
+  gApiCppShutdownStatements.add(toSnakeCase(typeDisplayName) & "Dispatcher_.clear();")
+
+  gApiCppClassMethods.add(
+    "using " & typeDisplayName & "Callback = " & traitName & "::Callback<__CPP_CLASS__>;"
+  )
+
+  var onMethod =
+    "uint64_t on" & typeDisplayName & "(" & typeDisplayName & "Callback fn) noexcept {\n"
   onMethod.add(
-    "            " & prefix & "CHandle_ = ::" & publicRegFuncName & "(ctx_, " & prefix &
-      "Trampoline_);\n"
+    "        return " & toSnakeCase(typeDisplayName) &
+      "Dispatcher_.add(std::move(fn));\n"
   )
-  onMethod.add("        }\n")
-  onMethod.add("        uint64_t id = " & prefix & "NextId_.fetch_add(1);\n")
-  onMethod.add("        " & prefix & "Cbs_[id] = std::move(fn);\n")
-  onMethod.add("        return id;\n")
   onMethod.add("    }")
   gApiCppClassMethods.add(onMethod)
 
-  var offMethod = "void off" & typeDisplayName & "(uint64_t handle = 0) {\n"
-  offMethod.add("        std::lock_guard<std::mutex> lock(" & prefix & "Mtx_);\n")
+  var offMethod = "void off" & typeDisplayName & "(uint64_t handle = 0) noexcept {\n"
   offMethod.add("        if (handle == 0) {\n")
-  offMethod.add("            // Remove all\n")
-  offMethod.add("            " & prefix & "Cbs_.clear();\n")
-  offMethod.add("            if (" & prefix & "CHandle_) {\n")
   offMethod.add(
-    "                ::" & publicDeregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
+    "            " & toSnakeCase(typeDisplayName) & "Dispatcher_.clear();\n"
   )
-  offMethod.add("                " & prefix & "CHandle_ = 0;\n")
-  offMethod.add("            }\n")
   offMethod.add("        } else {\n")
-  offMethod.add("            " & prefix & "Cbs_.erase(handle);\n")
   offMethod.add(
-    "            if (" & prefix & "Cbs_.empty() && " & prefix & "CHandle_) {\n"
+    "            " & toSnakeCase(typeDisplayName) & "Dispatcher_.remove(handle);\n"
   )
-  offMethod.add(
-    "                ::" & publicDeregFuncName & "(ctx_, " & prefix & "CHandle_);\n"
-  )
-  offMethod.add("                " & prefix & "CHandle_ = 0;\n")
-  offMethod.add("            }\n")
   offMethod.add("        }\n")
   offMethod.add("    }")
   gApiCppClassMethods.add(offMethod)
@@ -521,6 +686,8 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
     block:
       var cfuncArgs: seq[string] = @[]
       cfuncArgs.add("None") # return type
+      cfuncArgs.add("ctypes.c_uint32")
+      cfuncArgs.add("ctypes.c_void_p")
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
           cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
@@ -530,7 +697,8 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
         cfuncName & " = ctypes.CFUNCTYPE(" & cfuncArgs.join(", ") & ")"
       )
       gApiPyCallbackSetup.add(
-        "_lib." & publicRegFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName & "]"
+        "_lib." & publicRegFuncName & ".argtypes = [ctypes.c_uint32, " & cfuncName &
+          ", ctypes.c_void_p]"
       )
       gApiPyCallbackSetup.add(
         "_lib." & publicRegFuncName & ".restype = ctypes.c_uint64"
@@ -577,10 +745,13 @@ proc generateApiEventBroker*(body: NimNode): NimNode =
       m.add("        self._requireContext()\n")
       # Build the trampoline that decodes strings
       m.add("        @" & cfuncTypeName & "\n")
-      m.add("        def _trampoline(" & pyCallbackParams.join(", ") & "):\n")
+      var trampolineParams = @["_ctx", "_user_data"]
+      trampolineParams.add(pyCallbackParams)
+      m.add("        def _trampoline(" & trampolineParams.join(", ") & "):\n")
       m.add("            callback(" & pyForwards.join(", ") & ")\n")
       m.add(
-        "        handle = self._lib." & publicRegFuncName & "(self._ctx, _trampoline)\n"
+        "        handle = self._lib." & publicRegFuncName &
+          "(self._ctx, _trampoline, None)\n"
       )
       m.add("        if handle == 0:\n")
       m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")

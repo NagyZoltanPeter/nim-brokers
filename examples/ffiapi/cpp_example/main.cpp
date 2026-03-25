@@ -56,8 +56,9 @@ int main() {
 
     int discoveryCount = 0;
     auto h_disc = lib.onDeviceDiscovered(
-        [&discoveryCount](int64_t id, const std::string_view name,
+        [&discoveryCount](Mylib& owner, int64_t id, const std::string_view name,
                           const std::string_view type, const std::string_view addr) {
+            (void)owner;
             ++discoveryCount;
             printf("  >>> DeviceDiscovered #%d: id=%lld  \"%.*s\"  [%.*s]  %.*s\n",
                    discoveryCount,
@@ -69,8 +70,9 @@ int main() {
 
     int statusCount = 0;
     auto h_status = lib.onDeviceStatusChanged(
-        [&statusCount](int64_t id, const std::string_view name,
+        [&statusCount](Mylib& owner, int64_t id, const std::string_view name,
                        bool online, int64_t ts) {
+            (void)owner;
             ++statusCount;
             printf("  >>> DeviceStatusChanged #%d: id=%lld  \"%.*s\"  %s  (ts=%lld)\n",
                    statusCount,
@@ -82,7 +84,9 @@ int main() {
 
     // Register a second status listener to demonstrate multiplexing
     auto h_status2 = lib.onDeviceStatusChanged(
-        [](int64_t id, const std::string_view name, bool online, int64_t) {
+        [](Mylib& owner, int64_t id, const std::string_view name, bool online, int64_t) {
+            (void)owner;
+            (void)id;
             printf("  >>> [Logger] %.*s is now %s\n",
                    (int)name.size(), name.data(),
                    online ? "UP" : "DOWN");

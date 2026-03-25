@@ -128,7 +128,9 @@ registerBrokerLibrary:
   shutdownRequest:
     ShutdownRequest
 
-proc readyCallback(value: int32) {.cdecl.} =
+proc readyCallback(ctx: uint32, userData: pointer, value: int32) {.cdecl.} =
+  discard ctx
+  discard userData
   gReadyCallbackValue.store(value)
   discard gReadyCallbackCount.fetchAdd(1)
 
@@ -184,7 +186,7 @@ suite "API library init":
     let ctx = createContext()
     check ctx != 0'u32
 
-    let handle = apitestlib_onReadyEvent(ctx, readyCallback)
+    let handle = apitestlib_onReadyEvent(ctx, readyCallback, nil)
     check handle > 0'u64
 
     let pingRes = apitestlib_ping(ctx)

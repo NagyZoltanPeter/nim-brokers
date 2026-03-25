@@ -29,9 +29,16 @@ var gCallbackInvoked: Atomic[bool]
 var gCallbackMessage: array[256, char]
 var gCallbackCode: Atomic[int32]
 var gCallbackCount: Atomic[int32]
+var gCallbackCtx: Atomic[uint32]
+var gCallbackUserData: Atomic[int]
+var gUserDataMarker = 0'i32
 
-proc testCallback(message: cstring, code: int32) {.cdecl.} =
+proc testCallback(
+    ctx: uint32, userData: pointer, message: cstring, code: int32
+) {.cdecl.} =
   ## C-compatible callback that stores received values for verification.
+  gCallbackCtx.store(ctx)
+  gCallbackUserData.store(cast[int](userData))
   gCallbackCode.store(code)
   if not message.isNil():
     let msgLen = min(len($message), 255)
@@ -41,8 +48,14 @@ proc testCallback(message: cstring, code: int32) {.cdecl.} =
   gCallbackInvoked.store(true)
   discard gCallbackCount.fetchAdd(1)
 
-proc testCallback2(message: cstring, code: int32) {.cdecl.} =
+proc testCallback2(
+    ctx: uint32, userData: pointer, message: cstring, code: int32
+) {.cdecl.} =
   ## Second callback for multi-listener tests.
+  discard ctx
+  discard userData
+  discard message
+  discard code
   discard gCallbackCount.fetchAdd(1)
 
 # ── Emitter thread ──────────────────────────────────────────────────────
@@ -65,12 +78,17 @@ proc deliveryThread(ctx: BrokerContext) {.thread.} =
   discard RegisterEventListenerResult.setProvider(
     ctx,
     proc(
-        action: int32, eventTypeId: int32, callbackPtr: pointer, listenerHandle: uint64
+        action: int32,
+        eventTypeId: int32,
+        callbackPtr: pointer,
+        userData: pointer,
+        listenerHandle: uint64,
     ): Future[Result[RegisterEventListenerResult, string]] {.closure, async.} =
       case eventTypeId
       of ApiTestEventApiTypeId:
-        return
-          await handleApiTestEventRegistration(ctx, action, callbackPtr, listenerHandle)
+        return await handleApiTestEventRegistration(
+          ctx, action, callbackPtr, userData, listenerHandle
+        )
       else:
         return err("Unknown event type: " & $eventTypeId),
   )
@@ -110,7 +128,8 @@ suite "API EventBroker (delivery thread)":
 
     # Register C callback via generated exported function
     # This uses waitFor internally to route request to delivery thread
-    let handle = onApiTestEvent(uint32(ctx), testCallback)
+    let expectedUserData = cast[pointer](addr gUserDataMarker)
+    let handle = onApiTestEvent(uint32(ctx), testCallback, expectedUserData)
     check handle > 0'u64
 
     # Start emitter thread after listener registration completed
@@ -129,6 +148,8 @@ suite "API EventBroker (delivery thread)":
     waitFor waitForCallback()
 
     check gCallbackInvoked.load() == true
+    check gCallbackCtx.load() == uint32(ctx)
+    check gCallbackUserData.load() == cast[int](expectedUserData)
     check gCallbackCode.load() == 42
 
     # Verify message
@@ -157,7 +178,8 @@ suite "API EventBroker (delivery thread)":
       sleep(10)
 
     # Register callback
-    let handle = onApiTestEvent(uint32(ctx), testCallback)
+    let handle =
+      onApiTestEvent(uint32(ctx), testCallback, cast[pointer](addr gUserDataMarker))
     check handle > 0'u64
 
     # Deregister by handle
@@ -186,8 +208,9 @@ suite "API EventBroker (delivery thread)":
       sleep(10)
 
     # Register two callbacks
-    let h1 = onApiTestEvent(uint32(ctx), testCallback)
-    let h2 = onApiTestEvent(uint32(ctx), testCallback2)
+    let h1 =
+      onApiTestEvent(uint32(ctx), testCallback, cast[pointer](addr gUserDataMarker))
+    let h2 = onApiTestEvent(uint32(ctx), testCallback2, nil)
     check h1 > 0'u64
     check h2 > 0'u64
 

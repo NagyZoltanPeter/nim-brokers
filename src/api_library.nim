@@ -357,6 +357,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
                 provCtxIdent,
                 ident("action"),
                 ident("callbackPtr"),
+                ident("userData"),
                 ident("listenerHandle"),
               ),
             ),
@@ -404,6 +405,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       newTree(nnkIdentDefs, ident("action"), ident("int32"), newEmptyNode()),
       newTree(nnkIdentDefs, ident("eventTypeId"), ident("int32"), newEmptyNode()),
       newTree(nnkIdentDefs, ident("callbackPtr"), ident("pointer"), newEmptyNode()),
+      newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode()),
       newTree(nnkIdentDefs, ident("listenerHandle"), ident("uint64"), newEmptyNode()),
     )
 

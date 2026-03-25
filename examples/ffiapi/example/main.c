@@ -40,26 +40,43 @@ static void sleep_ms(int ms) { usleep(ms * 1000); }
  * Event callbacks (called on the Nim delivery thread — must not block)
  * -------------------------------------------------------------------------- */
 
+typedef struct {
+    int discovered_count;
+    int status_count;
+} ExampleEventState;
+
 static void on_device_discovered(
+    uint32_t ctx, void* userData,
     int64_t deviceId, const char* name,
     const char* deviceType, const char* address)
 {
+    ExampleEventState* state = (ExampleEventState*)userData;
+    if (state != NULL) {
+        state->discovered_count += 1;
+    }
     printf("  [event] DeviceDiscovered: id=%lld name=\"%s\" type=\"%s\" addr=\"%s\"\n",
            (long long)deviceId,
            name ? name : "(null)",
            deviceType ? deviceType : "(null)",
            address ? address : "(null)");
+    (void)ctx;
 }
 
 static void on_device_status_changed(
+    uint32_t ctx, void* userData,
     int64_t deviceId, const char* name,
     _Bool online, int64_t timestampMs)
 {
+    ExampleEventState* state = (ExampleEventState*)userData;
+    if (state != NULL) {
+        state->status_count += 1;
+    }
     printf("  [event] DeviceStatusChanged: id=%lld name=\"%s\" online=%s ts=%lld\n",
            (long long)deviceId,
            name ? name : "(null)",
            online ? "true" : "false",
            (long long)timestampMs);
+    (void)ctx;
 }
 
 /* --------------------------------------------------------------------------
@@ -68,6 +85,8 @@ static void on_device_status_changed(
 
 int main(void) {
     printf("=== Device Monitor — C Example ===\n\n");
+
+    ExampleEventState event_state = {0, 0};
 
     /* ── 1. Create library context ────────────────────────────────────── */
     printf("1. Create library context\n");
@@ -83,8 +102,8 @@ int main(void) {
 
     /* ── 2. Register event listeners ──────────────────────────────────── */
     printf("2. Register event listeners\n");
-    uint64_t h_discovered = mylib_onDeviceDiscovered(ctx, on_device_discovered);
-    uint64_t h_status     = mylib_onDeviceStatusChanged(ctx, on_device_status_changed);
+    uint64_t h_discovered = mylib_onDeviceDiscovered(ctx, on_device_discovered, &event_state);
+    uint64_t h_status     = mylib_onDeviceStatusChanged(ctx, on_device_status_changed, &event_state);
     printf("   DeviceDiscovered handle:     %llu\n", (unsigned long long)h_discovered);
     printf("   DeviceStatusChanged handle:  %llu\n\n", (unsigned long long)h_status);
 
@@ -218,6 +237,9 @@ int main(void) {
 
     mylib_shutdown(ctx);
     printf("    Context shut down.\n\n");
+
+    printf("    Discovery callbacks: %d\n", event_state.discovered_count);
+    printf("    Status callbacks: %d\n\n", event_state.status_count);
 
     printf("=== C example complete ===\n");
     return 0;

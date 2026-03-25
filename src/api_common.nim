@@ -184,11 +184,23 @@ var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiCppClassMethods* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ wrapper class method declarations.
 
+var gApiCppPreamble* {.compileTime.}: seq[string] =
+  @[] ## Accumulates reusable C++ helper templates and event traits.
+
 var gApiCppStructs* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ struct definitions (emitted before the class).
 
 var gApiCppPrivateMembers* {.compileTime.}: seq[string] =
-  @[] ## Accumulates C++ private static members (trampolines, storage).
+  @[] ## Accumulates C++ private members and aliases.
+
+var gApiCppConstructorInitializers* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ wrapper constructor initializer fragments.
+
+var gApiCppShutdownStatements* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ wrapper shutdown cleanup statements.
+
+var gApiCppEventSupportGenerated* {.compileTime.}: bool = false
+  ## Flag: has the shared C++ EventDispatcher template been emitted?
 
 # ---------------------------------------------------------------------------
 # Compile-time accumulators for Python wrapper generation
@@ -543,6 +555,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     header.add("#include <optional>\n")
     header.add("#include <mutex>\n")
     header.add("#include <unordered_map>\n")
+    header.add("#include <utility>\n")
     header.add("#include <cstring>\n")
     header.add("#include <atomic>\n\n")
 
@@ -601,6 +614,15 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
 
     header.add("} // namespace " & nsName & "\n\n")
 
+    for p in gApiCppPreamble:
+      header.add(
+        p.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+          ApiLibPrefixPlaceholder, apiPrefix
+        ) & "\n"
+      )
+    if gApiCppPreamble.len > 0:
+      header.add("\n")
+
     # Class definition (outside namespace)
     header.add("class " & className & " {\n")
     header.add("protected:\n")
@@ -608,31 +630,26 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
 
     header.add("private:\n")
 
-    # Private members (trampolines, callback storage)
+    # Private members and aliases
     if gApiCppPrivateMembers.len > 0:
       for m in gApiCppPrivateMembers:
-        header.add(m.replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n")
+        header.add(
+          m.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+            ApiLibPrefixPlaceholder, apiPrefix
+          ) & "\n"
+        )
       header.add("\n")
 
     header.add("public:\n")
-    header.add("    " & className & "() : ctx_(0) {}\n")
-    header.add("    virtual ~" & className & "() { if (ctx_) shutdown(); }\n")
+    var ctorInitializers = @["ctx_(0)"]
+    for init in gApiCppConstructorInitializers:
+      ctorInitializers.add(init)
+    header.add("    " & className & "() : " & ctorInitializers.join(", ") & " {}\n")
+    header.add("    virtual ~" & className & "() { shutdown(); }\n")
     header.add("    " & className & "(const " & className & "&) = delete;\n")
     header.add("    " & className & "& operator=(const " & className & "&) = delete;\n")
-    header.add(
-      "    " & className & "(" & className &
-        "&& other) noexcept : ctx_(other.ctx_) { other.ctx_ = 0; }\n"
-    )
-    header.add(
-      "    " & className & "& operator=(" & className & "&& other) noexcept {\n"
-    )
-    header.add("        if (this != &other) {\n")
-    header.add("            if (ctx_) shutdown();\n")
-    header.add("            ctx_ = other.ctx_;\n")
-    header.add("            other.ctx_ = 0;\n")
-    header.add("        }\n")
-    header.add("        return *this;\n")
-    header.add("    }\n\n")
+    header.add("    " & className & "(" & className & "&&) = delete;\n")
+    header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
     header.add("    " & nsName & "::Result<void> createContext() {\n")
     header.add("        if (ctx_)\n")
     header.add(
@@ -658,17 +675,24 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     header.add(
       "    explicit operator bool() const noexcept { return validContext(); }\n"
     )
-    header.add(
-      "    void shutdown() noexcept { if (ctx_) { " & libName &
-        "_shutdown(ctx_); ctx_ = 0; } }\n"
-    )
+    header.add("    void shutdown() noexcept {\n")
+    for stmt in gApiCppShutdownStatements:
+      header.add(
+        "        " &
+          stmt.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+            ApiLibPrefixPlaceholder, apiPrefix
+          ) & "\n"
+      )
+    header.add("        if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; }\n")
+    header.add("    }\n")
     header.add("    uint32_t ctx() const noexcept { return ctx_; }\n\n")
     for cppMethod in gApiCppClassMethods:
       header.add(
         "    " &
-          cppMethod.replace("__CPP_NS__", nsName).replace(
-            ApiLibPrefixPlaceholder, apiPrefix
-          ) & "\n"
+          cppMethod
+          .replace("__CPP_NS__", nsName)
+          .replace("__CPP_CLASS__", className)
+          .replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n"
       )
     header.add("};\n\n")
     header.add("#endif /* __cplusplus */\n\n")
