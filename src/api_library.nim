@@ -611,6 +611,9 @@ macro registerBrokerLibrary*(body: untyped): untyped =
 
           # Cleanup: drop all registered event listeners
           `cleanupAllIdent`(arg.ctx)
+          # Remove the RegisterEventListenerResult provider so its global
+          # bucket entry is freed and does not accumulate across context lifetimes.
+          RegisterEventListenerResult.clearProvider(arg.ctx)
 
     )
   elif hasEventHandlers:
@@ -638,6 +641,10 @@ macro registerBrokerLibrary*(body: untyped): untyped =
                 discard
 
           waitFor awaitShutdown(addr arg.shutdownFlag)
+
+          # Remove the RegisterEventListenerResult provider so its global
+          # bucket entry is freed and does not accumulate across context lifetimes.
+          RegisterEventListenerResult.clearProvider(arg.ctx)
 
     )
   else:
