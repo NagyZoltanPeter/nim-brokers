@@ -91,8 +91,17 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
 
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
-  exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
+  let label = path & " [" & env & "]"
+  exec "nim c " & env & " --path:src --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
+  echo "=== RUN  " & label & " ==="
+  let (output, exitCode) = gorgeEx(outputPath)
+  if output.len > 0:
+    echo output
+  if exitCode != 0:
+    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
+    quit(1)
+  echo "=== PASS " & label & " ==="
 
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
@@ -166,16 +175,20 @@ task test, "Run all tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
     for opt in [
-      "--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert --mm:orc",
-      "-d:release -d:gcAssert -d:sysAssert --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:refc",
     ]:
       test opt, f
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in [
-      "--mm:orc --threads:on", "--mm:refc --threads:on",
-      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
       test opt, f
 
@@ -184,8 +197,10 @@ task perftest, "Run performance and stress tests":
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in [
-      "--mm:orc --threads:on", "--mm:refc --threads:on",
-      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
       test opt, f
 
@@ -194,9 +209,10 @@ task testApi, "Run FFI API broker tests":
     ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
   for f in apiTests:
     for opt in [
-      "-d:BrokerFfiApi --mm:orc --threads:on", "-d:BrokerFfiApi --mm:refc --threads:on",
-      "-d:BrokerFfiApi -d:release --mm:orc --threads:on",
-      "-d:BrokerFfiApi -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
       when defined(windows):
         # On Windows, chronos' waitForSingleObject fires its completion callback

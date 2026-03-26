@@ -787,6 +787,14 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("        here / f\"{name}{suffix}\",\n")
   py.add("    ]:\n")
   py.add("        if candidate.exists():\n")
+  py.add("            # Python 3.8+ no longer adds the DLL's own directory to the\n")
+  py.add("            # search path for transitive dependencies (security change).\n")
+  py.add("            # Add it explicitly so that bundled runtime DLLs such as\n")
+  py.add("            # libwinpthread-1.dll are found next to the loaded library.\n")
+  py.add(
+    "            if sys.platform == \"win32\" and hasattr(os, \"add_dll_directory\"):\n"
+  )
+  py.add("                os.add_dll_directory(str(candidate.parent))\n")
   py.add("            return ctypes.CDLL(str(candidate))\n")
   py.add("    # Fall back to system search\n")
   py.add("    path = ctypes.util.find_library(name)\n")
