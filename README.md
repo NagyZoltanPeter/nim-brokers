@@ -512,6 +512,16 @@ The `--mm:refc` limitation applies only to the **FFI API layer** (`RequestBroker
 
 **Recommendation:** use `--mm:orc` (the Nim default since 2.0) when building FFI API libraries on Windows.
 
+### `--nimMainPrefix` is not needed on Windows, and cannot be used there
+
+`--nimMainPrefix` exists to avoid `NimMain` symbol collisions when multiple Nim `.so` files are loaded in the same POSIX process. On Linux/macOS, `dlopen` with `RTLD_GLOBAL` merges all shared-object exports into a single flat namespace, so two Nim libraries that both define `NimMain` clash. The prefix renames them (e.g. `fooNimMain`, `barNimMain`) to prevent that.
+
+On Windows the PE loader works differently: every import is resolved as `DLL!Symbol`, so `foo.dll!NimMain` and `bar.dll!NimMain` are entirely separate entries that never interfere with each other. Any number of Nim DLLs can be loaded into the same process without a prefix.
+
+Attempting to use `--nimMainPrefix` on Windows also triggers a Nim codegen bug: the C generator forward-declares the prefixed `NimMain` without `__declspec(dllexport)` and then defines it with `N_LIB_EXPORT`, which both clang and GCC reject as a hard error (`err_attribute_dll_redeclaration`).
+
+The `nimble testFfiApi` task therefore omits `--nimMainPrefix` on Windows, which is the correct behaviour — not a workaround.
+
 ## Testing
 
 ```

@@ -35,9 +35,31 @@ proc findPythonExe(): string =
   if result.len == 0:
     quit "Python interpreter not found. Install python3 or add it to PATH."
 
+proc nimMainPrefixFlag(prefix: string): string =
+  ## Returns "--nimMainPrefix:<prefix>" on POSIX and "" on Windows.
+  ##
+  ## --nimMainPrefix is a POSIX-only concern.  On POSIX, dlopen with
+  ## RTLD_GLOBAL merges all shared-object exports into a single flat namespace,
+  ## so two Nim .so files that both define NimMain collide; the prefix renames
+  ## them (e.g. fooNimMain, barNimMain) to prevent that.
+  ##
+  ## On Windows the PE loader resolves every import as "DLL!Symbol", giving
+  ## each DLL its own isolated namespace — foo.dll!NimMain and bar.dll!NimMain
+  ## never clash, so the prefix is unnecessary.
+  ##
+  ## Using --nimMainPrefix on Windows also triggers a Nim codegen bug:
+  ## the C generator forward-declares the prefixed NimMain without
+  ## __declspec(dllexport) and then defines it with N_LIB_EXPORT, which both
+  ## clang and GCC reject as a hard error (err_attribute_dll_redeclaration).
+  when defined(windows):
+    result = ""
+  else:
+    result = " --nimMainPrefix:" & prefix
+
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/ffiapi/nimlib/build"
+  result.add(nimMainPrefixFlag("mylib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -188,7 +210,7 @@ task testApi, "Run FFI API broker tests":
             "refc STW GC is incompatible with chronos thread-pool callbacks."
           continue
       let extraOpt =
-        if f == "test_api_library_init": " --nimMainPrefix:apitestlib" else: ""
+        if f == "test_api_library_init": nimMainPrefixFlag("apitestlib") else: ""
       test opt & extraOpt, f
 
 task buildFfiExample, "Build FFI API example library":
@@ -224,7 +246,8 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
 proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --nimMainPrefix:pytestlib --path:src --outdir:test/pytestlib/build"
+    " --path:src --outdir:test/pytestlib/build"
+  flags.add(nimMainPrefixFlag("pytestlib"))
   if release:
     flags.add(" -d:release")
   exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
