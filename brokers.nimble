@@ -208,6 +208,27 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
+proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
+  var flags =
+    "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
+    " --nimMainPrefix:pytestlib --path:src --outdir:test/pytestlib/build"
+  if release:
+    flags.add(" -d:release")
+  exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
+
+task buildPyTestLib, "Build the Python binding test library":
+  buildPyTestLibrary()
+
+task testFfiApi,
+    "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
+  for mm in ["orc", "refc"]:
+    for release in [false, true]:
+      let mode = if release: "release" else: "debug"
+      echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
+      buildPyTestLibrary(mm, release)
+      exec quoteArg(findPythonExe()) & " -m unittest discover -s test/pytestlib -p " &
+        quoteArg("test_*.py") & " -v"
+
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
 

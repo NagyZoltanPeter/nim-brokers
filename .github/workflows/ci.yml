@@ -27,6 +27,7 @@ jobs:
         nimble setup -l
         nimble test --verbose
         nimble testApi --verbose
+        nimble testFfiApi --verbose
 
   examples:
     runs-on: ubuntu-latest
