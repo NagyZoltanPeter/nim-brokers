@@ -72,7 +72,8 @@ proc buildFfiExampleLibrary(generatePy = false) =
 
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:torpedolib --path:src --outdir:examples/torpedo/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/torpedo/nimlib/build"
+  result.add(nimMainPrefixFlag("torpedolib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
