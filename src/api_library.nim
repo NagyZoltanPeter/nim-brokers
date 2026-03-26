@@ -209,6 +209,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let initLibFuncName = libName & "_initialize"
   let initLibFuncIdent = ident(initLibFuncName)
   let nimInitializedIdent = ident("g" & libName & "NimInitialized")
+  let gcRegisteredIdent = ident("g" & libName & "GcRegistered")
   let nimMainIdent = ident(libName & "NimMain")
   let nimMainImportName = newLit(libName & "NimMain")
   let createContextResultIdent = ident(libName & "CreateContextResult")
@@ -220,12 +221,14 @@ macro registerBrokerLibrary*(body: untyped): untyped =
       proc `nimMainIdent`() {.importc: `nimMainImportName`, cdecl.}
 
       var `nimInitializedIdent`: Atomic[int]
+      var `gcRegisteredIdent` {.threadvar.}: bool
 
       proc `initLibFuncIdent`(): Result[void, string] =
+        # Step 1: One-time process-wide Nim runtime initialization
         while true:
           case `nimInitializedIdent`.load(moAcquire)
           of 2:
-            return ok()
+            break
           of -1:
             return err("Failed to initialize Nim runtime")
           of 1:
@@ -236,12 +239,6 @@ macro registerBrokerLibrary*(body: untyped): untyped =
               when compileOption("app", "lib"):
                 let initRes = catch:
                   `nimMainIdent`()
-                  when declared(setupForeignThreadGc):
-                    setupForeignThreadGc()
-                  when declared(nimGC_setStackBottom):
-                    var locals {.volatile, noinit.}: pointer
-                    locals = addr(locals)
-                    nimGC_setStackBottom(locals)
                 if initRes.isErr():
                   error "Failed to initialize Nim runtime",
                     library = `libNameLit`, detail = initRes.error.msg
@@ -249,7 +246,20 @@ macro registerBrokerLibrary*(body: untyped): untyped =
                   return err("Failed to initialize Nim runtime")
 
               `nimInitializedIdent`.store(2, moRelease)
-              return ok()
+              break
+
+        # Step 2: Per-thread foreign thread GC registration
+        when compileOption("app", "lib"):
+          if not `gcRegisteredIdent`:
+            when declared(setupForeignThreadGc):
+              setupForeignThreadGc()
+            `gcRegisteredIdent` = true
+          when declared(nimGC_setStackBottom):
+            var locals {.volatile, noinit.}: pointer
+            locals = addr(locals)
+            nimGC_setStackBottom(locals)
+
+        return ok()
 
       type `exportedCreateContextResultIdent` {.exportc.} = object
         ctx*: uint32
