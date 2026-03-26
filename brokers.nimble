@@ -210,7 +210,10 @@ task testApi, "Run FFI API broker tests":
             "refc STW GC is incompatible with chronos thread-pool callbacks."
           continue
       let extraOpt =
-        if f == "test_api_library_init": nimMainPrefixFlag("apitestlib") else: ""
+        if f == "test_api_library_init":
+          nimMainPrefixFlag("apitestlib")
+        else:
+          ""
       test opt & extraOpt, f
 
 task buildFfiExample, "Build FFI API example library":
