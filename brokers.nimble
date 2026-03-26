@@ -220,7 +220,7 @@ task buildPyTestLib, "Build the Python binding test library":
   buildPyTestLibrary()
 
 task testFfiApi,
-    "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
+  "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
   for mm in ["orc", "refc"]:
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
