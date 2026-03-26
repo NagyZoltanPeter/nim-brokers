@@ -271,8 +271,10 @@ task testFfiApi,
       # When ELF inspection is unavailable (bits == 0) fall back to the default
       # Python and let ctypes report any mismatch itself.
       let python =
-        if bits == 0: findPythonExe()
-        else: findPythonForBits(bits)
+        if bits == 0:
+          findPythonExe()
+        else:
+          findPythonForBits(bits)
       if python.len == 0:
         echo "Skipping Python tests: no " & $bits &
           "-bit Python interpreter found to match the compiled .so."
