@@ -216,6 +216,47 @@ proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
     flags.add(" -d:release")
   exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
 
+proc soElfBits(soPath: string): int =
+  ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
+  ## determined (e.g. non-Linux, file tool absent).
+  let (info, rc) = gorgeEx("file " & quoteArg(soPath))
+  if rc != 0:
+    return 0
+  if "ELF 64-bit" in info:
+    return 64
+  if "ELF 32-bit" in info:
+    return 32
+  return 0
+
+proc pythonExeBits(exe: string): int =
+  ## Returns 32 or 64 for the pointer width of the given Python interpreter,
+  ## or 0 on failure.
+  let (output, rc) =
+    gorgeEx(exe & " -c \"import struct; print(struct.calcsize('P') * 8)\"")
+  if rc != 0:
+    return 0
+  try:
+    return parseInt(output.strip())
+  except ValueError:
+    return 0
+
+proc findPythonForBits(wantBits: int): string =
+  ## Return the path of the first Python interpreter whose pointer width equals
+  ## wantBits (32 or 64).  Returns "" when none is found.
+  ## Checks the obvious names/paths in order; extend the list as needed.
+  let candidates = [
+    findExe("python3"),
+    findExe("python"),
+    "/usr/bin/python3",
+    "/usr/local/bin/python3",
+    "/usr/bin/python",
+    "/usr/local/bin/python",
+  ]
+  for c in candidates:
+    if c.len > 0 and pythonExeBits(c) == wantBits:
+      return c
+  return ""
+
 task buildPyTestLib, "Build the Python binding test library":
   buildPyTestLibrary()
 
@@ -226,7 +267,17 @@ task testFfiApi,
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
       buildPyTestLibrary(mm, release)
-      exec quoteArg(findPythonExe()) & " -m unittest discover -s test/pytestlib -p " &
+      let bits = soElfBits("test/pytestlib/build/libpytestlib.so")
+      # When ELF inspection is unavailable (bits == 0) fall back to the default
+      # Python and let ctypes report any mismatch itself.
+      let python =
+        if bits == 0: findPythonExe()
+        else: findPythonForBits(bits)
+      if python.len == 0:
+        echo "Skipping Python tests: no " & $bits &
+          "-bit Python interpreter found to match the compiled .so."
+        continue
+      exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
         quoteArg("test_*.py") & " -v"
 
 task nph, "Install nph if needed and format modified Nim files":
