@@ -211,7 +211,15 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   let nimInitializedIdent = ident("g" & libName & "NimInitialized")
   let gcRegisteredIdent = ident("g" & libName & "GcRegistered")
   let nimMainIdent = ident(libName & "NimMain")
-  let nimMainImportName = newLit(libName & "NimMain")
+  # On Windows, --nimMainPrefix is not used (LLVM/clang rejects the
+  # dllexport attribute mismatch it causes as a hard error), so Nim defines
+  # plain NimMain rather than <libname>NimMain.  Import it under the local
+  # nimMainIdent alias so the rest of the generated code is uniform.
+  let nimMainImportName =
+    when defined(windows):
+      newLit("NimMain")
+    else:
+      newLit(libName & "NimMain")
   let createContextResultIdent = ident(libName & "CreateContextResult")
   let exportedCreateContextResultIdent =
     postfix(copyNimTree(createContextResultIdent), "*")
