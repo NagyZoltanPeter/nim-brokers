@@ -947,14 +947,20 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add(
     "        \"\"\"Shut down the library context. Safe to call multiple times.\"\"\"\n"
   )
-  py.add("        if self._ctx:\n")
-  py.add("            self._lib." & libName & "_shutdown(self._ctx)\n")
+  py.add("        ctx = getattr(self, \"_ctx\", None)\n")
+  py.add("        if ctx:\n")
+  py.add("            self._lib." & libName & "_shutdown(ctx)\n")
   py.add("            self._ctx = 0\n")
   py.add("            self._cb_refs.clear()\n\n")
 
   # __del__
   py.add("    def __del__(self) -> None:\n")
-  py.add("        self.shutdown()\n\n")
+  py.add("        # Defensive: __del__ may run on partially constructed objects\n")
+  py.add("        if hasattr(self, \"shutdown\"):\n")
+  py.add("            try:\n")
+  py.add("                self.shutdown()\n")
+  py.add("            except Exception:\n")
+  py.add("                pass\n\n")
 
   # ctx property
   py.add("    @property\n")
