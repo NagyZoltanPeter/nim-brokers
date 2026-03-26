@@ -75,6 +75,8 @@ proc buildTorpedoExampleFlags(generatePy = false): string =
     "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:torpedolib --path:src --outdir:examples/torpedo/nimlib/build"
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
 
@@ -390,13 +392,11 @@ task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
 
-task buildTorpedoExampleCpp,
-  "Build the Torpedo Duel C++ application (via CMake)":
+task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
   buildTorpedoExampleLibrary()
   buildTorpedoCmakeTarget("torpedo_cpp")
 
-task runTorpedoExampleCpp,
-  "Build and run the Torpedo Duel C++ text UI example":
+task runTorpedoExampleCpp, "Build and run the Torpedo Duel C++ text UI example":
   buildTorpedoExampleLibrary()
   buildTorpedoCmakeTarget("torpedo_cpp")
   exec quoteArg(torpedoExecutablePath())
