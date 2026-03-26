@@ -297,7 +297,7 @@ macro registerBrokerLibrary*(body: untyped): untyped =
           `globalCtxsInitIdent`.store(2, moRelease)
         else:
           while `globalCtxsInitIdent`.load(moAcquire) != 2:
-            discard
+            sleep(1)
         ok()
 
       proc cleanupStartupState(startupState: ptr `startupStateIdent`) =
