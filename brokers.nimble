@@ -70,6 +70,21 @@ proc buildFfiExampleFlags(generatePy = false): string =
 proc buildFfiExampleLibrary(generatePy = false) =
   exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
 
+proc buildTorpedoExampleFlags(generatePy = false): string =
+  result =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/torpedo/nimlib/build"
+  result.add(nimMainPrefixFlag("torpedolib"))
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
+
+proc buildTorpedoExampleLibrary(generatePy = false) =
+  exec "nim c " & buildTorpedoExampleFlags(generatePy) &
+    " examples/torpedo/nimlib/torpedolib.nim"
+
 proc ffiExamplesBuildDir(): string =
   "examples/ffiapi/cmake-build"
 
@@ -88,6 +103,25 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
     joinPath(exampleDir, "build", "example.exe")
   else:
     joinPath(exampleDir, "build", "example")
+
+proc torpedoCmakeBuildDir(): string =
+  "examples/torpedo/cmake-build"
+
+proc buildTorpedoCmakeTarget(target = "") =
+  let cmakeDir = "examples/torpedo"
+  let buildDir = torpedoCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc torpedoExecutablePath(): string =
+  when defined(windows):
+    joinPath("examples", "torpedo", "cpp_example", "build", "torpedo.exe")
+  else:
+    joinPath("examples", "torpedo", "cpp_example", "build", "torpedo")
 
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
@@ -347,6 +381,26 @@ task testFfiApi,
         continue
       exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
         quoteArg("test_*.py") & " -v"
+task buildTorpedoExample, "Build the torpedo FFI example library":
+  buildTorpedoExampleLibrary()
+
+task buildTorpedoExamplePy,
+  "Build the torpedo FFI example library with generated Python wrapper":
+  buildTorpedoExampleLibrary(true)
+
+task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example":
+  buildTorpedoExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/torpedo/python_example/main.py")
+
+task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
+  buildTorpedoExampleLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp")
+
+task runTorpedoExampleCpp, "Build and run the Torpedo Duel C++ text UI example":
+  buildTorpedoExampleLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp")
+  exec quoteArg(torpedoExecutablePath())
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

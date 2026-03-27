@@ -302,6 +302,47 @@ nimble runFfiExamplePy
 
 See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
 
+### Torpedo Duel — a richer FFI API example
+
+The `examples/torpedo/` directory contains a full game example that pushes the
+Broker FFI API beyond a minimal hello-world.
+
+One Nim shared library (`torpedolib`) hosts **two independent contexts** in the
+same Python process — one per player. After a short bootstrap phase (create,
+initialize, place fleets, link opponents), the foreign app calls
+`StartGameRequest` on one side and **steps back entirely**. From that point the
+two captains exchange volleys autonomously inside Nim through cross-context
+`VolleyEvent` listeners, while Python only observes events and polls public
+board snapshots for its text UI.
+
+This demonstrates several things that a trivial example cannot:
+
+- **Multi-context isolation** — two active contexts share the same dylib, each
+  with its own processing thread, delivery thread, and `Captain` state object.
+- **Cross-context native listeners** — `EventBroker(API)` events are not just
+  a foreign callback surface; the same `VolleyEvent` type serves as the
+  internal protocol between linked contexts *and* as the observable stream
+  delivered to Python.
+- **Object-oriented state management** — all per-player state lives in a
+  `Captain` ref object, created by `InitializeCaptainRequest` and torn down by
+  `ShutdownRequest`. Only two threadvars remain per processing thread.
+- **Callback lifetime safety** — the Python example shows the correct shutdown
+  sequence: unregister all event listeners *before* the context manager calls
+  `shutdown()`, preventing use-after-free on ctypes function pointers.
+- **Deterministic replays** — identical seeds produce identical games, making
+  the example useful for regression testing.
+
+Build and run from the repository root:
+
+```sh
+nimble buildTorpedoExamplePy
+nimble runTorpedoExamplePy          # default pacing
+nimble runTorpedoExamplePy -- --fast # reduced delays
+```
+
+See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full
+architecture, sequence diagrams, and API surface reference.
+
 ## BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
@@ -365,13 +406,15 @@ Thread-local (GC-managed, per thread):
       brokerCtx: BrokerContext           ~8 bytes
       listeners: Table[uint64, proc]     ~64 bytes (3 entries: id→closure ptr)
       nextId: uint64                     ~8 bytes
+      inFlight: seq[Future[void]]        ~24 bytes (seq header, tracks active futures)
 
     buckets[1]:  (ctxA)
       brokerCtx: BrokerContext           ~8 bytes
       listeners: Table[uint64, proc]     ~48 bytes (1 entry)
       nextId: uint64                     ~8 bytes
+      inFlight: seq[Future[void]]        ~24 bytes
 
-Total: ~200 bytes for 2 contexts, 4 listeners.
+Total: ~248 bytes for 2 contexts, 4 listeners.
 ```
 
 **Key points:**
@@ -411,13 +454,13 @@ Total: ~80 bytes for 1 context, 1 provider signature.
 
 ```
 Shared memory (process lifetime):
-  Global bucket array    4 × sizeof(Bucket)          ~160 bytes (initial capacity 4)
+  Global bucket array    4 × sizeof(Bucket)          ~200 bytes (initial capacity 4)
   Lock (OS mutex)                                     ~40-64 bytes
   Init + count + cap                                  ~25 bytes
 
-  Bucket[0]: (Default, threadA, chanA, hasListeners)   — 3 buckets in use
-  Bucket[1]: (Default, threadB, chanB, hasListeners)
-  Bucket[2]: (Default, threadC, chanC, hasListeners)
+  Bucket[0]: (Default, threadA, chanA, threadGen, active, hasListeners)  — 3 buckets
+  Bucket[1]: (Default, threadB, chanB, threadGen, active, hasListeners)
+  Bucket[2]: (Default, threadC, chanC, threadGen, active, hasListeners)
 
   AsyncChannel × 3       ~200 bytes each              ~600 bytes
     (one per listener-thread; includes ptr Channel
@@ -434,11 +477,12 @@ Threadvar (per thread, GC-managed):
 Per-thread processLoop:
   One Future per listener-thread                      ~128 bytes × 3
 
-Total: ~1.5 KB for 3 listener-threads, 4 listeners, 1 context.
+Total: ~1.6 KB for 3 listener-threads, 4 listeners, 1 context.
 ```
 
 **Key points:**
 - Channels are allocated **per (BrokerContext, listener-thread)** pair — not per listener. Thread B's two listeners share one channel.
+- Each bucket includes a `threadGen: uint64` field to disambiguate reused threadvar addresses across thread lifetimes, and an `active: bool` flag.
 - Emitter threads allocate **zero** persistent memory — `emit()` only acquires the lock, snapshots targets, and sends via `sendSync`.
 - Buckets persist across `dropListener`/`listen` cycles (channel reuse). Only program shutdown leaks them.
 
@@ -448,7 +492,7 @@ Total: ~1.5 KB for 3 listener-threads, 4 listeners, 1 context.
 
 ```
 Shared memory (process lifetime):
-  Global bucket array    4 × sizeof(Bucket)           ~144 bytes (initial capacity 4)
+  Global bucket array    4 × sizeof(Bucket)           ~160 bytes (initial capacity 4)
   Lock (OS mutex)                                      ~40-64 bytes
   Init + count + cap                                   ~25 bytes
   Timeout var (Duration = int64)                       ~8 bytes
@@ -493,7 +537,7 @@ Total baseline: ~660 bytes for 1 provider, 1 context.
 | Channels | None | None | One per listener-thread | One per context (request) + one per cross-thread call (response) |
 | Per-call cost | Zero | Zero | Zero | ~200 bytes response channel (cross-thread only) |
 | OS resources | None | None | pipe/eventfd per channel | pipe/eventfd per channel + per cross-thread call |
-| Baseline per context | ~80 bytes | ~16 bytes | ~440 bytes (bucket + channel + processLoop) | ~440 bytes (bucket + channel + processLoop) |
+| Baseline per context | ~100 bytes | ~16 bytes | ~450 bytes (bucket + channel + processLoop) | ~450 bytes (bucket + channel + processLoop) |
 | Intentional leaks | None | None | Channel on shutdown | Request channel on clearProvider; response channel on timeout |
 
 ## Known Limitations
