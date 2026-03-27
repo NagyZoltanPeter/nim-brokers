@@ -194,7 +194,7 @@ def draw_screen(red_view: object, blue_view: object, event_log: deque[str], bann
     )
     print()
     print("Event Log")
-    for line in event_log:
+    for line in list(event_log):
         print(f"- {line}")
     print()
     print("Press q to quit")
