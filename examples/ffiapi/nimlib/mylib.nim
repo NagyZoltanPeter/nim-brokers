@@ -23,7 +23,7 @@ when defined(BrokerFfiApi):
   import brokers/api_library
 
 # ---------------------------------------------------------------------------
-# Shared item types (used in seq[T] result fields)
+# Shared item types (used in seq[T] request and result fields)
 # ---------------------------------------------------------------------------
 
 ## DeviceInfo — flat struct describing a single device.
@@ -36,33 +36,42 @@ ApiType:
     address*: string
     online*: bool
 
+## AddDeviceSpec — FFI-safe batch input item for AddDevice.
+ApiType:
+  type AddDeviceSpec = object
+    name*: string
+    deviceType*: string
+    address*: string
+
 # ---------------------------------------------------------------------------
 # Request Brokers
 # ---------------------------------------------------------------------------
 
-## CreateRequest: called after mylib_create() to configure the monitoring engine.
+## InitializeRequest: called after mylib_createContext() to configure the monitoring engine.
 RequestBroker(API):
-  type CreateRequest = object
+  type InitializeRequest = object
     configPath*: string
     initialized*: bool
 
-  proc signature*(configPath: string): Future[Result[CreateRequest, string]] {.async.}
+  proc signature*(
+    configPath: string
+  ): Future[Result[InitializeRequest, string]] {.async.}
 
-## DestroyRequest: called before mylib_shutdown() to tear down state.
+## ShutdownRequest: called by mylib_shutdown() to tear down state.
 RequestBroker(API):
-  type DestroyRequest = object
+  type ShutdownRequest = object
     status*: int32
 
-  proc signature*(): Future[Result[DestroyRequest, string]] {.async.}
+  proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
-## AddDevice: register a new device for monitoring.
+## AddDevice: register one or more devices for monitoring.
 RequestBroker(API):
   type AddDevice = object
-    deviceId*: int64
+    devices*: seq[DeviceInfo]
     success*: bool
 
   proc signature*(
-    name: string, deviceType: string, address: string
+    devices: seq[AddDeviceSpec]
   ): Future[Result[AddDevice, string]] {.async.}
 
 ## RemoveDevice: stop monitoring a device and remove it.
@@ -130,57 +139,85 @@ var gProviderCtx {.threadvar.}: BrokerContext
 proc nowMs(): int64 =
   int64(chronos.Moment.now().epochNanoSeconds div 1_000_000)
 
-proc setupProviders(ctx: BrokerContext) =
+proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ## Set up broker providers on the library's processing thread.
   gProviderCtx = ctx
   gNextDeviceId = 1
   gDevices = @[]
 
-  # CreateRequest provider
-  discard CreateRequest.setProvider(
-    ctx,
-    proc(configPath: string): Future[Result[CreateRequest, string]] {.closure, async.} =
-      gConfigPath = configPath
-      gInitialized = true
-      return ok(CreateRequest(configPath: configPath, initialized: true)),
-  )
-
-  # DestroyRequest provider
-  discard DestroyRequest.setProvider(
-    ctx,
-    proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
-      gInitialized = false
-      gDevices = @[]
-      return ok(DestroyRequest(status: 0)),
-  )
-
-  # AddDevice provider
-  discard AddDevice.setProvider(
+  # InitializeRequest provider
+  let initializeProviderRes = InitializeRequest.setProvider(
     ctx,
     proc(
-        name: string, deviceType: string, address: string
+        configPath: string
+    ): Future[Result[InitializeRequest, string]] {.closure, async.} =
+      gConfigPath = configPath
+      gInitialized = true
+      return ok(InitializeRequest(configPath: configPath, initialized: true)),
+  )
+  if initializeProviderRes.isErr():
+    return err(
+      "failed to register InitializeRequest provider: " & initializeProviderRes.error()
+    )
+
+  # ShutdownRequest provider
+  let shutdownProviderRes = ShutdownRequest.setProvider(
+    ctx,
+    proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      gInitialized = false
+      gDevices = @[]
+      return ok(ShutdownRequest(status: 0)),
+  )
+  if shutdownProviderRes.isErr():
+    return
+      err("failed to register ShutdownRequest provider: " & shutdownProviderRes.error())
+
+  # AddDevice provider
+  let addDeviceProviderRes = AddDevice.setProvider(
+    ctx,
+    proc(
+        devices: seq[AddDeviceSpec]
     ): Future[Result[AddDevice, string]] {.closure, async.} =
       if not gInitialized:
         return err("Library not initialized")
-      let id = gNextDeviceId
-      inc gNextDeviceId
-      gDevices.add(
-        Device(
-          id: id, name: name, deviceType: deviceType, address: address, online: true
+      var addedDevices: seq[DeviceInfo] = @[]
+      for device in devices:
+        let id = gNextDeviceId
+        inc gNextDeviceId
+        gDevices.add(
+          Device(
+            id: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+            online: true,
+          )
         )
-      )
-      # Emit a discovery event
-      await DeviceDiscovered.emit(
-        gProviderCtx,
-        DeviceDiscovered(
-          deviceId: id, name: name, deviceType: deviceType, address: address
-        ),
-      )
-      return ok(AddDevice(deviceId: id, success: true)),
+        addedDevices.add(
+          DeviceInfo(
+            deviceId: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+            online: true,
+          )
+        )
+        await DeviceDiscovered.emit(
+          gProviderCtx,
+          DeviceDiscovered(
+            deviceId: id,
+            name: device.name,
+            deviceType: device.deviceType,
+            address: device.address,
+          ),
+        )
+      return ok(AddDevice(devices: addedDevices, success: true)),
   )
+  if addDeviceProviderRes.isErr():
+    return err("failed to register AddDevice provider: " & addDeviceProviderRes.error())
 
   # RemoveDevice provider
-  discard RemoveDevice.setProvider(
+  let removeDeviceProviderRes = RemoveDevice.setProvider(
     ctx,
     proc(deviceId: int64): Future[Result[RemoveDevice, string]] {.closure, async.} =
       if not gInitialized:
@@ -199,9 +236,13 @@ proc setupProviders(ctx: BrokerContext) =
           return ok(RemoveDevice(success: true))
       return err("Device not found: " & $deviceId),
   )
+  if removeDeviceProviderRes.isErr():
+    return err(
+      "failed to register RemoveDevice provider: " & removeDeviceProviderRes.error()
+    )
 
   # GetDevice provider
-  discard GetDevice.setProvider(
+  let getDeviceProviderRes = GetDevice.setProvider(
     ctx,
     proc(deviceId: int64): Future[Result[GetDevice, string]] {.closure, async.} =
       if not gInitialized:
@@ -219,9 +260,11 @@ proc setupProviders(ctx: BrokerContext) =
           )
       return err("Device not found: " & $deviceId),
   )
+  if getDeviceProviderRes.isErr():
+    return err("failed to register GetDevice provider: " & getDeviceProviderRes.error())
 
   # ListDevices provider
-  discard ListDevices.setProvider(
+  let listDevicesProviderRes = ListDevices.setProvider(
     ctx,
     proc(): Future[Result[ListDevices, string]] {.closure, async.} =
       if not gInitialized:
@@ -239,6 +282,11 @@ proc setupProviders(ctx: BrokerContext) =
         )
       return ok(ListDevices(devices: infos)),
   )
+  if listDevicesProviderRes.isErr():
+    return
+      err("failed to register ListDevices provider: " & listDevicesProviderRes.error())
+
+  ok()
 
 # ---------------------------------------------------------------------------
 # Library registration — MUST be last
@@ -248,9 +296,9 @@ when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name:
       "mylib"
-    createRequest:
-      CreateRequest
-    destroyRequest:
-      DestroyRequest
+    initializeRequest:
+      InitializeRequest
+    shutdownRequest:
+      ShutdownRequest
 
 {.pop.}

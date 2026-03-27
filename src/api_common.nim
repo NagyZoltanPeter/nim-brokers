@@ -148,6 +148,17 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
 
 var gApiHeaderDeclarations* {.compileTime.}: seq[string] = @[]
 var gApiLibraryName* {.compileTime.}: string = ""
+const ApiLibPrefixPlaceholder* = "__BROKERS_API_LIB_PREFIX__"
+
+type ApiCExportWrapper* =
+  tuple[
+    publicSuffix: string,
+    rawName: string,
+    returnType: string,
+    params: seq[(string, string)],
+  ]
+
+var gApiCExportWrappers* {.compileTime.}: seq[ApiCExportWrapper] = @[]
 
 # ---------------------------------------------------------------------------
 # Compile-time accumulators for delivery thread event system
@@ -173,11 +184,26 @@ var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiCppClassMethods* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ wrapper class method declarations.
 
+var gApiCppInterfaceSummary* {.compileTime.}: seq[string] =
+  @[] ## Accumulates dense, type-free C++ wrapper interface summary lines.
+
+var gApiCppPreamble* {.compileTime.}: seq[string] =
+  @[] ## Accumulates reusable C++ helper templates and event traits.
+
 var gApiCppStructs* {.compileTime.}: seq[string] =
   @[] ## Accumulates C++ struct definitions (emitted before the class).
 
 var gApiCppPrivateMembers* {.compileTime.}: seq[string] =
-  @[] ## Accumulates C++ private static members (trampolines, storage).
+  @[] ## Accumulates C++ private members and aliases.
+
+var gApiCppConstructorInitializers* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ wrapper constructor initializer fragments.
+
+var gApiCppShutdownStatements* {.compileTime.}: seq[string] =
+  @[] ## Accumulates C++ wrapper shutdown cleanup statements.
+
+var gApiCppEventSupportGenerated* {.compileTime.}: bool = false
+  ## Flag: has the shared C++ EventDispatcher template been emitted?
 
 # ---------------------------------------------------------------------------
 # Compile-time accumulators for Python wrapper generation
@@ -194,6 +220,9 @@ var gApiPyMethods* {.compileTime.}: seq[string] =
 
 var gApiPyEventMethods* {.compileTime.}: seq[string] =
   @[] ## Python wrapper class on/off event method definitions.
+
+var gApiPyInterfaceSummary* {.compileTime.}: seq[string] =
+  @[] ## Accumulates dense, type-free Python wrapper interface summary lines.
 
 var gApiPyCallbackSetup* {.compileTime.}: seq[string] =
   @[] ## Python CFUNCTYPE definitions and argtypes/restype setup lines.
@@ -222,6 +251,17 @@ proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =
   gApiHeaderDeclarations.add(decl)
+
+proc apiPublicCName*(suffix: string): string {.compileTime.} =
+  ApiLibPrefixPlaceholder & suffix
+
+proc registerApiCExportWrapper*(
+    publicSuffix: string,
+    rawName: string,
+    returnType: string,
+    params: seq[(string, string)],
+) {.compileTime.} =
+  gApiCExportWrappers.add((publicSuffix, rawName, returnType, params))
 
 # ---------------------------------------------------------------------------
 # Compile-time C++ type mapping
@@ -484,6 +524,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
       outDir & "/" & libName & ".h"
     else:
       libName & ".h"
+  let apiPrefix = libName & "_"
   var header = "#ifndef " & guardName & "\n"
   header.add("#define " & guardName & "\n\n")
   header.add("#include <stdint.h>\n")
@@ -491,7 +532,7 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
   header.add("#include <stddef.h>\n\n")
   header.add("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
   for decl in gApiHeaderDeclarations:
-    header.add(decl)
+    header.add(decl.replace(ApiLibPrefixPlaceholder, apiPrefix))
     header.add("\n")
   header.add("\n#ifdef __cplusplus\n}\n#endif\n\n")
 
@@ -511,6 +552,18 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
 
     header.add("#ifdef __cplusplus\n\n")
 
+    header.add("// Quick C++ wrapper interface summary (names only)\n")
+    header.add("// class " & className & " {\n")
+    header.add("// public:\n")
+    for summaryLine in [
+      "createContext();", "validContext() const;", "operator bool() const;",
+      "shutdown();", "ctx() const;",
+    ]:
+      header.add("//   " & summaryLine & "\n")
+    for summaryLine in gApiCppInterfaceSummary:
+      header.add("//   " & summaryLine & "\n")
+    header.add("// };\n\n")
+
     # C++ standard includes
     header.add("#include <string>\n")
     header.add("#include <string_view>\n")
@@ -520,11 +573,13 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     header.add("#include <optional>\n")
     header.add("#include <mutex>\n")
     header.add("#include <unordered_map>\n")
+    header.add("#include <utility>\n")
     header.add("#include <cstring>\n")
     header.add("#include <atomic>\n\n")
 
     # Derive namespace from library name (lowercase)
     let nsName = libName.toLowerAscii().replace("-", "_")
+    let createContextResultName = className & "CreateContextResult"
 
     header.add("namespace " & nsName & " {\n\n")
 
@@ -546,40 +601,117 @@ proc generateHeaderFile*(outDir: string) {.compileTime, raises: [].} =
     header.add("    const std::string& error() const { return error_; }\n")
     header.add("};\n\n")
 
+    header.add("template <>\n")
+    header.add("class Result<void> {\n")
+    header.add("    bool ok_ = true;\n")
+    header.add("    std::string error_;\n")
+    header.add("public:\n")
+    header.add("    Result() = default;\n")
+    header.add("    Result(std::string err) : ok_(false), error_(std::move(err)) {}\n")
+    header.add("    bool ok() const { return ok_; }\n")
+    header.add("    explicit operator bool() const { return ok(); }\n")
+    header.add("    const std::string& error() const { return error_; }\n")
+    header.add("};\n\n")
+
     # C++ structs (ApiType structs, then RequestBroker result structs)
     for s in gApiCppStructs:
-      header.add(s)
+      header.add(s.replace(ApiLibPrefixPlaceholder, apiPrefix))
       header.add("\n")
+
+    header.add("struct " & createContextResultName & " {\n")
+    header.add("    uint32_t ctx = 0;\n")
+    header.add("    " & createContextResultName & "() = default;\n")
+    header.add(
+      "    explicit " & createContextResultName & "(" & libName &
+        "CreateContextResult& c)\n"
+    )
+    header.add("        : ctx(c.ctx) {\n")
+    header.add("        " & "free_" & libName & "_create_context_result(&c);\n")
+    header.add("    }\n")
+    header.add("};\n\n")
 
     header.add("} // namespace " & nsName & "\n\n")
 
+    for p in gApiCppPreamble:
+      header.add(
+        p.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+          ApiLibPrefixPlaceholder, apiPrefix
+        ) & "\n"
+      )
+    if gApiCppPreamble.len > 0:
+      header.add("\n")
+
     # Class definition (outside namespace)
     header.add("class " & className & " {\n")
+    header.add("protected:\n")
     header.add("    uint32_t ctx_;\n\n")
 
-    # Private members (trampolines, callback storage)
+    header.add("private:\n")
+
+    # Private members and aliases
     if gApiCppPrivateMembers.len > 0:
       for m in gApiCppPrivateMembers:
-        header.add(m & "\n")
+        header.add(
+          m.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+            ApiLibPrefixPlaceholder, apiPrefix
+          ) & "\n"
+        )
       header.add("\n")
 
     header.add("public:\n")
-    header.add("    " & className & "() : ctx_(0) {}\n")
-    header.add("    ~" & className & "() { if (ctx_) shutdown(); }\n")
+    var ctorInitializers = @["ctx_(0)"]
+    for init in gApiCppConstructorInitializers:
+      ctorInitializers.add(init)
+    header.add("    " & className & "() : " & ctorInitializers.join(", ") & " {}\n")
+    header.add("    virtual ~" & className & "() { shutdown(); }\n")
     header.add("    " & className & "(const " & className & "&) = delete;\n")
     header.add("    " & className & "& operator=(const " & className & "&) = delete;\n")
     header.add("    " & className & "(" & className & "&&) = delete;\n")
     header.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
-    header.add("    static void initialize() { " & libName & "_initialize(); }\n")
+    header.add("    " & nsName & "::Result<void> createContext() {\n")
+    header.add("        if (ctx_)\n")
     header.add(
-      "    bool create() { ctx_ = " & libName & "_create(); return ctx_ != 0; }\n"
+      "            return " & nsName &
+        "::Result<void>(std::string(\"Context already created\"));\n"
     )
+    header.add("        auto c = " & libName & "_createContext();\n")
+    header.add("        if (c.error_message) {\n")
+    header.add("            std::string err(c.error_message);\n")
+    header.add("            " & "free_" & libName & "_create_context_result(&c);\n")
+    header.add("            return " & nsName & "::Result<void>(std::move(err));\n")
+    header.add("        }\n")
+    header.add("        ctx_ = c.ctx;\n")
+    header.add("        " & "free_" & libName & "_create_context_result(&c);\n")
+    header.add("        if (!ctx_)\n")
     header.add(
-      "    void shutdown() { if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; } }\n"
+      "            return " & nsName &
+        "::Result<void>(std::string(\"createContext failed\"));\n"
     )
-    header.add("    uint32_t ctx() const { return ctx_; }\n\n")
+    header.add("        return " & nsName & "::Result<void>();\n")
+    header.add("    }\n")
+    header.add("    bool validContext() const noexcept { return ctx_ != 0; }\n")
+    header.add(
+      "    explicit operator bool() const noexcept { return validContext(); }\n"
+    )
+    header.add("    void shutdown() noexcept {\n")
+    for stmt in gApiCppShutdownStatements:
+      header.add(
+        "        " &
+          stmt.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+            ApiLibPrefixPlaceholder, apiPrefix
+          ) & "\n"
+      )
+    header.add("        if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; }\n")
+    header.add("    }\n")
+    header.add("    uint32_t ctx() const noexcept { return ctx_; }\n\n")
     for cppMethod in gApiCppClassMethods:
-      header.add("    " & cppMethod.replace("__CPP_NS__", nsName) & "\n")
+      header.add(
+        "    " &
+          cppMethod
+          .replace("__CPP_NS__", nsName)
+          .replace("__CPP_CLASS__", className)
+          .replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n"
+      )
     header.add("};\n\n")
     header.add("#endif /* __cplusplus */\n\n")
 
@@ -603,6 +735,7 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
       outDir & "/" & libName & ".py"
     else:
       libName & ".py"
+  let apiPrefix = libName & "_"
 
   # Derive class name from library name (PascalCase)
   var className = ""
@@ -654,6 +787,14 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("        here / f\"{name}{suffix}\",\n")
   py.add("    ]:\n")
   py.add("        if candidate.exists():\n")
+  py.add("            # Python 3.8+ no longer adds the DLL's own directory to the\n")
+  py.add("            # search path for transitive dependencies (security change).\n")
+  py.add("            # Add it explicitly so that bundled runtime DLLs such as\n")
+  py.add("            # libwinpthread-1.dll are found next to the loaded library.\n")
+  py.add(
+    "            if sys.platform == \"win32\" and hasattr(os, \"add_dll_directory\"):\n"
+  )
+  py.add("                os.add_dll_directory(str(candidate.parent))\n")
   py.add("            return ctypes.CDLL(str(candidate))\n")
   py.add("    # Fall back to system search\n")
   py.add("    path = ctypes.util.find_library(name)\n")
@@ -681,6 +822,14 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
+  let pyCreateContextResultName = className & "CreateContextResult"
+  let freeCreateContextResultFuncName = "free_" & libName & "_create_context_result"
+  py.add("class " & pyCreateContextResultName & "(ctypes.Structure):\n")
+  py.add("    _fields_ = [\n")
+  py.add("        (\"ctx\", ctypes.c_uint32),\n")
+  py.add("        (\"error_message\", ctypes.c_char_p),\n")
+  py.add("    ]\n\n")
+
   for s in gApiPyCtypesStructs:
     py.add(s)
     py.add("\n\n")
@@ -705,12 +854,23 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
+  py.add("# Quick Python wrapper interface summary (names only)\n")
+  py.add("# class " & className & ":\n")
+  for summaryLine in [
+    "__enter__()", "__exit__()", "createContext()", "create_context()",
+    "validContext()", "valid_context()", "__bool__()", "shutdown()", "ctx",
+  ]:
+    py.add("#   " & summaryLine & "\n")
+  for summaryLine in gApiPyInterfaceSummary:
+    py.add("#   " & summaryLine & "\n")
+  py.add("\n")
   py.add("class " & className & ":\n")
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
   py.add("        with " & className & "() as lib:\n")
-  py.add("            result = lib.create_request(\"/path/to/config\")\n")
-  py.add("            print(result.config_path)\n")
+  py.add("            lib.createContext()\n")
+  py.add("            result = lib.initializeRequest(\"/path/to/config\")\n")
+  py.add("            print(result.configPath)\n")
   py.add("    \"\"\"\n\n")
 
   # __init__
@@ -723,27 +883,27 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
     "        self._cb_refs: dict[tuple[str, int], ctypes._CFuncPtr] = {}  # prevent GC\n"
   )
   py.add("        self._lock = threading.Lock()\n")
-  py.add("        self._setup_signatures()\n")
-  py.add("        self._lib." & libName & "_initialize()\n")
-  py.add("        self._ctx = self._lib." & libName & "_create()\n")
-  py.add("        if self._ctx == 0:\n")
-  py.add(
-    "            raise " & className & "Error(\"Library context creation failed\")\n\n"
-  )
+  py.add("        self._setup_signatures()\n\n")
 
   # _setup_signatures
   py.add("    def _setup_signatures(self) -> None:\n")
   py.add("        \"\"\"Configure ctypes argtypes/restype for all C functions.\"\"\"\n")
   py.add("        _lib = self._lib\n")
   # Lifecycle functions
-  py.add("        _lib." & libName & "_initialize.argtypes = []\n")
-  py.add("        _lib." & libName & "_initialize.restype = None\n")
-  py.add("        _lib." & libName & "_create.argtypes = []\n")
-  py.add("        _lib." & libName & "_create.restype = ctypes.c_uint32\n")
+  py.add("        _lib." & libName & "_createContext.argtypes = []\n")
+  py.add(
+    "        _lib." & libName & "_createContext.restype = " & pyCreateContextResultName &
+      "\n"
+  )
+  py.add(
+    "        _lib." & freeCreateContextResultFuncName & ".argtypes = [ctypes.POINTER(" &
+      pyCreateContextResultName & ")]\n"
+  )
+  py.add("        _lib." & freeCreateContextResultFuncName & ".restype = None\n")
   py.add("        _lib." & libName & "_shutdown.argtypes = [ctypes.c_uint32]\n")
   py.add("        _lib." & libName & "_shutdown.restype = None\n")
   for setup in gApiPyCallbackSetup:
-    py.add("        " & setup & "\n")
+    py.add("        " & setup.replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n")
   py.add("\n")
 
   # Context manager
@@ -752,19 +912,63 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   py.add("    def __exit__(self, *_: object) -> None:\n")
   py.add("        self.shutdown()\n\n")
 
+  py.add("    def createContext(self) -> None:\n")
+  py.add("        \"\"\"Create the library context explicitly.\"\"\"\n")
+  py.add("        if self._ctx != 0:\n")
+  py.add("            raise " & className & "Error(\"Context already created\")\n")
+  py.add("        c = self._lib." & libName & "_createContext()\n")
+  py.add("        try:\n")
+  py.add("            if c.error_message:\n")
+  py.add(
+    "                raise " & className & "Error(c.error_message.decode(\"utf-8\"))\n"
+  )
+  py.add("            self._ctx = c.ctx\n")
+  py.add("            if self._ctx == 0:\n")
+  py.add(
+    "                raise " & className & "Error(\"Library context creation failed\")\n"
+  )
+  py.add("        finally:\n")
+  py.add(
+    "            self._lib." & freeCreateContextResultFuncName & "(ctypes.byref(c))\n\n"
+  )
+
+  py.add("    def create_context(self) -> None:\n")
+  py.add("        self.createContext()\n\n")
+
+  py.add("    def validContext(self) -> bool:\n")
+  py.add("        return self._ctx != 0\n\n")
+
+  py.add("    def valid_context(self) -> bool:\n")
+  py.add("        return self.validContext()\n\n")
+
+  py.add("    def __bool__(self) -> bool:\n")
+  py.add("        return self.validContext()\n\n")
+
+  py.add("    def _requireContext(self) -> None:\n")
+  py.add("        if self._ctx == 0:\n")
+  py.add(
+    "            raise " & className & "Error(\"Library context is not created\")\n\n"
+  )
+
   # shutdown
   py.add("    def shutdown(self) -> None:\n")
   py.add(
     "        \"\"\"Shut down the library context. Safe to call multiple times.\"\"\"\n"
   )
-  py.add("        if self._ctx:\n")
-  py.add("            self._lib." & libName & "_shutdown(self._ctx)\n")
+  py.add("        ctx = getattr(self, \"_ctx\", None)\n")
+  py.add("        if ctx:\n")
+  py.add("            self._lib." & libName & "_shutdown(ctx)\n")
   py.add("            self._ctx = 0\n")
   py.add("            self._cb_refs.clear()\n\n")
 
   # __del__
   py.add("    def __del__(self) -> None:\n")
-  py.add("        self.shutdown()\n\n")
+  py.add("        # Defensive: __del__ may run on partially constructed objects\n")
+  py.add("        if hasattr(self, \"shutdown\"):\n")
+  py.add("            try:\n")
+  py.add("                self.shutdown()\n")
+  py.add("            except Exception:\n")
+  py.add("                pass\n\n")
 
   # ctx property
   py.add("    @property\n")
@@ -775,12 +979,16 @@ proc generatePythonFile*(outDir: string) {.compileTime, raises: [].} =
   # Request methods
   let pyErrClass = className & "Error"
   for m in gApiPyMethods:
-    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add(
+      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+    )
     py.add("\n\n")
 
   # Event methods
   for m in gApiPyEventMethods:
-    py.add(m.replace("__LIB_ERROR__", pyErrClass))
+    py.add(
+      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+    )
     py.add("\n\n")
 
   try:

@@ -173,9 +173,8 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
       pyDc.add("    \"\"\"" & typeName & " data object.\"\"\"\n")
       for (fname, ftype) in fields:
         let pyType = nimTypeToPyAnnotation(ident(ftype))
-        let snakeFname = toSnakeCase(fname)
         let pyDefault = nimTypeToPyDefault(ident(ftype))
-        pyDc.add("    " & snakeFname & ": " & pyType & " = " & pyDefault)
+        pyDc.add("    " & fname & ": " & pyType & " = " & pyDefault)
         pyDc.add("\n")
       gApiPyDataclasses.add(pyDc)
 

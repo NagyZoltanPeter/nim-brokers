@@ -35,11 +35,35 @@ proc findPythonExe(): string =
   if result.len == 0:
     quit "Python interpreter not found. Install python3 or add it to PATH."
 
+proc nimMainPrefixFlag(prefix: string): string =
+  ## Returns "--nimMainPrefix:<prefix>" on POSIX and "" on Windows.
+  ##
+  ## --nimMainPrefix is a POSIX-only concern.  On POSIX, dlopen with
+  ## RTLD_GLOBAL merges all shared-object exports into a single flat namespace,
+  ## so two Nim .so files that both define NimMain collide; the prefix renames
+  ## them (e.g. fooNimMain, barNimMain) to prevent that.
+  ##
+  ## On Windows the PE loader resolves every import as "DLL!Symbol", giving
+  ## each DLL its own isolated namespace — foo.dll!NimMain and bar.dll!NimMain
+  ## never clash, so the prefix is unnecessary.
+  ##
+  ## Using --nimMainPrefix on Windows also triggers a Nim codegen bug:
+  ## the C generator forward-declares the prefixed NimMain without
+  ## __declspec(dllexport) and then defines it with N_LIB_EXPORT, which both
+  ## clang and GCC reject as a hard error (err_attribute_dll_redeclaration).
+  when defined(windows):
+    result = ""
+  else:
+    result = " --nimMainPrefix:" & prefix
+
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --nimMainPrefix:mylib --path:src --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/ffiapi/nimlib/build"
+  result.add(nimMainPrefixFlag("mylib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
 
@@ -67,8 +91,17 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
 
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
-  exec "nim c " & env & " -r --path:src --out:" & quoteArg(outputPath) & " test/" & path &
+  let label = path & " [" & env & "]"
+  exec "nim c " & env & " --path:src --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
+  echo "=== RUN  " & label & " ==="
+  let (output, exitCode) = gorgeEx(outputPath)
+  if output.len > 0:
+    echo output
+  if exitCode != 0:
+    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
+    quit(1)
+  echo "=== PASS " & label & " ==="
 
 proc isExcludedNimPath(path: string): bool =
   let normalized = path.replace('\\', '/')
@@ -142,16 +175,20 @@ task test, "Run all tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
     for opt in [
-      "--mm:orc", "--mm:refc", "-d:release -d:gcAssert -d:sysAssert --mm:orc",
-      "-d:release -d:gcAssert -d:sysAssert --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:refc",
     ]:
       test opt, f
 
   let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in [
-      "--mm:orc --threads:on", "--mm:refc --threads:on",
-      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
       test opt, f
 
@@ -160,8 +197,10 @@ task perftest, "Run performance and stress tests":
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
     for opt in [
-      "--mm:orc --threads:on", "--mm:refc --threads:on",
-      "-d:release --mm:orc --threads:on", "-d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
       test opt, f
 
@@ -170,12 +209,27 @@ task testApi, "Run FFI API broker tests":
     ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
   for f in apiTests:
     for opt in [
-      "-d:BrokerFfiApi --mm:orc --threads:on", "-d:BrokerFfiApi --mm:refc --threads:on",
-      "-d:BrokerFfiApi -d:release --mm:orc --threads:on",
-      "-d:BrokerFfiApi -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
+      when defined(windows):
+        # On Windows, chronos' waitForSingleObject fires its completion callback
+        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+        # suspends known Nim threads, so it can collect futures/handles still
+        # referenced by the unsuspended thread-pool callback → crash.
+        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+        if "--mm:refc" in opt:
+          echo "Skipping " & f & " (" & opt & ") on Windows: " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
       let extraOpt =
-        if f == "test_api_library_init": " --nimMainPrefix:apitestlib" else: ""
+        if f == "test_api_library_init":
+          nimMainPrefixFlag("apitestlib")
+        else:
+          ""
       test opt & extraOpt, f
 
 task buildFfiExample, "Build FFI API example library":
@@ -207,6 +261,92 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   buildFfiExampleLibrary(true)
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
+
+proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
+  var flags =
+    "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
+    " --path:src --outdir:test/pytestlib/build"
+  flags.add(nimMainPrefixFlag("pytestlib"))
+  if release:
+    flags.add(" -d:release")
+  exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
+
+proc soElfBits(soPath: string): int =
+  ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
+  ## determined (e.g. non-Linux, file tool absent).
+  let (info, rc) = gorgeEx("file " & quoteArg(soPath))
+  if rc != 0:
+    return 0
+  if "ELF 64-bit" in info:
+    return 64
+  if "ELF 32-bit" in info:
+    return 32
+  return 0
+
+proc pythonExeBits(exe: string): int =
+  ## Returns 32 or 64 for the pointer width of the given Python interpreter,
+  ## or 0 on failure.
+  let (output, rc) =
+    gorgeEx(exe & " -c \"import struct; print(struct.calcsize('P') * 8)\"")
+  if rc != 0:
+    return 0
+  try:
+    return parseInt(output.strip())
+  except ValueError:
+    return 0
+
+proc findPythonForBits(wantBits: int): string =
+  ## Return the path of the first Python interpreter whose pointer width equals
+  ## wantBits (32 or 64).  Returns "" when none is found.
+  ## Checks the obvious names/paths in order; extend the list as needed.
+  let candidates = [
+    findExe("python3"),
+    findExe("python"),
+    "/usr/bin/python3",
+    "/usr/local/bin/python3",
+    "/usr/bin/python",
+    "/usr/local/bin/python",
+  ]
+  for c in candidates:
+    if c.len > 0 and pythonExeBits(c) == wantBits:
+      return c
+  return ""
+
+task buildPyTestLib, "Build the Python binding test library":
+  buildPyTestLibrary()
+
+task testFfiApi,
+  "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
+  for mm in ["orc", "refc"]:
+    for release in [false, true]:
+      let mode = if release: "release" else: "debug"
+      echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
+      when defined(windows):
+        # On Windows, chronos' waitForSingleObject fires its completion callback
+        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+        # suspends known Nim threads, so it can collect futures/handles still
+        # referenced by the unsuspended thread-pool callback → crash.
+        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+        if "refc" in mm:
+          echo "Skipping (" & mm & ") on Windows: " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
+      buildPyTestLibrary(mm, release)
+      let bits = soElfBits("test/pytestlib/build/libpytestlib.so")
+      # When ELF inspection is unavailable (bits == 0) fall back to the default
+      # Python and let ctypes report any mismatch itself.
+      let python =
+        if bits == 0:
+          findPythonExe()
+        else:
+          findPythonForBits(bits)
+      if python.len == 0:
+        echo "Skipping Python tests: no " & $bits &
+          "-bit Python interpreter found to match the compiled .so."
+        continue
+      exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
+        quoteArg("test_*.py") & " -v"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

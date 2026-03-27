@@ -30,7 +30,7 @@ C++ wrapper, and Python `ctypes.Structure` definitions all assume that default
 layout.
 
 The FFI API is designed around a per-library-context runtime model. Each call to
-`<lib>_create()` creates one independent broker context with its own worker
+`<lib>_createContext()` creates one independent broker context with its own worker
 threads and broker registrations.
 
 ---
@@ -57,8 +57,9 @@ RequestBroker(API):
 This generates:
 
 - a C result struct
-- a C-exported request function such as `get_device_request_with_args(...)`
-- a `free_*_result(...)` function for result-owned memory
+- a C-exported request function such as `mylib_get_device(...)` once the broker is
+  registered into a library
+- a library-prefixed `mylib_free_*_result(...)` function for result-owned memory
 - C++ and Python wrapper methods built from the same declaration
 
 ### 2. `EventBroker(API)`
@@ -77,7 +78,7 @@ EventBroker(API):
 This generates:
 
 - a C callback typedef
-- `on<EventType>(ctx, callback)`
+- `on<EventType>(ctx, callback, userData)`
 - `off<EventType>(ctx, handle)`
 - generated wrapper registration methods in C++ and Python
 
@@ -91,14 +92,13 @@ Example:
 ```nim
 registerBrokerLibrary:
   name: "mylib"
-  createRequest: CreateRequest
-  destroyRequest: DestroyRequest
+  initializeRequest: InitializeRequest
+  shutdownRequest: ShutdownRequest
 ```
 
 This generates:
 
-- `mylib_initialize()`
-- `mylib_create()`
+- `mylib_createContext()`
 - `mylib_shutdown(ctx)`
 - `mylib_free_string(...)`
 - the library context registry
@@ -110,29 +110,15 @@ This generates:
 
 ## Lifecycle Model
 
-The FFI API deliberately separates process initialization from per-context
-creation.
-
-### Process-wide runtime setup
-
-`<lib>_initialize()` must be called once before using the library from foreign
-code.
-
-Responsibilities:
-
-- initialize the Nim runtime
-- configure foreign-thread GC support where applicable
-- set the Nim GC stack bottom for the caller thread
-
-This is a process-wide operation. It does not create broker contexts and it does
-not register request providers.
+The FFI API exposes a single public creation entry point.
 
 ### Per-context creation
 
-`<lib>_create()` creates one independent library instance.
+`<lib>_createContext()` creates one independent library instance.
 
 Responsibilities:
 
+- ensure the Nim runtime is initialized once per process
 - allocate a fresh `BrokerContext`
 - start the delivery thread
 - start the processing thread
@@ -140,24 +126,30 @@ Responsibilities:
 - publish the context in the library registry
 
 The startup handshake is synchronous from the caller point of view. When
-`<lib>_create()` returns non-zero, the delivery side and processing side are
-already ready for use.
+`<lib>_createContext()` returns a context, the delivery side and processing side
+are already ready for use.
 
 This is why the examples do not need a post-create sleep.
+
+The generated C API returns a small result struct with:
+
+- `ctx`
+- `error_message`
+
+When startup fails, `ctx` is zero and `error_message` contains a descriptive
+message that must be released with `free_<lib>_create_context_result(...)`.
 
 Sequence overview:
 
 ```mermaid
 sequenceDiagram
   actor F as Foreign caller
-  participant I as mylib_initialize()
-  participant C as mylib_create()
+  participant C as mylib_createContext()
   participant D as Delivery thread
   participant P as Processing thread
   participant R as Context registry
-  F->>I: initialize once per process
-  I-->>F: Nim runtime ready
   F->>+C: create context
+  C->>C: ensure Nim runtime initialized
   C->>C: allocate BrokerContext
   C-)D: start delivery thread
   D->>D: install event registration provider
@@ -167,12 +159,12 @@ sequenceDiagram
   P-->>C: processingReady = true
   C->>R: publish active context
   C-->>-F: return ctx
-  Note over F,C: create() blocks until both worker threads are ready
+  Note over F,C: createContext() blocks until both worker threads are ready
 ```
 
 ### Post-create configuration
 
-`CreateRequest` is the request broker type used for configuration after the
+`InitializeRequest` is the request broker type used for configuration after the
 context exists.
 
 Typical responsibilities:
@@ -184,17 +176,14 @@ Typical responsibilities:
 
 ### Shutdown
 
-`DestroyRequest` is the broker request type for orderly application-level
+`ShutdownRequest` is the broker request type for orderly application-level
 teardown.
 
-`<lib>_shutdown(ctx)` stops the delivery and processing threads and marks the
-context inactive in the registry.
+`<lib>_shutdown(ctx)` first invokes `ShutdownRequest` on the processing thread,
+then stops the delivery and processing threads and marks the context inactive in
+the registry.
 
-Recommended order:
-
-1. call `DestroyRequest`
-2. unregister or drop external listeners if needed
-3. call `<lib>_shutdown(ctx)`
+Foreign callers only need to call `<lib>_shutdown(ctx)`.
 
 ---
 
@@ -259,7 +248,8 @@ When foreign code registers an event callback:
 - the registration call goes through the generated `RegisterEventListenerResult`
   request broker
 - that request is served on the delivery thread
-- the delivery thread stores the listener handle and callback wrapper
+- the delivery thread stores the listener handle, callback function pointer, and
+  opaque `userData` pointer
 
 When the Nim side emits an API event:
 
@@ -332,28 +322,29 @@ level request-routing behavior that the FFI API builds on.
 
 ---
 
-## Requirements on `CreateRequest` and `DestroyRequest`
+## Requirements on `InitializeRequest` and `ShutdownRequest`
 
-`registerBrokerLibrary` requires that the types named in `createRequest:` and
-`destroyRequest:` exist at compile time.
+`registerBrokerLibrary` requires that the types named in `initializeRequest:` and
+`shutdownRequest:` exist at compile time. The legacy `destroyRequest:` alias is
+still accepted for compatibility.
 
 It does not itself force those providers to be registered.
 
 In practice:
 
-- `CreateRequest.setProvider(ctx, ...)` should be installed in `setupProviders`
-  if you want the generated `create_request_*` export to be immediately usable
-- `DestroyRequest.setProvider(ctx, ...)` should also usually be installed there
-  if you want a stable always-available lifecycle API
+- `InitializeRequest.setProvider(ctx, ...)` should be installed in `setupProviders`
+  if you want the generated `mylib_initialize(...)` export to be immediately usable
+- `ShutdownRequest.setProvider(ctx, ...)` should also usually be installed there
+  if you want `mylib_shutdown(ctx)` to perform orderly application teardown
 
 For other API request brokers, lazy registration is allowed.
 
 For example, a library may:
 
-- register `CreateRequest` and `DestroyRequest` during startup
-- use `CreateRequest.request(...)` to install additional API broker providers
+- register `InitializeRequest` and `ShutdownRequest` during startup
+- use `InitializeRequest.request(...)` to install additional API broker providers
 
-This works because `CreateRequest` executes on the processing thread, which is
+This works because `InitializeRequest` executes on the processing thread, which is
 the correct owner thread for `setProvider` on API request brokers.
 
 The main limitation is that a provider can only be registered once per broker
@@ -371,16 +362,16 @@ when defined(BrokerFfiApi):
   import brokers/api_library
 
 RequestBroker(API):
-  type CreateRequest = object
+  type InitializeRequest = object
     initialized*: bool
 
-  proc signature*(configPath: string): Future[Result[CreateRequest, string]] {.async.}
+  proc signature*(configPath: string): Future[Result[InitializeRequest, string]] {.async.}
 
 RequestBroker(API):
-  type DestroyRequest = object
+  type ShutdownRequest = object
     status*: int32
 
-  proc signature*(): Future[Result[DestroyRequest, string]] {.async.}
+  proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
 EventBroker(API):
   type StatusChanged = object
@@ -391,23 +382,23 @@ var gProviderCtx {.threadvar.}: BrokerContext
 proc setupProviders(ctx: BrokerContext) =
   gProviderCtx = ctx
 
-  discard CreateRequest.setProvider(
+  discard InitializeRequest.setProvider(
     ctx,
-    proc(configPath: string): Future[Result[CreateRequest, string]] {.closure, async.} =
-      return ok(CreateRequest(initialized: true))
+    proc(configPath: string): Future[Result[InitializeRequest, string]] {.closure, async.} =
+      return ok(InitializeRequest(initialized: true))
   )
 
-  discard DestroyRequest.setProvider(
+  discard ShutdownRequest.setProvider(
     ctx,
-    proc(): Future[Result[DestroyRequest, string]] {.closure, async.} =
-      return ok(DestroyRequest(status: 0))
+    proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      return ok(ShutdownRequest(status: 0))
   )
 
 when defined(BrokerFfiApi):
   registerBrokerLibrary:
     name: "mylib"
-    createRequest: CreateRequest
-    destroyRequest: DestroyRequest
+    initializeRequest: InitializeRequest
+    shutdownRequest: ShutdownRequest
 ```
 
 ### `setupProviders(ctx)` convention
@@ -422,12 +413,102 @@ That proc is the main hook for:
 - remembering the active provider context
 - installing lazily created providers if desired
 
+### Batch request inputs
+
+For request parameters that need to cross the foreign-function boundary as a
+collection, prefer `seq[ApiType]` over `seq[tuple[...]]`.
+
+Example:
+
+```nim
+ApiType:
+  type AddDeviceSpec = object
+    name*: string
+    deviceType*: string
+    address*: string
+
+RequestBroker(API):
+  type AddDevice = object
+    devices*: seq[DeviceInfo]
+    success*: bool
+
+  proc signature*(devices: seq[AddDeviceSpec]):
+    Future[Result[AddDevice, string]] {.async.}
+```
+
+Why this shape is preferred:
+
+- `ApiType` already generates a stable foreign representation for each item:
+  a C `*CItem` struct, a C++ value type, and a Python dataclass plus
+  `ctypes.Structure`
+- the generated request export can pass the batch as pointer plus count at the
+  C ABI boundary and reconstruct `seq[AddDeviceSpec]` on the Nim side
+- the same declaration maps cleanly into the generated C++, Python, and C
+  surfaces without handwritten marshalling
+
+In contrast, literal tuple sequences are not a good fit for the current FFI
+generator because tuple items do not participate in the `ApiType` registry that
+drives foreign struct generation.
+
+Current limitation:
+
+- `RequestBroker(API)` supports at most two signature categories for a broker
+  type: one zero-argument signature and one argument-bearing signature
+- the zero-argument form is optional; it is auto-generated only when no
+  signatures are declared at all
+- if you need to add a batch form such as `AddDevice(devices: seq[AddDeviceSpec])`,
+  and the broker already has another argument-bearing signature, replace that
+  signature or model the variants as separate request broker types
+
+### Event callback ABI
+
+The generated C event ABI now includes two identity parameters ahead of the
+event payload:
+
+- `ctx`, the library context that emitted the event
+- `userData`, an opaque pointer supplied by the foreign caller during
+  registration
+
+For an event such as `DeviceDiscovered`, the generated C typedef looks like:
+
+```c
+typedef void (*DeviceDiscoveredCCallback)(
+  uint32_t ctx,
+  void* userData,
+  int64_t deviceId,
+  const char* name,
+  const char* deviceType,
+  const char* address
+);
+```
+
+The matching registration export is:
+
+```c
+uint64_t mylib_onDeviceDiscovered(
+  uint32_t ctx,
+  DeviceDiscoveredCCallback callback,
+  void* userData
+);
+```
+
+This shape has two purposes:
+
+- `ctx` tells the callback which library instance emitted the event
+- `userData` lets the foreign caller carry its own ownership or routing token
+  through the C ABI unchanged
+
+The Nim runtime does not interpret `userData`; it only stores it and passes it
+back to the callback.
+
 ### Data ownership for request results
 
 The generated C request exports return C structs that may own allocated strings
 or arrays.
 
 Foreign code must free them using the generated `free_*_result(...)` function.
+For registered libraries these functions are library-prefixed, for example
+`mylib_free_initialize_result(...)`.
 
 The generated C++ and Python wrappers hide that cleanup automatically.
 
@@ -447,39 +528,123 @@ The generated C surface contains:
 Example:
 
 ```c
-void mylib_initialize(void);
-uint32_t mylib_create(void);
+typedef struct {
+  uint32_t ctx;
+  const char* error_message;
+} mylibCreateContextResult;
+
+mylibCreateContextResult mylib_createContext(void);
+void free_mylib_create_context_result(mylibCreateContextResult* r);
 void mylib_shutdown(uint32_t ctx);
 
-CreateRequestCResult create_request_request_with_args(uint32_t ctx, const char* configPath);
-void free_create_request_result(CreateRequestCResult* r);
+InitializeRequestCResult mylib_initialize(uint32_t ctx, const char* configPath);
+void mylib_free_initialize_result(InitializeRequestCResult* r);
 
-uint64_t onDeviceDiscovered(uint32_t ctx, DeviceDiscoveredCCallback callback);
-void offDeviceDiscovered(uint32_t ctx, uint64_t handle);
+uint64_t mylib_onDeviceDiscovered(
+  uint32_t ctx,
+  DeviceDiscoveredCCallback callback,
+  void* userData
+);
+void mylib_offDeviceDiscovered(uint32_t ctx, uint64_t handle);
 ```
 
 ### C++ wrapper
 
-The generated header also contains a wrapper class.
+The generated header also contains a wrapper class and a reusable event
+dispatcher template.
 
 Current lifecycle shape:
 
-- `Mylib::initialize()` for process-wide runtime init
-- `lib.create()` for per-context creation
+- inert `Mylib lib;`
+- `lib.createContext()` for per-context creation
 - `lib.shutdown()` for shutdown
-- request wrapper methods such as `createRequest(...)`, `listDevices()`, and
+- request wrapper methods such as `initializeRequest(...)`, `listDevices()`, and
   `getDevice(...)`
+- event wrapper methods such as `onDeviceDiscovered(...)` and
+  `offDeviceDiscovered(...)`
+
+The generated header now includes a compact comment block directly above the
+wrapper class so users can scan the public surface without reading the full
+implementation.
+
+Example extract from the generated `mylib.h`:
+
+```cpp
+// Quick C++ wrapper interface summary (names only)
+// class Mylib {
+// public:
+//   createContext();
+//   validContext() const;
+//   operator bool() const;
+//   shutdown();
+//   ctx() const;
+//   initializeRequest(configPath);
+//   addDevice(devices);
+//   removeDevice(deviceId);
+//   getDevice(deviceId);
+//   listDevices();
+//   DeviceStatusChangedCallback(owner, deviceId, name, online, timestampMs);
+//   onDeviceStatusChanged(fn);
+//   offDeviceStatusChanged(handle = 0);
+//   DeviceDiscoveredCallback(owner, deviceId, name, deviceType, address);
+//   onDeviceDiscovered(fn);
+//   offDeviceDiscovered(handle = 0);
+// };
+```
+
+The generated event machinery no longer uses class-static callback registries.
+Instead it emits:
+
+- a reusable `EventDispatcher<Owner, Traits, ...>` template
+- one traits struct per API event type
+- one dispatcher instance per event type inside each generated wrapper object
+
+This design keeps event callback ownership attached to a single wrapper
+instance, which avoids the cross-instance callback corruption that a shared
+static callback registry would cause.
+
+Public C++ event callbacks are owner-aware. The first callback argument is a
+reference to the wrapper instance that owns the context.
 
 Example:
 
 ```cpp
-Mylib::initialize();
+uint64_t handle = lib.onDeviceDiscovered(
+    [](Mylib& owner,
+       int64_t deviceId,
+       std::string_view name,
+       std::string_view deviceType,
+       std::string_view address) {
+        std::printf("ctx=%u name=%.*s\n",
+                    owner.ctx(),
+                    (int)name.size(),
+                    name.data());
+    }
+);
+```
+
+The generated dispatcher catches and swallows exceptions from user callbacks so
+that no exception crosses the C callback boundary.
+
+The generated wrapper is intentionally non-copyable and non-movable. The event
+dispatcher passes its own address through the C ABI as `userData`, so wrapper
+and dispatcher addresses must remain stable for the lifetime of the
+registration.
+
+If a foreign application needs many library instances in a container, the
+recommended pattern is `std::unique_ptr<Mylib>` in a standard container rather
+than storing `Mylib` values directly.
+
+Example:
+
+```cpp
 Mylib lib;
-if (!lib.create()) {
+auto created = lib.createContext();
+if (!created.ok()) {
     return 1;
 }
 
-auto res = lib.createRequest("/opt/devices.yaml");
+auto res = lib.initializeRequest("/opt/devices.yaml");
 if (!res.ok()) {
     std::fprintf(stderr, "%s\n", res.error().c_str());
 }
@@ -489,12 +654,58 @@ if (!res.ok()) {
 
 When Python generation is enabled, a ctypes wrapper module is emitted.
 
-The Python wrapper differs slightly from C and C++:
+The Python wrapper mirrors the C++ lifecycle shape closely:
 
-- `Mylib()` automatically loads the library
-- the constructor calls `mylib_initialize()`
-- the constructor also calls `mylib_create()`
+- `Mylib()` loads the library but starts without a context
+- `createContext()` performs per-context creation explicitly
+- `validContext()` and truthiness reflect whether a live context exists
 - `shutdown()` is exposed for explicit teardown
+
+The generated Python module now also includes a compact comment summary above
+the wrapper class so the available methods and callback shapes are visible at a
+glance.
+
+Example extract from the generated `mylib.py`:
+
+```python
+# Quick Python wrapper interface summary (names only)
+# class Mylib:
+#   __enter__()
+#   __exit__()
+#   createContext()
+#   create_context()
+#   validContext()
+#   valid_context()
+#   __bool__()
+#   shutdown()
+#   ctx
+#   initializeRequest(configPath)
+#   initialize_request(configPath)
+#   addDevice(devices)
+#   add_device(devices)
+#   removeDevice(deviceId)
+#   remove_device(deviceId)
+#   getDevice(deviceId)
+#   get_device(deviceId)
+#   listDevices()
+#   list_devices()
+#   DeviceStatusChangedCallback(owner, device_id, name, online, timestamp_ms)
+#   onDeviceStatusChanged(callback)
+#   on_device_status_changed(callback)
+#   offDeviceStatusChanged(handle = 0)
+#   off_device_status_changed(handle = 0)
+#   DeviceDiscoveredCallback(owner, device_id, name, device_type, address)
+#   onDeviceDiscovered(callback)
+#   on_device_discovered(callback)
+#   offDeviceDiscovered(handle = 0)
+#   off_device_discovered(handle = 0)
+```
+
+For events, the generated Python wrapper still hides the low-level `ctx` and
+`userData` ABI parameters, but it now exposes ownership at the wrapper level:
+Python callbacks receive the owning `Mylib` instance as their first argument,
+followed by decoded event payload values. The wrapper keeps the underlying
+ctypes trampoline alive internally until shutdown.
 
 Example:
 
@@ -502,8 +713,16 @@ Example:
 from mylib import Mylib
 
 with Mylib() as lib:
-    res = lib.create_request("/opt/devices.yaml")
-    print(res.config_path)
+  lib.createContext()
+
+  res = lib.initializeRequest("/opt/devices.yaml")
+  print(res.configPath)
+
+  handle = lib.onDeviceDiscovered(
+      lambda owner, deviceId, name, deviceType, address:
+          print(owner.ctx, deviceId, name, deviceType, address)
+  )
+  lib.offDeviceDiscovered(handle)
 ```
 
 ---
@@ -572,9 +791,9 @@ The repository provides convenience tasks:
 
 ## Operational Expectations
 
-### What `mylib_create()` guarantees
+### What `mylib_createContext()` guarantees
 
-When `mylib_create()` succeeds:
+When `mylib_createContext()` succeeds:
 
 - the event registration provider is already installed
 - the processing thread already ran `setupProviders(ctx)`
@@ -597,6 +816,14 @@ Recommended practice:
 - do lightweight work in the callback
 - hand off expensive processing to your own queue or thread
 - avoid blocking the delivery thread for long periods
+- treat `userData` lifetime as owned by the foreign side; unregister the
+  listener before destroying the object referenced by that pointer
+
+For generated C++ wrappers, `userData` is managed internally by the dispatcher.
+For generated Python wrappers, the ownership signal is surfaced as the first
+callback argument (`owner: Mylib`) while raw `userData` remains hidden. For
+direct C consumers, `userData` is the natural place to store callback state or
+an owning object pointer.
 
 ### Provider behavior
 

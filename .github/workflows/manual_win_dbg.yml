@@ -2,6 +2,17 @@ name: Manual Nim CI (Windows)
 
 on:
   workflow_dispatch:
+    inputs:
+      tasks:
+        description: 'Nimble tasks to run (space-separated)'
+        required: false
+        default: 'test'
+        type: choice
+        options:
+          - test
+          - testApi
+          - testFfiApi
+          - test testApi testFfiApi
 
 permissions:
   contents: read
@@ -21,10 +32,6 @@ jobs:
           nim-version: ${{ env.NIM_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies (nimble)
-        shell: pwsh
-        run: nimble install -d -y
-
       - name: Show tool versions
         shell: pwsh
         run: |
@@ -32,23 +39,40 @@ jobs:
           nimble --version
           git --version
 
-      - name: Show CPU info (Windows)
+      - name: Show CPU info
         shell: pwsh
         run: |
-          echo $env:NUMBER_OF_PROCESSORS
-          wmic cpu get NumberOfCores,NumberOfLogicalProcessors
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors |
+            Format-List
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
       - name: Show workspace state
         shell: pwsh
         run: |
-          Write-Host "Repository root"
+          Write-Host "=== Repository root ==="
           Get-ChildItem -Force
-          Write-Host "nimbledeps"
+          Write-Host "=== nimbledeps ==="
           if (Test-Path "nimbledeps") {
             Get-ChildItem "nimbledeps" -Force
           } else {
-            Write-Host "nimbledeps directory does not exist yet"
+            Write-Host "nimbledeps does not exist yet"
           }
 
-      - name: Run Nimble tests (verbose)
+      - name: Run Nimble tasks
         shell: pwsh
-        run: nimble --verbose --debug test -y
+        run: |
+          foreach ($task in "${{ inputs.tasks }}".Split(" ")) {
+            Write-Host "=== nimble $task ==="
+            nimble --verbose $task -y
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "=== FAILED: nimble $task ==="
+              exit $LASTEXITCODE
+            }
+          }
+

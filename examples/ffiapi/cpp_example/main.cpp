@@ -7,8 +7,9 @@
  * Key features exercised:
  *   - mylib:: namespace for Result<T>, structs, and value types
  *   - Result<T> return type with ok()/error()/value() + operator->
- *   - RAII lifecycle (Mylib non-copyable, non-movable)
+ *   - Explicit lifecycle with inert construction and createContext()
  *   - std::string inputs (no raw const char*)
+ *   - std::vector<AddDeviceSpec> batch request input
  *   - const std::string_view in event callbacks (zero-copy, lifetime-safe)
  *   - Lambda callbacks with captures via std::function
  *   - std::vector<DeviceInfo> in ListDevicesResult (no raw arrays)
@@ -39,11 +40,11 @@ using namespace mylib;
 int main() {
     printf("=== Device Monitor — Modern C++ Example ===\n\n");
 
-    // ── 1. Create the library wrapper (RAII, move-only) ──────────────
-    Mylib::initialize();
+    // ── 1. Create the library wrapper and context explicitly ─────────
     Mylib lib;
-    if (!lib.create()) {
-        fprintf(stderr, "FATAL: library create failed\n");
+    auto createContextResult = lib.createContext();
+    if (!createContextResult.ok()) {
+        fprintf(stderr, "FATAL: %s\n", createContextResult.error().c_str());
         return 1;
     }
     printf("Library context: 0x%08X\n\n", lib.ctx());
@@ -55,8 +56,9 @@ int main() {
 
     int discoveryCount = 0;
     auto h_disc = lib.onDeviceDiscovered(
-        [&discoveryCount](int64_t id, const std::string_view name,
+        [&discoveryCount](Mylib& owner, int64_t id, const std::string_view name,
                           const std::string_view type, const std::string_view addr) {
+            (void)owner;
             ++discoveryCount;
             printf("  >>> DeviceDiscovered #%d: id=%lld  \"%.*s\"  [%.*s]  %.*s\n",
                    discoveryCount,
@@ -68,8 +70,9 @@ int main() {
 
     int statusCount = 0;
     auto h_status = lib.onDeviceStatusChanged(
-        [&statusCount](int64_t id, const std::string_view name,
+        [&statusCount](Mylib& owner, int64_t id, const std::string_view name,
                        bool online, int64_t ts) {
+            (void)owner;
             ++statusCount;
             printf("  >>> DeviceStatusChanged #%d: id=%lld  \"%.*s\"  %s  (ts=%lld)\n",
                    statusCount,
@@ -81,7 +84,9 @@ int main() {
 
     // Register a second status listener to demonstrate multiplexing
     auto h_status2 = lib.onDeviceStatusChanged(
-        [](int64_t id, const std::string_view name, bool online, int64_t) {
+        [](Mylib& owner, int64_t id, const std::string_view name, bool online, int64_t) {
+            (void)owner;
+            (void)id;
             printf("  >>> [Logger] %.*s is now %s\n",
                    (int)name.size(), name.data(),
                    online ? "UP" : "DOWN");
@@ -92,12 +97,12 @@ int main() {
            (unsigned long long)h_status,
            (unsigned long long)h_status2);
 
-    // ── 3. Configure library — returns Result<CreateRequestResult> ───
+    // ── 3. Configure library — returns Result<InitializeRequestResult> ─
     printf("--- Configuring library ---\n");
     {
-        auto res = lib.createRequest("/opt/devices.yaml");
+        auto res = lib.initializeRequest("/opt/devices.yaml");
         if (!res.ok()) {
-            fprintf(stderr, "Create error: %s\n", res.error().c_str());
+            fprintf(stderr, "Initialize error: %s\n", res.error().c_str());
             return 1;
         }
         // res->configPath is std::string, res->initialized is bool
@@ -108,25 +113,32 @@ int main() {
 
     // ── 4. Add a fleet of devices ────────────────────────────────────
     printf("--- Adding devices ---\n");
-    struct DeviceDef { std::string name, type, addr; };
-    std::vector<DeviceDef> fleet = {
-        {"Core-Router",    "router",  "10.0.0.1"},
-        {"Edge-Switch-A",  "switch",  "10.0.1.1"},
-        {"Edge-Switch-B",  "switch",  "10.0.1.2"},
-        {"AP-Floor-3",     "ap",      "10.0.2.10"},
-        {"TempSensor-DC1", "sensor",  "10.0.3.50"},
+    auto makeDeviceSpec = [](std::string name, std::string deviceType, std::string address) {
+        AddDeviceSpec spec;
+        spec.name = std::move(name);
+        spec.deviceType = std::move(deviceType);
+        spec.address = std::move(address);
+        return spec;
+    };
+    std::vector<AddDeviceSpec> fleet = {
+        makeDeviceSpec("Core-Router", "router", "10.0.0.1"),
+        makeDeviceSpec("Edge-Switch-A", "switch", "10.0.1.1"),
+        makeDeviceSpec("Edge-Switch-B", "switch", "10.0.1.2"),
+        makeDeviceSpec("AP-Floor-3", "ap", "10.0.2.10"),
+        makeDeviceSpec("TempSensor-DC1", "sensor", "10.0.3.50"),
     };
 
     std::vector<int64_t> ids;
-    for (auto& [name, type, addr] : fleet) {
-        // std::string args → const std::string& params, no .c_str() needed
-        auto res = lib.addDevice(name, type, addr);
+    {
+        auto res = lib.addDevice(fleet);
         if (!res.ok()) {
             fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
-            continue;
+            return 1;
         }
-        ids.push_back(res->deviceId);
-        printf("  + %s -> id=%lld\n", name.c_str(), (long long)res->deviceId);
+        for (const auto& device : res->devices) {
+            ids.push_back(device.deviceId);
+            printf("  + %s -> id=%lld\n", device.name.c_str(), (long long)device.deviceId);
+        }
     }
     // Let discovery events fire
     std::this_thread::sleep_for(std::chrono::milliseconds(300));

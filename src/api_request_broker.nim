@@ -24,7 +24,7 @@ export results, chronos, chronicles, broker_context, mt_request_broker, api_comm
 # Macro code generator
 # ---------------------------------------------------------------------------
 
-proc generateApiRequestBroker*(body: NimNode): NimNode =
+proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: API"
@@ -40,11 +40,25 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
 
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let snakeName = toSnakeCase(typeDisplayName)
+  let hideFromForeignSurface = snakeName == "shutdown_request"
+  let baseExportName =
+    if snakeName.endsWith("_request"):
+      let trimmed = snakeName[0 ..< snakeName.len - "_request".len]
+      if trimmed == "shutdown": snakeName else: trimmed
+    else:
+      snakeName
 
   # Parse signatures (mirroring mt_request_broker logic)
   var zeroArgSig: NimNode = nil
   var argSig: NimNode = nil
+  var zeroArgSigName = ""
+  var argSigName = ""
   var argParams: seq[NimNode] = @[]
+
+  proc signatureNameSuffix(sigName: string): string {.compileTime.} =
+    if sigName.len <= "signature".len:
+      return ""
+    toSnakeCase(sigName["signature".len .. ^1])
 
   for stmt in body:
     case stmt.kind
@@ -64,8 +78,10 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
       let paramCount = params.len - 1
       if paramCount == 0:
         zeroArgSig = stmt
+        zeroArgSigName = $procNameIdent
       elif paramCount >= 1:
         argSig = stmt
+        argSigName = $procNameIdent
         argParams = @[]
         for idx in 1 ..< params.len:
           argParams.add(copyNimTree(params[idx]))
@@ -77,6 +93,98 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   # If no signatures at all, default to zero-arg
   if zeroArgSig.isNil() and argSig.isNil():
     zeroArgSig = newEmptyNode()
+    zeroArgSigName = "signature"
+
+  let hasDualSignatures = not zeroArgSig.isNil() and not argSig.isNil()
+  proc exportedFuncName(sigName: string): string {.compileTime.} =
+    let sigSuffix = signatureNameSuffix(sigName)
+    if hasDualSignatures and sigSuffix.len > 0:
+      baseExportName & "_" & sigSuffix
+    else:
+      baseExportName
+
+  proc buildSeqDecodeStmt(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): NimNode {.compileTime, raises: [ValueError].} =
+    let countName = paramName & "_count"
+    let arrName = "arr_" & paramName
+    let idxName = "i_" & paramName
+    let nimName = "nim_" & paramName
+    var code = "var " & nimName & ": seq[" & itemTypeName & "] = @[]\n"
+    code.add("if " & countName & " > 0 and not " & paramName & ".isNil:\n")
+    code.add(
+      "  let " & arrName & " = cast[ptr UncheckedArray[" & itemTypeName & "CItem]](" &
+        paramName & ")\n"
+    )
+    code.add(
+      "  " & nimName & " = newSeqOfCap[" & itemTypeName & "](int(" & countName & "))\n"
+    )
+    code.add("  for " & idxName & " in 0 ..< int(" & countName & "):\n")
+    code.add("    " & nimName & ".add(" & itemTypeName & "(\n")
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      code.add("      " & fieldName & ": ")
+      let fieldExpr = arrName & "[" & idxName & "]." & fieldName
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        code.add("(if " & fieldExpr & ".isNil: \"\" else: $" & fieldExpr & ")")
+      else:
+        code.add(fieldExpr)
+      if fieldIndex < itemFields.len - 1:
+        code.add(",")
+      code.add("\n")
+    code.add("    ))")
+    parseStmt(code)
+
+  proc buildCppSeqParamSetup(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): string {.compileTime.} =
+    result = "        std::vector<" & itemTypeName & "CItem> " & paramName & "CItems;\n"
+    result.add("        " & paramName & "CItems.reserve(" & paramName & ".size());\n")
+    result.add("        for (const auto& item : " & paramName & ") {\n")
+    result.add(
+      "            " & paramName & "CItems.push_back(" & itemTypeName & "CItem{\n"
+    )
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      result.add("                ")
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        result.add("const_cast<char*>(item." & fieldName & ".c_str())")
+      else:
+        result.add("item." & fieldName)
+      if fieldIndex < itemFields.len - 1:
+        result.add(",")
+      result.add("\n")
+    result.add("            });\n")
+    result.add("        }\n")
+
+  proc buildPySeqParamSetup(
+      paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
+  ): string {.compileTime.} =
+    result = "        " & paramName & "_items: list[" & itemTypeName & "CItem] = []\n"
+    result.add("        " & paramName & "_refs: list[object] = []\n")
+    result.add("        for _item in " & paramName & ":\n")
+    for (fieldName, fieldType) in itemFields:
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        let encodedName = "_" & paramName & "_" & fieldName
+        result.add(
+          "            " & encodedName & " = _item." & fieldName & ".encode(\"utf-8\")\n"
+        )
+        result.add("            " & paramName & "_refs.append(" & encodedName & ")\n")
+    result.add(
+      "            " & paramName & "_items.append(" & itemTypeName & "CItem(\n"
+    )
+    for fieldIndex, (fieldName, fieldType) in itemFields:
+      result.add("                ")
+      if fieldType.toLowerAscii() in ["string", "cstring"]:
+        result.add("_" & paramName & "_" & fieldName)
+      else:
+        result.add("_item." & fieldName)
+      if fieldIndex < itemFields.len - 1:
+        result.add(",")
+      result.add("\n")
+    result.add("            ))\n")
+    result.add(
+      "        " & paramName & "_array = (" & itemTypeName & "CItem * len(" & paramName &
+        "_items))(*" & paramName & "_items) if " & paramName & "_items else None\n"
+    )
 
   # Step 2: Generate all MT broker code
   result = newStmtList()
@@ -213,7 +321,7 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
   # Step 4b: Generate free_result function
   # Frees all allocated memory in a C result struct (strings, arrays, etc.)
   block:
-    let freeProcName = "free_" & snakeName & "_result"
+    let freeProcName = "free_" & baseExportName & "_result"
     let freeProcIdent = ident(freeProcName)
     let freeProcNameLit = newLit(freeProcName)
     let rIdent = ident("r")
@@ -282,18 +390,28 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
 
   # Step 4b continued: save header declarations for later
   block:
-    let freeProcName2 = "free_" & snakeName & "_result"
-    freeHeaderProto =
-      generateCFuncProto(freeProcName2, "void", @[("r", typeDisplayName & "CResult*")])
-    cppFreeMethod =
-      "void free" & typeDisplayName & "Result(" & typeDisplayName & "CResult* r) { " &
-      freeProcName2 & "(r); }"
+    let freeProcName2 = "free_" & baseExportName & "_result"
+    let publicFreeProcName = apiPublicCName(freeProcName2)
+    if not hideFromForeignSurface:
+      freeHeaderProto = generateCFuncProto(
+        publicFreeProcName, "void", @[("r", typeDisplayName & "CResult*")]
+      )
+      cppFreeMethod =
+        "void free" & typeDisplayName & "Result(" & typeDisplayName & "CResult* r) { " &
+        publicFreeProcName & "(r); }"
+      registerApiCExportWrapper(
+        freeProcName2,
+        freeProcName2,
+        "void",
+        @[("r", "ptr " & typeDisplayName & "CResult")],
+      )
 
   # Step 5: Generate C-exported request functions
 
   # Zero-arg signature
   if not zeroArgSig.isNil():
-    let funcName = snakeName & "_request"
+    let funcName = exportedFuncName(zeroArgSigName)
+    let publicFuncName = apiPublicCName(funcName)
     let funcIdent = ident(funcName)
     let funcNameLit = newLit(funcName)
 
@@ -325,15 +443,22 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
         else:
           headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
     let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
-    appendHeaderDecl(structDecl)
+    if not hideFromForeignSurface:
+      appendHeaderDecl(structDecl)
 
-    let funcProto =
-      generateCFuncProto(funcName, typeDisplayName & "CResult", @[("ctx", "uint32_t")])
-    appendHeaderDecl(funcProto)
+    let funcProto = generateCFuncProto(
+      publicFuncName, typeDisplayName & "CResult", @[("ctx", "uint32_t")]
+    )
+    if not hideFromForeignSurface:
+      appendHeaderDecl(funcProto)
+      registerApiCExportWrapper(
+        funcName, funcName, typeDisplayName & "CResult", @[("ctx", "uint32")]
+      )
 
   # Arg-based signature
   if not argSig.isNil():
-    let funcName = snakeName & "_request_with_args"
+    let funcName = exportedFuncName(argSigName)
+    let publicFuncName = apiPublicCName(funcName)
     let funcIdent = ident(funcName)
     let funcNameLit = newLit(funcName)
 
@@ -350,30 +475,56 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     var decodeStmts = newStmtList()
     var nimCallArgs: seq[NimNode] = @[]
     var headerParams: seq[(string, string)] = @[("ctx", "uint32_t")]
+    var wrapperParams: seq[(string, string)] = @[("ctx", "uint32")]
 
     for paramDef in argParams:
       for i in 0 ..< paramDef.len - 2:
         let paramName = paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
-        let cParamType = toCFieldType(paramType)
-        let cParamIdent = ident("c_" & $paramName)
+        let paramNameStr = $paramName
+        if isSeqType(paramType):
+          let itemTypeName = seqItemTypeName(paramType)
+          let cParamIdent = ident(paramNameStr)
+          let countIdent = ident(paramNameStr & "_count")
 
-        cFormalParams.add(
-          newTree(nnkIdentDefs, cParamIdent, cParamType, newEmptyNode())
-        )
-
-        # Decode C param to Nim type
-        if isCStringType(paramType):
-          let nimParamIdent = ident("nim_" & $paramName)
-          decodeStmts.add(
-            quote do:
-              let `nimParamIdent` = $`cParamIdent`
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, ident("pointer"), newEmptyNode())
           )
-          nimCallArgs.add(nimParamIdent)
-        else:
-          nimCallArgs.add(cParamIdent)
+          cFormalParams.add(
+            newTree(nnkIdentDefs, countIdent, ident("cint"), newEmptyNode())
+          )
 
-        headerParams.add(($paramName, nimTypeToCInput(paramType)))
+          decodeStmts.add(
+            buildSeqDecodeStmt(
+              paramNameStr, itemTypeName, lookupFfiStruct(itemTypeName)
+            )
+          )
+          nimCallArgs.add(ident("nim_" & paramNameStr))
+
+          headerParams.add((paramNameStr, itemTypeName & "CItem*"))
+          headerParams.add((paramNameStr & "_count", "int32_t"))
+          wrapperParams.add((paramNameStr, "pointer"))
+          wrapperParams.add((paramNameStr & "_count", "cint"))
+        else:
+          let cParamType = toCFieldType(paramType)
+          let cParamIdent = ident(paramNameStr)
+
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, cParamType, newEmptyNode())
+          )
+
+          if isCStringType(paramType):
+            let nimParamIdent = ident("nim_" & paramNameStr)
+            decodeStmts.add(
+              quote do:
+                let `nimParamIdent` = $`cParamIdent`
+            )
+            nimCallArgs.add(nimParamIdent)
+          else:
+            nimCallArgs.add(cParamIdent)
+
+          headerParams.add((paramNameStr, nimTypeToCInput(paramType)))
+          wrapperParams.add((paramNameStr, $cParamType))
 
     # Build the request call with decoded args
     let brokerCtxIdent = ident("brokerCtx")
@@ -433,14 +584,19 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
           else:
             headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
       let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
-      appendHeaderDecl(structDecl)
+      if not hideFromForeignSurface:
+        appendHeaderDecl(structDecl)
 
     let funcProto =
-      generateCFuncProto(funcName, typeDisplayName & "CResult", headerParams)
-    appendHeaderDecl(funcProto)
+      generateCFuncProto(publicFuncName, typeDisplayName & "CResult", headerParams)
+    if not hideFromForeignSurface:
+      appendHeaderDecl(funcProto)
+      registerApiCExportWrapper(
+        funcName, funcName, typeDisplayName & "CResult", wrapperParams
+      )
 
   # Step 6: Generate C++ result struct + modern class methods
-  let freeFuncName = "free_" & snakeName & "_result"
+  let freeFuncName = apiPublicCName("free_" & baseExportName & "_result")
 
   # Use placeholder for namespace — resolved during header generation
   let cppNs = "__CPP_NS__"
@@ -452,69 +608,72 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
 
   # 6a: Generate C++ result struct with RAII constructor from C struct
   block:
-    let cppResultName = typeDisplayName & "Result"
-    var cppStruct = "struct " & cppResultName & " {\n"
-    if hasInlineFields:
-      for i in 0 ..< fieldNames.len:
-        let fName = $fieldNames[i]
-        let fType = fieldTypes[i]
-        let cppType = nimTypeToCpp(fType)
-        cppStruct.add("    " & cppType & " " & fName)
-        if cppType in ["bool"]:
-          cppStruct.add(" = false")
-        elif cppType in [
-          "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
-          "uint64_t", "float", "double",
-        ]:
-          cppStruct.add(" = 0")
-        cppStruct.add(";\n")
-    cppStruct.add("    " & cppResultName & "() = default;\n")
-    # Constructor from C result — copies data then frees the C struct
-    let cResultName = typeDisplayName & "CResult"
-    cppStruct.add("    explicit " & cppResultName & "(" & cResultName & "& c)")
-    if hasInlineFields:
-      var ctorInits: seq[string] = @[]
-      for i in 0 ..< fieldNames.len:
-        let fName = $fieldNames[i]
-        let fType = fieldTypes[i]
-        if isCStringType(fType):
-          ctorInits.add(fName & "(c." & fName & " ? c." & fName & " : \"\")")
-        elif isSeqType(fType):
-          discard # handled in body
-        else:
-          ctorInits.add(fName & "(c." & fName & ")")
-      if ctorInits.len > 0:
-        cppStruct.add("\n        : " & ctorInits.join("\n        , "))
-    cppStruct.add(" {\n")
-    # Handle seq[T] fields in the constructor body
-    if hasInlineFields:
-      for i in 0 ..< fieldNames.len:
-        let fName = $fieldNames[i]
-        let fType = fieldTypes[i]
-        if isSeqType(fType):
-          let itemTypeName = seqItemTypeName(fType)
-          let countField = fName & "_count"
-          cppStruct.add("        if (c." & fName & " && c." & countField & " > 0) {\n")
-          cppStruct.add(
-            "            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." & fName &
-              ");\n"
-          )
-          cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
-          cppStruct.add(
-            "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
-          )
-          cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
-          cppStruct.add("        }\n")
-    cppStruct.add("        " & freeFuncName & "(&c);\n")
-    cppStruct.add("    }\n")
-    cppStruct.add("};\n")
-    gApiCppStructs.add(cppStruct)
+    if hideFromForeignSurface:
+      discard
+    else:
+      let cppResultName = typeDisplayName & "Result"
+      var cppStruct = "struct " & cppResultName & " {\n"
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let fType = fieldTypes[i]
+          let cppType = nimTypeToCpp(fType)
+          cppStruct.add("    " & cppType & " " & fName)
+          if cppType in ["bool"]:
+            cppStruct.add(" = false")
+          elif cppType in [
+            "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t",
+            "uint32_t", "uint64_t", "float", "double",
+          ]:
+            cppStruct.add(" = 0")
+          cppStruct.add(";\n")
+      cppStruct.add("    " & cppResultName & "() = default;\n")
+      let cResultName = typeDisplayName & "CResult"
+      cppStruct.add("    explicit " & cppResultName & "(" & cResultName & "& c)")
+      if hasInlineFields:
+        var ctorInits: seq[string] = @[]
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let fType = fieldTypes[i]
+          if isCStringType(fType):
+            ctorInits.add(fName & "(c." & fName & " ? c." & fName & " : \"\")")
+          elif isSeqType(fType):
+            discard
+          else:
+            ctorInits.add(fName & "(c." & fName & ")")
+        if ctorInits.len > 0:
+          cppStruct.add("\n        : " & ctorInits.join("\n        , "))
+      cppStruct.add(" {\n")
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = $fieldNames[i]
+          let fType = fieldTypes[i]
+          if isSeqType(fType):
+            let itemTypeName = seqItemTypeName(fType)
+            let countField = fName & "_count"
+            cppStruct.add(
+              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            )
+            cppStruct.add(
+              "            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." &
+                fName & ");\n"
+            )
+            cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
+            cppStruct.add(
+              "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
+            )
+            cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
+            cppStruct.add("        }\n")
+      cppStruct.add("        " & freeFuncName & "(&c);\n")
+      cppStruct.add("    }\n")
+      cppStruct.add("};\n")
+      gApiCppStructs.add(cppStruct)
 
   # 6b: Generate modern C++ class methods returning Result<CppStruct>
   let cppResultType = cppNs & "::Result<" & cppNs & "::" & typeDisplayName & "Result>"
 
-  if not zeroArgSig.isNil():
-    let funcName = snakeName & "_request"
+  if not hideFromForeignSurface and not zeroArgSig.isNil():
+    let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
     var cppMethod = "inline " & cppResultType & " " & camelName & "() {\n"
     cppMethod.add("        auto c = " & funcName & "(ctx_);\n")
     cppMethod.add("        if (c.error_message) {\n")
@@ -528,24 +687,45 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
+    gApiCppInterfaceSummary.add(camelName & "();")
 
-  if not argSig.isNil():
-    let funcName = snakeName & "_request_with_args"
+  if not hideFromForeignSurface and not argSig.isNil():
+    let funcName = apiPublicCName(exportedFuncName(argSigName))
     # Build C++ method params and C call args
     var cppParams: seq[string] = @[]
+    var summaryParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
+    var cppPreCall = ""
     for paramDef in argParams:
       for i in 0 ..< paramDef.len - 2:
         let paramName = $paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
-        let cppParamType = nimTypeToCppParam(paramType)
+        let cppParamType =
+          if isSeqType(paramType):
+            "const std::vector<" & cppNs & "::" & seqItemTypeName(paramType) & ">&"
+          else:
+            nimTypeToCppParam(paramType)
         cppParams.add(cppParamType & " " & paramName)
-        if isCStringType(paramType):
+        summaryParams.add(paramName)
+        if isSeqType(paramType):
+          let itemTypeName = seqItemTypeName(paramType)
+          cppPreCall.add(
+            buildCppSeqParamSetup(
+              paramName, itemTypeName, lookupFfiStruct(itemTypeName)
+            )
+          )
+          cppCallArgs.add(
+            ", " & paramName & "CItems.empty() ? nullptr : " & paramName &
+              "CItems.data()"
+          )
+          cppCallArgs.add(", static_cast<int32_t>(" & paramName & "CItems.size())")
+        elif isCStringType(paramType):
           cppCallArgs.add(", " & paramName & ".c_str()")
         else:
           cppCallArgs.add(", " & paramName)
     var cppMethod =
       "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
+    cppMethod.add(cppPreCall)
     cppMethod.add("        auto c = " & funcName & "(" & cppCallArgs & ");\n")
     cppMethod.add("        if (c.error_message) {\n")
     cppMethod.add("            std::string err(c.error_message);\n")
@@ -558,178 +738,211 @@ proc generateApiRequestBroker*(body: NimNode): NimNode =
     )
     cppMethod.add("    }")
     gApiCppClassMethods.add(cppMethod)
+    gApiCppInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ");")
 
   # Step 6c: Generate Python ctypes + dataclass + methods (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):
-    let pySnakeName = toSnakeCase(typeDisplayName)
-    let pyFreeFuncName = "free_" & pySnakeName & "_result"
-    let pyResultName = typeDisplayName & "Result"
-    let pyCResultName = typeDisplayName & "CResult"
+    if not hideFromForeignSurface:
+      let pySnakeName = toSnakeCase(typeDisplayName)
+      let pyFreeFuncName = apiPublicCName("free_" & baseExportName & "_result")
+      let pyResultName = typeDisplayName & "Result"
+      let pyCResultName = typeDisplayName & "CResult"
 
-    # ctypes Structure for CResult
-    block:
-      var pyCStruct = "class " & pyCResultName & "(ctypes.Structure):\n"
-      pyCStruct.add("    _fields_ = [\n")
-      pyCStruct.add("        (\"error_message\", ctypes.c_char_p),\n")
-      if hasInlineFields:
-        for i in 0 ..< fieldNames.len:
-          let fName = $fieldNames[i]
-          let fType = fieldTypes[i]
-          if isSeqType(fType):
-            pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
-            pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
-          else:
-            let ctField = nimTypeToCtypes(fType)
-            pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
-      pyCStruct.add("    ]")
-      gApiPyCtypesStructs.add(pyCStruct)
+      block:
+        var pyCStruct = "class " & pyCResultName & "(ctypes.Structure):\n"
+        pyCStruct.add("    _fields_ = [\n")
+        pyCStruct.add("        (\"error_message\", ctypes.c_char_p),\n")
+        if hasInlineFields:
+          for i in 0 ..< fieldNames.len:
+            let fName = $fieldNames[i]
+            let fType = fieldTypes[i]
+            if isSeqType(fType):
+              pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
+              pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
+            else:
+              let ctField = nimTypeToCtypes(fType)
+              pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
+        pyCStruct.add("    ]")
+        gApiPyCtypesStructs.add(pyCStruct)
 
-    # Python dataclass for result
-    block:
-      var pyDc = "@dataclass\nclass " & pyResultName & ":\n"
-      pyDc.add("    \"\"\"Result of " & typeDisplayName & " request.\"\"\"\n")
-      if hasInlineFields:
-        for i in 0 ..< fieldNames.len:
-          let fName = $fieldNames[i]
-          let fType = fieldTypes[i]
-          let snakeFname = toSnakeCase(fName)
-          let pyType = nimTypeToPyAnnotation(fType)
-          let pyDefault = nimTypeToPyDefault(fType)
-          pyDc.add("    " & snakeFname & ": " & pyType & " = " & pyDefault & "\n")
-      else:
-        pyDc.add("    pass\n")
-      gApiPyDataclasses.add(pyDc)
+      block:
+        var pyDc = "@dataclass\nclass " & pyResultName & ":\n"
+        pyDc.add("    \"\"\"Result of " & typeDisplayName & " request.\"\"\"\n")
+        if hasInlineFields:
+          for i in 0 ..< fieldNames.len:
+            let fName = $fieldNames[i]
+            let fType = fieldTypes[i]
+            let pyType = nimTypeToPyAnnotation(fType)
+            let pyDefault = nimTypeToPyDefault(fType)
+            pyDc.add("    " & fName & ": " & pyType & " = " & pyDefault & "\n")
+        else:
+          pyDc.add("    pass\n")
+        gApiPyDataclasses.add(pyDc)
 
-    # Callback setup (argtypes/restype for C functions)
-    block:
-      if not zeroArgSig.isNil():
-        let funcName = pySnakeName & "_request"
-        gApiPyCallbackSetup.add("_lib." & funcName & ".argtypes = [ctypes.c_uint32]")
-        gApiPyCallbackSetup.add("_lib." & funcName & ".restype = " & pyCResultName)
+      block:
+        if not zeroArgSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          let argtypesLine = "_lib." & funcName & ".argtypes = [ctypes.c_uint32]"
+          let restypeLine = "_lib." & funcName & ".restype = " & pyCResultName
+          gApiPyCallbackSetup.add(argtypesLine)
+          gApiPyCallbackSetup.add(restypeLine)
+        if not argSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(argSigName))
+          var argTypes = "[ctypes.c_uint32"
+          for paramDef in argParams:
+            for i in 0 ..< paramDef.len - 2:
+              let paramType = paramDef[paramDef.len - 2]
+              if isSeqType(paramType):
+                let itemTypeName = seqItemTypeName(paramType)
+                argTypes.add(
+                  ", ctypes.POINTER(" & itemTypeName & "CItem), ctypes.c_int32"
+                )
+              else:
+                argTypes.add(", " & nimTypeToCtypes(paramType))
+          argTypes.add("]")
+          let argtypesLine = "_lib." & funcName & ".argtypes = " & argTypes
+          let restypeLine = "_lib." & funcName & ".restype = " & pyCResultName
+          gApiPyCallbackSetup.add(argtypesLine)
+          gApiPyCallbackSetup.add(restypeLine)
+        let freeArgtypesLine =
+          "_lib." & pyFreeFuncName & ".argtypes = [ctypes.POINTER(" & pyCResultName &
+          ")]"
+        let freeRestypeLine = "_lib." & pyFreeFuncName & ".restype = None"
+        gApiPyCallbackSetup.add(freeArgtypesLine)
+        gApiPyCallbackSetup.add(freeRestypeLine)
+
+      const I = "            "
+
+      proc pyExtractField(fName: string, fType: NimNode): string {.compileTime.} =
+        if isCStringType(fType):
+          I & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
+            " else \"\"\n"
+        elif isSeqType(fType):
+          let itemType = seqItemTypeName(fType)
+          var s = I & fName & "_list: list[" & itemType & "] = []\n"
+          s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+          s.add(
+            I & "    arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & itemType &
+              "CItem))\n"
+          )
+          s.add(I & "    for _i in range(c." & fName & "_count):\n")
+          s.add(I & "        _item = arr[_i]\n")
+          let itemFields = lookupFfiStruct(itemType)
+          var itemArgs: seq[string] = @[]
+          for (ifName, ifType) in itemFields:
+            if ifType.toLowerAscii() in ["string", "cstring"]:
+              itemArgs.add(
+                ifName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
+                  " else \"\""
+              )
+            else:
+              itemArgs.add(ifName & "=_item." & ifName)
+          s.add(I & "        " & fName & "_list.append(" & itemType & "(\n")
+          for j, arg in itemArgs:
+            s.add(I & "            " & arg)
+            if j < itemArgs.len - 1:
+              s.add(",")
+            s.add("\n")
+          s.add(I & "        ))\n")
+          s.add(I & fName & " = " & fName & "_list\n")
+          s
+        else:
+          I & fName & " = c." & fName & "\n"
+
+      proc buildPyMethodBody(
+          funcName, callArgs, pyResultName2, pyFreeFuncName2: string
+      ): string {.compileTime.} =
+        result = ""
+        result.add("        c = self._lib." & funcName & "(" & callArgs & ")\n")
+        result.add("        try:\n")
+        result.add("            if c.error_message:\n")
+        result.add(
+          "                raise __LIB_ERROR__(c.error_message.decode(\"utf-8\"))\n"
+        )
+        if hasInlineFields:
+          for i in 0 ..< fieldNames.len:
+            let fName = $fieldNames[i]
+            result.add(pyExtractField(fName, fieldTypes[i]))
+          var dcArgs: seq[string] = @[]
+          for i in 0 ..< fieldNames.len:
+            let fName = $fieldNames[i]
+            dcArgs.add(fName & "=" & fName)
+          result.add("            return " & pyResultName2 & "(\n")
+          for j, arg in dcArgs:
+            result.add("                " & arg)
+            if j < dcArgs.len - 1:
+              result.add(",")
+            result.add("\n")
+          result.add("            )\n")
+        else:
+          result.add("            return " & pyResultName2 & "()\n")
+        result.add("        finally:\n")
+        result.add("            self._lib." & pyFreeFuncName2 & "(ctypes.byref(c))")
+
       if not argSig.isNil():
-        let funcName = pySnakeName & "_request_with_args"
-        var argTypes = "[ctypes.c_uint32"
+        let funcName = apiPublicCName(exportedFuncName(argSigName))
+        var pyParams = "self"
+        var callArgs = "self._ctx"
+        var aliasArgs: seq[string] = @[]
+        var summaryParams: seq[string] = @[]
+        var pyPreCall = ""
         for paramDef in argParams:
           for i in 0 ..< paramDef.len - 2:
+            let paramName = $paramDef[i]
             let paramType = paramDef[paramDef.len - 2]
-            argTypes.add(", " & nimTypeToCtypes(paramType))
-        argTypes.add("]")
-        gApiPyCallbackSetup.add("_lib." & funcName & ".argtypes = " & argTypes)
-        gApiPyCallbackSetup.add("_lib." & funcName & ".restype = " & pyCResultName)
-      # free function
-      gApiPyCallbackSetup.add(
-        "_lib." & pyFreeFuncName & ".argtypes = [ctypes.POINTER(" & pyCResultName & ")]"
-      )
-      gApiPyCallbackSetup.add("_lib." & pyFreeFuncName & ".restype = None")
+            let pyType = nimTypeToPyAnnotation(paramType)
+            pyParams.add(", " & paramName & ": " & pyType)
+            aliasArgs.add(paramName)
+            summaryParams.add(paramName)
+            if isSeqType(paramType):
+              let itemTypeName = seqItemTypeName(paramType)
+              pyPreCall.add(
+                buildPySeqParamSetup(
+                  paramName, itemTypeName, lookupFfiStruct(itemTypeName)
+                )
+              )
+              callArgs.add(", " & paramName & "_array, len(" & paramName & "_items)")
+            elif isCStringType(paramType):
+              callArgs.add(", " & paramName & ".encode(\"utf-8\")")
+            else:
+              callArgs.add(", " & paramName)
 
-    # Indent prefix for lines inside `try` block (3 levels: class → method → try)
-    const I = "            "
-
-    # Helper to build field extraction code
-    proc pyExtractField(
-        fName, snakeFname: string, fType: NimNode
-    ): string {.compileTime.} =
-      if isCStringType(fType):
-        I & snakeFname & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
-          " else \"\"\n"
-      elif isSeqType(fType):
-        let itemType = seqItemTypeName(fType)
-        var s = I & snakeFname & "_list: list[" & itemType & "] = []\n"
-        s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
-        s.add(
-          I & "    arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & itemType &
-            "CItem))\n"
+        var pyMethod =
+          "    def " & camelName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+        pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+        pyMethod.add("        self._requireContext()\n")
+        pyMethod.add(pyPreCall)
+        pyMethod.add(
+          buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName)
         )
-        s.add(I & "    for _i in range(c." & fName & "_count):\n")
-        s.add(I & "        _item = arr[_i]\n")
-        # Build item extraction from CItem fields
-        let itemFields = lookupFfiStruct(itemType)
-        var itemArgs: seq[string] = @[]
-        for (ifName, ifType) in itemFields:
-          let snakeIfName = toSnakeCase(ifName)
-          if ifType.toLowerAscii() in ["string", "cstring"]:
-            itemArgs.add(
-              snakeIfName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
-                " else \"\""
-            )
-          else:
-            itemArgs.add(snakeIfName & "=_item." & ifName)
-        s.add(I & "        " & snakeFname & "_list.append(" & itemType & "(\n")
-        for j, arg in itemArgs:
-          s.add(I & "            " & arg)
-          if j < itemArgs.len - 1:
-            s.add(",")
-          s.add("\n")
-        s.add(I & "        ))\n")
-        s.add(I & snakeFname & " = " & snakeFname & "_list\n")
-        s
-      else:
-        I & snakeFname & " = c." & fName & "\n"
-
-    # Generate Python method body (shared between zero-arg and arg variants)
-    proc buildPyMethodBody(
-        funcName, callArgs, pyResultName2, pyFreeFuncName2: string
-    ): string {.compileTime.} =
-      result = "        c = self._lib." & funcName & "(" & callArgs & ")\n"
-      result.add("        try:\n")
-      result.add("            if c.error_message:\n")
-      result.add(
-        "                raise __LIB_ERROR__(c.error_message.decode(\"utf-8\"))\n"
-      )
-      if hasInlineFields:
-        for i in 0 ..< fieldNames.len:
-          let fName = $fieldNames[i]
-          let snakeFname = toSnakeCase(fName)
-          result.add(pyExtractField(fName, snakeFname, fieldTypes[i]))
-        var dcArgs: seq[string] = @[]
-        for i in 0 ..< fieldNames.len:
-          let snakeFname = toSnakeCase($fieldNames[i])
-          dcArgs.add(snakeFname & "=" & snakeFname)
-        result.add("            return " & pyResultName2 & "(\n")
-        for j, arg in dcArgs:
-          result.add("                " & arg)
-          if j < dcArgs.len - 1:
-            result.add(",")
-          result.add("\n")
-        result.add("            )\n")
-      else:
-        result.add("            return " & pyResultName2 & "()\n")
-      result.add("        finally:\n")
-      result.add("            self._lib." & pyFreeFuncName2 & "(ctypes.byref(c))")
-
-    # Generate Python method — prefer arg signature if available, else zero-arg
-    if not argSig.isNil():
-      let funcName = pySnakeName & "_request_with_args"
-      var pyParams = "self"
-      var callArgs = "self._ctx"
-      for paramDef in argParams:
-        for i in 0 ..< paramDef.len - 2:
-          let paramName = $paramDef[i]
-          let paramType = paramDef[paramDef.len - 2]
-          let snakeParamName = toSnakeCase(paramName)
-          let pyType = nimTypeToPyAnnotation(paramType)
-          pyParams.add(", " & snakeParamName & ": " & pyType)
-          if isCStringType(paramType):
-            callArgs.add(", " & snakeParamName & ".encode(\"utf-8\")")
-          else:
-            callArgs.add(", " & snakeParamName)
-
-      var pyMethod =
-        "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
-      pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
-      pyMethod.add(buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName))
-      gApiPyMethods.add(pyMethod)
-    elif not zeroArgSig.isNil():
-      let funcName = pySnakeName & "_request"
-      var pyMethod = "    def " & pySnakeName & "(self) -> " & pyResultName & ":\n"
-      pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
-      pyMethod.add(
-        buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
-      )
-      gApiPyMethods.add(pyMethod)
+        pyMethod.add("\n\n")
+        pyMethod.add(
+          "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+        )
+        pyMethod.add(
+          "        return self." & camelName & "(" & aliasArgs.join(", ") & ")"
+        )
+        gApiPyMethods.add(pyMethod)
+        gApiPyInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ")")
+        gApiPyInterfaceSummary.add(pySnakeName & "(" & summaryParams.join(", ") & ")")
+      elif not zeroArgSig.isNil():
+        let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+        var pyMethod = "    def " & camelName & "(self) -> " & pyResultName & ":\n"
+        pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
+        pyMethod.add("        self._requireContext()\n")
+        pyMethod.add(
+          buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
+        )
+        pyMethod.add("\n\n")
+        pyMethod.add("    def " & pySnakeName & "(self) -> " & pyResultName & ":\n")
+        pyMethod.add("        return self." & camelName & "()")
+        gApiPyMethods.add(pyMethod)
+        gApiPyInterfaceSummary.add(camelName & "()")
+        gApiPyInterfaceSummary.add(pySnakeName & "()")
 
   # Step 7: Append free_result header declaration (C side still needs it)
-  appendHeaderDecl(freeHeaderProto)
+  if not hideFromForeignSurface:
+    appendHeaderDecl(freeHeaderProto)
 
   when defined(brokerDebug):
     echo result.repr

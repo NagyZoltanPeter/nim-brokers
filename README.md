@@ -266,10 +266,19 @@ At a high level:
 
 The process-wide runtime init and per-context lifecycle are intentionally separate:
 
-- `mylib_initialize()` initializes the Nim runtime once per process.
-- `mylib_create()` creates one broker-backed library context.
-- `CreateRequest` is the broker request used for post-create configuration.
-- `DestroyRequest` is the broker request used for orderly teardown before shutdown.
+- `mylib_createContext()` creates one broker-backed library context and performs any required one-time runtime initialization internally.
+- `InitializeRequest` is the broker request used for post-create configuration.
+- `ShutdownRequest` is the broker request used for orderly application teardown during shutdown.
+
+For API events, the generated C ABI now includes both the emitting `ctx` and an
+opaque `userData` pointer in the callback signature. The generated C++ wrapper
+builds on that with an owner-aware dispatcher template: public C++ event
+callbacks receive `Mylib& owner` as their first argument, callback exceptions
+are swallowed before they can cross the C boundary, and the wrapper is
+intentionally non-copyable and non-movable so callback identity stays stable.
+
+If you need multiple wrapper instances in a container, store
+`std::unique_ptr<Mylib>` rather than `Mylib` values directly.
 
 Build the example shared library with:
 
@@ -486,6 +495,32 @@ Total baseline: ~660 bytes for 1 provider, 1 context.
 | OS resources | None | None | pipe/eventfd per channel | pipe/eventfd per channel + per cross-thread call |
 | Baseline per context | ~80 bytes | ~16 bytes | ~440 bytes (bucket + channel + processLoop) | ~440 bytes (bucket + channel + processLoop) |
 | Intentional leaks | None | None | Channel on shutdown | Request channel on clearProvider; response channel on timeout |
+
+## Known Limitations
+
+### `--mm:refc` is not supported for FFI API tests on Windows
+
+`nimble testApi` skips all `--mm:refc` variants on Windows. ORC (`--mm:orc`) is fully supported on all platforms.
+
+**Root cause:** chronos' async `waitForSingleObject` — used internally by `AsyncChannel.recv` whenever a response has not yet arrived — registers a completion callback via the Win32 `RegisterWaitForSingleObject` API. That callback fires on a **Windows thread-pool thread**, which is not a Nim thread and is therefore invisible to the garbage collector.
+
+With `--mm:refc` the GC is stop-the-world: it pauses all *known* Nim threads before scanning the heap. Because the thread-pool thread is not tracked, the GC can collect futures and wait-handles that the callback is still referencing, producing an access violation.
+
+With `--mm:orc` there is no stop-the-world phase — reference counting is fully atomic — so the same thread-pool callback is safe.
+
+The `--mm:refc` limitation applies only to the **FFI API layer** (`RequestBroker(API)` / `EventBroker(API)` / `registerBrokerLibrary`). Plain multi-thread broker tests (`RequestBroker(mt)`, `EventBroker(mt)`) pass on Windows under `--mm:refc` because those tests keep all callers on Nim threads that run persistent async event loops, which means the response event is typically already signalled by the time the receiver polls — bypassing the `RegisterWaitForSingleObject` code path entirely.
+
+**Recommendation:** use `--mm:orc` (the Nim default since 2.0) when building FFI API libraries on Windows.
+
+### `--nimMainPrefix` is not needed on Windows, and cannot be used there
+
+`--nimMainPrefix` exists to avoid `NimMain` symbol collisions when multiple Nim `.so` files are loaded in the same POSIX process. On Linux/macOS, `dlopen` with `RTLD_GLOBAL` merges all shared-object exports into a single flat namespace, so two Nim libraries that both define `NimMain` clash. The prefix renames them (e.g. `fooNimMain`, `barNimMain`) to prevent that.
+
+On Windows the PE loader works differently: every import is resolved as `DLL!Symbol`, so `foo.dll!NimMain` and `bar.dll!NimMain` are entirely separate entries that never interfere with each other. Any number of Nim DLLs can be loaded into the same process without a prefix.
+
+Attempting to use `--nimMainPrefix` on Windows also triggers a Nim codegen bug: the C generator forward-declares the prefixed `NimMain` without `__declspec(dllexport)` and then defines it with `N_LIB_EXPORT`, which both clang and GCC reject as a hard error (`err_attribute_dll_redeclaration`).
+
+The `nimble testFfiApi` task therefore omits `--nimMainPrefix` on Windows, which is the correct behaviour — not a workaround.
 
 ## Testing
 
