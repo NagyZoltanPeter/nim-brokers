@@ -34,25 +34,22 @@ when defined(BrokerFfiApi):
 # FFI-visible data types (shared between Nim, C, C++, Python)
 # ---------------------------------------------------------------------------
 
-ApiType:
-  type PublicCell = object
-    row*: int32
-    col*: int32
-    stateCode*: int32
+type PublicCell* = object
+  row*: int32
+  col*: int32
+  stateCode*: int32
 
-ApiType:
-  type ShipStatus = object
-    name*: string
-    length*: int32
-    hits*: int32
-    sunk*: bool
+type ShipStatus* = object
+  name*: string
+  length*: int32
+  hits*: int32
+  sunk*: bool
 
-ApiType:
-  type ReplayEntry = object
-    turnNumber*: int32
-    side*: string
-    phase*: string
-    message*: string
+type ReplayEntry* = object
+  turnNumber*: int32
+  side*: string
+  phase*: string
+  message*: string
 
 # ---------------------------------------------------------------------------
 # Request brokers — each generates an exported C function + wrappers

@@ -27,21 +27,19 @@ when defined(BrokerFfiApi):
 # ---------------------------------------------------------------------------
 
 ## DeviceInfo — flat struct describing a single device.
-## Declared with `ApiType` so it can appear in `seq[DeviceInfo]` results.
-ApiType:
-  type DeviceInfo = object
-    deviceId*: int64
-    name*: string
-    deviceType*: string
-    address*: string
-    online*: bool
+## Plain Nim type: auto-registered when referenced in broker macros.
+type DeviceInfo* = object
+  deviceId*: int64
+  name*: string
+  deviceType*: string
+  address*: string
+  online*: bool
 
 ## AddDeviceSpec — FFI-safe batch input item for AddDevice.
-ApiType:
-  type AddDeviceSpec = object
-    name*: string
-    deviceType*: string
-    address*: string
+type AddDeviceSpec* = object
+  name*: string
+  deviceType*: string
+  address*: string
 
 # ---------------------------------------------------------------------------
 # Request Brokers

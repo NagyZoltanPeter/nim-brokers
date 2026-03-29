@@ -17,14 +17,18 @@ import std/[macros, strutils]
 import chronos, chronicles
 import results
 import ./helper/broker_utils, ./broker_context, ./mt_request_broker, ./api_common
+import ./api_type_resolver
 
 export results, chronos, chronicles, broker_context, mt_request_broker, api_common
+export api_type_resolver
 
 # ---------------------------------------------------------------------------
 # Macro code generator
 # ---------------------------------------------------------------------------
 
-proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} =
+proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError].} =
+  ## Core codegen for API request broker. Called from `generateApiRequestBrokerDeferred`
+  ## AFTER external types have been auto-registered, so `lookupFfiStruct` works.
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: API"
@@ -188,6 +192,14 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
 
   # Step 2: Generate all MT broker code
   result = newStmtList()
+
+  # Auto-register external types referenced in the body (e.g. seq[DeviceInfo]).
+  # This emits typed macro calls that resolve fields via getTypeImpl and
+  # populate gApiTypeRegistry, eliminating the need for explicit ApiType.
+  let externalIdents = discoverExternalTypes(body)
+  if externalIdents.len > 0:
+    result.add(emitAutoRegistrations(externalIdents))
+
   result.add(generateMtRequestBroker(body))
 
   # Step 2b: Generate per-type provider cleanup proc and register it for
@@ -946,5 +958,25 @@ proc generateApiRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} 
 
   when defined(brokerDebug):
     echo result.repr
+
+macro generateApiRequestBrokerDeferred*(body: untyped): untyped =
+  ## Deferred codegen macro. By the time this expands, any preceding
+  ## `autoRegisterApiType` calls have already populated the type registry,
+  ## so `lookupFfiStruct` will find external types.
+  generateApiRequestBrokerImpl(body)
+
+proc generateApiRequestBroker*(body: NimNode): NimNode =
+  ## Two-phase API request broker generation:
+  ## 1. Emit `autoRegisterApiType` calls for external types (typed macro phase)
+  ## 2. Emit deferred codegen macro that runs AFTER types are registered
+  result = newStmtList()
+
+  # Phase 1: auto-register external types (these typed macros run first)
+  let externalIdents = discoverExternalTypes(body)
+  if externalIdents.len > 0:
+    result.add(emitAutoRegistrations(externalIdents))
+
+  # Phase 2: deferred codegen (runs after auto-registrations complete)
+  result.add(newCall(ident("generateApiRequestBrokerDeferred"), copyNimTree(body)))
 
 {.pop.}

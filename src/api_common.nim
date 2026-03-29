@@ -231,22 +231,32 @@ var gApiPyCallbackSetup* {.compileTime.}: seq[string] =
 # Compile-time FFI struct registry (for seq[T] support)
 # ---------------------------------------------------------------------------
 
+import ./api_schema
+export api_schema
+
 var gApiFfiStructs* {.compileTime.}: seq[(string, seq[(string, string)])] = @[]
-  ## Maps ApiType name → [(fieldName, nimTypeName)].
-  ## Populated by the `ApiType` macro, consumed by `RequestBroker(API)` for `seq[T]` fields.
+  ## Legacy registry. Kept for backward compatibility with existing ApiType usage.
+  ## New code should use `gApiTypeRegistry` from `api_schema` instead.
 
 proc registerApiFfiStruct*(
     typeName: string, fields: seq[(string, string)]
 ) {.compileTime.} =
+  ## Register a type in both the legacy and new registries.
   gApiFfiStructs.add((typeName, fields))
+  registerFromFieldTuples(typeName, fields)
 
 proc lookupFfiStruct*(typeName: string): seq[(string, string)] {.compileTime.} =
+  ## Look up type fields. Checks the new type registry first, then falls back
+  ## to the legacy registry for backward compatibility.
+  if isTypeRegistered(typeName):
+    return lookupTypeFields(typeName)
   for (name, fields) in gApiFfiStructs:
     if name == typeName:
       return fields
   error(
-    "ApiType '" & typeName & "' not registered. " &
-      "Declare it with `ApiType:` before using `seq[" & typeName & "]`."
+    "Type '" & typeName & "' not registered. " &
+      "Define it as a plain Nim type before the broker macro, " &
+      "or declare it with `ApiType:` for explicit registration."
   )
 
 proc appendHeaderDecl*(decl: string) {.compileTime.} =

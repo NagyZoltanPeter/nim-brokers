@@ -82,119 +82,103 @@ proc collectParamNames*(params: seq[NimNode]): seq[NimNode] =
         continue
       result.add(ident($nameNode))
 
-proc parseSingleTypeDef*(
-    body: NimNode,
+proc parseOneTypeDef(
+    def: NimNode,
     macroName: string,
     allowRefToNonObject = false,
     collectFieldInfo = false,
 ): ParsedBrokerType =
-  ## Parses exactly one `type` definition from a broker macro body.
-  ##
-  ## Supported RHS:
-  ## - inline `object` / `ref object` (fields are auto-exported)
-  ## - non-object types / aliases / externally-defined types (wrapped in `distinct`)
-  ## - optionally: `ref SomeType` when `allowRefToNonObject = true`
-  var typeIdent: NimNode = nil
-  var objectDef: NimNode = nil
-  var isRefObject = false
-  var hasInlineFields = false
+  ## Parse a single nnkTypeDef node into a ParsedBrokerType.
+  ## Internal helper used by both parseSingleTypeDef and parseTypeDefs.
   var fieldNames: seq[NimNode] = @[]
   var fieldTypes: seq[NimNode] = @[]
 
-  for stmt in body:
-    if stmt.kind != nnkTypeSection:
-      continue
-    for def in stmt:
-      if def.kind != nnkTypeDef:
-        continue
-      if not typeIdent.isNil():
-        error("Only one type may be declared inside " & macroName, def)
-      typeIdent = baseTypeIdent(def[0])
-      let rhs = def[2]
+  let typeIdent = baseTypeIdent(def[0])
+  let rhs = def[2]
+  var objectDef: NimNode
+  var isRefObject = false
+  var hasInlineFields = false
 
-      case rhs.kind
-      of nnkObjectTy:
-        let recList = rhs[2]
-        if recList.kind != nnkRecList:
-          error(macroName & " object must declare a standard field list", rhs)
-        var exportedRecList = newTree(nnkRecList)
-        for field in recList:
-          case field.kind
-          of nnkIdentDefs:
-            ensureFieldDef(field)
-            if collectFieldInfo:
-              let fieldTypeNode = field[field.len - 2]
-              for i in 0 ..< field.len - 2:
-                let baseFieldIdent = baseTypeIdent(field[i])
-                fieldNames.add(copyNimTree(baseFieldIdent))
-                fieldTypes.add(copyNimTree(fieldTypeNode))
-            var cloned = copyNimTree(field)
-            for i in 0 ..< cloned.len - 2:
-              cloned[i] = exportIdentNode(cloned[i])
-            exportedRecList.add(cloned)
-          of nnkEmpty:
-            discard
-          else:
-            error(
-              macroName & " object definition only supports simple field declarations",
-              field,
-            )
-        objectDef = newTree(
-          nnkObjectTy, copyNimTree(rhs[0]), copyNimTree(rhs[1]), exportedRecList
-        )
-        isRefObject = false
-        hasInlineFields = true
-      of nnkRefTy:
-        if rhs.len != 1:
-          error(macroName & " ref type must have a single base", rhs)
-        if rhs[0].kind == nnkObjectTy:
-          let obj = rhs[0]
-          let recList = obj[2]
-          if recList.kind != nnkRecList:
-            error(macroName & " object must declare a standard field list", obj)
-          var exportedRecList = newTree(nnkRecList)
-          for field in recList:
-            case field.kind
-            of nnkIdentDefs:
-              ensureFieldDef(field)
-              if collectFieldInfo:
-                let fieldTypeNode = field[field.len - 2]
-                for i in 0 ..< field.len - 2:
-                  let baseFieldIdent = baseTypeIdent(field[i])
-                  fieldNames.add(copyNimTree(baseFieldIdent))
-                  fieldTypes.add(copyNimTree(fieldTypeNode))
-              var cloned = copyNimTree(field)
-              for i in 0 ..< cloned.len - 2:
-                cloned[i] = exportIdentNode(cloned[i])
-              exportedRecList.add(cloned)
-            of nnkEmpty:
-              discard
-            else:
-              error(
-                macroName & " object definition only supports simple field declarations",
-                field,
-              )
-          let exportedObjectType = newTree(
-            nnkObjectTy, copyNimTree(obj[0]), copyNimTree(obj[1]), exportedRecList
-          )
-          objectDef = newTree(nnkRefTy, exportedObjectType)
-          isRefObject = true
-          hasInlineFields = true
-        elif allowRefToNonObject:
-          ## `ref SomeType` (SomeType can be defined elsewhere)
-          objectDef = ensureDistinctType(rhs)
-          isRefObject = false
-          hasInlineFields = false
-        else:
-          error(macroName & " ref object must wrap a concrete object definition", rhs)
+  case rhs.kind
+  of nnkObjectTy:
+    let recList = rhs[2]
+    if recList.kind != nnkRecList:
+      error(macroName & " object must declare a standard field list", rhs)
+    var exportedRecList = newTree(nnkRecList)
+    for field in recList:
+      case field.kind
+      of nnkIdentDefs:
+        ensureFieldDef(field)
+        if collectFieldInfo:
+          let fieldTypeNode = field[field.len - 2]
+          for i in 0 ..< field.len - 2:
+            let baseFieldIdent = baseTypeIdent(field[i])
+            fieldNames.add(copyNimTree(baseFieldIdent))
+            fieldTypes.add(copyNimTree(fieldTypeNode))
+        var cloned = copyNimTree(field)
+        for i in 0 ..< cloned.len - 2:
+          cloned[i] = exportIdentNode(cloned[i])
+        exportedRecList.add(cloned)
+      of nnkEmpty:
+        discard
       else:
-        ## Non-object type / alias.
-        objectDef = ensureDistinctType(rhs)
-        isRefObject = false
-        hasInlineFields = false
-
-  if typeIdent.isNil():
-    error(macroName & " body must declare exactly one type", body)
+        error(
+          macroName & " object definition only supports simple field declarations",
+          field,
+        )
+    objectDef = newTree(
+      nnkObjectTy, copyNimTree(rhs[0]), copyNimTree(rhs[1]), exportedRecList
+    )
+    isRefObject = false
+    hasInlineFields = true
+  of nnkRefTy:
+    if rhs.len != 1:
+      error(macroName & " ref type must have a single base", rhs)
+    if rhs[0].kind == nnkObjectTy:
+      let obj = rhs[0]
+      let recList = obj[2]
+      if recList.kind != nnkRecList:
+        error(macroName & " object must declare a standard field list", obj)
+      var exportedRecList = newTree(nnkRecList)
+      for field in recList:
+        case field.kind
+        of nnkIdentDefs:
+          ensureFieldDef(field)
+          if collectFieldInfo:
+            let fieldTypeNode = field[field.len - 2]
+            for i in 0 ..< field.len - 2:
+              let baseFieldIdent = baseTypeIdent(field[i])
+              fieldNames.add(copyNimTree(baseFieldIdent))
+              fieldTypes.add(copyNimTree(fieldTypeNode))
+          var cloned = copyNimTree(field)
+          for i in 0 ..< cloned.len - 2:
+            cloned[i] = exportIdentNode(cloned[i])
+          exportedRecList.add(cloned)
+        of nnkEmpty:
+          discard
+        else:
+          error(
+            macroName & " object definition only supports simple field declarations",
+            field,
+          )
+      let exportedObjectType = newTree(
+        nnkObjectTy, copyNimTree(obj[0]), copyNimTree(obj[1]), exportedRecList
+      )
+      objectDef = newTree(nnkRefTy, exportedObjectType)
+      isRefObject = true
+      hasInlineFields = true
+    elif allowRefToNonObject:
+      ## `ref SomeType` (SomeType can be defined elsewhere)
+      objectDef = ensureDistinctType(rhs)
+      isRefObject = false
+      hasInlineFields = false
+    else:
+      error(macroName & " ref object must wrap a concrete object definition", rhs)
+  else:
+    ## Non-object type / alias.
+    objectDef = ensureDistinctType(rhs)
+    isRefObject = false
+    hasInlineFields = false
 
   result = ParsedBrokerType(
     typeIdent: typeIdent,
@@ -204,3 +188,47 @@ proc parseSingleTypeDef*(
     fieldNames: fieldNames,
     fieldTypes: fieldTypes,
   )
+
+proc parseTypeDefs*(
+    body: NimNode,
+    macroName: string,
+    allowRefToNonObject = false,
+    collectFieldInfo = false,
+): seq[ParsedBrokerType] =
+  ## Parses all `type` definitions from a broker macro body.
+  ## Returns them in declaration order. Supports multiple types in a single
+  ## broker block (e.g. supporting types + primary type).
+  ##
+  ## Callers are responsible for identifying which entry is the "primary" type
+  ## (typically the last one, or the one referenced in the signature return type).
+  result = @[]
+  for stmt in body:
+    if stmt.kind != nnkTypeSection:
+      continue
+    for def in stmt:
+      if def.kind != nnkTypeDef:
+        continue
+      result.add(
+        parseOneTypeDef(def, macroName, allowRefToNonObject, collectFieldInfo)
+      )
+
+  if result.len == 0:
+    error(macroName & " body must declare at least one type", body)
+
+proc parseSingleTypeDef*(
+    body: NimNode,
+    macroName: string,
+    allowRefToNonObject = false,
+    collectFieldInfo = false,
+): ParsedBrokerType =
+  ## Parses exactly one `type` definition from a broker macro body.
+  ## Backward-compatible wrapper around parseTypeDefs that enforces a single type.
+  ##
+  ## Supported RHS:
+  ## - inline `object` / `ref object` (fields are auto-exported)
+  ## - non-object types / aliases / externally-defined types (wrapped in `distinct`)
+  ## - optionally: `ref SomeType` when `allowRefToNonObject = true`
+  let defs = parseTypeDefs(body, macroName, allowRefToNonObject, collectFieldInfo)
+  if defs.len > 1:
+    error("Only one type may be declared inside " & macroName, body)
+  result = defs[0]

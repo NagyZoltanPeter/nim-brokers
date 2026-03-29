@@ -29,9 +29,10 @@ import chronos, chronicles
 import results
 import ./helper/broker_utils, ./broker_context, ./mt_event_broker, ./api_common
 import ./mt_request_broker
+import ./api_type_resolver
 
 export results, chronos, chronicles, broker_context, mt_event_broker, api_common
-export mt_request_broker
+export mt_request_broker, api_type_resolver
 
 # ---------------------------------------------------------------------------
 # Shared RequestBroker AST builder
@@ -120,7 +121,9 @@ proc buildSharedBrokerAst(): NimNode {.compileTime.} =
 # Macro code generator
 # ---------------------------------------------------------------------------
 
-proc generateApiEventBroker*(body: NimNode): NimNode =
+proc generateApiEventBrokerImpl(body: NimNode): NimNode =
+  ## Core codegen for API event broker. Called from `generateApiEventBrokerDeferred`
+  ## AFTER external types have been auto-registered.
   when defined(brokerDebug):
     echo body.treeRepr
     echo "EventBroker mode: API"
@@ -818,5 +821,24 @@ private:
 
   when defined(brokerDebug):
     echo result.repr
+
+macro generateApiEventBrokerDeferred*(body: untyped): untyped =
+  ## Deferred codegen macro. By the time this expands, any preceding
+  ## `autoRegisterApiType` calls have already populated the type registry.
+  generateApiEventBrokerImpl(body)
+
+proc generateApiEventBroker*(body: NimNode): NimNode =
+  ## Two-phase API event broker generation:
+  ## 1. Emit `autoRegisterApiType` calls for external types (typed macro phase)
+  ## 2. Emit deferred codegen macro that runs AFTER types are registered
+  result = newStmtList()
+
+  # Phase 1: auto-register external types
+  let externalIdents = discoverExternalTypes(body)
+  if externalIdents.len > 0:
+    result.add(emitAutoRegistrations(externalIdents))
+
+  # Phase 2: deferred codegen
+  result.add(newCall(ident("generateApiEventBrokerDeferred"), copyNimTree(body)))
 
 {.pop.}
