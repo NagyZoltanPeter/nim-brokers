@@ -127,7 +127,9 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         if elemImpl.kind == nnkObjectTy:
           result.add(elemSym)
 
-proc buildSyntheticApiTypeBody(typeName: string, fields: seq[(string, string)]): NimNode {.compileTime.} =
+proc buildSyntheticApiTypeBody(
+    typeName: string, fields: seq[(string, string)]
+): NimNode {.compileTime.} =
   ## Construct an AST body equivalent to what `ApiType:` receives, e.g.:
   ##   type TypeName = object
   ##     field1*: Type1
@@ -136,11 +138,7 @@ proc buildSyntheticApiTypeBody(typeName: string, fields: seq[(string, string)]):
   var recList = newTree(nnkRecList)
   for (fname, ftype) in fields:
     recList.add(
-      newTree(nnkIdentDefs,
-        postfix(ident(fname), "*"),
-        ident(ftype),
-        newEmptyNode()
-      )
+      newTree(nnkIdentDefs, postfix(ident(fname), "*"), ident(ftype), newEmptyNode())
     )
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
   let typeDef = newTree(nnkTypeDef, ident(typeName), newEmptyNode(), objTy)
@@ -230,13 +228,11 @@ proc discoverExternalTypes*(body: NimNode): seq[NimNode] {.compileTime.} =
               continue
             let ft = field[field.len - 2]
             scanTypeNode(ft, result)
-
         elif rhs.kind == nnkIdent:
           # Type alias: `type MyEvent = ExternalType`
           let aliasTarget = $rhs
           if not isNimPrimitive(aliasTarget):
             result.add(rhs)
-
     elif stmt.kind == nnkProcDef:
       # Scan proc signature parameters for external types
       let params = stmt.params

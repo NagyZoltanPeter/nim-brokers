@@ -35,7 +35,9 @@ import ./helper/broker_utils, ./api_common
 
 export api_common
 
-proc generateApiType*(body: NimNode, emitTypeDefinition = true): NimNode {.compileTime.} =
+proc generateApiType*(
+    body: NimNode, emitTypeDefinition = true
+): NimNode {.compileTime.} =
   ## Generate CItem type, encode proc, and C/C++/Python codegen for a type.
   ##
   ## When `emitTypeDefinition` is true (default, used by `ApiType` macro),
@@ -196,8 +198,11 @@ macro ApiType*(body: untyped): untyped =
   ##
   ## This macro remains for backward compatibility and will be removed in a
   ## future release.
-  {.warning: "ApiType is deprecated. Define types as plain Nim objects and " &
-    "reference them directly in RequestBroker(API)/EventBroker(API).".}
+  {.
+    warning:
+      "ApiType is deprecated. Define types as plain Nim objects and " &
+      "reference them directly in RequestBroker(API)/EventBroker(API)."
+  .}
   generateApiType(body)
 
 {.pop.}

@@ -126,9 +126,8 @@ proc parseOneTypeDef(
           macroName & " object definition only supports simple field declarations",
           field,
         )
-    objectDef = newTree(
-      nnkObjectTy, copyNimTree(rhs[0]), copyNimTree(rhs[1]), exportedRecList
-    )
+    objectDef =
+      newTree(nnkObjectTy, copyNimTree(rhs[0]), copyNimTree(rhs[1]), exportedRecList)
     isRefObject = false
     hasInlineFields = true
   of nnkRefTy:
@@ -161,9 +160,8 @@ proc parseOneTypeDef(
             macroName & " object definition only supports simple field declarations",
             field,
           )
-      let exportedObjectType = newTree(
-        nnkObjectTy, copyNimTree(obj[0]), copyNimTree(obj[1]), exportedRecList
-      )
+      let exportedObjectType =
+        newTree(nnkObjectTy, copyNimTree(obj[0]), copyNimTree(obj[1]), exportedRecList)
       objectDef = newTree(nnkRefTy, exportedObjectType)
       isRefObject = true
       hasInlineFields = true
@@ -208,9 +206,7 @@ proc parseTypeDefs*(
     for def in stmt:
       if def.kind != nnkTypeDef:
         continue
-      result.add(
-        parseOneTypeDef(def, macroName, allowRefToNonObject, collectFieldInfo)
-      )
+      result.add(parseOneTypeDef(def, macroName, allowRefToNonObject, collectFieldInfo))
 
   if result.len == 0:
     error(macroName & " body must declare at least one type", body)

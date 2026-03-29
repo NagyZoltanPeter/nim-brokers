@@ -16,16 +16,14 @@
 import std/[macros, strutils]
 
 type
-  ApiFieldDef* = object
-    ## A single field in a type definition.
+  ApiFieldDef* = object ## A single field in a type definition.
     name*: string
     nimType*: string ## "int64", "string", "bool", "seq[DeviceInfo]", etc.
     isSeq*: bool ## true when nimType starts with "seq["
     seqElementType*: string ## e.g. "DeviceInfo" when isSeq
     isCustomObject*: bool ## true when type resolves to an object (not primitive)
 
-  ApiTypeEntry* = object
-    ## A registered type in the FFI schema.
+  ApiTypeEntry* = object ## A registered type in the FFI schema.
     name*: string ## "DeviceInfo"
     fields*: seq[ApiFieldDef] ## field definitions
     isAlias*: bool ## true for `type MyEvent = DeviceInfo`
@@ -45,10 +43,8 @@ var gApiTypeRegistry* {.compileTime.}: seq[ApiTypeEntry] = @[]
 # ---------------------------------------------------------------------------
 
 const nimPrimitiveTypes* = [
-  "string", "cstring", "char", "bool",
-  "int", "int8", "int16", "int32", "int64",
-  "uint", "uint8", "uint16", "uint32", "uint64",
-  "float", "float32", "float64", "byte",
+  "string", "cstring", "char", "bool", "int", "int8", "int16", "int32", "int64", "uint",
+  "uint8", "uint16", "uint32", "uint64", "float", "float32", "float64", "byte",
 ]
 
 proc isNimPrimitive*(typeName: string): bool {.compileTime.} =

@@ -1053,14 +1053,16 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   appendHeaderDecl(generateCFuncProto(shutdownFuncName, "void", @[("ctx", "uint32_t")]))
   appendHeaderDecl(generateCFuncProto(freeStringFuncName, "void", @[("s", "char*")]))
 
-  # Generate header file at compile time
+  # Generate output files at compile time
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
-  generateHeaderFile(outDir)
+  let libNameResolved = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
+  generateCHeaderFile(outDir, libNameResolved)
+  generateCppHeaderFile(outDir, libNameResolved)
 
   # Generate Python wrapper file when requested
   when defined(BrokerFfiApiGenPy):
-    generatePythonFile(outDir)
+    generatePythonFile(outDir, libNameResolved)
 
   when defined(brokerDebug):
     echo result.repr
