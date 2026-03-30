@@ -965,6 +965,7 @@ macro generateApiRequestBrokerDeferred*(body: untyped): untyped =
   ## `autoRegisterApiType` calls have already populated the type registry,
   ## so `lookupFfiStruct` will find external types.
   generateApiRequestBrokerImpl(body)
+
 {.push raises: [].}
 
 proc generateApiRequestBroker*(body: NimNode): NimNode =

@@ -827,6 +827,7 @@ macro generateApiEventBrokerDeferred*(body: untyped): untyped =
   ## Deferred codegen macro. By the time this expands, any preceding
   ## `autoRegisterApiType` calls have already populated the type registry.
   generateApiEventBrokerImpl(body)
+
 {.push raises: [].}
 
 proc generateApiEventBroker*(body: NimNode): NimNode =
