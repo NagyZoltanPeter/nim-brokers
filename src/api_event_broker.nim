@@ -822,10 +822,12 @@ private:
   when defined(brokerDebug):
     echo result.repr
 
-macro generateApiEventBrokerDeferred*(body: untyped): untyped {.raises: [ValueError].} =
+{.pop.}
+macro generateApiEventBrokerDeferred*(body: untyped): untyped =
   ## Deferred codegen macro. By the time this expands, any preceding
   ## `autoRegisterApiType` calls have already populated the type registry.
   generateApiEventBrokerImpl(body)
+{.push raises: [].}
 
 proc generateApiEventBroker*(body: NimNode): NimNode =
   ## Two-phase API event broker generation:
