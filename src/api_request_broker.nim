@@ -959,7 +959,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   when defined(brokerDebug):
     echo result.repr
 
-macro generateApiRequestBrokerDeferred*(body: untyped): untyped =
+macro generateApiRequestBrokerDeferred*(body: untyped): untyped {.raises: [ValueError].} =
   ## Deferred codegen macro. By the time this expands, any preceding
   ## `autoRegisterApiType` calls have already populated the type registry,
   ## so `lookupFfiStruct` will find external types.

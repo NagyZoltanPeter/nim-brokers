@@ -822,7 +822,7 @@ private:
   when defined(brokerDebug):
     echo result.repr
 
-macro generateApiEventBrokerDeferred*(body: untyped): untyped =
+macro generateApiEventBrokerDeferred*(body: untyped): untyped {.raises: [ValueError].} =
   ## Deferred codegen macro. By the time this expands, any preceding
   ## `autoRegisterApiType` calls have already populated the type registry.
   generateApiEventBrokerImpl(body)
