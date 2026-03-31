@@ -81,6 +81,7 @@ GitHub Actions CI currently runs:
 
 - `nimble test`
 - `nimble testApi`
+- `nimble testFfiApi`
 - `nimble runFfiExampleC`
 - `nimble runFfiExampleCpp`
 - `nimble runFfiExamplePy`
