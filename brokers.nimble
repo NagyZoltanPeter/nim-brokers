@@ -5,7 +5,7 @@ version = "0.1.0"
 author = "Status Research & Development GmbH"
 description = "Type-safe, thread-local, decoupled messaging patterns for Nim"
 license = "MIT"
-srcDir = "src"
+skipDirs = @["tests", "examples", "tools"]
 
 # Dependencies
 requires "nim >= 2.0.0"
