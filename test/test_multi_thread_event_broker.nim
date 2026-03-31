@@ -4,7 +4,7 @@ import testutils/unittests
 import chronos
 import std/[atomics]
 
-import event_broker
+import brokers/event_broker
 
 ## ---------------------------------------------------------------------------
 ## Multi-thread EventBroker tests

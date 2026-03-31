@@ -19,7 +19,7 @@ import std/[macros, strutils, locks]
 import chronos, chronicles
 import results
 import asyncchannels
-import ./helper/broker_utils, ./broker_context
+import ./helper/broker_utils, ../broker_context
 
 import ./mt_broker_common
 export results, chronos, chronicles, broker_context, asyncchannels, mt_broker_common

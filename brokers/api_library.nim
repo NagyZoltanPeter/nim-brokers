@@ -27,7 +27,7 @@ import std/[atomics, locks, macros, os, strutils]
 import chronos, chronicles
 import results
 import asyncchannels
-import ./broker_context, ./api_common
+import ./broker_context, ./internal/api_common
 
 export results, chronos, chronicles, broker_context, api_common, asyncchannels
 

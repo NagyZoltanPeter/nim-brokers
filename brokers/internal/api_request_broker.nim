@@ -16,7 +16,7 @@
 import std/[macros, strutils]
 import chronos, chronicles
 import results
-import ./helper/broker_utils, ./broker_context, ./mt_request_broker, ./api_common
+import ./helper/broker_utils, ../broker_context, ./mt_request_broker, ./api_common
 import ./api_type_resolver
 
 export results, chronos, chronicles, broker_context, mt_request_broker, api_common

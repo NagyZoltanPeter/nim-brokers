@@ -5,7 +5,7 @@ import chronos
 import std/sequtils
 import std/strutils
 
-import multi_request_broker
+import brokers/multi_request_broker
 
 MultiRequestBroker:
   type NoArgResponse = object

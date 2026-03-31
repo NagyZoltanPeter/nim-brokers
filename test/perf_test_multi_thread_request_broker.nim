@@ -5,7 +5,7 @@ import chronos
 import std/[strutils, atomics, monotimes]
 from std/times import inNanoseconds
 
-import request_broker
+import brokers/request_broker
 
 ## ---------------------------------------------------------------------------
 ## Performance / stress tests for multi-thread RequestBroker

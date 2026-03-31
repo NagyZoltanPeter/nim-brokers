@@ -4,7 +4,7 @@ import testutils/unittests
 import chronos
 import std/[strutils, atomics]
 
-import request_broker
+import brokers/request_broker
 
 ## ---------------------------------------------------------------------------
 ## Multi-thread Async-mode Requestbroker tests

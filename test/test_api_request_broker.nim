@@ -4,7 +4,7 @@ import testutils/unittests
 import chronos
 import std/[atomics, os]
 
-import request_broker
+import brokers/request_broker
 
 ## ---------------------------------------------------------------------------
 ## API-mode RequestBroker tests

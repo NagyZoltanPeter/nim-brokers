@@ -160,14 +160,14 @@ import std/[macros, strutils]
 from std/sequtils import keepItIf
 import chronos
 import results
-import ./helper/broker_utils, ./broker_context
+import ./internal/helper/broker_utils, ./broker_context
 
 when compileOption("threads"):
-  import ./mt_request_broker
+  import ./internal/mt_request_broker
   export mt_request_broker
 
 when compileOption("threads") and defined(BrokerFfiApi):
-  import ./api_request_broker, ./api_type
+  import ./internal/api_request_broker, ./internal/api_type
   export api_request_broker, api_type
 
 export results, chronos, keepItIf, broker_context

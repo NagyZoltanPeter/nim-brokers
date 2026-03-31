@@ -27,7 +27,7 @@
 import std/[macros, strutils]
 import chronos, chronicles
 import results
-import ./helper/broker_utils, ./broker_context, ./mt_event_broker, ./api_common
+import ./helper/broker_utils, ../broker_context, ./mt_event_broker, ./api_common
 import ./mt_request_broker
 import ./api_type_resolver
 
