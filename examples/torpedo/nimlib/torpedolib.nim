@@ -25,10 +25,7 @@
 
 import std/[sequtils, strutils]
 import chronos, results
-import brokers/[event_broker, request_broker, broker_context]
-
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # FFI-visible data types (shared between Nim, C, C++, Python)
@@ -1174,13 +1171,12 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 # Library registration — generates C exports, header, Python wrapper
 # ---------------------------------------------------------------------------
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name:
-      "torpedolib"
-    initializeRequest:
-      InitializeCaptainRequest
-    shutdownRequest:
-      ShutdownRequest
+registerBrokerLibrary:
+  name:
+    "torpedolib"
+  initializeRequest:
+    InitializeCaptainRequest
+  shutdownRequest:
+    ShutdownRequest
 
 {.pop.}

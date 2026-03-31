@@ -109,7 +109,7 @@ proc parseTypeExpr(
 # Macro
 # ---------------------------------------------------------------------------
 
-macro registerBrokerLibrary*(body: untyped): untyped =
+proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let config = parseLibraryConfig(body)
   let libName = config.name
   let libNameLit = newLit(libName)
@@ -1068,3 +1068,12 @@ macro registerBrokerLibrary*(body: untyped): untyped =
     echo result.repr
 
 {.pop.}
+
+macro registerBrokerLibrary*(body: untyped): untyped =
+  ## Generates the full shared-library surface for a broker FFI library.
+  ## When compiled without `-d:BrokerFfiApi` this is a no-op, so client
+  ## code never needs a `when defined(BrokerFfiApi):` guard around it.
+  when defined(BrokerFfiApi):
+    registerBrokerLibraryImpl(body)
+  else:
+    newStmtList()

@@ -17,10 +17,7 @@
 
 {.push raises: [].}
 
-import brokers/[event_broker, request_broker, broker_context]
-
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # Shared item types (used in seq[T] request and result fields)
@@ -290,13 +287,12 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 # Library registration — MUST be last
 # ---------------------------------------------------------------------------
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name:
-      "mylib"
-    initializeRequest:
-      InitializeRequest
-    shutdownRequest:
-      ShutdownRequest
+registerBrokerLibrary:
+  name:
+    "mylib"
+  initializeRequest:
+    InitializeRequest
+  shutdownRequest:
+    ShutdownRequest
 
 {.pop.}
