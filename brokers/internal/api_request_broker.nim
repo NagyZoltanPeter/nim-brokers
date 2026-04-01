@@ -318,6 +318,34 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         "_items))(*" & paramName & "_items) if " & paramName & "_items else None\n"
     )
 
+  proc buildPyStringSeqParamSetup(paramName: string): string {.compileTime.} =
+    result =
+      "        " & paramName & "_encoded = [s.encode('utf-8') for s in " & paramName &
+      "]\n"
+    result.add(
+      "        " & paramName & "_arr_type = ctypes.c_char_p * len(" & paramName &
+        "_encoded)\n"
+    )
+    result.add(
+      "        " & paramName & "_ptr = " & paramName & "_arr_type(*" & paramName &
+        "_encoded) if " & paramName & "_encoded else None\n"
+    )
+
+  proc buildPyPrimSeqParamSetup(paramName, ctElem: string): string {.compileTime.} =
+    result =
+      "        " & paramName & "_arr_type = " & ctElem & " * len(" & paramName & ")\n"
+    result.add(
+      "        " & paramName & "_ptr = " & paramName & "_arr_type(*" & paramName &
+        ") if " & paramName & " else None\n"
+    )
+
+  proc buildPyArrayParamSetup(
+      paramName, ctElem: string, n: int
+  ): string {.compileTime.} =
+    result =
+      "        " & paramName & "_arr = (" & ctElem & " * " & $n & ")(*" & paramName &
+      ")\n"
+
   # ---------------------------------------------------------------------------
   # Step 2: Generate all MT broker code
   # ---------------------------------------------------------------------------
@@ -1134,7 +1162,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             if isSeqType(fType):
               pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
               pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
+            elif isArrayTypeNode(fType):
+              let n = arrayNodeSize(fType)
+              let elemName = arrayNodeElemName(fType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyCStruct.add(
+                "        (\"" & fName & "\", " & ctElem & " * " & $n & "),\n"
+              )
             else:
+              # nimTypeToCtypes now resolves enums → ctypes.c_int32
+              # and distinct/alias types → underlying ctypes type
               let ctField = nimTypeToCtypes(fType)
               pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
         pyCStruct.add("    ]")
@@ -1167,10 +1204,19 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           for paramDef in argParams:
             for i in 0 ..< paramDef.len - 2:
               let paramType = paramDef[paramDef.len - 2]
-              if isSeqType(paramType):
+              if isSeqOfObjectNode(paramType):
                 let itemTypeName = seqItemTypeName(paramType)
                 argTypes.add(
                   ", ctypes.POINTER(" & itemTypeName & "CItem), ctypes.c_int32"
+                )
+              elif isSeqType(paramType):
+                # seq[primitive] or seq[string]: void* + count
+                argTypes.add(", ctypes.c_void_p, ctypes.c_int32")
+              elif isArrayTypeNode(paramType):
+                # array[N, T]: pointer to first element
+                let elemName = arrayNodeElemName(paramType)
+                argTypes.add(
+                  ", ctypes.POINTER(" & nimTypeToCtypes(ident(elemName)) & ")"
                 )
               else:
                 argTypes.add(", " & nimTypeToCtypes(paramType))
@@ -1192,7 +1238,37 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         if isCStringType(fType):
           I & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
             " else \"\"\n"
-        elif isSeqType(fType):
+        elif isSeqOfStringNode(fType):
+          # seq[string]: char** → list[str]
+          var s = I & fName & "_list: list[str] = []\n"
+          s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+          s.add(
+            I & "    _str_arr = ctypes.cast(c." & fName &
+              ", ctypes.POINTER(ctypes.c_char_p))\n"
+          )
+          s.add(I & "    for _i in range(c." & fName & "_count):\n")
+          s.add(
+            I & "        " & fName &
+              "_list.append(_str_arr[_i].decode(\"utf-8\") if _str_arr[_i] else \"\")\n"
+          )
+          s.add(I & fName & " = " & fName & "_list\n")
+          s
+        elif isSeqOfPrimitiveNode(fType):
+          # seq[primitive]: primType* → list[int/float]
+          let elemName = seqItemTypeName(fType)
+          let ctElem = nimTypeToCtypes(ident(elemName))
+          var s = I & fName & "_list = []\n"
+          s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+          s.add(
+            I & "    _arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & ctElem &
+              "))\n"
+          )
+          s.add(I & "    for _i in range(c." & fName & "_count):\n")
+          s.add(I & "        " & fName & "_list.append(_arr[_i])\n")
+          s.add(I & fName & " = " & fName & "_list\n")
+          s
+        elif isSeqOfObjectNode(fType):
+          # seq[CustomObject]: cast to CItem*, reconstruct dataclasses
           let itemType = seqItemTypeName(fType)
           var s = I & fName & "_list: list[" & itemType & "] = []\n"
           s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
@@ -1221,6 +1297,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           s.add(I & "        ))\n")
           s.add(I & fName & " = " & fName & "_list\n")
           s
+        elif isArrayTypeNode(fType):
+          # array[N, T]: ctypes fixed-size array → Python list
+          I & fName & " = list(c." & fName & ")\n"
+        elif isEnumNode(fType):
+          # Enum: wrap raw int with the Python IntEnum class
+          I & fName & " = " & $fType & "(c." & fName & ")\n"
         else:
           I & fName & " = c." & fName & "\n"
 
@@ -1269,7 +1351,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             pyParams.add(", " & paramName & ": " & pyType)
             aliasArgs.add(paramName)
             summaryParams.add(paramName)
-            if isSeqType(paramType):
+            if isSeqOfObjectNode(paramType):
               let itemTypeName = seqItemTypeName(paramType)
               pyPreCall.add(
                 buildPySeqParamSetup(
@@ -1277,6 +1359,20 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 )
               )
               callArgs.add(", " & paramName & "_array, len(" & paramName & "_items)")
+            elif isSeqOfStringNode(paramType):
+              pyPreCall.add(buildPyStringSeqParamSetup(paramName))
+              callArgs.add(", " & paramName & "_ptr, len(" & paramName & ")")
+            elif isSeqOfPrimitiveNode(paramType):
+              let elemName = seqItemTypeName(paramType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyPreCall.add(buildPyPrimSeqParamSetup(paramName, ctElem))
+              callArgs.add(", " & paramName & "_ptr, len(" & paramName & ")")
+            elif isArrayTypeNode(paramType):
+              let n = arrayNodeSize(paramType)
+              let elemName = arrayNodeElemName(paramType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyPreCall.add(buildPyArrayParamSetup(paramName, ctElem, n))
+              callArgs.add(", " & paramName & "_arr")
             elif isCStringType(paramType):
               callArgs.add(", " & paramName & ".encode(\"utf-8\")")
             else:

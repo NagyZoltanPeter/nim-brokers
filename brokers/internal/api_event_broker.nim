@@ -925,7 +925,15 @@ private:
       cfuncArgs.add("ctypes.c_void_p")
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
-          cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
+          if isSeqType(fieldTypes[i]):
+            cfuncArgs.add("ctypes.c_void_p")
+            cfuncArgs.add("ctypes.c_int32")
+          elif isArrayTypeNode(fieldTypes[i]):
+            let n = arrayNodeSize(fieldTypes[i])
+            let ctElem = nimTypeToCtypes(ident(arrayNodeElemName(fieldTypes[i])))
+            cfuncArgs.add(ctElem & " * " & $n)
+          else:
+            cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
 
       let cfuncName = "self._" & typeDisplayName & "CCallback"
       gApiPyCallbackSetup.add(
@@ -955,6 +963,9 @@ private:
           pyForwards.add(
             snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\""
           )
+        elif isEnumRegistered($fieldTypes[i]):
+          # Wrap raw int with the Python IntEnum class
+          pyForwards.add($fieldTypes[i] & "(" & snakeFname & ")")
         else:
           pyForwards.add(snakeFname)
 

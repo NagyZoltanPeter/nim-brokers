@@ -267,6 +267,17 @@ macro autoRegisterApiType*(T: typed): untyped =
       # for namespace awareness)
       # No separate C++ struct needed — C enum typedef is used directly
 
+      # Generate Python IntEnum class
+      when defined(BrokerFfiApiGenPy):
+        var pyEnum = "class " & typeName & "(enum.IntEnum):\n"
+        pyEnum.add("    \"\"\"" & typeName & " — generated from Nim enum.\"\"\"\n")
+        for v in apiValues:
+          pyEnum.add(
+            "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " &
+              $v.ordinal & "\n"
+          )
+        gApiPyTypedefs.add(pyEnum)
+
       # Emit recursive calls for nested enum dependencies (rare but possible)
       return result
 
@@ -278,6 +289,12 @@ macro autoRegisterApiType*(T: typed): untyped =
     # Generate C typedef in header
     let cBase = nimTypeToCSuffix(ident(baseName))
     appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
+
+    # Generate Python type alias
+    when defined(BrokerFfiApiGenPy):
+      let pyBase = nimTypeToPyAnnotation(ident(baseName))
+      gApiPyTypedefs.add(typeName & " = " & pyBase & "  # distinct " & baseName)
+
     return result
 
   # Check for alias types (sym that resolves to another sym/primitive)
