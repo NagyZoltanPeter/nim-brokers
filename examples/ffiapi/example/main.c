@@ -9,7 +9,8 @@
  *   - Querying a single device (GetDevice request)
  *   - Listing all devices (ListDevices — returns an array of structs)
  *   - Removing a device (RemoveDevice request)
- *   - Event callbacks for DeviceDiscovered and DeviceStatusChanged
+ *   - Event callbacks for DeviceDiscovered, DeviceStatusChanged, SensorAlert,
+ *     and DeviceBatch (seq[string] + seq[int64] + array[4,int32] in callback)
  *   - Proper memory cleanup via free_*_result functions
  *
  * Build (from repo root):
@@ -43,6 +44,7 @@ static void sleep_ms(int ms) { usleep(ms * 1000); }
 typedef struct {
     int discovered_count;
     int status_count;
+    int batch_count;
 } ExampleEventState;
 
 static void on_device_discovered(
@@ -59,6 +61,29 @@ static void on_device_discovered(
            name ? name : "(null)",
            deviceType ? deviceType : "(null)",
            address ? address : "(null)");
+    (void)ctx;
+}
+
+static void on_device_batch(
+    uint32_t ctx, void* userData,
+    const char** labels,      int32_t labels_count,
+    const int64_t* deviceIds, int32_t deviceIds_count,
+    const int32_t* caps,      int32_t caps_count)
+{
+    ExampleEventState* state = (ExampleEventState*)userData;
+    if (state != NULL) {
+        state->batch_count += 1;
+    }
+    printf("  [event] DeviceBatch: %d devices  labels=[", labels_count);
+    for (int32_t i = 0; i < labels_count; ++i)
+        printf("%s\"%s\"", i ? ", " : "", labels[i] ? labels[i] : "(null)");
+    printf("]  ids=[");
+    for (int32_t i = 0; i < deviceIds_count; ++i)
+        printf("%s%lld", i ? ", " : "", (long long)deviceIds[i]);
+    printf("]  caps=[");
+    for (int32_t i = 0; i < caps_count; ++i)
+        printf("%s%d", i ? ", " : "", caps[i]);
+    printf("]\n");
     (void)ctx;
 }
 
@@ -114,9 +139,11 @@ int main(void) {
     uint64_t h_discovered = mylib_onDeviceDiscovered(ctx, on_device_discovered, &event_state);
     uint64_t h_status     = mylib_onDeviceStatusChanged(ctx, on_device_status_changed, &event_state);
     uint64_t h_alert      = mylib_onSensorAlert(ctx, on_sensor_alert, NULL);
+    uint64_t h_batch      = mylib_onDeviceBatch(ctx, on_device_batch, &event_state);
     printf("   DeviceDiscovered handle:     %llu\n", (unsigned long long)h_discovered);
     printf("   DeviceStatusChanged handle:  %llu\n", (unsigned long long)h_status);
-    printf("   SensorAlert handle:          %llu\n\n", (unsigned long long)h_alert);
+    printf("   SensorAlert handle:          %llu\n", (unsigned long long)h_alert);
+    printf("   DeviceBatch handle:          %llu\n\n", (unsigned long long)h_batch);
 
     /* ── 3. Initialize the library ────────────────────────────────────── */
     printf("3. Configure library (InitializeRequest)\n");
@@ -295,13 +322,15 @@ int main(void) {
     mylib_offDeviceDiscovered(ctx, 0);        /* remove all discovery listeners */
     mylib_offDeviceStatusChanged(ctx, 0);     /* remove all status listeners */
     mylib_offSensorAlert(ctx, 0);             /* remove all sensor alert listeners */
+    mylib_offDeviceBatch(ctx, h_batch);       /* remove by handle */
     printf("    Listeners removed.\n");
 
     mylib_shutdown(ctx);
     printf("    Context shut down.\n\n");
 
     printf("    Discovery callbacks: %d\n", event_state.discovered_count);
-    printf("    Status callbacks: %d\n\n", event_state.status_count);
+    printf("    Status callbacks:    %d\n", event_state.status_count);
+    printf("    Batch callbacks:     %d\n\n", event_state.batch_count);
 
     printf("=== C example complete ===\n");
     return 0;

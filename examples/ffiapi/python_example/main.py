@@ -26,6 +26,7 @@ def main() -> int:
 
     discovery_count = 0
     status_count = 0
+    batch_count = 0
 
     try:
         with Mylib() as lib:
@@ -74,6 +75,22 @@ def main() -> int:
 
             alert_count = 0
 
+            def on_batch(
+                owner: Mylib,
+                labels: list[str],
+                device_ids: list[int],
+                capabilities: list[int],
+            ) -> None:
+                nonlocal batch_count
+                batch_count += 1
+                print(
+                    f"  >>> DeviceBatch #{batch_count}: "
+                    f"ctx=0x{owner.ctx:08X}  count={len(labels)}"
+                    f"  labels={labels}"
+                    f"  ids={device_ids}"
+                    f"  caps={capabilities}"
+                )
+
             def on_alert(
                 owner: Mylib,
                 sensorId: int,
@@ -92,9 +109,11 @@ def main() -> int:
             h_status = lib.onDeviceStatusChanged(on_status)
             h_status2 = lib.onDeviceStatusChanged(on_status_logger)
             h_alert = lib.onSensorAlert(on_alert)
+            h_batch = lib.onDeviceBatch(on_batch)
 
             print(
-                f"  Handles: discovered={h_disc}  status={h_status}  status2={h_status2}  alert={h_alert}\n"
+                f"  Handles: discovered={h_disc}  status={h_status}"
+                f"  status2={h_status2}  alert={h_alert}  batch={h_batch}\n"
             )
 
             print("--- Configuring library ---")
@@ -204,11 +223,13 @@ def main() -> int:
             print("--- Unsubscribing all ---")
             lib.offDeviceDiscovered()
             lib.offDeviceStatusChanged()
+            lib.offDeviceBatch(h_batch)
             print("  All event listeners removed.\n")
 
             print(f"  Total discovery events received: {discovery_count}")
             print(f"  Total status events received: {status_count}")
-            print(f"  Total sensor alert events received: {alert_count}\n")
+            print(f"  Total sensor alert events received: {alert_count}")
+            print(f"  Total device batch events received: {batch_count}\n")
 
             print("--- Shutting down (context manager) ---")
 

@@ -929,9 +929,10 @@ private:
             cfuncArgs.add("ctypes.c_void_p")
             cfuncArgs.add("ctypes.c_int32")
           elif isArrayTypeNode(fieldTypes[i]):
-            let n = arrayNodeSize(fieldTypes[i])
+            # C ABI: const elemType* ptr + int32_t count (Nim heap-copies the array)
             let ctElem = nimTypeToCtypes(ident(arrayNodeElemName(fieldTypes[i])))
-            cfuncArgs.add(ctElem & " * " & $n)
+            cfuncArgs.add("ctypes.POINTER(" & ctElem & ")")
+            cfuncArgs.add("ctypes.c_int32")
           else:
             cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
 
@@ -951,22 +952,104 @@ private:
       )
       gApiPyCallbackSetup.add("_lib." & publicDeregFuncName & ".restype = None")
 
-    # Build Python callback parameter list and forwarding
-    var pyCallbackParams: seq[string] = @[]
+    # Build Python callback parameter list and forwarding.
+    # pyTrampolineParams: raw names matching CFUNCTYPE arg count
+    #   (seq[T] fields expand to two names: foo + foo_count)
+    # pyUserParams: one name per Nim field (for summary/callable hint)
+    # pyDecodeLines: multi-line decode code emitted inside trampoline body
+    # pyForwards: expressions forwarded to the Python callback
+    var pyTrampolineParams: seq[string] = @[]
+    var pyUserParams: seq[string] = @[]
+    var pyDecodeLines: string = ""
     var pyForwards: seq[string] = @[]
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
         let fName = $fieldNames[i]
         let snakeFname = toSnakeCase(fName)
-        pyCallbackParams.add(snakeFname)
-        if isCStringType(fieldTypes[i]):
+        let fType = fieldTypes[i]
+        pyUserParams.add(snakeFname)
+        if isCStringType(fType):
+          pyTrampolineParams.add(snakeFname)
           pyForwards.add(
             snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\""
           )
-        elif isEnumRegistered($fieldTypes[i]):
+        elif isSeqType(fType):
+          # CFUNCTYPE emits two args: pointer + count
+          pyTrampolineParams.add(snakeFname)
+          pyTrampolineParams.add(snakeFname & "_count")
+          let elemName = seqItemTypeName(fType)
+          let listVar = "_" & snakeFname & "_list"
+          if elemName.toLowerAscii() in ["string", "cstring"]:
+            pyDecodeLines.add("            " & listVar & ": list[str] = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _str_arr = ctypes.cast(" & snakeFname &
+                ", ctypes.POINTER(ctypes.c_char_p))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add(
+              "                    " & listVar &
+                ".append(_str_arr[_i].decode('utf-8') if _str_arr[_i] else '')\n"
+            )
+          elif isNimPrimitive(elemName):
+            let ctElem = nimTypeToCtypes(ident(elemName))
+            pyDecodeLines.add("            " & listVar & " = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+                ctElem & "))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          else:
+            # seq[CustomObject]: cast to CItem*, reconstruct
+            pyDecodeLines.add("            " & listVar & " = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+                elemName & "CItem))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          pyForwards.add(listVar)
+        elif isArrayTypeNode(fType):
+          # C ABI: pointer + count (same layout as seq[primitive])
+          pyTrampolineParams.add(snakeFname)
+          pyTrampolineParams.add(snakeFname & "_count")
+          let elemName = arrayNodeElemName(fType)
+          let ctElem = nimTypeToCtypes(ident(elemName))
+          let listVar = "_" & snakeFname & "_list"
+          pyDecodeLines.add("            " & listVar & " = []\n")
+          pyDecodeLines.add(
+            "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+          )
+          pyDecodeLines.add(
+            "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+              ctElem & "))\n"
+          )
+          pyDecodeLines.add(
+            "                for _i in range(" & snakeFname & "_count):\n"
+          )
+          pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          pyForwards.add(listVar)
+        elif isEnumRegistered($fType):
           # Wrap raw int with the Python IntEnum class
-          pyForwards.add($fieldTypes[i] & "(" & snakeFname & ")")
+          pyTrampolineParams.add(snakeFname)
+          pyForwards.add($fType & "(" & snakeFname & ")")
         else:
+          pyTrampolineParams.add(snakeFname)
           pyForwards.add(snakeFname)
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
@@ -980,7 +1063,7 @@ private:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
     let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
     var pySummaryParams: seq[string] = @[("owner")]
-    pySummaryParams.add(pyCallbackParams)
+    pySummaryParams.add(pyUserParams)
 
     # on_<event> method
     block:
@@ -992,11 +1075,13 @@ private:
           " events.\n\n        The callback receives the owning Mylib instance as its first\n        argument instead of the raw ctx value so ownership stays at the\n        wrapper level while the C ABI details remain hidden. Returns a\n        handle for removal.\"\"\"\n"
       )
       m.add("        self._requireContext()\n")
-      # Build the trampoline that decodes strings
+      # Build the trampoline that decodes ABI values to Python types
       m.add("        @" & cfuncTypeName & "\n")
       var trampolineParams = @["_ctx", "_user_data"]
-      trampolineParams.add(pyCallbackParams)
+      trampolineParams.add(pyTrampolineParams)
       m.add("        def _trampoline(" & trampolineParams.join(", ") & "):\n")
+      if pyDecodeLines.len > 0:
+        m.add(pyDecodeLines)
       var pyCallbackInvokeArgs = @["self"]
       pyCallbackInvokeArgs.add(pyForwards)
       m.add("            callback(" & pyCallbackInvokeArgs.join(", ") & ")\n")

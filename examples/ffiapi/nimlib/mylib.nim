@@ -17,6 +17,7 @@
 
 {.push raises: [].}
 
+import std/sequtils
 import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,14 @@ EventBroker(API):
     status*: DeviceStatus
     timestampMs*: Timestamp
 
+## DeviceBatch: emitted when multiple devices change state simultaneously.
+## Exercises: seq[string] and array[4, int32] in event callback fields.
+EventBroker(API):
+  type DeviceBatch = object
+    labels*: seq[string]
+    deviceIds*: seq[int64]
+    capabilities*: array[4, int32]
+
 # ---------------------------------------------------------------------------
 # Library internals (provider implementations)
 # ---------------------------------------------------------------------------
@@ -262,6 +271,15 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
             address: device.address,
           ),
         )
+      # Emit a DeviceBatch summary for the whole add operation
+      let batchLabels = addedDevices.mapIt(it.name)
+      let batchIds = addedDevices.mapIt(it.deviceId)
+      let batchCaps: array[4, int32] =
+        [int32(addedDevices.len), int32(gNextDeviceId - 1), 0'i32, 0'i32]
+      await DeviceBatch.emit(
+        gProviderCtx,
+        DeviceBatch(labels: batchLabels, deviceIds: batchIds, capabilities: batchCaps),
+      )
       return ok(AddDevice(devices: addedDevices, success: true)),
   )
   if addDeviceProviderRes.isErr():

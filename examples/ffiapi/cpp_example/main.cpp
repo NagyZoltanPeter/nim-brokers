@@ -26,6 +26,7 @@
 
 #include <cstdio>
 #include <chrono>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -82,6 +83,32 @@ int main() {
                    (long long)ts);
         });
 
+    // DeviceBatch listener — exercises seq[string], seq[int64], array[4,int32]
+    //   in a single event callback. Labels and IDs arrive as std::span (zero-copy
+    //   views into the Nim-owned buffers, valid only for the duration of the call).
+    int batchCount = 0;
+    auto h_batch = lib.onDeviceBatch(
+        [&batchCount](Mylib& owner,
+                      std::span<const char*> labels,
+                      std::span<const int64_t> deviceIds,
+                      std::span<const int32_t> capabilities) {
+            (void)owner;
+            ++batchCount;
+            printf("  >>> DeviceBatch #%d: %zu devices\n", batchCount, labels.size());
+            printf("      labels:       [");
+            for (size_t i = 0; i < labels.size(); ++i)
+                printf("%s\"%s\"", i ? ", " : "", labels[i] ? labels[i] : "(null)");
+            printf("]\n");
+            printf("      ids:          [");
+            for (size_t i = 0; i < deviceIds.size(); ++i)
+                printf("%s%lld", i ? ", " : "", (long long)deviceIds[i]);
+            printf("]\n");
+            printf("      capabilities: [");
+            for (size_t i = 0; i < capabilities.size(); ++i)
+                printf("%s%d", i ? ", " : "", capabilities[i]);
+            printf("]\n");
+        });
+
     // SensorAlert listener — exercises enum, distinct, and int64 in callback
     auto h_alert = lib.onSensorAlert(
         [](Mylib& owner, int32_t sensorId, int64_t deviceId,
@@ -102,10 +129,11 @@ int main() {
                    online ? "UP" : "DOWN");
         });
 
-    printf("  Handles: discovered=%llu  status=%llu  status2=%llu\n\n",
+    printf("  Handles: discovered=%llu  status=%llu  status2=%llu  batch=%llu\n\n",
            (unsigned long long)h_disc,
            (unsigned long long)h_status,
-           (unsigned long long)h_status2);
+           (unsigned long long)h_status2,
+           (unsigned long long)h_batch);
 
     // ── 3. Configure library — returns Result<InitializeRequestResult> ─
     printf("--- Configuring library ---\n");
@@ -149,6 +177,15 @@ int main() {
             ids.push_back(device.deviceId);
             printf("  + %s -> id=%lld\n", device.name.c_str(), (long long)device.deviceId);
         }
+    auto res = lib.addDevice(fleet);
+        if (!res.ok()) {
+            fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
+            return 1;
+        }
+        for (const auto& device : res->devices) {
+            ids.push_back(device.deviceId);
+            printf("  + %s -> id=%lld\n", device.name.c_str(), (long long)device.deviceId);
+        }
     }
     // Let discovery events fire
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -178,18 +215,7 @@ int main() {
     if (!ids.empty()) {
         int64_t qid = ids[2];  // Edge-Switch-B
         printf("--- Query device id=%lld ---\n", (long long)qid);
-        auto res = lib.getDevice(qid);
-        if (!res.ok()) {
-            fprintf(stderr, "  GetDevice error: %s\n", res.error().c_str());
-        } else {
-            printf("  name=\"%s\"  type=\"%s\"  addr=\"%s\"  online=%s\n",
-                   res->name.c_str(), res->deviceType.c_str(),
-                   res->address.c_str(), res->online ? "yes" : "no");
-        }
-        printf("\n");
-    }
-
-    // ── 6b. New type demos ───────────────────────────────────────────
+        auto res = lib.getDevice(qid);    // ── 6b. New type demos ───────────────────────────────────────────
     if (!ids.empty()) {
         int64_t qid = ids[0];  // Core-Router
 
@@ -240,6 +266,17 @@ int main() {
         printf("\n");
     }
 
+
+        if (!res.ok()) {
+            fprintf(stderr, "  GetDevice error: %s\n", res.error().c_str());
+        } else {
+            printf("  name=\"%s\"  type=\"%s\"  addr=\"%s\"  online=%s\n",
+                   res->name.c_str(), res->deviceType.c_str(),
+                   res->address.c_str(), res->online ? "yes" : "no");
+        }
+        printf("\n");
+    }
+
     // ── 7. Remove two devices (triggers DeviceStatusChanged × 2) ─────
     //    Both status listeners will fire for each removal.
     printf("--- Removing devices ---\n");
@@ -280,18 +317,19 @@ int main() {
             for (auto& d : res->devices) {
                 printf("  id=%-3lld  %-18s  type=%-10s  addr=%-16s  %s\n",
                        (long long)d.deviceId, d.name.c_str(),
-                       d.deviceType.c_str(), d.address.c_str(),
+                       d.deviceType.c_str    lib.offSensorAlert();           // handle=0 → remove all
+    lib.offDeviceBatch(h_batch);    // remove by handle
+(), d.address.c_str(),
                        d.online ? "online" : "offline");
             }
         }
     }
     printf("\n");
 
-    // ── 11. Remove all event listeners ───────────────────────────────
-    printf("--- Unsubscribing all ---\n");
-    lib.offDeviceDiscovered();      // handle=0 → remove all
+    // ── 11. Remove all event listeners ─────────────────────────    printf("  Total status events received:   %d\n", statusCount);
+    printf("  Total batch events received:    %d\n\n", batchCount);
+Discovered();      // handle=0 → remove all
     lib.offDeviceStatusChanged();   // handle=0 → remove all
-    lib.offSensorAlert();           // handle=0 → remove all
     printf("  All event listeners removed.\n\n");
 
     // ── 12. Summary ──────────────────────────────────────────────────
