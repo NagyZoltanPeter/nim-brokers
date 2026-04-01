@@ -24,6 +24,7 @@
  *   ./examples/ffiapi/cpp_example/build/example
  */
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <span>
@@ -94,19 +95,27 @@ int main() {
                       std::span<const int32_t> capabilities) {
             (void)owner;
             ++batchCount;
+
+            auto printSpan = []<typename T, typename F>
+                    (const char* label, std::span<T> values, F&& fmt) {
+                printf("      %-13s [", label);
+                if (!values.empty()) {
+                    fmt(values.front());
+                    std::ranges::for_each(values.subspan(1), [&](const auto& v) {
+                        printf(", ");
+                        fmt(v);
+                    });
+                }
+                printf("]\n");
+            };
+
             printf("  >>> DeviceBatch #%d: %zu devices\n", batchCount, labels.size());
-            printf("      labels:       [");
-            for (size_t i = 0; i < labels.size(); ++i)
-                printf("%s\"%s\"", i ? ", " : "", labels[i] ? labels[i] : "(null)");
-            printf("]\n");
-            printf("      ids:          [");
-            for (size_t i = 0; i < deviceIds.size(); ++i)
-                printf("%s%lld", i ? ", " : "", (long long)deviceIds[i]);
-            printf("]\n");
-            printf("      capabilities: [");
-            for (size_t i = 0; i < capabilities.size(); ++i)
-                printf("%s%d", i ? ", " : "", capabilities[i]);
-            printf("]\n");
+            printSpan("labels:", labels,
+                [](const char* s) { printf("\"%s\"", s ? s : "(null)"); });
+            printSpan("ids:", deviceIds,
+                [](int64_t v) { printf("%lld", (long long)v); });
+            printSpan("capabilities:", capabilities,
+                [](int32_t v) { printf("%d", v); });
         });
 
     // SensorAlert listener — exercises enum, distinct, and int64 in callback
@@ -169,15 +178,6 @@ int main() {
     std::vector<int64_t> ids;
     {
         auto res = lib.addDevice(fleet);
-        if (!res.ok()) {
-            fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
-            return 1;
-        }
-        for (const auto& device : res->devices) {
-            ids.push_back(device.deviceId);
-            printf("  + %s -> id=%lld\n", device.name.c_str(), (long long)device.deviceId);
-        }
-    auto res = lib.addDevice(fleet);
         if (!res.ok()) {
             fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
             return 1;
@@ -317,24 +317,25 @@ int main() {
             for (auto& d : res->devices) {
                 printf("  id=%-3lld  %-18s  type=%-10s  addr=%-16s  %s\n",
                        (long long)d.deviceId, d.name.c_str(),
-                       d.deviceType.c_str    lib.offSensorAlert();           // handle=0 → remove all
-    lib.offDeviceBatch(h_batch);    // remove by handle
-(), d.address.c_str(),
+                       d.deviceType.c_str(), d.address.c_str(),
                        d.online ? "online" : "offline");
             }
         }
     }
     printf("\n");
-
+    
     // ── 11. Remove all event listeners ─────────────────────────    printf("  Total status events received:   %d\n", statusCount);
-    printf("  Total batch events received:    %d\n\n", batchCount);
-Discovered();      // handle=0 → remove all
+    printf("--- Unsubscribing all ---\n");
+    lib.offDeviceDiscovered();      // handle=0 → remove all
+    lib.offSensorAlert();           // handle=0 → remove all
+    lib.offDeviceBatch(h_batch);    // remove by handle      // handle=0 → remove all
     lib.offDeviceStatusChanged();   // handle=0 → remove all
     printf("  All event listeners removed.\n\n");
-
+    
     // ── 12. Summary ──────────────────────────────────────────────────
     printf("  Total discovery events received: %d\n", discoveryCount);
     printf("  Total status events received: %d\n\n", statusCount);
+    printf("  Total batch events received:    %d\n\n", batchCount);
 
     // ── 13. Shutdown (RAII) ──────────────────────────────────────────
     printf("--- Shutting down (RAII) ---\n");
