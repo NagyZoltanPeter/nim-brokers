@@ -49,7 +49,7 @@ int main() {
     }
     printf("Library context: 0x%08X\n\n", lib.ctx());
 
-    // ── 2. Subscribe to events using lambdas ─────────────────────────
+    // ── 2. Subscribe to events using lambdas (including SensorAlert) ────
     //    Callbacks receive std::string_view (zero-copy, valid during call).
     //    Captures work naturally — these are std::function, not C ptrs.
     printf("--- Subscribing to events ---\n");
@@ -81,6 +81,16 @@ int main() {
                    online ? "ONLINE" : "OFFLINE",
                    (long long)ts);
         });
+
+    // SensorAlert listener — exercises enum, distinct, and int64 in callback
+    auto h_alert = lib.onSensorAlert(
+        [](Mylib& owner, int32_t sensorId, int64_t deviceId,
+           DeviceStatus status, int64_t timestampMs) {
+            (void)owner;
+            printf("  >>> SensorAlert: sensorId=%d  deviceId=%lld  status=%d  ts=%lld\n",
+                   sensorId, (long long)deviceId, (int)status, (long long)timestampMs);
+        });
+    printf("  SensorAlert handle: %llu\n", (unsigned long long)h_alert);
 
     // Register a second status listener to demonstrate multiplexing
     auto h_status2 = lib.onDeviceStatusChanged(
@@ -179,6 +189,57 @@ int main() {
         printf("\n");
     }
 
+    // ── 6b. New type demos ───────────────────────────────────────────
+    if (!ids.empty()) {
+        int64_t qid = ids[0];  // Core-Router
+
+        // GetSensorData — seq[byte], enum (DeviceStatus), distinct (SensorId)
+        printf("--- GetSensorData (seq[byte] + enum + distinct) ---\n");
+        {
+            auto res = lib.getSensorData(qid);
+            if (!res.ok()) {
+                fprintf(stderr, "  GetSensorData error: %s\n", res.error().c_str());
+            } else {
+                printf("  sensorId=%d  status=%d  rawData[%zu]: ",
+                       res->sensorId, (int)res->status, res->rawData.size());
+                for (size_t i = 0; i < res->rawData.size() && i < 8; ++i)
+                    printf("%s0x%02X", i ? " " : "", res->rawData[i]);
+                printf("\n");
+            }
+        }
+
+        // GetDeviceTags — seq[string]
+        printf("--- GetDeviceTags (seq[string]) ---\n");
+        {
+            auto res = lib.getDeviceTags(qid);
+            if (!res.ok()) {
+                fprintf(stderr, "  GetDeviceTags error: %s\n", res.error().c_str());
+            } else {
+                printf("  tags[%zu]: ", res->tags.size());
+                for (size_t i = 0; i < res->tags.size(); ++i)
+                    printf("%s\"%s\"", i ? ", " : "", res->tags[i].c_str());
+                printf("\n");
+            }
+        }
+
+        // GetDeviceCapabilities — array[4, int32] + Timestamp
+        printf("--- GetDeviceCapabilities (array[4,int32] + Timestamp) ---\n");
+        {
+            auto res = lib.getDeviceCapabilities(qid);
+            if (!res.ok()) {
+                fprintf(stderr, "  GetDeviceCaps error: %s\n", res.error().c_str());
+            } else {
+                printf("  capturedAt=%lld  caps=[%d, %d, %d, %d]\n",
+                       (long long)res->capturedAt,
+                       res->capabilities[0], res->capabilities[1],
+                       res->capabilities[2], res->capabilities[3]);
+            }
+        }
+        // Let SensorAlert events fire
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        printf("\n");
+    }
+
     // ── 7. Remove two devices (triggers DeviceStatusChanged × 2) ─────
     //    Both status listeners will fire for each removal.
     printf("--- Removing devices ---\n");
@@ -230,6 +291,7 @@ int main() {
     printf("--- Unsubscribing all ---\n");
     lib.offDeviceDiscovered();      // handle=0 → remove all
     lib.offDeviceStatusChanged();   // handle=0 → remove all
+    lib.offSensorAlert();           // handle=0 → remove all
     printf("  All event listeners removed.\n\n");
 
     // ── 12. Summary ──────────────────────────────────────────────────

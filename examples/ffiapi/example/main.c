@@ -62,6 +62,15 @@ static void on_device_discovered(
     (void)ctx;
 }
 
+static void on_sensor_alert(
+    uint32_t ctx, void* userData,
+    int32_t sensorId, int64_t deviceId, DeviceStatus status, int64_t timestampMs)
+{
+    printf("  [event] SensorAlert: sensorId=%d deviceId=%lld status=%d ts=%lld\n",
+           sensorId, (long long)deviceId, (int)status, (long long)timestampMs);
+    (void)ctx; (void)userData;
+}
+
 static void on_device_status_changed(
     uint32_t ctx, void* userData,
     int64_t deviceId, const char* name,
@@ -104,8 +113,10 @@ int main(void) {
     printf("2. Register event listeners\n");
     uint64_t h_discovered = mylib_onDeviceDiscovered(ctx, on_device_discovered, &event_state);
     uint64_t h_status     = mylib_onDeviceStatusChanged(ctx, on_device_status_changed, &event_state);
+    uint64_t h_alert      = mylib_onSensorAlert(ctx, on_sensor_alert, NULL);
     printf("   DeviceDiscovered handle:     %llu\n", (unsigned long long)h_discovered);
-    printf("   DeviceStatusChanged handle:  %llu\n\n", (unsigned long long)h_status);
+    printf("   DeviceStatusChanged handle:  %llu\n", (unsigned long long)h_status);
+    printf("   SensorAlert handle:          %llu\n\n", (unsigned long long)h_alert);
 
     /* ── 3. Initialize the library ────────────────────────────────────── */
     printf("3. Configure library (InitializeRequest)\n");
@@ -229,10 +240,61 @@ int main(void) {
     }
     printf("\n");
 
+    /* ── 9. New type demos — seq[byte], seq[string], array[N,T], enum, distinct ── */
+    printf("9. New type demos\n");
+
+    /* 9a. GetSensorData — seq[byte] result + enum + distinct */
+    {
+        GetSensorDataCResult sr = mylib_get_sensor_data(ctx, id_gw);
+        if (sr.error_message) {
+            fprintf(stderr, "   GetSensorData ERROR: %s\n", sr.error_message);
+        } else {
+            printf("   GetSensorData: sensorId=%d  status=%d  rawBytes=%d [",
+                   sr.sensorId, (int)sr.status, sr.rawData_count);
+            for (int32_t i = 0; i < sr.rawData_count && i < 8; ++i)
+                printf("%s0x%02X", i ? " " : "", sr.rawData[i]);
+            printf("]\n");
+        }
+        mylib_free_get_sensor_data_result(&sr);
+    }
+
+    /* 9b. GetDeviceTags — seq[string] result */
+    {
+        GetDeviceTagsCResult tr = mylib_get_device_tags(ctx, id_sensor);
+        if (tr.error_message) {
+            fprintf(stderr, "   GetDeviceTags ERROR: %s\n", tr.error_message);
+        } else {
+            printf("   GetDeviceTags: %d tags [", tr.tags_count);
+            for (int32_t i = 0; i < tr.tags_count; ++i)
+                printf("%s\"%s\"", i ? ", " : "", tr.tags[i] ? tr.tags[i] : "(null)");
+            printf("]\n");
+        }
+        mylib_free_get_device_tags_result(&tr);
+    }
+
+    /* 9c. GetDeviceCapabilities — array[4, int32] result + Timestamp */
+    {
+        GetDeviceCapabilitiesCResult cr = mylib_get_device_capabilities(ctx, id_gw);
+        if (cr.error_message) {
+            fprintf(stderr, "   GetDeviceCaps ERROR: %s\n", cr.error_message);
+        } else {
+            printf("   GetDeviceCaps: capturedAt=%lld  caps=[%d, %d, %d, %d]\n",
+                   (long long)cr.capturedAt,
+                   cr.capabilities[0], cr.capabilities[1],
+                   cr.capabilities[2], cr.capabilities[3]);
+        }
+        mylib_free_get_device_capabilities_result(&cr);
+    }
+
+    /* Let SensorAlert events fire */
+    sleep_ms(200);
+    printf("\n");
+
     /* ── 10. Unregister listeners & shutdown ───────────────────────────── */
     printf("10. Cleanup and shutdown\n");
     mylib_offDeviceDiscovered(ctx, 0);        /* remove all discovery listeners */
     mylib_offDeviceStatusChanged(ctx, 0);     /* remove all status listeners */
+    mylib_offSensorAlert(ctx, 0);             /* remove all sensor alert listeners */
     printf("    Listeners removed.\n");
 
     mylib_shutdown(ctx);

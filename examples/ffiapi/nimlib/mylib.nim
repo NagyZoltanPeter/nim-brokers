@@ -38,6 +38,22 @@ type AddDeviceSpec* = object
   deviceType*: string
   address*: string
 
+## DeviceStatus — enum for device health state.
+## Exercises: enum type → C typedef enum, ABI as int32_t.
+type DeviceStatus* = enum
+  dsUnknown = 0
+  dsOnline = 1
+  dsOffline = 2
+  dsError = 3
+
+## Timestamp — distinct int64 for type-safe timestamp values (milliseconds since epoch).
+## Exercises: distinct type → C typedef int64_t Timestamp.
+type Timestamp* = distinct int64
+
+## SensorId — distinct int32 for type-safe sensor identifiers.
+## Exercises: distinct type → C typedef int32_t SensorId.
+type SensorId* = distinct int32
+
 # ---------------------------------------------------------------------------
 # Request Brokers
 # ---------------------------------------------------------------------------
@@ -94,6 +110,35 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[ListDevices, string]] {.async.}
 
+## GetSensorData: return raw binary sensor data for a device.
+## Exercises: seq[byte] (seq[primitive]) → uint8_t* + int32_t count in C.
+RequestBroker(API):
+  type GetSensorData = object
+    sensorId*: SensorId
+    rawData*: seq[byte]
+    status*: DeviceStatus
+
+  proc signature*(deviceId: int64): Future[Result[GetSensorData, string]] {.async.}
+
+## GetDeviceTags: return string labels associated with a device.
+## Exercises: seq[string] → char** + int32_t count in C.
+RequestBroker(API):
+  type GetDeviceTags = object
+    tags*: seq[string]
+
+  proc signature*(deviceId: int64): Future[Result[GetDeviceTags, string]] {.async.}
+
+## GetDeviceCapabilities: return a fixed-size capability vector.
+## Exercises: array[4, int32] → int32_t caps[4] in C.
+RequestBroker(API):
+  type GetDeviceCapabilities = object
+    capabilities*: array[4, int32]
+    capturedAt*: Timestamp
+
+  proc signature*(
+    deviceId: int64
+  ): Future[Result[GetDeviceCapabilities, string]] {.async.}
+
 # ---------------------------------------------------------------------------
 # Event Brokers
 # ---------------------------------------------------------------------------
@@ -114,6 +159,15 @@ EventBroker(API):
     deviceType*: string
     address*: string
 
+## SensorAlert: emitted when a sensor reading crosses a threshold.
+## Exercises: enum (DeviceStatus) and distinct (SensorId) in event fields.
+EventBroker(API):
+  type SensorAlert = object
+    sensorId*: SensorId
+    deviceId*: int64
+    status*: DeviceStatus
+    timestampMs*: Timestamp
+
 # ---------------------------------------------------------------------------
 # Library internals (provider implementations)
 # ---------------------------------------------------------------------------
@@ -127,6 +181,7 @@ type Device = object
 
 var gDevices {.threadvar.}: seq[Device]
 var gNextDeviceId {.threadvar.}: int64
+var gNextSensorId {.threadvar.}: int32
 var gConfigPath {.threadvar.}: string
 var gInitialized {.threadvar.}: bool
 var gProviderCtx {.threadvar.}: BrokerContext
@@ -138,6 +193,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ## Set up broker providers on the library's processing thread.
   gProviderCtx = ctx
   gNextDeviceId = 1
+  gNextSensorId = 100
   gDevices = @[]
 
   # InitializeRequest provider
@@ -280,6 +336,79 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   if listDevicesProviderRes.isErr():
     return
       err("failed to register ListDevices provider: " & listDevicesProviderRes.error())
+
+  # GetSensorData provider — returns synthetic raw bytes + enum status
+  let getSensorDataProviderRes = GetSensorData.setProvider(
+    ctx,
+    proc(deviceId: int64): Future[Result[GetSensorData, string]] {.closure, async.} =
+      if not gInitialized:
+        return err("Library not initialized")
+      var found = false
+      for dev in gDevices:
+        if dev.id == deviceId:
+          found = true
+          break
+      if not found:
+        return err("Device not found: " & $deviceId)
+      let sid = SensorId(gNextSensorId)
+      inc gNextSensorId
+      # Emit a sensor alert (online status)
+      await SensorAlert.emit(
+        gProviderCtx,
+        SensorAlert(
+          sensorId: sid,
+          deviceId: deviceId,
+          status: dsOnline,
+          timestampMs: Timestamp(nowMs()),
+        ),
+      )
+      # Synthetic 8-byte sensor reading
+      let raw: seq[byte] = @[0xDE'u8, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04]
+      return ok(GetSensorData(sensorId: sid, rawData: raw, status: dsOnline)),
+  )
+  if getSensorDataProviderRes.isErr():
+    return err(
+      "failed to register GetSensorData provider: " & getSensorDataProviderRes.error()
+    )
+
+  # GetDeviceTags provider — returns string labels for a device
+  let getDeviceTagsProviderRes = GetDeviceTags.setProvider(
+    ctx,
+    proc(deviceId: int64): Future[Result[GetDeviceTags, string]] {.closure, async.} =
+      if not gInitialized:
+        return err("Library not initialized")
+      for dev in gDevices:
+        if dev.id == deviceId:
+          return ok(GetDeviceTags(tags: @["monitored", "production", dev.deviceType]))
+      return err("Device not found: " & $deviceId),
+  )
+  if getDeviceTagsProviderRes.isErr():
+    return err(
+      "failed to register GetDeviceTags provider: " & getDeviceTagsProviderRes.error()
+    )
+
+  # GetDeviceCapabilities provider — returns a fixed-size capability array
+  let getDeviceCapabilitiesProviderRes = GetDeviceCapabilities.setProvider(
+    ctx,
+    proc(
+        deviceId: int64
+    ): Future[Result[GetDeviceCapabilities, string]] {.closure, async.} =
+      if not gInitialized:
+        return err("Library not initialized")
+      for dev in gDevices:
+        if dev.id == deviceId:
+          # cap[0]=maxRate, cap[1]=bufSize, cap[2]=channels, cap[3]=flags
+          let caps: array[4, int32] = [1000'i32, 4096'i32, 8'i32, 0x03'i32]
+          return ok(
+            GetDeviceCapabilities(capabilities: caps, capturedAt: Timestamp(nowMs()))
+          )
+      return err("Device not found: " & $deviceId),
+  )
+  if getDeviceCapabilitiesProviderRes.isErr():
+    return err(
+      "failed to register GetDeviceCapabilities provider: " &
+        getDeviceCapabilitiesProviderRes.error()
+    )
 
   ok()
 

@@ -14,8 +14,10 @@
 
 import std/[macros, os, strutils]
 import ./api_codegen_c
+import ./api_schema
 
 export api_codegen_c
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Compile-time C++ type mapping
@@ -23,7 +25,8 @@ export api_codegen_c
 
 proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to its C++ equivalent.
-  ## string → std::string, seq[T] → std::vector<T>, primitives pass through.
+  ## string → std::string, seq[T] → std::vector<T>, array[N,T] → std::array<T,N>,
+  ## primitives pass through.
   case nimType.kind
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
@@ -56,30 +59,47 @@ proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
       "uint32_t"
     of "pointer":
       "void*"
+    of "byte":
+      "uint8_t"
     else:
-      $nimType # user-defined C++ struct name
+      if isAliasOrDistinctRegistered($nimType):
+        nimTypeToCpp(ident(resolveUnderlyingType($nimType)))
+      else:
+        $nimType # enum typedef or user-defined struct name
   of nnkBracketExpr:
     if isSeqType(nimType):
-      "std::vector<" & seqItemTypeName(nimType) & ">"
+      let elemName = seqItemTypeName(nimType)
+      if isNimPrimitive(elemName):
+        "std::vector<" & nimTypeToCpp(ident(elemName)) & ">"
+      else:
+        "std::vector<" & elemName & ">"
+    elif isArrayTypeNode(nimType):
+      let n = arrayNodeSize(nimType)
+      let elemName = arrayNodeElemName(nimType)
+      "std::array<" & nimTypeToCpp(ident(elemName)) & ", " & $n & ">"
     else:
-      error("Generic types other than seq[T] not supported for C++ mapping", nimType)
+      error(
+        "Generic types other than seq[T] and array[N,T] not supported for C++ mapping",
+        nimType,
+      )
   else:
     error("Unsupported type node for C++ mapping: " & $nimType.kind, nimType)
 
 proc nimTypeToCppParam*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to a C++ method input parameter type.
-  ## string → const std::string&, primitives pass through.
+  ## string → const std::string&, vector/array → const T&, primitives pass through.
   let cppType = nimTypeToCpp(nimType)
   if cppType == "std::string":
     "const std::string&"
-  elif cppType.startsWith("std::vector<"):
+  elif cppType.startsWith("std::vector<") or cppType.startsWith("std::array<"):
     "const " & cppType & "&"
   else:
     cppType
 
 proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to the C++ callback parameter type.
-  ## string → std::string_view, seq[T] → std::span<const T>.
+  ## string → std::string_view, seq[T] → std::span<const T>,
+  ## array[N,T] → std::span<const T> (flattened for callbacks).
   case nimType.kind
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
@@ -89,7 +109,17 @@ proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
       nimTypeToCpp(nimType)
   of nnkBracketExpr:
     if isSeqType(nimType):
-      "std::span<const " & seqItemTypeName(nimType) & ">"
+      let elemName = seqItemTypeName(nimType)
+      if isNimPrimitive(elemName):
+        "std::span<const " & nimTypeToCpp(ident(elemName)) & ">"
+      else:
+        "std::span<const " & elemName & ">"
+    elif isArrayTypeNode(nimType):
+      let elemName = arrayNodeElemName(nimType)
+      if isNimPrimitive(elemName):
+        "std::span<const " & nimTypeToCpp(ident(elemName)) & ">"
+      else:
+        "std::span<const " & elemName & ">"
     else:
       nimTypeToCpp(nimType)
   else:
@@ -180,6 +210,7 @@ proc generateCppHeaderFile*(
   hpp.add("#include <string>\n")
   hpp.add("#include <string_view>\n")
   hpp.add("#include <vector>\n")
+  hpp.add("#include <array>\n")
   hpp.add("#include <span>\n")
   hpp.add("#include <functional>\n")
   hpp.add("#include <optional>\n")

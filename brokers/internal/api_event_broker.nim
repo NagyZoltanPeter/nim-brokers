@@ -137,6 +137,22 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
   let typeDisplayName = sanitizeIdentName(typeIdent)
 
+  # ---------------------------------------------------------------------------
+  # Type classification helpers
+  # ---------------------------------------------------------------------------
+
+  proc isSeqOfStringNode(fType: NimNode): bool {.compileTime.} =
+    if isSeqType(fType):
+      let elem = seqItemTypeName(fType).toLowerAscii()
+      return elem in ["string", "cstring"]
+    false
+
+  proc isSeqOfPrimitiveNode(fType: NimNode): bool {.compileTime.} =
+    if isSeqType(fType):
+      return isNimPrimitive(seqItemTypeName(fType))
+    false
+
+  # ---------------------------------------------------------------------------
   # Step 2: Generate all MT event broker code (Nim threads keep full listen/emit)
   result = newStmtList()
   result.add(generateMtEventBroker(body))
@@ -154,10 +170,12 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   )
 
   # Step 4: Generate C callback type
+  # seq[T] and array[N,T] fields each expand to two callback params (ptr + count).
+  # Enum fields map to cint.
   let callbackTypeIdent = ident(typeDisplayName & "CCallback")
   let exportedCallbackIdent = postfix(copyNimTree(callbackTypeIdent), "*")
 
-  if hasInlineFields:
+  block:
     var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
     callbackFormal.add(
       newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
@@ -165,27 +183,37 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     callbackFormal.add(
       newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
     )
-    for i in 0 ..< fieldNames.len:
-      let cFieldType = toCFieldType(fieldTypes[i])
-      callbackFormal.add(
-        newTree(nnkIdentDefs, copyNimTree(fieldNames[i]), cFieldType, newEmptyNode())
-      )
-    let callbackPragmas = newTree(nnkPragma, ident("cdecl"))
-    let callbackProcType = newTree(nnkProcTy, callbackFormal, callbackPragmas)
-    result.add(
-      newTree(
-        nnkTypeSection,
-        newTree(nnkTypeDef, exportedCallbackIdent, newEmptyNode(), callbackProcType),
-      )
-    )
-  else:
-    var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
-    callbackFormal.add(
-      newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
-    )
-    callbackFormal.add(
-      newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
-    )
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fType = fieldTypes[i]
+        if isSeqType(fType) or isArrayTypeNode(fType):
+          # Two params: pointer + cint count
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs, copyNimTree(fieldNames[i]), ident("pointer"), newEmptyNode()
+            )
+          )
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs,
+              ident($fieldNames[i] & "_count"),
+              ident("cint"),
+              newEmptyNode(),
+            )
+          )
+        elif isEnumRegistered($fType):
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs, copyNimTree(fieldNames[i]), ident("cint"), newEmptyNode()
+            )
+          )
+        else:
+          let cFieldType = toCFieldType(fType)
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs, copyNimTree(fieldNames[i]), cFieldType, newEmptyNode()
+            )
+          )
     let callbackPragmas = newTree(nnkPragma, ident("cdecl"))
     let callbackProcType = newTree(nnkProcTy, callbackFormal, callbackPragmas)
     result.add(
@@ -245,6 +273,118 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           )
           callbackCallArgs.add(cVarIdent)
           postCallStmts.add(newCall(ident("freeSharedCString"), cVarIdent))
+        elif isSeqType(fType):
+          # Allocate a shared array, copy elements, pass pointer+count, free after
+          let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
+          let countVarIdent = genSym(nskLet, "n_" & $fName)
+          let elemName = seqItemTypeName(fType)
+          if isSeqOfStringNode(fType):
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let arr = cast[ptr UncheckedArray[cstring]](allocShared(
+                      int(`countVarIdent`) * sizeof(cstring)
+                    ))
+                    for ii in 0 ..< int(`countVarIdent`):
+                      arr[ii] = allocCStringCopy(`evtParam`.`fName`[ii])
+                    cast[pointer](arr)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  let arr = cast[ptr UncheckedArray[cstring]](`ptrVarIdent`)
+                  for ii in 0 ..< int(`countVarIdent`):
+                    if not arr[ii].isNil:
+                      freeCString(arr[ii])
+                  deallocShared(`ptrVarIdent`)
+            )
+          elif isNimPrimitive(elemName):
+            let primCNimType = toCFieldType(ident(elemName))
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let arr = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                      int(`countVarIdent`) * sizeof(`primCNimType`)
+                    ))
+                    for ii in 0 ..< int(`countVarIdent`):
+                      arr[ii] = `primCNimType`(`evtParam`.`fName`[ii])
+                    cast[pointer](arr)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  deallocShared(`ptrVarIdent`)
+            )
+          else:
+            # seq[object]: use existing CItem encode
+            let cItemIdent = ident(elemName & "CItem")
+            let encodeFuncIdent = ident("encode" & elemName & "ToCItem")
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let arr = cast[ptr UncheckedArray[`cItemIdent`]](allocShared(
+                      int(`countVarIdent`) * sizeof(`cItemIdent`)
+                    ))
+                    for ii in 0 ..< int(`countVarIdent`):
+                      arr[ii] = `encodeFuncIdent`(`evtParam`.`fName`[ii])
+                    cast[pointer](arr)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  deallocShared(`ptrVarIdent`)
+            )
+          callbackCallArgs.add(ptrVarIdent)
+          callbackCallArgs.add(countVarIdent)
+        elif isArrayTypeNode(fType):
+          # Flatten array to pointer + count
+          let n = arrayNodeSize(fType)
+          let elemName = arrayNodeElemName(fType)
+          let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
+          let countLit = newLit(cint(n))
+          let primCNimType = toCFieldType(ident(elemName))
+          preCallStmts.add(
+            quote do:
+              let `ptrVarIdent` = block:
+                let arr = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                  `n` * sizeof(`primCNimType`)
+                ))
+                for ii in 0 ..< `n`:
+                  arr[ii] = `primCNimType`(`evtParam`.`fName`[ii])
+                cast[pointer](arr)
+          )
+          postCallStmts.add(
+            quote do:
+              deallocShared(`ptrVarIdent`)
+          )
+          callbackCallArgs.add(ptrVarIdent)
+          callbackCallArgs.add(countLit)
+        elif isEnumRegistered($fType):
+          # Enum: pass as cint (ord)
+          callbackCallArgs.add(
+            newCall(
+              ident("cint"),
+              newCall(ident("ord"), newDotExpr(evtParam, copyNimTree(fName))),
+            )
+          )
+        elif isAliasOrDistinctRegistered($fType):
+          # Alias/distinct: cast to underlying C field type
+          let cFieldType = toCFieldType(fType)
+          callbackCallArgs.add(
+            newTree(nnkCast, cFieldType, newDotExpr(evtParam, copyNimTree(fName)))
+          )
         else:
           callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
 
@@ -410,8 +550,26 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   callbackHeaderParams.add("void* userData")
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      let cType = nimTypeToCInput(fieldTypes[i])
-      callbackHeaderParams.add(cType & " " & $fieldNames[i])
+      let fName = $fieldNames[i]
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        callbackHeaderParams.add("const char** " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isSeqOfPrimitiveNode(fType):
+        let elemCType = nimTypeToCSuffix(ident(seqItemTypeName(fType)))
+        callbackHeaderParams.add("const " & elemCType & "* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isSeqType(fType):
+        let itemTypeName = seqItemTypeName(fType)
+        callbackHeaderParams.add(itemTypeName & "CItem* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isArrayTypeNode(fType):
+        let elemCType = nimTypeToCSuffix(ident(arrayNodeElemName(fType)))
+        callbackHeaderParams.add("const " & elemCType & "* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      else:
+        let cType = nimTypeToCInput(fType)
+        callbackHeaderParams.add(cType & " " & fName)
 
   var callbackTypedef = "typedef void (*" & callbackTypeIdent.repr & ")("
   if callbackHeaderParams.len == 0:
@@ -580,17 +738,66 @@ private:
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fName = $fieldNames[i]
-      let cbType = nimTypeToCppCallbackParam(fieldTypes[i])
-      let cType = nimTypeToCInput(fieldTypes[i])
-      cppCbParams.add(cbType & " " & fName)
-      cppCbSummaryParams.add(fName)
-      cTrampolineParams.add(cType & " " & fName)
-      if isCStringType(fieldTypes[i]):
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        # C++ callback sees std::span<const char*>
+        cppCbParams.add("std::span<const char*> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const char** " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
         traitInvokeArgs.add(
-          fName & " ? std::string_view(" & fName & ") : std::string_view()"
+          "std::span<const char*>(" & fName & ", " & fName & "_count)"
         )
-      else:
+      elif isSeqOfPrimitiveNode(fType):
+        let elemName = seqItemTypeName(fType)
+        let cppElemType = nimTypeToCpp(ident(elemName))
+        let cElemType = nimTypeToCSuffix(ident(elemName))
+        cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const " & cElemType & "* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
+        )
+      elif isSeqType(fType):
+        let itemTypeName = seqItemTypeName(fType)
+        cppCbParams.add("std::span<const " & itemTypeName & "CItem> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(itemTypeName & "CItem* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & itemTypeName & "CItem>(" & fName & ", " & fName &
+            "_count)"
+        )
+      elif isArrayTypeNode(fType):
+        let elemName = arrayNodeElemName(fType)
+        let cppElemType = nimTypeToCpp(ident(elemName))
+        let cElemType = nimTypeToCSuffix(ident(elemName))
+        cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const " & cElemType & "* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
+        )
+      elif isEnumRegistered($fType):
+        let enumTypeName = $fType
+        cppCbParams.add(enumTypeName & " " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(enumTypeName & " " & fName)
         traitInvokeArgs.add(fName)
+      else:
+        let cbType = nimTypeToCppCallbackParam(fType)
+        let cType = nimTypeToCInput(fType)
+        cppCbParams.add(cbType & " " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(cType & " " & fName)
+        if isCStringType(fType):
+          traitInvokeArgs.add(
+            fName & " ? std::string_view(" & fName & ") : std::string_view()"
+          )
+        else:
+          traitInvokeArgs.add(fName)
 
   let traitName = typeDisplayName & "EventTraits"
   var trait = "struct " & traitName & " {\n"
@@ -639,7 +846,25 @@ private:
   var cArgTypes: seq[string] = @[]
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      cArgTypes.add(nimTypeToCInput(fieldTypes[i]))
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        cArgTypes.add("const char**")
+        cArgTypes.add("int32_t")
+      elif isSeqOfPrimitiveNode(fType):
+        cArgTypes.add("const " & nimTypeToCSuffix(ident(seqItemTypeName(fType))) & "*")
+        cArgTypes.add("int32_t")
+      elif isSeqType(fType):
+        cArgTypes.add(seqItemTypeName(fType) & "CItem*")
+        cArgTypes.add("int32_t")
+      elif isArrayTypeNode(fType):
+        cArgTypes.add(
+          "const " & nimTypeToCSuffix(ident(arrayNodeElemName(fType))) & "*"
+        )
+        cArgTypes.add("int32_t")
+      elif isEnumRegistered($fType):
+        cArgTypes.add($fType)
+      else:
+        cArgTypes.add(nimTypeToCInput(fType))
 
   var dispatcherDecl =
     "    using " & dispatcherAlias & " = EventDispatcher<__CPP_CLASS__, " & traitName

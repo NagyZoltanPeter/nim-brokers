@@ -18,19 +18,21 @@
 ##   calls `getTypeImpl()` to extract its fields, recursively resolves
 ##   nested object types, and registers everything in `gApiTypeRegistry`.
 ##
-## ## Constraints
+## ## Supported type kinds
 ##
-## - External types must be defined **before** the broker macro call site
-##   (normal Nim compilation order).
-## - Only `object` types can be introspected. Non-object types (enums,
-##   distinct, etc.) pass through without field registration.
+## - `object` types — field introspection and CItem generation
+## - `enum` types — value extraction and C enum generation
+## - `distinct` types — base type resolution and C typedef generation
+## - Type aliases — base type resolution and C typedef generation
 
 {.push raises: [].}
 
 import std/[macros, strutils]
 import ./api_schema, ./api_type
+import ./api_codegen_c
 
 export api_schema, api_type
+export api_codegen_c
 
 # ---------------------------------------------------------------------------
 # Phase 2: Typed macro that resolves a single external type
@@ -50,6 +52,10 @@ proc resolveActualSym(T: NimNode): NimNode {.compileTime.} =
       nil
   of nnkObjectTy:
     # Already resolved; T itself is the symbol
+    T
+  of nnkEnumTy:
+    T
+  of nnkDistinctTy:
     T
   of nnkSym:
     T
@@ -85,6 +91,49 @@ proc extractFieldsFromSym(sym: NimNode): seq[(string, string)] {.compileTime.} =
         continue
       result.add(($field[i], repr(fieldType)))
 
+proc extractEnumValues(sym: NimNode): seq[(string, int)] {.compileTime.} =
+  ## Walk nnkEnumTy children to get (name, ordinal) pairs.
+  let typeImpl = getTypeImpl(sym)
+  let enumTy =
+    if typeImpl.kind == nnkEnumTy:
+      typeImpl
+    elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
+      getTypeImpl(typeImpl[1])
+    else:
+      nil
+
+  if enumTy.isNil or enumTy.kind != nnkEnumTy:
+    return @[]
+
+  var ordinal = 0
+  for i in 1 ..< enumTy.len: # skip first child (empty node)
+    let child = enumTy[i]
+    case child.kind
+    of nnkSym:
+      result.add(($child, ordinal))
+      inc ordinal
+    of nnkEnumFieldDef:
+      let fieldName = $child[0]
+      let fieldVal = int(child[1].intVal)
+      result.add((fieldName, fieldVal))
+      ordinal = fieldVal + 1
+    else:
+      discard
+
+proc resolveAliasBase(sym: NimNode): string {.compileTime.} =
+  ## Follows alias/distinct chains to the underlying primitive name.
+  let typeImpl = getTypeImpl(sym)
+  if typeImpl.kind == nnkDistinctTy:
+    let base = typeImpl[0]
+    return $base
+  # For aliases, getTypeInst gives us the target
+  let typeInst = getTypeInst(sym)
+  if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
+    return $typeInst[1]
+  if typeInst.kind == nnkSym:
+    return $typeInst
+  return $sym
+
 proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
   ## Walk the fields of a resolved type symbol and return NimNodes for
   ## any nested custom object types or seq[T] element types that need
@@ -117,14 +166,36 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
       let innerImpl = getTypeImpl(fieldType)
       if innerImpl.kind == nnkObjectTy:
         result.add(fieldType)
+      elif innerImpl.kind == nnkEnumTy:
+        result.add(fieldType)
+      elif innerImpl.kind == nnkDistinctTy:
+        result.add(fieldType)
+      else:
+        # Could be an alias — check if it resolves to something different
+        let instName = $getTypeInst(fieldType)
+        if instName != $fieldType and not isNimPrimitive(instName):
+          result.add(fieldType)
 
-    # seq[T] where T is a custom object (e.g. `devices: seq[DeviceInfo]`)
+    # seq[T] where T is a custom type (e.g. `devices: seq[DeviceInfo]`)
     elif fieldType.kind == nnkBracketExpr and fieldType.len >= 2 and
         $fieldType[0] == "seq":
       let elemSym = fieldType[1]
       if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
         let elemImpl = getTypeImpl(elemSym)
         if elemImpl.kind == nnkObjectTy:
+          result.add(elemSym)
+        elif elemImpl.kind == nnkEnumTy:
+          result.add(elemSym)
+
+    # array[N, T] where T is a custom type
+    elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
+        $fieldType[0] == "array":
+      let elemSym = fieldType[2]
+      if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
+        let elemImpl = getTypeImpl(elemSym)
+        if elemImpl.kind == nnkObjectTy:
+          result.add(elemSym)
+        elif elemImpl.kind == nnkEnumTy:
           result.add(elemSym)
 
 proc buildSyntheticApiTypeBody(
@@ -150,8 +221,8 @@ macro autoRegisterApiType*(T: typed): untyped =
   ## recursively processes nested types, registers in the schema,
   ## and generates CItem type + encode proc + C/C++/Python codegen.
   ##
-  ## This macro is emitted by Phase 1 (`emitAutoRegistrations`) and
-  ## should not be called directly by user code.
+  ## Handles object types (full CItem generation), enum types (C enum
+  ## generation), and alias/distinct types (C typedef generation).
   result = newStmtList()
 
   let actualSym = resolveActualSym(T)
@@ -162,6 +233,65 @@ macro autoRegisterApiType*(T: typed): untyped =
   if isTypeRegistered(typeName) or isNimPrimitive(typeName):
     return result
 
+  let typeImpl = getTypeImpl(actualSym)
+
+  # Check for enum types
+  block checkEnum:
+    let enumTy =
+      if typeImpl.kind == nnkEnumTy:
+        typeImpl
+      elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
+        let inner = getTypeImpl(typeImpl[1])
+        if inner.kind == nnkEnumTy: inner else: nil
+      else:
+        nil
+    if not enumTy.isNil:
+      let values = extractEnumValues(actualSym)
+      var apiValues: seq[ApiEnumValue] = @[]
+      for (name, ordinal) in values:
+        apiValues.add(ApiEnumValue(name: name, ordinal: ordinal))
+      registerTypeEntry(makeEnumEntry(typeName, apiValues))
+
+      # Generate C enum typedef in header
+      var enumDecl = "typedef enum {\n"
+      let prefix = toSnakeCase(typeName).toUpperAscii()
+      for v in apiValues:
+        enumDecl.add(
+          "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
+            ",\n"
+        )
+      enumDecl.add("} " & typeName & ";\n")
+      appendHeaderDecl(enumDecl)
+
+      # Generate C++ enum (inherits from .h include, but add to cpp structs
+      # for namespace awareness)
+      # No separate C++ struct needed — C enum typedef is used directly
+
+      # Emit recursive calls for nested enum dependencies (rare but possible)
+      return result
+
+  # Check for distinct types
+  if typeImpl.kind == nnkDistinctTy:
+    let baseName = resolveAliasBase(actualSym)
+    registerTypeEntry(makeAliasEntry(typeName, baseName, atkDistinct))
+
+    # Generate C typedef in header
+    let cBase = nimTypeToCSuffix(ident(baseName))
+    appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
+    return result
+
+  # Check for alias types (sym that resolves to another sym/primitive)
+  block checkAlias:
+    let typeInst = getTypeInst(actualSym)
+    if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
+      let targetName = $typeInst[1]
+      if targetName != typeName:
+        registerTypeEntry(makeAliasEntry(typeName, targetName, atkAlias))
+        let cBase = nimTypeToCSuffix(ident(targetName))
+        appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
+        return result
+
+  # Object types — existing behavior
   let fields = extractFieldsFromSym(actualSym)
   if fields.len == 0:
     return result
@@ -188,7 +318,7 @@ macro autoRegisterApiType*(T: typed): untyped =
 
 proc scanTypeNode(ft: NimNode, result: var seq[NimNode]) {.compileTime.} =
   ## Check a single type node for external type references.
-  ## Adds ident nodes for `seq[T]` and plain custom types.
+  ## Adds ident nodes for `seq[T]`, `array[N, T]`, and plain custom types.
   if ft.kind == nnkEmpty:
     return
   # seq[T]
@@ -196,6 +326,11 @@ proc scanTypeNode(ft: NimNode, result: var seq[NimNode]) {.compileTime.} =
     let elemName = $ft[1]
     if not isNimPrimitive(elemName):
       result.add(ft[1])
+  # array[N, T]
+  elif ft.kind == nnkBracketExpr and ft.len == 3 and $ft[0] == "array":
+    let elemName = $ft[2]
+    if not isNimPrimitive(elemName):
+      result.add(ft[2])
   # Plain custom type
   elif ft.kind == nnkIdent and not isNimPrimitive($ft):
     result.add(ft)
@@ -206,6 +341,7 @@ proc discoverExternalTypes*(body: NimNode): seq[NimNode] {.compileTime.} =
   ##
   ## Detects:
   ## - `seq[T]` fields in type definitions where T is not a primitive
+  ## - `array[N, T]` fields where T is not a primitive
   ## - Plain custom type fields (`field: CustomType`)
   ## - Type aliases (`type MyEvent = ExternalType`)
   ## - `seq[T]` and custom types in proc signature parameters
