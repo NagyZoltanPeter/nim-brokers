@@ -10,7 +10,7 @@ bypasses channels entirely and dispatches directly via `asyncSpawn`.
 The broker **does not own or spawn threads**. Thread management is your responsibility.
 
 ```nim
-import event_broker
+import brokers/event_broker
 
 EventBroker(mt):
   type Alert = object
@@ -40,7 +40,7 @@ This generates:
 ```nim
 import std/atomics
 import chronos
-import event_broker
+import brokers/event_broker
 
 EventBroker(mt):
   type ChatMsg = object

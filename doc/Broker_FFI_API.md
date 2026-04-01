@@ -523,9 +523,7 @@ type per context unless it is cleared first.
 ### Minimal structure
 
 ```nim
-import brokers/[event_broker, request_broker, broker_context]
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 RequestBroker(API):
   type InitializeRequest = object
@@ -560,11 +558,10 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(ShutdownRequest(status: 0))
   )
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name: "mylib"
-    initializeRequest: InitializeRequest
-    shutdownRequest: ShutdownRequest
+registerBrokerLibrary:
+  name: "mylib"
+  initializeRequest: InitializeRequest
+  shutdownRequest: ShutdownRequest
 ```
 
 ### `setupProviders(ctx)` convention
@@ -916,7 +913,7 @@ nim c \
   --threads:on \
   --app:lib \
   --nimMainPrefix:mylib \
-  --path:src \
+  --path:. \
   --outdir:examples/ffiapi/nimlib/build \
   examples/ffiapi/nimlib/mylib.nim
 ```
