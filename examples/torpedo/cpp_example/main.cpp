@@ -37,7 +37,7 @@
 #include <sys/select.h>
 #endif
 
-#include "torpedolib.h"
+#include "torpedolib.hpp"
 
 using namespace torpedolib;
 

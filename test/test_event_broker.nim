@@ -2,7 +2,7 @@ import chronos
 import std/sequtils
 import testutils/unittests
 
-import event_broker
+import brokers/event_broker
 
 type ExternalDefinedEventType = object
   label*: string

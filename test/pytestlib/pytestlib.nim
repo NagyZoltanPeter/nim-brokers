@@ -8,10 +8,7 @@
 
 {.push raises: [].}
 
-import brokers/[event_broker, request_broker, broker_context]
-
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # Request Brokers
@@ -93,11 +90,10 @@ proc setupProviders(ctx: BrokerContext) =
 # Library registration
 # ---------------------------------------------------------------------------
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name:
-      "pytestlib"
-    initializeRequest:
-      InitializeRequest
-    shutdownRequest:
-      ShutdownRequest
+registerBrokerLibrary:
+  name:
+    "pytestlib"
+  initializeRequest:
+    InitializeRequest
+  shutdownRequest:
+    ShutdownRequest

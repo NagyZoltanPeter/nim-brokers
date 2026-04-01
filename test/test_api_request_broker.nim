@@ -4,8 +4,7 @@ import testutils/unittests
 import chronos
 import std/[atomics, os]
 
-import request_broker
-import api_type
+import brokers/request_broker
 
 ## ---------------------------------------------------------------------------
 ## API-mode RequestBroker tests
@@ -33,11 +32,10 @@ RequestBroker(API):
     input: string, count: int64
   ): Future[Result[ApiTestReqArgs, string]] {.async.}
 
-ApiType:
-  type ApiTestBatchItem = object
-    name*: string
-    deviceType*: string
-    address*: string
+type ApiTestBatchItem* = object
+  name*: string
+  deviceType*: string
+  address*: string
 
 RequestBroker(API):
   type ApiTestBatchReq = object

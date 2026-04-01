@@ -25,34 +25,28 @@
 
 import std/[sequtils, strutils]
 import chronos, results
-import brokers/[event_broker, request_broker, broker_context]
-
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # FFI-visible data types (shared between Nim, C, C++, Python)
 # ---------------------------------------------------------------------------
 
-ApiType:
-  type PublicCell = object
-    row*: int32
-    col*: int32
-    stateCode*: int32
+type PublicCell* = object
+  row*: int32
+  col*: int32
+  stateCode*: int32
 
-ApiType:
-  type ShipStatus = object
-    name*: string
-    length*: int32
-    hits*: int32
-    sunk*: bool
+type ShipStatus* = object
+  name*: string
+  length*: int32
+  hits*: int32
+  sunk*: bool
 
-ApiType:
-  type ReplayEntry = object
-    turnNumber*: int32
-    side*: string
-    phase*: string
-    message*: string
+type ReplayEntry* = object
+  turnNumber*: int32
+  side*: string
+  phase*: string
+  message*: string
 
 # ---------------------------------------------------------------------------
 # Request brokers — each generates an exported C function + wrappers
@@ -1177,13 +1171,12 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 # Library registration — generates C exports, header, Python wrapper
 # ---------------------------------------------------------------------------
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name:
-      "torpedolib"
-    initializeRequest:
-      InitializeCaptainRequest
-    shutdownRequest:
-      ShutdownRequest
+registerBrokerLibrary:
+  name:
+    "torpedolib"
+  initializeRequest:
+    InitializeCaptainRequest
+  shutdownRequest:
+    ShutdownRequest
 
 {.pop.}

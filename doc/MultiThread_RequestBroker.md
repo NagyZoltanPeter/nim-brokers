@@ -10,7 +10,7 @@ provider directly.
 The broker **does not own or spawn threads**. Thread management is your responsibility.
 
 ```nim
-import request_broker
+import brokers/request_broker
 
 RequestBroker(mt):
   type Weather = object
@@ -43,7 +43,7 @@ This generates:
 ```nim
 import std/atomics
 import chronos
-import request_broker
+import brokers/request_broker
 
 RequestBroker(mt):
   type Greeting = object
@@ -193,7 +193,7 @@ proc worker() {.thread.} =
 The `blockingAwait` template is also available as an alias for `waitFor`:
 
 ```nim
-import mt_request_broker  # exports blockingAwait
+import brokers/request_broker  # exports blockingAwait
 let res = blockingAwait MyType.request("hello")
 ```
 
@@ -636,10 +636,10 @@ This is certainly an optimization point, as we can expect requests from one thre
 
 ```sh
 # ORC (recommended)
-nim c -r --mm:orc --threads:on --path:src test/test_multi_thread_request_broker.nim
+nim c -r --mm:orc --threads:on --path:. test/test_multi_thread_request_broker.nim
 
 # refc (compatible)
-nim c -r --mm:refc --threads:on --path:src test/test_multi_thread_request_broker.nim
+nim c -r --mm:refc --threads:on --path:. test/test_multi_thread_request_broker.nim
 ```
 
 Or via nimble:

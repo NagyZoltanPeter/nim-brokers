@@ -27,7 +27,7 @@ import std/[atomics, locks, macros, os, strutils]
 import chronos, chronicles
 import results
 import asyncchannels
-import ./broker_context, ./api_common
+import ./broker_context, ./internal/api_common
 
 export results, chronos, chronicles, broker_context, api_common, asyncchannels
 
@@ -109,7 +109,7 @@ proc parseTypeExpr(
 # Macro
 # ---------------------------------------------------------------------------
 
-macro registerBrokerLibrary*(body: untyped): untyped =
+proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let config = parseLibraryConfig(body)
   let libName = config.name
   let libNameLit = newLit(libName)
@@ -1053,16 +1053,27 @@ macro registerBrokerLibrary*(body: untyped): untyped =
   appendHeaderDecl(generateCFuncProto(shutdownFuncName, "void", @[("ctx", "uint32_t")]))
   appendHeaderDecl(generateCFuncProto(freeStringFuncName, "void", @[("s", "char*")]))
 
-  # Generate header file at compile time
+  # Generate output files at compile time
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
-  generateHeaderFile(outDir)
+  let libNameResolved = if gApiLibraryName.len > 0: gApiLibraryName else: "brokers_api"
+  generateCHeaderFile(outDir, libNameResolved)
+  generateCppHeaderFile(outDir, libNameResolved)
 
   # Generate Python wrapper file when requested
   when defined(BrokerFfiApiGenPy):
-    generatePythonFile(outDir)
+    generatePythonFile(outDir, libNameResolved)
 
   when defined(brokerDebug):
     echo result.repr
 
 {.pop.}
+
+macro registerBrokerLibrary*(body: untyped): untyped =
+  ## Generates the full shared-library surface for a broker FFI library.
+  ## When compiled without `-d:BrokerFfiApi` this is a no-op, so client
+  ## code never needs a `when defined(BrokerFfiApi):` guard around it.
+  when defined(BrokerFfiApi):
+    registerBrokerLibraryImpl(body)
+  else:
+    newStmtList()

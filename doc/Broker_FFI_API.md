@@ -20,9 +20,9 @@ The FFI API solution provides:
 - C-callable request functions for API request brokers
 - C-callable event registration functions for API event brokers
 - a generated library lifecycle API
-- a generated C header
-- a generated C++ wrapper layer inside that header
-- an optional generated Python wrapper module
+- a generated C header (`.h`)
+- a generated C++ wrapper header (`.hpp`) that includes the C header
+- an optional generated Python wrapper module (`.py`)
 
 Generated `CItem` and `CResult` structs use the platform's normal C ABI
 layout. They are not emitted as packed structs, and the generated C header,
@@ -32,6 +32,172 @@ layout.
 The FFI API is designed around a per-library-context runtime model. Each call to
 `<lib>_createContext()` creates one independent broker context with its own worker
 threads and broker registrations.
+
+---
+
+## Code Structure
+
+The FFI API system is split into focused modules, each owning one concern.
+
+### Source Layout
+
+```
+src/
+  api_schema.nim              Type registry (ApiTypeEntry, gApiTypeRegistry)
+  api_type_resolver.nim       Two-phase external type auto-resolution
+  api_codegen_c.nim           C type mapping + header generation (.h)
+  api_codegen_cpp.nim         C++ type mapping + wrapper generation (.hpp)
+  api_codegen_python.nim      Python type mapping + wrapper generation (.py)
+  api_codegen_nim.nim         Nim → C ABI type mapping (toCFieldType, isCStringType)
+  api_common.nim              Re-export hub + legacy bridge + runtime memory helpers
+  api_type.nim                Deprecated ApiType shim (→ generateApiType)
+  api_request_broker.nim      RequestBroker(API) macro + deferred codegen
+  api_event_broker.nim        EventBroker(API) macro + deferred codegen
+  api_library.nim             registerBrokerLibrary — lifecycle + file orchestration
+  helper/broker_utils.nim     Shared AST parsing (parseSingleTypeDef, parseTypeDefs)
+```
+
+### Module Dependency Graph
+
+```
+helper/broker_utils.nim        (no API deps)
+      |
+api_schema.nim                 (type registry)
+      |
+api_codegen_c.nim              (C mapping, accumulators, generateCHeaderFile)
+      |
+      +-- api_codegen_cpp.nim   (C++ mapping, accumulators, generateCppHeaderFile)
+      |
+      +-- api_codegen_python.nim (Python mapping, accumulators, generatePythonFile)
+      |
+      +-- api_codegen_nim.nim    (Nim → C ABI mapping)
+      |
+api_common.nim                 (re-exports all above + legacy bridge + runtime helpers)
+      |
+api_type_resolver.nim          (two-phase auto-resolution)
+      |
+api_type.nim                   (deprecated ApiType shim)
+      |
+api_request_broker.nim         (RequestBroker(API) generation)
+api_event_broker.nim           (EventBroker(API) generation)
+      |
+api_library.nim                (lifecycle + file orchestration)
+```
+
+**Key rule**: Codegen modules (C, C++, Python, Nim) have no dependencies on each
+other. Each owns its accumulators and type mapping functions. Adding a new
+language surface means adding one new module with no changes to existing ones.
+
+### Codegen Module Responsibilities
+
+Each codegen module owns:
+
+1. **Type mapping procs** — convert Nim types to the target language
+   (`nimTypeToCOutput`, `nimTypeToCpp`, `nimTypeToCtypes`, `toCFieldType`)
+2. **Compile-time accumulators** — collect code fragments during macro expansion
+3. **File generator** — reads accumulators and writes the output file
+
+| Module | Output | Accumulators |
+|--------|--------|-------------|
+| `api_codegen_c.nim` | `.h` | `gApiHeaderDeclarations`, `gApiCExportWrappers` |
+| `api_codegen_cpp.nim` | `.hpp` | `gApiCppStructs`, `gApiCppClassMethods`, `gApiCppPreamble`, `gApiCppPrivateMembers`, etc. |
+| `api_codegen_python.nim` | `.py` | `gApiPyCtypesStructs`, `gApiPyDataclasses`, `gApiPyMethods`, `gApiPyEventMethods`, etc. |
+| `api_codegen_nim.nim` | (AST) | none — provides type mapping for Nim `{.exportc.}` struct generation |
+
+### Compile-Time Data Flow
+
+```
+1. User defines plain Nim types (DeviceInfo, AddDeviceSpec)
+
+2. Broker macros expand:
+   a. discoverExternalTypes() scans AST for non-primitive types
+   b. emitAutoRegistrations() emits autoRegisterApiType(T) calls
+   c. Deferred codegen macro emitted (runs after registrations)
+
+3. autoRegisterApiType(T) typed macro expands (runs first):
+   a. getTypeImpl() extracts fields
+   b. Recursion for nested object types
+   c. Registers in gApiTypeRegistry
+   d. Generates CItem type + encode proc
+   e. Appends to all language accumulators (C, C++, Python)
+
+4. Deferred broker codegen expands (runs after step 3):
+   a. lookupFfiStruct() succeeds — registry populated
+   b. Generates CResult struct, encode proc, exported C functions
+   c. Appends to all language accumulators
+
+5. registerBrokerLibrary macro:
+   a. Generates lifecycle code (createContext, shutdown, threads)
+   b. Calls file generators:
+      - generateCHeaderFile()   → <libName>.h
+      - generateCppHeaderFile() → <libName>.hpp
+      - generatePythonFile()    → <libName>.py
+```
+
+---
+
+## Type Auto-Resolution
+
+External types referenced in broker macros are automatically discovered and
+registered at compile time. No separate `ApiType` registration macro is needed.
+
+### Usage
+
+Define types as plain Nim objects before the broker macro:
+
+```nim
+type DeviceInfo* = object
+  deviceId*: int64
+  name*: string
+  online*: bool
+
+RequestBroker(API):
+  type ListDevices = object
+    devices*: seq[DeviceInfo]
+  proc signature*(): Future[Result[ListDevices, string]] {.async.}
+```
+
+`DeviceInfo` is auto-discovered from the `seq[DeviceInfo]` field and
+auto-registered. The CItem struct, encode proc, C header struct, C++ struct, and
+Python dataclass are all generated automatically.
+
+### How It Works
+
+The auto-resolution uses a two-phase approach to work within Nim's macro system
+constraints:
+
+**Phase 1 — Discovery (untyped context)**:
+`discoverExternalTypes(body)` scans the raw AST for non-primitive type
+references in type fields, proc parameters, and type aliases.
+
+**Phase 2 — Resolution (typed macro)**:
+`autoRegisterApiType(T: typed)` receives a resolved type symbol, introspects its
+fields via `getTypeImpl()`, recursively resolves nested object types, and
+registers everything in the compile-time type registry.
+
+The **deferred codegen pattern** ensures proper ordering: auto-registration macro
+calls are emitted before the broker codegen macro, so the type registry is
+populated when the codegen needs to look up fields.
+
+### What Is Auto-Discovered
+
+- `seq[T]` in type fields: `devices: seq[DeviceInfo]` → discovers `DeviceInfo`
+- `seq[T]` in proc parameters: `proc signature*(items: seq[AddDeviceSpec])` → discovers `AddDeviceSpec`
+- Plain custom type fields: `info: DeviceInfo` → discovers `DeviceInfo`
+- Type aliases: `type MyEvent = ExternalType` → discovers `ExternalType`
+- Nested objects: if `DeviceInfo` has `address: Address`, `Address` is recursively resolved
+
+### Constraints
+
+- External types must be defined **before** the broker macro call site (standard
+  Nim compilation order)
+- Only `object` types can be fully introspected. Enums, distinct types, etc.
+  pass through without field registration.
+
+### ApiType Deprecation
+
+The `ApiType` macro still works but emits a compile-time deprecation warning.
+Existing code continues to compile. New code should use plain types.
 
 ---
 
@@ -357,9 +523,7 @@ type per context unless it is cleared first.
 ### Minimal structure
 
 ```nim
-import brokers/[event_broker, request_broker, broker_context]
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 RequestBroker(API):
   type InitializeRequest = object
@@ -394,11 +558,10 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(ShutdownRequest(status: 0))
   )
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name: "mylib"
-    initializeRequest: InitializeRequest
-    shutdownRequest: ShutdownRequest
+registerBrokerLibrary:
+  name: "mylib"
+  initializeRequest: InitializeRequest
+  shutdownRequest: ShutdownRequest
 ```
 
 ### `setupProviders(ctx)` convention
@@ -416,16 +579,16 @@ That proc is the main hook for:
 ### Batch request inputs
 
 For request parameters that need to cross the foreign-function boundary as a
-collection, prefer `seq[ApiType]` over `seq[tuple[...]]`.
+collection, prefer `seq[T]` where `T` is a plain Nim object type defined before
+the broker macro.
 
 Example:
 
 ```nim
-ApiType:
-  type AddDeviceSpec = object
-    name*: string
-    deviceType*: string
-    address*: string
+type AddDeviceSpec* = object
+  name*: string
+  deviceType*: string
+  address*: string
 
 RequestBroker(API):
   type AddDevice = object
@@ -438,7 +601,8 @@ RequestBroker(API):
 
 Why this shape is preferred:
 
-- `ApiType` already generates a stable foreign representation for each item:
+- The type auto-resolution system discovers `AddDeviceSpec` from the proc
+  parameter and generates a stable foreign representation for each item:
   a C `*CItem` struct, a C++ value type, and a Python dataclass plus
   `ctypes.Structure`
 - the generated request export can pass the batch as pointer plus count at the
@@ -447,7 +611,7 @@ Why this shape is preferred:
   surfaces without handwritten marshalling
 
 In contrast, literal tuple sequences are not a good fit for the current FFI
-generator because tuple items do not participate in the `ApiType` registry that
+generator because tuple items do not participate in the type registry that
 drives foreign struct generation.
 
 Current limitation:
@@ -550,8 +714,9 @@ void mylib_offDeviceDiscovered(uint32_t ctx, uint64_t handle);
 
 ### C++ wrapper
 
-The generated header also contains a wrapper class and a reusable event
-dispatcher template.
+The C++ wrapper is generated as a separate `.hpp` file that includes the C
+header via `#pragma once` and `#include "<libName>.h"`. This keeps the pure C
+declarations separate from the C++ layer.
 
 Current lifecycle shape:
 
@@ -567,7 +732,7 @@ The generated header now includes a compact comment block directly above the
 wrapper class so users can scan the public surface without reading the full
 implementation.
 
-Example extract from the generated `mylib.h`:
+Example extract from the generated `mylib.hpp`:
 
 ```cpp
 // Quick C++ wrapper interface summary (names only)
@@ -748,7 +913,7 @@ nim c \
   --threads:on \
   --app:lib \
   --nimMainPrefix:mylib \
-  --path:src \
+  --path:. \
   --outdir:examples/ffiapi/nimlib/build \
   examples/ffiapi/nimlib/mylib.nim
 ```
@@ -832,6 +997,89 @@ Request providers run on the processing thread and may be async. That means:
 - multiple requests can be interleaved across await points
 - provider code should protect mutable shared state if reentrancy matters
 - shutting down external resources should account for in-flight work
+
+---
+
+## Future Phases
+
+The modular codegen architecture is designed to support additional transport and
+language surfaces without changing existing modules.
+
+### Phase 3: CBOR Tunnel Surface
+
+A buffer-based transport layer for languages that prefer buffer FFI over
+per-field C ABI interop.
+
+**Design:**
+
+- New `api_codegen_cbor.nim` module — follows the same pattern as existing
+  codegen modules (type mapping, accumulators, file generator)
+- Adds `appendCborRequest(entry)` / `appendCborEvent(entry)` accumulator
+  helpers called during broker macro expansion
+- Generates CBOR encode/decode logic per schema entry using the compile-time
+  type registry (`gApiTypeRegistry`)
+- Only 3 generic C exports instead of per-type exports:
+  - `<lib>_invoke(ctx, requestId, cborBuffer, len)` → CBOR-encoded result
+  - `<lib>_subscribe(ctx, eventId, callback, userData)` → handle
+  - `<lib>_free_buffer(buffer)`
+- Generates a schema manifest file (`<libName>.schema.json`) describing all
+  request/event types, field names, and CBOR tags — consumed by external
+  tooling and language-specific code generators
+
+**Advantages over C ABI for some consumers:**
+
+- Single stable FFI surface (3 functions) regardless of how many broker types
+  exist
+- Schema-driven — external tools can generate bindings without reading Nim
+  source
+- Natural fit for languages with strong serialization support (Rust serde,
+  Go encoding)
+
+### Phase 4: Rust / Go Codegen
+
+Language-specific binding generators that consume the CBOR tunnel rather than
+the C ABI directly.
+
+**Rust (`api_codegen_rust.nim`):**
+
+- Generates a `.rs` file with `#[derive(Deserialize)]` structs matching the
+  schema
+- Thin invoke wrappers that serialize arguments to CBOR, call the tunnel, and
+  deserialize results
+- Event subscription wrappers with idiomatic Rust callback signatures
+- Estimated ~200-300 LOC — just struct definitions and thin methods
+
+**Go (`api_codegen_go.nim`):**
+
+- Generates a `.go` file with CBOR-tagged structs
+- Thin CGo wrapper around the 3 tunnel exports
+- Idiomatic Go error returns instead of result structs
+- Estimated ~200-300 LOC
+
+**Both modules:**
+
+- Follow the same codegen module pattern: type mapping, accumulators, file
+  generator
+- Read from the same compile-time type registry (`gApiTypeRegistry`)
+- No changes needed to existing C, C++, or Python codegen modules
+- No changes needed to broker macros — the schema is already available
+
+### Adding a New Language Surface
+
+The codegen architecture makes adding a new language straightforward:
+
+1. Create `api_codegen_<lang>.nim` with:
+   - Type mapping procs (Nim types → target language types)
+   - Compile-time accumulators (`{.compileTime.}` string sequences)
+   - A file generator proc that reads accumulators and writes the output file
+2. Import and export from `api_codegen_c.nim` for shared helpers
+3. Call the accumulator helpers from existing sites in `api_type.nim`,
+   `api_request_broker.nim`, and `api_event_broker.nim`
+4. Call the file generator from `api_library.nim`
+
+No existing codegen modules need modification. The compile-time accumulator
+pattern ensures each module is independently testable and the generated output
+is deterministic.
 
 ---
 

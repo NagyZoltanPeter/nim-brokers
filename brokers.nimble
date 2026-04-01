@@ -5,7 +5,7 @@ version = "0.1.0"
 author = "Status Research & Development GmbH"
 description = "Type-safe, thread-local, decoupled messaging patterns for Nim"
 license = "MIT"
-srcDir = "src"
+skipDirs = @["tests", "examples", "tools"]
 
 # Dependencies
 requires "nim >= 2.0.0"
@@ -58,7 +58,7 @@ proc nimMainPrefixFlag(prefix: string): string =
 
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
@@ -72,7 +72,7 @@ proc buildFfiExampleLibrary(generatePy = false) =
 
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:src --outdir:examples/torpedo/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
@@ -126,7 +126,7 @@ proc torpedoExecutablePath(): string =
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
   let label = path & " [" & env & "]"
-  exec "nim c " & env & " --path:src --out:" & quoteArg(outputPath) & " test/" & path &
+  exec "nim c " & env & " --path:. --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
   echo "=== RUN  " & label & " ==="
   let (output, exitCode) = gorgeEx(outputPath)
@@ -299,7 +299,7 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
 proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:src --outdir:test/pytestlib/build"
+    " --path:. --outdir:test/pytestlib/build"
   flags.add(nimMainPrefixFlag("pytestlib"))
   if release:
     flags.add(" -d:release")

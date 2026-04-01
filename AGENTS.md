@@ -35,28 +35,34 @@ The package is managed via `brokers.nimble`. Install dependencies and run all te
 nimble install -d
 nimble test
 nimble testApi
+nimble testFfiApi
 ```
 
 Current test task coverage:
 
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
+- `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
 
 ```
-nim c -r --outdir:build test/test_event_broker.nim
-nim c -r --outdir:build test/test_request_broker.nim
-nim c -r --outdir:build test/test_multi_request_broker.nim
-nim c -r --outdir:build test/test_multi_thread_event_broker.nim
-nim c -r --outdir:build test/test_multi_thread_request_broker.nim
-nim c -r --outdir:build -d:BrokerFfiApi --threads:on --nimMainPrefix:apitestlib test/test_api_library_init.nim
+nim c -r --path:. --outdir:build test/test_event_broker.nim
+nim c -r --path:. --outdir:build test/test_request_broker.nim
+nim c -r --path:. --outdir:build test/test_multi_request_broker.nim
+nim c -r --path:. --outdir:build --threads:on test/test_multi_thread_event_broker.nim
+nim c -r --path:. --outdir:build --threads:on test/test_multi_thread_request_broker.nim
+nim c -r --path:. --outdir:build -d:BrokerFfiApi --threads:on --nimMainPrefix:apitestlib test/test_api_library_init.nim
 ```
 
 The `build/` directory is in `.gitignore`. Never compile without `--outdir:build` as test binaries will otherwise land in `test/` and pollute git status.
 
 Tests use `testutils/unittests` (not the stdlib `unittest`).
+
+### Formatting
+
+- use `nimble nphall` command to format code properly always.
 
 ### FFI API example build and run tasks
 
@@ -71,6 +77,8 @@ nimble buildFfiExamples     # build both C and C++ examples via CMake
 nimble runFfiExampleC       # rebuild library + run C example
 nimble runFfiExampleCpp     # rebuild library + run C++ example
 nimble runFfiExamplePy      # rebuild library + generated wrapper + run Python example
+nimble runTorpedoExamplePy # build and run the more complex torpedo example over Python bindings, implements game ui and orchestrator in Python
+nimble runTorpedoExampleCpp # build and run the more complex torpedo example over C++ bindings, implements game ui and orchestrator in C++
 ```
 
 The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`.
@@ -81,6 +89,7 @@ GitHub Actions CI currently runs:
 
 - `nimble test`
 - `nimble testApi`
+- `nimble testFfiApi`
 - `nimble runFfiExampleC`
 - `nimble runFfiExampleCpp`
 - `nimble runFfiExamplePy`
@@ -100,11 +109,11 @@ Any change that affects broker runtime behavior, FFI generation, or example inte
 
 Each broker macro (`EventBroker`, `RequestBroker`, `MultiRequestBroker` and their `mt` variants) follows the same structure:
 
-1. **Parse** the user-supplied type definition using shared helper `parseSingleTypeDef` in `src/helper/broker_utils.nim`.
+1. **Parse** the user-supplied type definition using shared helper `parseSingleTypeDef` in `brokers/internal/helper/broker_utils.nim`.
 2. **Generate** a type section (the value type, handler proc types, broker storage type) and all public API procs (`listen`/`emit`, `setProvider`/`request`/`clearProvider`, etc.).
 3. Store state in a **thread-local global** (`{.threadvar.}`) for single-thread brokers, or **shared memory + threadvar** for multi-thread brokers.
 
-### BrokerContext system (`src/broker_context.nim`)
+### BrokerContext system (`brokers/broker_context.nim`)
 
 `BrokerContext` is a `distinct uint32` used to multiplex independent broker instances. `NewBrokerContext()` generates globally unique IDs via an atomic counter (`fetchAdd`, thread-safe).
 
@@ -144,7 +153,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Fails the entire request if any provider fails.
 - Deduplicates identical handler references on registration.
 
-### Multi-thread broker specifics (`src/mt_event_broker.nim`, `src/mt_request_broker.nim`)
+### Multi-thread broker specifics (`brokers/internal/mt_event_broker.nim`, `brokers/internal/mt_request_broker.nim`)
 
 - Global bucket registry: `Lock`-protected shared array of buckets, each identified by `(brokerCtx, threadId, threadGen)`.
 - Thread identity: `addr mtThreadIdMarker` (threadvar address) + monotonic generation counter to disambiguate reused threadvar addresses across thread lifetimes.
@@ -152,19 +161,22 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Cross-thread dispatch: `AsyncChannel` per bucket, with a `processLoop` on the listener/provider thread that reads from the channel.
 - Initialization: atomic CAS-based one-time init per broker type.
 
-### Broker FFI API specifics (`src/api_library.nim`, `src/api_common.nim`, `src/api_request_broker.nim`, `src/api_event_broker.nim`)
+### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)
 
 - `RequestBroker(API)` and `EventBroker(API)` generate C ABI entry points and wrapper metadata in addition to the normal broker interfaces.
-- `registerBrokerLibrary` ties API request/event brokers into a complete shared-library surface.
+- `registerBrokerLibrary` ties API request/event brokers into a complete shared-library surface. It is a no-op when compiled without `-d:BrokerFfiApi`, so client code never needs a `when defined(BrokerFfiApi):` guard around it.
+- `api_library` is always imported as part of the `brokers` package; no conditional import is needed in client code.
+- External types used in broker signatures are auto-discovered and registered — plain Nim `object` types do not need any `ApiType` annotation. The deprecated `ApiType` macro still compiles with a warning.
 - Generated lifecycle naming is intentionally split:
   - `<lib>_initialize()` — once-per-process Nim runtime initialization
-  - `<lib>_create()` — per-context instance creation
+  - `<lib>_createContext()` — per-context instance creation
   - `<lib>_shutdown(ctx)` — per-context shutdown
-- `CreateRequest` is the post-create configuration broker; `DestroyRequest` is the orderly teardown broker.
-- `mylib_create()` is readiness-synchronous: it returns only after the delivery thread installed event registration and the processing thread finished `setupProviders(ctx)`.
+- `InitializeRequest` is the post-create configuration broker; `ShutdownRequest` is the orderly teardown broker.
+- `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread installed event registration and the processing thread finished `setupProviders(ctx)`.
 - The generated runtime uses two threads per created library context:
   - **delivery thread** — owns foreign event registration and executes foreign callbacks
   - **processing thread** — runs `setupProviders(ctx)` and executes request providers
+- Generated C header: `<libName>.h` (pure C), C++ wrapper: `<libName>.hpp` (includes the `.h`).
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
 
 ### Concurrency safety notes
@@ -178,27 +190,35 @@ All brokers are designed for chronos cooperative multitasking on a single thread
 ## Source Files
 
 ```
-src/
-  api_common.nim            — Shared FFI code generation helpers for C/C++/Python surfaces
-  api_event_broker.nim      — API-specific EventBroker generation helpers
-  api_library.nim           — Shared-library lifecycle/runtime generator (`registerBrokerLibrary`)
-  api_request_broker.nim    — API-specific RequestBroker generation helpers
-  api_type.nim              — FFI-safe API type declarations (`ApiType`)
+brokers/
   broker_context.nim        — BrokerContext type, thread-global binding, async scoped templates
-  event_broker.nim          — Single-thread EventBroker macro
-  request_broker.nim        — Single-thread RequestBroker macro
+  event_broker.nim          — Single-thread EventBroker macro (re-exports internal/mt_event_broker when --threads:on)
+  request_broker.nim        — Single-thread RequestBroker macro (re-exports internal/mt_request_broker when --threads:on)
   multi_request_broker.nim  — Single-thread MultiRequestBroker macro
-  mt_event_broker.nim       — Multi-thread EventBroker(mt) macro
-  mt_request_broker.nim     — Multi-thread RequestBroker(mt) macro
-  mt_broker_common.nim      — Shared runtime helpers for MT brokers (thread ID, generation, blockingAwait)
-  helper/
-    broker_utils.nim        — Shared macro parsing utilities
+  api_library.nim           — Shared-library lifecycle/runtime generator (`registerBrokerLibrary`)
+  internal/
+    api_common.nim          — Re-export hub for all codegen modules + legacy bridge + runtime memory helpers
+    api_codegen_c.nim       — C type mapping, accumulators, header generation (.h)
+    api_codegen_cpp.nim     — C++ type mapping, accumulators, wrapper generation (.hpp)
+    api_codegen_python.nim  — Python type mapping, accumulators, wrapper generation (.py)
+    api_codegen_nim.nim     — Nim→C ABI type mapping (toCFieldType)
+    api_event_broker.nim    — API-specific EventBroker generation helpers
+    api_request_broker.nim  — API-specific RequestBroker generation helpers
+    api_schema.nim          — Compile-time type registry (ApiTypeEntry, gApiTypeRegistry)
+    api_type.nim            — Deprecated ApiType shim (use plain Nim types instead)
+    api_type_resolver.nim   — Two-phase external type auto-resolution
+    mt_event_broker.nim     — Multi-thread EventBroker(mt) macro
+    mt_request_broker.nim   — Multi-thread RequestBroker(mt) macro
+    mt_broker_common.nim    — Shared runtime helpers for MT brokers (thread ID, generation, blockingAwait)
+    helper/
+      broker_utils.nim      — Shared macro parsing utilities
 examples/
   ffiapi/
     nimlib/mylib.nim        — Canonical Broker FFI API example library
     example/main.c          — Pure C consumer example
     cpp_example/main.cpp    — C++ wrapper consumer example
     python_example/main.py  — Python ctypes wrapper consumer example
+  torpedo/                  - more complex demonstration of using API brokers, follows the same code and build structure as ffiapi example.
 test/
   test_event_broker.nim
   test_request_broker.nim
@@ -208,6 +228,7 @@ test/
   test_api_request_broker.nim
   test_api_event_broker.nim
   test_api_library_init.nim
+  pytestlib/                - similar to ffiapi example, it supports e2e testing of nim brokers through FFI and py bindings.
 ```
 
 ## Coding Conventions
@@ -217,9 +238,11 @@ test/
 - Generated identifier names are sanitized via `sanitizeIdentName` to be safe Nim identifiers.
 - Debug output of generated AST is available via `-d:brokerDebug` compile flags.
 - Always compile with `--outdir:build` to keep binaries out of the source tree.
-- For FFI API builds, keep the lifecycle naming distinction intact: `initialize` is process-wide, `create` is per-context.
+- Allways import with `broker/...`
+- For FFI API builds, keep the lifecycle naming distinction intact: `createContext`/`shutdown(ctx)`.
 - For FFI API builds, keep `--nimMainPrefix:<libname>` aligned with `name: "<libname>"` in `registerBrokerLibrary`.
 
-## Formatting
+### C/C++
 
-- use `nimble nphall` command to format code properly always.
+- We use cmake projects to build C/C++ examples, test codes if any.
+- We enforce C++20 standard for C++ code, and C11 for C code.

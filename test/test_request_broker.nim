@@ -4,7 +4,7 @@ import testutils/unittests
 import chronos
 import std/strutils
 
-import request_broker
+import brokers/request_broker
 
 ## ---------------------------------------------------------------------------
 ## Async-mode brokers + tests

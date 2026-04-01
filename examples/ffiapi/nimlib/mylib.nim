@@ -17,31 +17,26 @@
 
 {.push raises: [].}
 
-import brokers/[event_broker, request_broker, broker_context]
-
-when defined(BrokerFfiApi):
-  import brokers/api_library
+import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # Shared item types (used in seq[T] request and result fields)
 # ---------------------------------------------------------------------------
 
 ## DeviceInfo — flat struct describing a single device.
-## Declared with `ApiType` so it can appear in `seq[DeviceInfo]` results.
-ApiType:
-  type DeviceInfo = object
-    deviceId*: int64
-    name*: string
-    deviceType*: string
-    address*: string
-    online*: bool
+## Plain Nim type: auto-registered when referenced in broker macros.
+type DeviceInfo* = object
+  deviceId*: int64
+  name*: string
+  deviceType*: string
+  address*: string
+  online*: bool
 
 ## AddDeviceSpec — FFI-safe batch input item for AddDevice.
-ApiType:
-  type AddDeviceSpec = object
-    name*: string
-    deviceType*: string
-    address*: string
+type AddDeviceSpec* = object
+  name*: string
+  deviceType*: string
+  address*: string
 
 # ---------------------------------------------------------------------------
 # Request Brokers
@@ -292,13 +287,12 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 # Library registration — MUST be last
 # ---------------------------------------------------------------------------
 
-when defined(BrokerFfiApi):
-  registerBrokerLibrary:
-    name:
-      "mylib"
-    initializeRequest:
-      InitializeRequest
-    shutdownRequest:
-      ShutdownRequest
+registerBrokerLibrary:
+  name:
+    "mylib"
+  initializeRequest:
+    InitializeRequest
+  shutdownRequest:
+    ShutdownRequest
 
 {.pop.}

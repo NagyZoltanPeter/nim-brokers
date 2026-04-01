@@ -102,7 +102,7 @@
 import std/[macros, strutils, tables, sugar]
 import chronos
 import results
-import ./helper/broker_utils
+import ./internal/helper/broker_utils
 import ./broker_context
 
 export results, chronos, broker_context

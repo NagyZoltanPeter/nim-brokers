@@ -5,7 +5,7 @@ import chronos
 import std/[strutils, atomics, monotimes]
 from std/times import inNanoseconds
 
-import event_broker
+import brokers/event_broker
 
 ## ---------------------------------------------------------------------------
 ## Performance / stress tests for multi-thread EventBroker

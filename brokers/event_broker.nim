@@ -86,14 +86,14 @@
 
 import std/[macros, strutils, tables]
 import chronos, chronicles, results
-import ./helper/broker_utils, ./broker_context
+import ./internal/helper/broker_utils, ./broker_context
 
 when compileOption("threads"):
-  import ./mt_event_broker
+  import ./internal/mt_event_broker
   export mt_event_broker
 
 when compileOption("threads") and defined(BrokerFfiApi):
-  import ./api_event_broker
+  import ./internal/api_event_broker
   export api_event_broker
 
 export chronicles, results, chronos, broker_context

@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EventBroker &amp; RequestBroker — Logos Messaging</title>
+
+  <!-- RevealJS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/theme/black.min.css" />
+  <!-- highlight.js theme -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+
+  <style>
+    /* ── Logos brand palette ───────────────────────── */
+    :root {
+      --logos-bg:          #08090c;
+      --logos-surface:     #111318;
+      --logos-surface2:    #1b1d26;
+      --logos-border:      #252830;
+      --logos-blue:        #5c9cf5;
+      --logos-blue-dim:    #3a6dcc;
+      --logos-green:       #64f4ac;
+      --logos-green-dim:   #3ab87a;
+      --logos-orange:      #f9882a;
+      --logos-red:         #f45c74;
+      --logos-text:        #e8eaf0;
+      --logos-muted:       #7a7f91;
+      --logos-code-bg:     #131520;
+      --logos-hl:          rgba(92,156,245,0.15);
+    }
+
+    /* Override reveal defaults — scale-friendly sizing */
+    .reveal-viewport { background: var(--logos-bg) !important; }
+    .reveal .slides section { text-align: left; }
+    .reveal .slides { font-size: 62.5%; }
+    .reveal { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; color: var(--logos-text); }
+    .reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+      color: #ffffff;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-transform: none;
+    }
+    .reveal h1 { font-size: 2em; line-height: 1.1; }
+    .reveal h2 { font-size: 1.4em; border-bottom: 1px solid var(--logos-border); padding-bottom: 0.2em; margin-bottom: 0.5em; }
+    .reveal h3 { font-size: 1.05em; color: var(--logos-blue); margin-bottom: 0.3em; }
+    .reveal p, .reveal li { font-size: 0.78em; line-height: 1.55; color: var(--logos-text); }
+    .reveal ul { margin-left: 1em; }
+    .reveal ul li { margin-bottom: 0.2em; }
+
+    /* ── Code blocks — projector-friendly ── */
+    .reveal pre {
+      background: var(--logos-code-bg) !important;
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      margin: 0.35em auto;
+      width: 100%;
+      font-size: 0.88em !important;
+    }
+    .reveal pre code {
+      background: transparent !important;
+      padding: 0.6em 0.8em !important;
+      max-height: none;
+      overflow: visible !important;
+    }
+    /* Scroll bar styling (for the rare overflow) */
+    .reveal pre code::-webkit-scrollbar { width: 4px; height: 4px; }
+    .reveal pre code::-webkit-scrollbar-track { background: transparent; }
+    .reveal pre code::-webkit-scrollbar-thumb { background: var(--logos-border); border-radius: 2px; }
+
+    /* Utility chips / badges */
+    .chip {
+      display: inline-block;
+      padding: 0.18em 0.6em;
+      border-radius: 4px;
+      font-size: 0.65em;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      vertical-align: middle;
+      margin-right: 0.3em;
+    }
+    .chip-blue   { background: rgba(92,156,245,0.18); color: var(--logos-blue); border: 1px solid var(--logos-blue-dim); }
+    .chip-green  { background: rgba(100,244,172,0.12); color: var(--logos-green); border: 1px solid var(--logos-green-dim); }
+    .chip-orange { background: rgba(249,136,42,0.18); color: var(--logos-orange); border: 1px solid #b35f10; }
+    .chip-red    { background: rgba(244,92,116,0.15); color: var(--logos-red); border: 1px solid #a02040; }
+    .chip-api    { background: rgba(92,156,245,0.10); color: #b6d2ff; border: 1px solid var(--logos-blue); }
+
+    /* Callout boxes */
+    .callout {
+      background: var(--logos-surface);
+      border-left: 3px solid var(--logos-blue);
+      border-radius: 0 6px 6px 0;
+      padding: 0.45em 0.7em;
+      margin: 0.4em 0;
+      font-size: 0.72em;
+    }
+    .callout.warn  { border-color: var(--logos-orange); }
+    .callout.good  { border-color: var(--logos-green); }
+    .callout.bad   { border-color: var(--logos-red); }
+    .callout p { margin: 0; font-size: 1em; }
+
+    /* Two-column layout */
+    .cols { display: grid; gap: 1.2em; align-items: start; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .col-6040 { grid-template-columns: 0.6fr 0.4fr; }
+    .col-4060 { grid-template-columns: 0.4fr 0.6fr; }
+
+    /* Title slide */
+    .title-slide { text-align: center !important; }
+    .title-slide h1 { font-size: 2.2em; margin-bottom: 0.3em; }
+    .title-slide .subtitle {
+      font-size: 0.95em;
+      color: var(--logos-muted);
+      margin-bottom: 1.2em;
+    }
+    .logos-wordmark {
+      font-weight: 800; font-size: 1.1em; letter-spacing: 0.12em;
+      color: var(--logos-text); text-transform: uppercase;
+      line-height: 1.3;
+      overflow: visible;
+    }
+    .logos-wordmark .wm-lambda {
+      text-transform: none;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+      display: inline;
+    }
+    .section-header {
+      text-align: center !important;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%;
+    }
+    .section-header .num {
+      font-size: 4em; font-weight: 900; color: var(--logos-border);
+      line-height: 1; margin-bottom: 0.1em;
+    }
+    .section-header h2 { border: none; font-size: 1.7em; }
+
+    /* Diagram boxes */
+    .diag-box {
+      background: var(--logos-surface2);
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      padding: 0.5em 0.8em;
+      text-align: center;
+      font-size: 0.62em;
+      color: var(--logos-text);
+    }
+    .diag-box.accent { border-color: var(--logos-blue); color: var(--logos-blue); }
+    .diag-box.green  { border-color: var(--logos-green); color: var(--logos-green); }
+    .diag-box.bad    { border-color: var(--logos-red);   color: var(--logos-red); }
+
+    .arrow {
+      text-align: center; font-size: 1.2em; color: var(--logos-muted);
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* Highlight lines inside code */
+    .hl-line { background: var(--logos-hl); }
+
+    /* Table */
+    .reveal table {
+      font-size: 0.62em;
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .reveal table th {
+      background: var(--logos-surface2);
+      color: var(--logos-blue);
+      padding: 0.5em 0.8em;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--logos-border);
+    }
+    .reveal table td {
+      padding: 0.4em 0.8em;
+      border-bottom: 1px solid var(--logos-border);
+      color: var(--logos-text);
+    }
+    .reveal table tr:last-child td { border-bottom: none; }
+
+    /* Fragment transitions */
+    .reveal .fragment { opacity: 0; transition: opacity 0.4s; }
+    .reveal .fragment.visible { opacity: 1; }
+    .reveal .fragment.highlight-blue { color: var(--logos-blue) !important; }
+    .reveal .fragment.highlight-green { color: var(--logos-green) !important; }
+
+    /* File path label */
+    .filepath {
+      font-family: monospace;
+      font-size: 0.6em;
+      color: var(--logos-muted);
+      margin-bottom: 0.15em;
+      display: block;
+    }
+
+    /* Inline code */
+    .reveal code:not(pre code) {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background: var(--logos-surface2);
+      color: var(--logos-green);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+      font-size: 0.85em;
+    }
+
+    /* Slide number / progress */
+    .reveal .progress { height: 2px; color: var(--logos-blue); }
+    .reveal .slide-number {
+      background: transparent;
+      color: var(--logos-muted);
+      font-size: 0.6em;
+    }
+
+    /* ── Persistent footer ── */
+    .slide-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      background: linear-gradient(180deg, transparent 0%, rgba(8,9,12,0.9) 35%);
+      z-index: 30;
+      pointer-events: none;
+    }
+    .slide-footer .footer-inner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      opacity: 0.7;
+    }
+    .slide-footer .footer-lambda {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+    }
+    .slide-footer .footer-text {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--logos-text);
+      letter-spacing: 0.06em;
+    }
+    /* ── Top-right domain badge ── */
+    .top-right-domain {
+      position: fixed;
+      top: 16px;
+      right: 24px;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--logos-muted);
+      letter-spacing: 0.04em;
+      opacity: 0.7;
+      z-index: 30;
+      pointer-events: none;
+    }
+
+    /* auto-animate highlights */
+    [data-id="code-highlight"] {
+      transition: all 0.5s ease;
+    }
+
+    /* Vertical-nav hint arrow */
+    .reveal .controls .navigate-down { color: var(--logos-blue); }
+  </style>
+</head>
+
+<body>
+
+<!-- ── Top-right domain ── -->
+<div class="top-right-domain">Logos.co</div>
+
+<!-- ── Persistent footer ── -->
+<div class="slide-footer">
+  <div class="footer-inner">
+    <span class="footer-lambda">&lambda;</span>
+    <span class="footer-text">Logos · Messaging</span>
+  </div>
+</div>
+
+<div class="reveal">
+<div class="slides">
+
+<!-- ══════════════════════════════════════════════════
+     TITLE (standalone horizontal slide)
+══════════════════════════════════════════════════ -->
+<section class="title-slide">
+  <div style="margin-bottom:0.6em">
+    <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue);"><span class="wm-lambda">&lambda;</span>ogos · Messaging</div>
+  </div>
+  <h1>Event &amp; Request<br>Broker Design</h1>
+  <div style="text-align:center; margin-bottom:1em;">
+    <code style="color:var(--logos-green); font-size:0.78em;">
+      <a href="https://github.com/NagyZoltanPeter/nim-brokers"
+          style="color:var(--logos-green); text-decoration:underline;">
+          NagyZoltanPeter/nim-brokers
+      </a>
+    </code>
+  </div>
+  <p class="subtitle">Architecture · Guarantees · Usage Patterns</p>
+  <div style="display:flex; justify-content:center; gap:0.8em; margin-top:1em; flex-wrap:wrap;">
+    <a href="#/2" style="text-decoration:none;"><span class="chip chip-blue" style="cursor:pointer;">EventBroker</span></a>
+    <a href="#/3" style="text-decoration:none;"><span class="chip chip-green" style="cursor:pointer;">RequestBroker</span></a>
+    <a href="#/4" style="text-decoration:none;"><span class="chip chip-orange" style="cursor:pointer;">MultiRequestBroker</span></a>
+    <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
+    <a href="#/6" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread Brokers</span></a>
+  </div>
+  <div style="display:flex; justify-content:center; margin-top:0.6em;">
+    <a href="#/9" style="text-decoration:none;"><span class="chip chip-api" style="cursor:pointer;">Broker FFI-API</span></a>
+  </div>
+  <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 1 — THE PROBLEM (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 1.0  Section header -->
+  <section class="section-header">
+    <div class="num">01</div>
+    <h2>The Code Word: decoupling!</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">We are developing distributed, p2p communication system. We are effectively decouple sender from recepients to preserve privacy.
+Decoupling is a high courage aim in software development with metrics that says about quality of your design.<br>
+<br>
+<strong>So why we aren't do it in our daily source code effectively?</strong><br>
+<br>
+Your API is a contract, it states what your module guarantees. It must be type safe and compiler verifiable.
+<br>
+This is the aim of this design!</p>
+  </section>
+
+  <!-- 1.1  Callback types -->
+  <section>
+    <h2>Example of tight coupling: Callbacks Wired at Init Time</h2>
+    <p>A raw function pointer is captured during construction and stored without lifetime management.</p>
+
+    <div class="cols cols-2" style="margin-top:0.6em; align-items:start;">
+      <div>
+        <span class="filepath">waku/waku_core/subscription/push_handler.nim</span>
+        <pre><code class="language-nim" data-trim>
+type FilterPushHandler* =
+  proc(pubsubTopic: PubsubTopic,
+       message: WakuMessage)
+    {.async, gcsafe, closure.}
+        </code></pre>
+
+        <span class="filepath">waku/waku_core/subscription/subscription_manager.nim</span>
+        <pre><code class="language-nim" data-trim>
+type SubscriptionManager* = object
+  subscriptions:
+    TableRef[(string, ContentTopic),
+              FilterPushHandler]   # raw proc pointer
+
+proc registerSubscription*(m, pubsubTopic,
+    contentTopic, handler: FilterPushHandler) =
+  m.subscriptions[(pubsubTopic, contentTopic)]
+    = handler   # stored forever, no cleanup API
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout bad">
+          <p><strong style="color:var(--logos-red);">Problems</strong></p>
+        </div>
+        <ul style="margin-top:0.5em;">
+          <li class="fragment">Handler stored in a table with <em>no expiry</em></li>
+          <li class="fragment">If the owner is destroyed, the closure becomes a <strong>dangling capture</strong></li>
+          <li class="fragment"><code>SubscriptionManager</code> must be threaded through every layer</li>
+          <li class="fragment">Init order matters — register too early and the sender doesn't exist yet</li>
+          <li class="fragment">Hard to test in isolation</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1.2  Coupling chain diagram -->
+  <section>
+    <h2>The Coupling Chain</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Every new subscriber forces a new dependency across the entire init hierarchy.</p>
+
+    <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; align-items:center; gap:0.4em; margin:1em 0;">
+      <div class="diag-box bad">WakuNode<br><small>creates</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">FilterClient<br><small>holds seq[Handler]</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">RecvService<br><small>registers handler</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box bad">Closure<br><small>captures recvService</small></div>
+    </div>
+
+    <div class="cols cols-2" style="margin-top:0.6em;">
+      <div class="callout bad">
+        <p><strong>Direct dependency:</strong> <code>RecvService</code> must know about <code>WakuFilterClient</code> just to receive events.</p>
+      </div>
+      <div class="callout bad">
+        <p><strong>No cleanup contract:</strong> <code>stopRecvService</code> cannot deregister — the callback lives as long as <code>WakuFilterClient</code> does.</p>
+      </div>
+    </div>
+
+    <div class="fragment callout" style="margin-top:0.7em;">
+      <p><strong>The goal:</strong> modules should talk to each other without importing or knowing about each other. That's what the Broker pattern delivers.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 1 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 2 — EVENTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 2.0  Section header -->
+  <section class="section-header">
+    <div class="num">02</div>
+    <h2 style="color:var(--logos-blue);">EventBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Reactive · Pub/Sub · Many emitters &rarr; Many listeners</p>
+  </section>
+
+  <!-- 2.1  Overview -->
+  <section>
+    <h2>EventBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li> Implements the Reactive pattern in a many-to-many manner</li>
+          <li class="fragment">Any number of listeners, any number of emitters</li>
+          <li class="fragment">Through a Nim <strong>macro</strong> that generates a type-safe, thread-local pub/sub broker for a single event type</li>
+          <li class="fragment">Emitters call <code>emit()</code> — <em>zero</em> knowledge of who is listening</li>
+          <li class="fragment">Listeners register with <code>listen()</code> and receive a <strong>handle</strong> for unregistering</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Generated API</h3>
+        <pre><code class="language-nim" data-trim>
+-- Declare once:
+EventBroker:
+  type MyEvent = object
+    field: string
+
+-- Anywhere in your code:
+MyEvent.listen(handler)        # register
+MyEvent.listen(ctx, handler)   # context-aware
+MyEvent.emit(event)            # fire
+MyEvent.emit(ctx, field = "x") # shorthand ctor
+await MyEvent.dropListener(handle)   # drain in-flight, then cleanup
+MyEvent.dropAllListeners()           # drain all in-flight (5s timeout)
+        </code></pre>
+      </div>
+    </div>
+
+    <div class="fragment cols cols-3" style="margin-top:0.7em;">
+      <div class="callout good"><p><strong>Thread-local storage</strong> — no locks needed</p></div>
+      <div class="callout good"><p><strong>Async dispatch</strong> — listeners run as independent tasks</p></div>
+      <div class="callout good"><p><strong>Handle-based</strong> — explicit, safe cleanup</p></div>
+    </div>
+  </section>
+
+  <!-- 2.2  Step 1 — Declare events -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Events</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">One macro call per event type — can live in a shared events module.</p>
+
+    <span class="filepath">waku/events/delivery_events.nim</span>
+    <pre data-id="event-decl"><code class="language-nim" data-trim data-id="event-code">
+import waku/common/broker/event_broker
+
+EventBroker:
+  type DeliveryFeedbackEvent* = ref object
+    success*:  DeliverySuccess
+    dir*:      DeliveryDirection
+    comment*:  string
+    msgHash*:  WakuMessageHash
+    msg*:      WakuMessage
+
+EventBroker:
+  type OnFilterSubscribeEvent* = object
+    pubsubTopic*:   string
+    contentTopics*: seq[string]
+
+EventBroker:
+  type OnFilterUnSubscribeEvent* = object
+    pubsubTopic*:   string
+    contentTopics*: seq[string]
+    </code></pre>
+
+    <div class="callout" style="margin-top:0.4em;">
+      <p>The macro exports the type <em>plus</em> a companion broker — both live in thread-local storage. No global state, no locks.</p>
+    </div>
+  </section>
+
+  <!-- 2.3  Step 2 — Emit (part A) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Emit Events</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">The emitter doesn't import or know about any listener.</p>
+
+    <span class="filepath">waku/waku_filter_v2/client.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-6|8-13">
+proc subscribe*(wfc: WakuFilterClient, ...) {.async.} =
+  # ... network call ...
+  ?await wfc.sendSubscribeRequest(peer, req)
+
+  # Fire-and-forget: no knowledge of RecvService
+  OnFilterSubscribeEvent.emit(
+    wfc.brokerCtx, pubsubTopic, contentTopicSeq)
+
+proc unsubscribe*(wfc: WakuFilterClient, ...) {.async.} =
+  # ... network call ...
+  ?await wfc.sendSubscribeRequest(peer, req)
+
+  OnFilterUnSubscribeEvent.emit(
+    wfc.brokerCtx, pubsubTopic, contentTopicSeq)
+    </code></pre>
+
+    <div class="callout good" style="margin-top:0.4em;">
+      <p><code>emit()</code> spawns async tasks for each listener. The emitter returns immediately — no blocking, no coupling.</p>
+    </div>
+  </section>
+
+  <!-- 2.4  Step 2 — Emit (part B: delivery feedback) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Emit Events <span style="color:var(--logos-muted); font-size:0.6em;">(continued)</span></h2>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+proc performDeliveryFeedback(
+    self: RecvService,
+    success: DeliverySuccess,
+    dir: DeliveryDirection,
+    comment: string,
+    msgHash: WakuMessageHash,
+    msg: WakuMessage,
+) {.gcsafe, raises: [].} =
+  info "recv monitor performDeliveryFeedback",
+    success, dir, comment,
+    msg_hash = shortLog(msgHash)
+
+  DeliveryFeedbackEvent.emit(
+    brokerCtx = self.brokerCtx,
+    success   = success,
+    dir       = dir,
+    comment   = comment,
+    msgHash   = msgHash,
+    msg       = msg,
+  )
+    </code></pre>
+
+    <div class="callout">
+      <p>The <strong>inline constructor</strong> overload (<code>emit(brokerCtx, field = value, ...)</code>) is auto-generated for <code>object</code> types — no manual construction needed.</p>
+    </div>
+  </section>
+
+  <!-- 2.5  Step 3 — Listen (registration) -->
+  <section data-auto-animate>
+    <h2>Step 3 · Listen &amp; Clean Up</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;"><code>RecvService</code> manages its own listeners — zero coupling with the filter client.</p>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+type RecvService* = ref object of RootObj
+  brokerCtx:             BrokerContext
+  onSubscribeListener:   OnFilterSubscribeEventListener
+  onUnsubscribeListener: OnFilterUnSubscribeEventListener
+
+proc startRecvService*(self: RecvService) =
+  self.onSubscribeListener =
+    OnFilterSubscribeEvent.listen(
+      self.brokerCtx,
+      proc(ev: OnFilterSubscribeEvent)
+          {.async: (raises: []).} =
+        self.onSubscribe(
+          ev.pubsubTopic, ev.contentTopics)
+    ).valueOr:
+      error "Failed to set listener"
+      quit(QuitFailure)
+    </code></pre>
+  </section>
+
+  <!-- 2.5b  Step 3 — Listen (continued + cleanup) -->
+  <section data-auto-animate>
+    <h2>Step 3 · Listen &amp; Clean Up <span style="color:var(--logos-muted); font-size:0.6em;">(continued)</span></h2>
+
+    <span class="filepath">waku/node/delivery_service/recv_service/recv_service.nim</span>
+    <pre><code class="language-nim" data-trim>
+  self.onUnsubscribeListener =
+    OnFilterUnSubscribeEvent.listen(
+      self.brokerCtx,
+      proc(ev: OnFilterUnSubscribeEvent)
+          {.async: (raises: []).} =
+        self.onUnsubscribe(
+          ev.pubsubTopic, ev.contentTopics)
+    ).valueOr:
+      error "Failed to set listener"
+      quit(QuitFailure)
+
+proc stopRecvService*(self: RecvService) {.async.} =
+  OnFilterSubscribeEvent.dropListener(
+    self.brokerCtx, self.onSubscribeListener)
+  OnFilterUnSubscribeEvent.dropListener(
+    self.brokerCtx, self.onUnsubscribeListener)
+    </code></pre>
+
+    <div class="callout good" style="margin-top:0.4em;">
+      <p>Symmetric <code>start</code>/<code>stop</code> — handles stored on the owner, cleanup is explicit and complete.</p>
+    </div>
+  </section>
+
+  <!-- 2.6  Guarantees -->
+  <section>
+    <h2>EventBroker Guarantees</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Lifetime safety</h3>
+        <ul>
+          <li><code>listen()</code> returns a typed <strong>handle</strong></li>
+          <li>Owner stores the handle as a field — lifetime tied to the object</li>
+          <li><code>dropListener(handle)</code> removes the registration and drains in-flight futures (5&thinsp;s timeout)</li>
+          <li>After <code>dropListener</code> returns, no callbacks for that handle are running — safe to release resources</li>
+        </ul>
+      </div>
+
+      <div>
+        <h3>Error isolation</h3>
+        <ul>
+          <li>Each listener runs as an independent <code>asyncSpawn</code> task, tracked in <code>inFlight</code></li>
+          <li>A panicking listener is caught and logged — others still fire</li>
+          <li>Emitter never awaits listener completion — <code>dropListener</code> drains in-flight on shutdown</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="cols cols-3" style="margin-top:0.8em;">
+      <div class="callout fragment">
+        <p><strong>No import cycle:</strong> emitter and listener only share the event <em>type declaration</em> module.</p>
+      </div>
+      <div class="callout fragment">
+        <p><strong>Thread-local:</strong> broker state per event-loop thread — no mutex for dispatch.</p>
+      </div>
+      <div class="callout good fragment">
+        <p><strong>Type safety:</strong> handler signature enforced at compile time via generated proc type.</p>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 2 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 3 — REQUESTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 3.0  Section header -->
+  <section class="section-header">
+    <div class="num">03</div>
+    <h2 style="color:var(--logos-green);">RequestBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Proactive · Request/Response · Many requesters &rarr; One provider</p>
+  </section>
+
+  <!-- 3.1  Overview -->
+  <section>
+    <h2>RequestBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li> Implements the Proactive pattern in a many-to-one manner</li>
+          <li class="fragment">Decoupled <strong>request/response</strong> — one provider answers many requesters</li>
+          <li class="fragment">Provider registers itself; requesters call the broker — neither imports the other</li>
+          <li class="fragment">Signature <strong>compile-time enforced</strong> via a <code>proc signature</code> declaration</li>
+          <li class="fragment">Two modes: <code>async</code> (default) and <code>sync</code> for simple state accessors</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Generated API</h3>
+        <pre><code class="language-nim" data-trim>
+-- Declare once:
+RequestBroker:        # or RequestBroker(sync):
+  type MyData = object
+    value: string
+  proc signature*():
+    Future[Result[MyData, string]]
+
+-- Provider side (e.g. in WakuNode):
+MyData.setProvider(
+  proc(): Future[...] {.async.} =
+    ok(MyData(value: "hello")))
+
+-- Requester side (anywhere):
+let data = await MyData.request()
+        </code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3.2  Step 1 — Declare requests (sync) -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Requests</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Sync variants — simple state accessors, no <code>Future</code>.</p>
+
+    <span class="filepath">waku/requests/health_requests.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-13">
+# Zero-arg sync: simple state accessor
+RequestBroker(sync):
+  type RequestConnectionStatus* = object
+    connectionStatus*: ConnectionStatus
+
+# Arg-based sync: parameterised lookup
+RequestBroker(sync):
+  type RequestContentTopicsHealth* = object
+    contentTopicHealth*:
+      seq[tuple[topic: ContentTopic,
+                health: TopicHealth]]
+  proc signature(topics: seq[ContentTopic]):
+    Result[RequestContentTopicsHealth, string]
+    </code></pre>
+  </section>
+
+  <!-- 3.2b  Step 1 — Declare requests (async) -->
+  <section data-auto-animate>
+    <h2>Step 1 · Declare Your Requests <span style="color:var(--logos-muted); font-size:0.6em;">(async)</span></h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Async variants — for IO-bound operations.</p>
+
+    <span class="filepath">waku/requests/health_requests.nim</span>
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-13">
+# Zero-arg async: may involve IO
+RequestBroker:
+  type RequestHealthReport* = object
+    healthReport*: HealthReport
+
+# Arg-based async: query a specific protocol
+RequestBroker:
+  type RequestProtocolHealth* = object
+    healthStatus*: ProtocolHealth
+  proc signature(protocol: WakuProtocol):
+    Future[Result[RequestProtocolHealth, string]]
+    </code></pre>
+
+    <div class="callout" style="margin-top:0.4em;">
+      <p>The <code>proc signature</code> declaration enforces the provider's type at <strong>compile time</strong>. If omitted, a zero-arg form is generated automatically.</p>
+    </div>
+  </section>
+
+  <!-- 3.3  Step 2 — Register provider (sync) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(sync)</span></h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Provider registers at startup — requesters don't need to know who provides.</p>
+
+    <span class="filepath">waku/factory/waku.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Sync provider — zero-arg, no IO involved
+RequestConnectionStatus.setProvider(
+  threadGlobalBrokerContext(),
+  proc(): Result[RequestConnectionStatus, string] =
+    try:
+      let report = waku[].healthMonitor
+                         .getSyncNodeHealthReport()
+      ok(RequestConnectionStatus(
+        connectionStatus: report.connectionStatus))
+    except:
+      err("Failed: " & getCurrentExceptionMsg()),
+).isOkOr:
+  error "Failed to set provider"
+    </code></pre>
+  </section>
+
+  <!-- 3.3b  Step 2 — Register provider (async) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(async)</span></h2>
+
+    <span class="filepath">waku/factory/waku.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Async provider — may perform IO
+RequestHealthReport.setProvider(
+  threadGlobalBrokerContext(),
+  proc(): Future[
+      Result[RequestHealthReport, string]]
+      {.async.} =
+    try:
+      let report = await waku[].healthMonitor
+                               .getNodeHealthReport()
+      ok(RequestHealthReport(healthReport: report))
+    except:
+      err("Failed: " & getCurrentExceptionMsg()),
+).isOkOr:
+  error "Failed to set provider"
+    </code></pre>
+  </section>
+
+  <!-- 3.4  Step 2 — Register provider (arg-based) -->
+  <section data-auto-animate>
+    <h2>Step 2 · Register a Provider <span style="color:var(--logos-muted); font-size:0.6em;">(arg-based)</span></h2>
+
+    <span class="filepath">waku/node/waku_node.nim</span>
+    <pre><code class="language-nim" data-trim>
+## Arg-based sync provider
+RequestShardTopicsHealth.setProvider(
+  node.brokerCtx,
+  proc(topics: seq[PubsubTopic]):
+      Result[RequestShardTopicsHealth, string] =
+    var response: RequestShardTopicsHealth
+
+    for shard in topics:
+      var healthStatus = TopicHealth.UNHEALTHY
+
+      if not node.wakuRelay.isNil:
+        healthStatus = node.wakuRelay.topicsHealth
+          .getOrDefault(shard, TopicHealth.NOT_SUBSCRIBED)
+
+      response.topicHealth.add((shard, healthStatus))
+
+    return ok(response),
+).isOkOr:
+  error "Can't set provider for RequestShardTopicsHealth",
+    error = error
+    </code></pre>
+  </section>
+
+  <!-- 3.5  Step 3 — Make a request -->
+  <section data-auto-animate>
+    <h2>Step 3 · Make a Request</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Any module can request without knowing who provides — or even if a provider is registered.</p>
+
+    <div class="cols cols-2">
+      <div>
+        <pre data-id="req-call"><code class="language-nim" data-trim data-line-numbers="1-6|8-12|14-19">
+## Sync request — no await needed
+let statusRes =
+  RequestConnectionStatus.request()
+statusRes.isOkOr:
+  error "No connection status provider"
+  return
+echo statusRes.get().connectionStatus
+
+## Sync with args
+let healthRes =
+  RequestShardTopicsHealth.request(topics)
+healthRes.isOkOr:
+  error "Shard health unavailable"; return
+
+## Async request
+let reportRes =
+  await RequestHealthReport.request()
+reportRes.isOkOr:
+  error "Health report unavailable"; return
+let report = reportRes.get().healthReport
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout good">
+          <p>If no provider is registered, <code>request()</code> returns <code>err(...)</code> — never panics.</p>
+        </div>
+        <div class="callout good" style="margin-top:0.5em;">
+          <p>Provider exceptions are caught and converted to <code>err</code> — requester always gets a <code>Result</code>.</p>
+        </div>
+        <div class="fragment callout" style="margin-top:0.5em;">
+          <p><strong>One provider per context:</strong> calling <code>setProvider</code> twice returns an error — no silent overwrites.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 3 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 4 — MULTIREQUESTBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 4.0  Section header -->
+  <section class="section-header">
+    <div class="num">04</div>
+    <h2 style="color:var(--logos-orange);">MultiRequestBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Fan-out · Collect all · Many providers &rarr; One result set</p>
+  </section>
+
+  <!-- 4.1  Design — code -->
+  <section>
+    <h2>MultiRequestBroker — Code</h2>
+
+    <pre><code class="language-nim" data-trim data-line-numbers="1-6|8-15|17-22|24-27">
+MultiRequestBroker:
+  type CollectedStatus* = object
+    label*: string
+
+  proc signature*():
+    Future[Result[CollectedStatus, string]]
+
+# Register N providers:
+let h1 = CollectedStatus.setProvider(
+  proc(): Future[...]
+      {.async: (raises: []).} =
+    ok(CollectedStatus(label: "relay")))
+
+let h2 = CollectedStatus.setProvider(
+  proc(): Future[...]
+      {.async: (raises: []).} =
+    ok(CollectedStatus(label: "filter")))
+
+# Request fans out — returns seq[T]:
+let results = await CollectedStatus.request()
+# Result[seq[CollectedStatus], string]
+#   @["relay", "filter"]
+
+# Remove individual provider via handle:
+CollectedStatus.removeProvider(h1)
+# or clear all:
+CollectedStatus.clearProviders()
+    </code></pre>
+  </section>
+
+  <!-- 4.1b  Design — explanation -->
+  <section>
+    <h2>MultiRequestBroker — Use Case</h2>
+
+    <ul>
+      <li>Collecting status/metrics from <em>multiple independent subsystems</em></li>
+      <li class="fragment">Each subsystem registers itself — no central orchestrator</li>
+      <li class="fragment">All providers called <strong>concurrently</strong> via <code>allFinished</code></li>
+      <li class="fragment">Succeeds only if <em>all</em> providers succeed — one failure short-circuits</li>
+    </ul>
+
+    <div class="fragment callout warn" style="margin-top:0.7em;">
+      <p>Unlike <code>RequestBroker</code>, <code>setProvider</code> returns a <strong>handle</strong> (not just ok/err) so providers can be removed individually.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 4 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 5 — BROKERCONTEXT (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 5.0  Section header -->
+  <section class="section-header">
+    <div class="num">05</div>
+    <h2 style="color:var(--logos-text);">BrokerContext</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Instance isolation &middot; Multi-node &middot; Same thread, separate worlds</p>
+  </section>
+
+  <!-- 5.1  Why we needed it -->
+  <section>
+    <h2>Why We Needed BrokerContext</h2>
+
+    <div class="callout warn" style="margin-bottom:0.7em;">
+      <p><strong>Scenario:</strong> two <code>WakuNode</code> instances on the <em>same thread</em> (integration tests, embedded usage). Both need their own listeners for <code>OnFilterSubscribeEvent</code>. Without context isolation, the single thread-local broker merges them — node A's events fire node B's listeners.</p>
+    </div>
+
+    <h3>How it works</h3>
+    <ul>
+      <li>Every broker stores listeners in <strong>buckets</strong>, keyed by <code>BrokerContext</code></li>
+      <li class="fragment">Bucket 0 is always <code>DefaultBrokerContext</code> — used when no context is specified</li>
+      <li class="fragment">Each component instance calls <code>NewBrokerContext()</code> and stores as field</li>
+      <li class="fragment">Context is propagated to submodules at init time</li>
+    </ul>
+
+    <div class="fragment callout good" style="margin-top:0.5em;">
+      <p>Context isolation is <strong>opt-in</strong>: omit the <code>brokerCtx</code> argument and the default context is used transparently.</p>
+    </div>
+  </section>
+
+  <!-- 5.1  Context isolation — code -->
+  <section>
+    <h2>Context Isolation — Code</h2>
+    <p style="color:var(--logos-muted); font-size:0.78em;">Two nodes, same thread</p>
+
+    <pre><code class="language-nim" data-trim data-line-numbers="1-5|7-16|18-22">
+let nodeA = WakuNode.new(...)  # ctx = 0x0001
+let nodeB = WakuNode.new(...)  # ctx = 0x0002
+
+let recvA = RecvService.new(nodeA, ...)
+let recvB = RecvService.new(nodeB, ...)
+
+# recvA registers under nodeA's context:
+OnFilterSubscribeEvent.listen(
+  nodeA.brokerCtx,
+  proc(ev: ...) {.async.} =
+    recvA.onSubscribe(...))
+
+# recvB registers under nodeB's context:
+OnFilterSubscribeEvent.listen(
+  nodeB.brokerCtx,
+  proc(ev: ...) {.async.} =
+    recvB.onSubscribe(...))
+
+# Emit from nodeA — only recvA fires:
+OnFilterSubscribeEvent.emit(
+  nodeA.brokerCtx,
+  pubsubTopic, contentTopics)
+    </code></pre>
+  </section>
+
+  <!-- 5.1b  Context isolation — bucket diagram -->
+  <section>
+    <h2>Context Isolation — Bucket Structure</h2>
+
+    <div style="max-width:80%; margin:0 auto;">
+      <div class="diag-box accent" style="margin-bottom:0.6em; font-size:0.75em;">
+        <strong>Thread-local Broker (OnFilterSubscribeEvent)</strong>
+      </div>
+      <div class="cols cols-3" style="gap:0.5em; margin-top:0.5em;">
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 0</strong><br><small style="color:var(--logos-muted);">DefaultBrokerContext</small><br>
+          <small style="color:var(--logos-blue);">listeners: [ ]</small>
+        </div>
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 1</strong><br><small style="color:var(--logos-muted);">nodeA.brokerCtx</small><br>
+          <small style="color:var(--logos-green);">listeners: [recvA]</small>
+        </div>
+        <div class="diag-box" style="background:var(--logos-surface2); font-size:0.72em;">
+          <strong>Bucket 2</strong><br><small style="color:var(--logos-muted);">nodeB.brokerCtx</small><br>
+          <small style="color:var(--logos-green);">listeners: [recvB]</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:0.8em;">
+      <p>Bucket cleanup is automatic: <code>dropAllListeners(ctx)</code> with a non-default context removes the bucket entirely.</p>
+    </div>
+    <div class="callout good" style="margin-top:0.4em;">
+      <p>Emit from <code>nodeA.brokerCtx</code> &rarr; only Bucket 1 listeners fire. Node B is completely unaffected.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 5 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 6 — MULTI-THREAD BROKERS (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 6.0  Section header -->
+  <section class="section-header">
+    <div class="num">06</div>
+    <h2 style="color:var(--logos-red);">Multi-Thread Brokers</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Cross-thread messaging &middot; Same API &middot; New trade-offs</p>
+  </section>
+
+  <!-- 6.1  Why multi-thread? -->
+  <section>
+    <h2>Why Go Multi-Thread?</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p><strong>Single-thread brokers</strong> keep listeners and emitters on one Chronos loop. When subsystems move to dedicated threads for CPU isolation or blocking I/O, those in-thread shortcuts break.</p>
+    </div>
+
+    <h3>Use cases that push you across thread boundaries</h3>
+    <ul>
+      <li class="fragment"><strong>CPU-bound work</strong> &mdash; heavy cryptography, proof generation, or tree hashing that would block the main event loop</li>
+      <li class="fragment"><strong>Blocking FFI</strong> &mdash; C libraries (e.g. database drivers, hardware access) that don&rsquo;t expose async APIs</li>
+      <li class="fragment"><strong>Thread-per-service architecture</strong> &mdash; each node service owns a thread + Chronos loop; brokers bridge them</li>
+      <li class="fragment"><strong>Integration tests</strong> &mdash; multiple node instances in one process, each on its own thread, sharing typed events</li>
+    </ul>
+  </section>
+
+  <!-- 6.2  The (mt) driver -->
+  <section>
+    <h2>Enabling Multi-Thread Mode</h2>
+
+    <p>Both <span class="chip chip-blue">EventBroker</span> and <span class="chip chip-green">RequestBroker</span> accept an <code>(mt)</code> driver annotation. The public API stays almost identical &mdash; the macro swaps the internal plumbing.</p>
+
+    <div class="cols cols-2" style="margin-top:0.6em;">
+      <div>
+        <h3>Single-thread (default)</h3>
+        <ul>
+          <li>Listeners stored directly in <code>threadvar</code> seqs</li>
+          <li>Emit / request dispatched inline on the same Chronos loop</li>
+          <li>No locks, no channels, no shared memory</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Multi-thread <code>(mt)</code></h3>
+        <ul>
+          <li>Shared bucket registry under <code>Lock</code></li>
+          <li>One <code>AsyncChannel</code> per (context, listener-thread)</li>
+          <li>Closures stay in <code>threadvar</code> &mdash; only metadata is shared</li>
+          <li>Same-thread fast-path bypasses channels entirely</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6.3  Architecture diagram -->
+  <section>
+    <h2>Cross-Thread Delivery</h2>
+
+    <div style="display:grid; grid-template-columns:auto 1fr auto; gap:0.8em; align-items:center; margin-top:0.8em;">
+
+      <div style="display:flex; flex-direction:column; gap:0.5em;">
+        <div class="diag-box accent" style="min-width:8em;">Thread A<br><span style="font-size:0.85em; color:var(--logos-muted);">emit()</span></div>
+        <div class="diag-box accent" style="min-width:8em;">Thread B<br><span style="font-size:0.85em; color:var(--logos-muted);">emit()</span></div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5em; align-items:center;">
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-bottom:0.2em;">&darr; sendSync &darr;</div>
+        <div class="diag-box" style="border-color:var(--logos-orange); color:var(--logos-orange); min-width:14em;">
+          Shared Bucket Registry<br>
+          <span style="font-size:0.8em; color:var(--logos-muted);">Lock-protected &middot; createShared</span>
+        </div>
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-top:0.2em;">&darr; AsyncChannel per listener thread &darr;</div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5em;">
+        <div class="diag-box green" style="min-width:8em;">Thread C<br><span style="font-size:0.85em; color:var(--logos-muted);">processLoop</span></div>
+        <div class="diag-box green" style="min-width:8em;">Thread D<br><span style="font-size:0.85em; color:var(--logos-muted);">processLoop</span></div>
+      </div>
+
+    </div>
+
+    <div class="callout" style="margin-top:0.8em;">
+      <p><strong>Same-thread optimisation:</strong> when emitter and listener share a thread, the channel is bypassed &mdash; listeners are dispatched directly via <code>asyncSpawn</code>, giving near-zero overhead identical to the single-thread broker.</p>
+    </div>
+  </section>
+
+  <!-- 6.4  Costs -->
+  <section>
+    <h2>Costs of Multi-Thread Mode</h2>
+
+    <table style="margin-top:0.5em;">
+      <thead>
+        <tr>
+          <th>Cost</th>
+          <th>Where it comes from</th>
+          <th>Mitigation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Lock contention</strong></td>
+          <td>Every <code>emit</code> / <code>listen</code> / <code>drop</code> acquires the global lock to read or mutate the bucket registry</td>
+          <td>Lock is held only for metadata scan &mdash; no callbacks run under lock</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Channel overhead</strong></td>
+          <td>Cross-thread delivery copies the event message into an <code>AsyncChannel</code> via <code>sendSync</code></td>
+          <td>Same-thread path skips channels entirely; keep hot-path listeners co-located</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Message copying</strong></td>
+          <td>Event / request payloads are value-copied into the channel buffer</td>
+          <td>Keep payloads small or use <code>ref</code> types for large data</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Shared memory</strong></td>
+          <td>Bucket array &amp; channels live in <code>createShared</code> heap &mdash; manual lifecycle, no GC</td>
+          <td>Managed automatically by the macro-generated init / grow / drop procs</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Shutdown complexity</strong></td>
+          <td><code>dropListener</code> / <code>dropAllListeners</code> drain in-flight futures (5&thinsp;s timeout per future) before returning — ensures no callbacks touch released resources</td>
+          <td>Call <code>await dropListener(handle)</code> before releasing resources; allow an event-loop tick after <code>dropAllListeners</code> for processLoop cleanup</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 6.5  Benefits -->
+  <section>
+    <h2>Benefits of Multi-Thread Mode</h2>
+
+    <table style="margin-top:0.5em;">
+      <thead>
+        <tr>
+          <th>Benefit</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Same public API</strong></td>
+          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes. MT adds <code>setRequestTimeout</code> / <code>requestTimeout</code>.</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Timeout protection</strong></td>
+          <td>Cross-thread <code>request</code> returns <code>err</code> after a configurable timeout (default 5&thinsp;s) if the provider is unresponsive &mdash; no indefinite hangs</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Transparent fan-out</strong></td>
+          <td>One <code>emit</code> reaches listeners on <em>every</em> thread that registered &mdash; no manual channel wiring</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Same-thread fast path</strong></td>
+          <td>Co-located emitters and listeners pay zero channel cost &mdash; identical performance to single-thread mode</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>GC safety</strong></td>
+          <td>Closures never cross heap boundaries &mdash; stored in per-thread <code>threadvar</code>; only plain-old-data metadata is shared</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Context isolation preserved</strong></td>
+          <td><code>BrokerContext</code> scoping works identically &mdash; two node instances on two threads stay fully isolated</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-green);"><strong>Clean shutdown</strong></td>
+          <td><code>dropListener</code> and <code>dropAllListeners</code> drain in-flight callbacks (5&thinsp;s timeout), clean up channels, and remove remote threadvars — safe to release resources immediately after return</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- 6.6  Considerations -->
+  <section>
+    <h2>Design Considerations</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Thread ownership rules</h3>
+        <ul>
+          <li><code>listen</code> must be called from the thread that will own the listener</li>
+          <li><code>dropListener</code> must be called from the <strong>same thread</strong> that registered it; drains in-flight futures (async, 5&thinsp;s timeout)</li>
+          <li><code>dropAllListeners</code> can be called from <strong>any thread</strong>; drains in-flight futures before returning</li>
+          <li><code>emit</code> can be called from <strong>any thread</strong></li>
+        </ul>
+
+        <div class="callout warn" style="margin-top:0.6em;">
+          <p><strong>EventBroker:</strong> <code>emit</code> is <code>async</code> &mdash; use <code>await</code> in Chronos contexts, <code>waitFor</code> from bare <code>{.thread.}</code> procs.</p>
+        </div>
+      </div>
+      <div>
+        <h3>When to stay single-thread</h3>
+        <ul>
+          <li>All emitters and listeners live on the same Chronos loop</li>
+          <li>No blocking FFI or CPU-heavy work in the pipeline</li>
+          <li>Integration tests with multiple nodes can use <code>BrokerContext</code> isolation instead of threads</li>
+        </ul>
+
+        <div class="callout good" style="margin-top:0.6em;">
+          <p><strong>Rule of thumb:</strong> start with single-thread. Switch to <code>(mt)</code> only when a subsystem genuinely needs its own thread.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6.7  EventBroker (mt) specifics -->
+  <section>
+    <h2>EventBroker <code>(mt)</code> &mdash; Specifics</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p>The multi-thread EventBroker delivers events to <strong>all listeners on all threads</strong> (broadcast fan-out).</p>
+    </div>
+
+    <ul>
+      <li class="fragment"><strong>Per-listener-thread channel</strong> &mdash; one <code>AsyncChannel</code> per (context, listener-thread) pair; multiple listeners on the same thread share one channel</li>
+      <li class="fragment"><strong>In-flight tracking</strong> &mdash; <code>processLoop</code> tracks running listener futures and drains them on shutdown (5&thinsp;s timeout)</li>
+      <li class="fragment"><strong>Listener concurrency</strong> &mdash; within a thread, all listeners for an event run concurrently (not serialised)</li>
+      <li class="fragment"><strong>Async emit</strong> &mdash; <code>emit</code> is <code>{.async: (raises: []).}</code>; cross-thread sends use <code>sendSync</code> (brief: buffer + signal), same-thread dispatches via <code>asyncSpawn</code></li>
+      <li class="fragment"><strong>Ordering</strong> &mdash; per-thread FIFO guaranteed by the channel; cross-thread ordering is per-target-thread, not global</li>
+    </ul>
+  </section>
+
+  <!-- 6.8  RequestBroker (mt) specifics -->
+  <section>
+    <h2>RequestBroker <code>(mt)</code> &mdash; Specifics</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p>The multi-thread RequestBroker preserves the <strong>single-provider-per-context</strong> guarantee across threads.</p>
+    </div>
+
+    <ul>
+      <li class="fragment"><strong>Cross-thread request</strong> &mdash; caller sends request via channel, blocks (or awaits) until the provider thread responds via a separate response channel</li>
+      <li class="fragment"><strong>Round-trip latency</strong> &mdash; two channel hops (request + response), both using <code>AsyncChannel</code>; expect ~2&times; the cost of a single emit</li>
+      <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; <code>processLoop</code> receives requests and dispatches to the local provider closure</li>
+      <li class="fragment"><strong>Same-thread fast path</strong> &mdash; when requester and provider share a thread, the provider is called directly with zero channel overhead</li>
+      <li class="fragment"><strong>Timeout handling</strong> &mdash; cross-thread requests use <code>withTimeout</code> (default 5&thinsp;s); if the provider is unresponsive, <code>request</code> returns <code>err</code>. Configure via <code>T.setRequestTimeout(duration)</code> / <code>T.requestTimeout()</code>. Same-thread requests are unaffected.</li>
+    </ul>
+  </section>
+
+</section><!-- /Section 6 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 7 — QUICK REFERENCE (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+  <h2>Broker Family: Quick Reference</h2>
+
+  <table style="margin-top:0.5em;">
+    <thead>
+      <tr>
+        <th>Aspect</th>
+        <th><span class="chip chip-blue">EventBroker</span></th>
+        <th><span class="chip chip-green">RequestBroker</span></th>
+        <th><span class="chip chip-orange">MultiRequestBroker</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pattern</td>
+        <td>Reactive pub/sub</td>
+        <td>Proactive req/resp</td>
+        <td>Proactive fan-out</td>
+      </tr>
+      <tr>
+        <td>Direction</td>
+        <td>N emitters &rarr; N listeners</td>
+        <td>N requesters &rarr; 1 provider</td>
+        <td>N requesters &rarr; N providers</td>
+      </tr>
+      <tr>
+        <td>Return type</td>
+        <td><code>void</code> per listener</td>
+        <td><code>Result[T, string]</code></td>
+        <td><code>Result[seq[T], string]</code></td>
+      </tr>
+      <tr>
+        <td>Mode</td>
+        <td>Always async</td>
+        <td>Async <em>or</em> Sync</td>
+        <td>Always async</td>
+      </tr>
+      <tr>
+        <td>Providers / Listeners</td>
+        <td>Unlimited, handle per reg</td>
+        <td>Exactly 1 per context</td>
+        <td>Unlimited, handle per reg</td>
+      </tr>
+      <tr>
+        <td>Context-aware</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Yes</td>
+      </tr>
+      <tr>
+        <td>Multi-thread <code>(mt)</code></td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td>Use when</td>
+        <td>Something happened; notify who cares</td>
+        <td>Query from one authoritative source</td>
+        <td>Gather data from multiple subsystems</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 8 — BEFORE VS AFTER (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+  <h2>Before vs After</h2>
+
+  <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+    <div>
+      <div class="callout bad" style="margin-bottom:0.4em;">
+        <p style="font-size:0.9em;"><strong style="color:var(--logos-red);">Before — Raw callbacks</strong></p>
+      </div>
+      <ul>
+        <li>Callback stored in <code>seq</code> with no cleanup path</li>
+        <li>Sender must import receiver's types</li>
+        <li>Init order matters — wire-up at the right moment</li>
+        <li>Stale captures after owner destruction</li>
+        <li>Adding a subscriber &rarr; modifying unrelated code</li>
+      </ul>
+    </div>
+    <div>
+      <div class="callout good" style="margin-bottom:0.4em;">
+        <p style="font-size:0.9em;"><strong style="color:var(--logos-green);">After — Brokers</strong></p>
+      </div>
+      <ul>
+        <li>Handle stored on owner; cleanup explicit (<code>start</code>/<code>stop</code>)</li>
+        <li>Emitter and listener share only the <em>event module</em></li>
+        <li>Register/provide <em>after</em> construction — order doesn't matter</li>
+        <li>No stale captures — handle tracks registration</li>
+        <li>Adding a subscriber &rarr; one <code>listen()</code> in its own module</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="fragment callout good" style="margin-top:0.7em; text-align:center;">
+    <p>Modules interact through a <strong>shared vocabulary of typed events and requests</strong> — not through direct references or init-time wiring.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 9 — BROKER FFI-API (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 9.0  Section header -->
+  <section class="section-header">
+    <div class="num">09</div>
+    <h2 style="color:var(--logos-blue);">Broker FFI-API</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; C ABI &middot; C++ and Python wrappers</p>
+  </section>
+
+  <!-- 9.1  The Concept -->
+  <section>
+    <h2>The Concept</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout good">
+          <p><strong>Clean contractual design:</strong> the library interface is described as a typed set of broker requests and broker events, so the contract stays explicit, reviewable, and compile-time checked.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.7em;">
+          <p><strong>Decoupled modules:</strong> the same broker vocabulary lets internal components collaborate without direct references, while <code>BrokerContext</code> keeps independent instances sandboxed from each other.</p>
+        </div>
+      </div>
+
+      <div>
+        <div class="callout" style="margin-top:0.1em;">
+          <p><strong>Less FFI boilerplate:</strong> request exports, event callback registration, wrappers, and lifecycle glue are all generated from the API definitions instead of being hand-written and repeated.</p>
+        </div>
+
+        <div class="callout warn" style="margin-top:0.7em;">
+          <p><strong>Safer by construction:</strong> the generated layer removes much of the manual synchronization, ownership plumbing, and calling-convention risk that usually makes FFI code fragile and easy to misuse.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="fragment callout good" style="margin-top:0.8em; text-align:center;">
+      <p>In short: define the API once as brokers, then let the generator turn that contract into a usable shared-library interface.</p>
+    </div>
+  </section>
+
+  <!-- 9.2  Concept -->
+  <section>
+    <h2>What the Broker FFI-API Adds</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em;">
+      <div>
+        <h3>Use brokers as the library contract</h3>
+        <ul>
+          <li><code>RequestBroker(API)</code> turns typed requests into exported C ABI functions</li>
+          <li class="fragment"><code>EventBroker(API)</code> turns typed events into callback registration functions</li>
+          <li class="fragment"><code>registerBrokerLibrary</code> adds lifecycle, context management, header generation, and wrapper generation</li>
+          <li class="fragment">The Nim implementation stays decoupled internally while foreign callers see a stable library interface</li>
+        </ul>
+      </div>
+
+      <div>
+        <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.45em; align-items:center; margin-top:0.6em;">
+          <div class="diag-box accent">Foreign App<br><small style="color:var(--logos-muted);">C / C++ / Python</small></div>
+          <div class="arrow">&harr;</div>
+          <div class="diag-box">Generated ABI<br><small style="color:var(--logos-muted);">header + wrappers</small></div>
+          <div class="arrow">&harr;</div>
+          <div class="diag-box green">API Brokers<br><small style="color:var(--logos-muted);">requests + events</small></div>
+        </div>
+
+        <div class="callout good" style="margin-top:0.8em;">
+          <p><strong>Result:</strong> instead of hand-writing fragile callback tables and request trampolines, the broker declarations become the authoritative API schema.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9.3  Threading model -->
+  <section>
+    <h2>Threading Model of a Created Library Context</h2>
+
+    <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.6em; align-items:center; margin-top:0.7em;">
+      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_createContext()<br/>blocking request calls</small></div>
+      <div class="arrow">&rarr;</div>
+      <div class="diag-box">Delivery thread<br><small style="color:var(--logos-muted);">owns listener registration<br/>runs foreign callbacks</small></div>
+      <div class="arrow">&larr;&rarr;</div>
+      <div class="diag-box green">Processing thread<br><small style="color:var(--logos-muted);">runs setupProviders(ctx)<br/>executes request providers</small></div>
+    </div>
+
+    <div class="cols cols-2" style="margin-top:0.9em;">
+      <div>
+        <h3>Lifecycle semantics</h3>
+        <ul>
+          <li><code>mylib_createContext()</code> performs one-time runtime initialization if needed</li>
+          <li><code>mylib_createContext()</code> starts the delivery thread first, then the processing thread</li>
+          <li>Creation blocks until both threads report readiness</li>
+          <li>When create returns, listener registration and API requests are immediately usable</li>
+          <li><code>mylib_shutdown(ctx)</code> first invokes <code>ShutdownRequest</code> on the processing thread</li>
+          <li>After that, shutdown joins the delivery thread and then the processing thread</li>
+        </ul>
+      </div>
+
+      <div>
+        <h3>Execution ownership</h3>
+        <ul>
+          <li>Request providers always run on the <strong>processing thread</strong></li>
+          <li>Foreign event callbacks always run on the <strong>delivery thread</strong></li>
+          <li>Generated C/C++/Python request calls block until the provider finishes</li>
+          <li>Events cross from Nim emitters to the delivery thread before invoking the FFI callback</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout warn" style="margin-top:0.7em;">
+      <p><strong>Operational rule:</strong> keep foreign callbacks lightweight. Blocking in a callback stalls later callback delivery on the delivery thread.</p>
+    </div>
+  </section>
+
+  <!-- 9.4  Nim library authoring -->
+  <section>
+    <h2>Author the Library Interface in Nim</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <span class="filepath">examples/ffiapi/nimlib/mylib.nim</span>
+        <pre><code class="language-nim" data-trim data-line-numbers="1-8|10-13|15-20|22-27|29-32">
+when defined(BrokerFfiApi):
+  import brokers/api_library
+
+RequestBroker(API):
+  type InitializeRequest = object
+    configPath*: string
+    initialized*: bool
+  proc signature*(configPath: string):
+    Future[Result[InitializeRequest, string]] {.async.}
+
+RequestBroker(API):
+  type ShutdownRequest = object
+    status*: int32
+  proc signature*():
+    Future[Result[ShutdownRequest, string]] {.async.}
+
+EventBroker(API):
+  type DeviceDiscovered = object
+    deviceId*: int64
+    name*: string
+    deviceType*: string
+    address*: string
+
+when defined(BrokerFfiApi):
+  registerBrokerLibrary:
+    name: "mylib"
+    initializeRequest: InitializeRequest
+    shutdownRequest: ShutdownRequest
+        </code></pre>
+      </div>
+
+      <div>
+        <div class="callout good">
+          <p><strong>Single source of truth:</strong> the request and event types define the foreign API surface as well as the internal broker contracts.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>Provider setup:</strong> <code>setupProviders(ctx)</code> runs on the processing thread and installs the request handlers that back the exported ABI.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>Lifecycle split:</strong> foreign callers use <code>mylib_createContext()</code> and <code>mylib_shutdown(ctx)</code>; library authors implement <code>InitializeRequest</code> and <code>ShutdownRequest</code>.</p>
+        </div>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>Wrapper generation:</strong> from this one declaration set, the build emits <code>libmylib</code>, <code>mylib.h</code>, the C++ wrapper class, and optionally the Python ctypes wrapper.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9.5  C++ consumer -->
+  <section>
+    <h2>Consume It from C++ Through the Generated Wrapper</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <span class="filepath">examples/ffiapi/cpp_example/main.cpp</span>
+        <pre><code class="language-cpp" data-trim data-line-numbers="1-9|11-16|18-25|27-33">
+Mylib lib;
+auto created = lib.createContext();
+if (!created.ok()) {
+  fprintf(stderr, "FATAL: %s\n", created.error().c_str());
+  return 1;
+}
+
+auto h_disc = lib.onDeviceDiscovered(
+    [](Mylib& owner, int64_t id, const std::string_view name,
+     const std::string_view type,
+     const std::string_view addr) {
+      (void)owner;
+    printf("discovered: %.*s\n",
+           (int)name.size(), name.data());
+  });
+
+auto res = lib.initializeRequest("/opt/devices.yaml");
+  std::vector<AddDeviceSpec> fleet = {
+    AddDeviceSpec{"Core-Router", "router", "10.0.0.1"}
+  };
+  auto add = lib.addDevice(fleet);
+auto list = lib.listDevices();
+
+lib.offDeviceDiscovered(h_disc);
+lib.shutdown();
+        </code></pre>
+      </div>
+
+      <div>
+        <h3>Why the wrapper matters</h3>
+        <ul>
+          <li>No manual <code>free_*_result</code> calls in user code</li>
+          <li><code>Result&lt;T&gt;</code> wrappers preserve the broker success/error model</li>
+          <li>Callbacks are owner-aware in both wrappers: C++ lambdas receive <code>Mylib&amp; owner</code>, Python callbacks receive <code>owner: Mylib</code></li>
+          <li>Event callbacks are routed through the owning <code>Mylib</code> instance, so registration and delivery stay instance-specific</li>
+          <li>The library consumer never needs to call <code>ShutdownRequest</code> directly; <code>shutdown()</code> handles teardown</li>
+        </ul>
+
+        <div class="callout warn" style="margin-top:0.7em;">
+          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread, while <code>initializeRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> synchronously wait for provider work on the processing thread.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9.6  Build flags -->
+  <section>
+    <h2>Build Flags That Enable the Feature</h2>
+
+    <div class="cols cols-2" style="align-items:start;">
+      <div>
+        <pre><code class="language-sh" data-trim>
+nim c \
+  -d:BrokerFfiApi \
+  --threads:on \
+  --app:lib \
+  --nimMainPrefix:mylib \
+  --mm:orc \
+  --outdir:examples/ffiapi/nimlib/build \
+  examples/ffiapi/nimlib/mylib.nim
+        </code></pre>
+
+        <div class="callout" style="margin-top:0.6em;">
+          <p>Add <code>-d:BrokerFfiApiGenPy</code> when you also want the generated Python wrapper module.</p>
+        </div>
+      </div>
+
+      <div>
+        <h3>Required knobs</h3>
+        <ul>
+          <li><code>-d:BrokerFfiApi</code> enables the library generator path</li>
+          <li><code>--threads:on</code> enables the delivery and processing thread runtime</li>
+          <li><code>--app:lib</code> builds a shared library instead of an executable</li>
+          <li><code>--nimMainPrefix:mylib</code> must match <code>name: "mylib"</code> in <code>registerBrokerLibrary</code> (except on Windows!)</li>
+          <li><code>--mm:orc</code> or <code>--mm:refc</code> are the supported memory managers</li>
+        </ul>
+
+        <div class="callout good" style="margin-top:0.7em;">
+          <p>In this repository the convenience entry points are <code>nimble buildFfiExample</code>, <code>nimble buildFfiExampleCpp</code>, and <code>nimble runFfiExampleCpp</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</section><!-- /Section 9 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 10 — SUMMARY (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 10.1  Summary -->
+  <section>
+    <h2>Summary</h2>
+    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.7em;">A simple way to navigate the broker toolbox:</p>
+
+    <div class="cols cols-3" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout good">
+          <p><strong>1. Start with single-thread brokers</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use async or sync brokers when you want mockable, type-safe decoupling between layers inside one module, library, or application without introducing thread complexity.</p>
+      </div>
+
+      <div>
+        <div class="callout warn">
+          <p><strong>2. Move to multi-thread brokers</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use multi-thread brokers when you want lightweight in-process IPC, need to off-load work onto worker threads, and still want communication between those threads to remain structured and safe.</p>
+      </div>
+
+      <div>
+        <div class="callout" style="border-left-color: var(--logos-blue);">
+          <p><strong>3. Choose the FFI-API layer</strong></p>
+        </div>
+        <p style="font-size:0.74em; margin-top:0.5em;">Use the Broker FFI-API when the library is meant to be consumed broadly from other languages or external runtimes and you want a safe shared-library surface without hand-written plumbing.</p>
+      </div>
+    </div>
+
+    <div class="fragment callout good" style="margin-top:0.9em; text-align:center;">
+      <p>Pick the smallest layer that solves the problem: in-thread decoupling first, cross-thread messaging next, and generated FFI only when the boundary must leave Nim.</p>
+    </div>
+  </section>
+
+</section><!-- /Section 10 -->
+
+<!-- ══════════════════════════════════════════════════
+     SECTION 11 — OPPORTUNITIES (standalone)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- 11.1  Opportunities -->
+  <section>
+    <h2 style="color:var(--logos-green);">Opportunities!</h2>
+    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">A natural extension point beyond the core broker runtime:</p>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <div class="callout good">
+          <p><strong>Serializable by design:</strong> broker requests and events are plain structured data, which makes them a strong fit for explicit serialization formats.</p>
+        </div>
+
+        <ul style="font-size:0.82em; line-height:1.7; margin-top:0.7em;">
+          <li class="fragment">Encode broker payloads with CBOR, JSON, or Protobuf</li>
+          <li class="fragment">Reuse the same contract across process boundaries</li>
+          <li class="fragment">Treat the broker interface as a stable schema for plugins, RPC, or transport layers</li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="diag-box accent" style="font-size:0.72em; padding:0.8em;">
+          Broker request / event type<br><br>
+          <span style="color:var(--logos-muted);">&darr; serialize &darr;</span><br><br>
+          JSON / CBOR / Protobuf<br><br>
+          <span style="color:var(--logos-muted);">&darr; transport or storage &darr;</span><br><br>
+          RPC &middot; plugin boundary &middot; cross-process API
+        </div>
+
+        <div class="fragment callout" style="margin-top:0.8em;">
+          <p>This is where brokers can evolve from an internal decoupling tool into a portable interface definition that survives beyond a single process.</p>
+        </div>
+      </div>
+      <div class="fragment callout good" style="margin-top:0.9em; text-align:center;">
+      <p>Add code generation for Rust and Golang bindings.</p>
+    </div>
+    </div>
+  </section>
+
+</section><!-- /Section 11 -->
+
+</div><!-- /.slides -->
+</div><!-- /.reveal -->
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/highlight/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/notes/notes.min.js"></script>
+
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c.v',
+    progress: true,
+    transition: 'fade',
+    transitionSpeed: 'fast',
+    backgroundTransition: 'none',
+    autoAnimateEasing: 'ease',
+    autoAnimateDuration: 0.5,
+    autoAnimateUnmatched: false,
+    width: 1400,
+    height: 900,
+    margin: 0.04,
+    minScale: 0.1,
+    maxScale: 3.0,
+    // Vertical navigation — arrow keys for sections + sub-slides
+    navigationMode: 'default',
+    plugins: [ RevealHighlight, RevealNotes ],
+    highlight: {
+      beforeHighlight: (hljs) => {
+        // Register Nim syntax
+        hljs.registerLanguage('nim', function(hljs) {
+          const KEYWORDS = {
+            keyword:
+              'addr and as asm bind block break case cast concept const continue ' +
+              'converter defer discard distinct div do elif else end enum except ' +
+              'export finally for from func generic if import in include interface ' +
+              'is isnot iterator let macro method mixin mod nil not notin object of ' +
+              'or out proc ptr raise ref return shl shr static template try tuple ' +
+              'type using var when while xor yield',
+            built_in:
+              'int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 ' +
+              'float float32 float64 bool char string seq array openarray ' +
+              'Future Result err ok async await asyncSpawn',
+            literal: 'true false nil'
+          };
+          return {
+            name: 'Nim',
+            aliases: ['nim'],
+            keywords: KEYWORDS,
+            contains: [
+              hljs.HASH_COMMENT_MODE,
+              { className: 'string', begin: '"', end: '"', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'string', begin: '\'', end: '\'', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'number', begin: '\\b\\d[\\d_]*(\\.\\d[\\d_]*)?([eE][+-]?\\d+)?\\b' },
+              { className: 'comment', begin: '#\\[', end: '\\]#', relevance: 10 },
+              {
+                className: 'type',
+                begin: '\\b[A-Z][a-zA-Z0-9_]*\\b',
+                relevance: 0
+              },
+            ]
+          };
+        });
+      }
+    }
+  });
+</script>
+</body>
+</html>

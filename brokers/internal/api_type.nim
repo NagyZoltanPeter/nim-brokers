@@ -35,7 +35,15 @@ import ./helper/broker_utils, ./api_common
 
 export api_common
 
-proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
+proc generateApiType*(
+    body: NimNode, emitTypeDefinition = true
+): NimNode {.compileTime.} =
+  ## Generate CItem type, encode proc, and C/C++/Python codegen for a type.
+  ##
+  ## When `emitTypeDefinition` is true (default, used by `ApiType` macro),
+  ## the original Nim type definition is re-emitted with exported fields.
+  ## When false (used by auto-resolution), the type is already defined
+  ## externally and only the CItem/encode/language codegen is generated.
   let parsed = parseSingleTypeDef(body, "ApiType", collectFieldInfo = true)
   let typeName = sanitizeIdentName(parsed.typeIdent)
   let typeIdent = parsed.typeIdent
@@ -51,25 +59,27 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
 
   result = newStmtList()
 
-  # 1. Emit normal Nim type definition (copy original body)
-  for stmt in body:
-    if stmt.kind == nnkTypeSection:
-      # Re-export fields (add * to field names)
-      var clonedSect = copyNimTree(stmt)
-      for typeDef in clonedSect:
-        if typeDef.kind == nnkTypeDef:
-          # Export the type name
-          typeDef[0] = postfix(baseTypeIdent(typeDef[0]), "*")
-          # Export fields
-          let rhs = typeDef[2]
-          if rhs.kind == nnkObjectTy:
-            let recList = rhs[2]
-            if recList.kind == nnkRecList:
-              for field in recList:
-                if field.kind == nnkIdentDefs:
-                  for i in 0 ..< field.len - 2:
-                    field[i] = exportIdentNode(field[i])
-      result.add(clonedSect)
+  # 1. Emit normal Nim type definition (copy original body) — skipped for
+  #    auto-resolved external types where the type is already defined.
+  if emitTypeDefinition:
+    for stmt in body:
+      if stmt.kind == nnkTypeSection:
+        # Re-export fields (add * to field names)
+        var clonedSect = copyNimTree(stmt)
+        for typeDef in clonedSect:
+          if typeDef.kind == nnkTypeDef:
+            # Export the type name
+            typeDef[0] = postfix(baseTypeIdent(typeDef[0]), "*")
+            # Export fields
+            let rhs = typeDef[2]
+            if rhs.kind == nnkObjectTy:
+              let recList = rhs[2]
+              if recList.kind == nnkRecList:
+                for field in recList:
+                  if field.kind == nnkIdentDefs:
+                    for i in 0 ..< field.len - 2:
+                      field[i] = exportIdentNode(field[i])
+        result.add(clonedSect)
 
   # 2. Emit CItem Nim type ({.exportc.}, default C ABI layout)
   let cItemIdent = ident(typeName & "CItem")
@@ -182,6 +192,17 @@ proc generateApiType*(body: NimNode): NimNode {.compileTime.} =
     echo result.repr
 
 macro ApiType*(body: untyped): untyped =
+  ## **Deprecated**: Types are now auto-registered when used in
+  ## `RequestBroker(API)` / `EventBroker(API)` macros. Define types as plain
+  ## Nim objects before the broker macro and reference them directly.
+  ##
+  ## This macro remains for backward compatibility and will be removed in a
+  ## future release.
+  {.
+    warning:
+      "ApiType is deprecated. Define types as plain Nim objects and " &
+      "reference them directly in RequestBroker(API)/EventBroker(API)."
+  .}
   generateApiType(body)
 
 {.pop.}

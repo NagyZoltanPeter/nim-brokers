@@ -4,7 +4,7 @@ import testutils/unittests
 import chronos
 import std/[atomics, os]
 
-import event_broker
+import brokers/event_broker
 
 ## ---------------------------------------------------------------------------
 ## API-mode EventBroker tests (delivery thread design)

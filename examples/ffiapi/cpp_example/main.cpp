@@ -30,7 +30,7 @@
 #include <thread>
 #include <vector>
 
-#include "mylib.h"
+#include "mylib.hpp"
 
 using namespace mylib;
 
