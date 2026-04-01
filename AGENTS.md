@@ -35,12 +35,14 @@ The package is managed via `brokers.nimble`. Install dependencies and run all te
 nimble install -d
 nimble test
 nimble testApi
+nimble testFfiApi
 ```
 
 Current test task coverage:
 
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
+- `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -58,6 +60,10 @@ The `build/` directory is in `.gitignore`. Never compile without `--outdir:build
 
 Tests use `testutils/unittests` (not the stdlib `unittest`).
 
+### Formatting
+
+- use `nimble nphall` command to format code properly always.
+
 ### FFI API example build and run tasks
 
 The FFI example library and runnable consumers are driven from Nimble tasks:
@@ -71,6 +77,8 @@ nimble buildFfiExamples     # build both C and C++ examples via CMake
 nimble runFfiExampleC       # rebuild library + run C example
 nimble runFfiExampleCpp     # rebuild library + run C++ example
 nimble runFfiExamplePy      # rebuild library + generated wrapper + run Python example
+nimble runTorpedoExamplePy # build and run the more complex torpedo example over Python bindings, implements game ui and orchestrator in Python
+nimble runTorpedoExampleCpp # build and run the more complex torpedo example over C++ bindings, implements game ui and orchestrator in C++
 ```
 
 The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`.
@@ -210,6 +218,7 @@ examples/
     example/main.c          — Pure C consumer example
     cpp_example/main.cpp    — C++ wrapper consumer example
     python_example/main.py  — Python ctypes wrapper consumer example
+  torpedo/                  - more complex demonstration of using API brokers, follows the same code and build structure as ffiapi example.
 test/
   test_event_broker.nim
   test_request_broker.nim
@@ -219,6 +228,7 @@ test/
   test_api_request_broker.nim
   test_api_event_broker.nim
   test_api_library_init.nim
+  pytestlib/                - similar to ffiapi example, it supports e2e testing of nim brokers through FFI and py bindings.
 ```
 
 ## Coding Conventions
@@ -228,9 +238,11 @@ test/
 - Generated identifier names are sanitized via `sanitizeIdentName` to be safe Nim identifiers.
 - Debug output of generated AST is available via `-d:brokerDebug` compile flags.
 - Always compile with `--outdir:build` to keep binaries out of the source tree.
-- For FFI API builds, keep the lifecycle naming distinction intact: `initialize` is process-wide, `create` is per-context.
+- Allways import with `broker/...`
+- For FFI API builds, keep the lifecycle naming distinction intact: `createContext`/`shutdown(ctx)`.
 - For FFI API builds, keep `--nimMainPrefix:<libname>` aligned with `name: "<libname>"` in `registerBrokerLibrary`.
 
-## Formatting
+### C/C++
 
-- use `nimble nphall` command to format code properly always.
+- We use cmake projects to build C/C++ examples, test codes if any.
+- We enforce C++20 standard for C++ code, and C11 for C code.
