@@ -243,6 +243,36 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     let handlesIdent = ident("g" & typeDisplayName & "ApiListenerHandles")
 
     # Build wrapper lambda body: converts event fields to C types, calls callback
+    #
+    # Memory model for event callbacks
+    # ---------------------------------
+    # The generated async wrapper proc runs on the delivery thread. For each
+    # event emission it performs three phases, driven by the code below:
+    #
+    # 1. preCallStmts  — allocate and populate shared-heap buffers for every
+    #    field type that cannot be passed by value across the C ABI:
+    #      string       → allocCStringCopy()  (NUL-terminated copy on shared heap)
+    #      seq[string]  → allocShared(n * sizeof(cstring)) + per-element copies
+    #      seq[prim]    → allocShared(n * sizeof(primType)) + element copy loop
+    #      seq[object]  → allocShared(n * sizeof(CItem)) + encode loop
+    #      array[N, T]  → allocShared(N * sizeof(elemType)) + element copy loop
+    #    Scalars (int, bool, enum, distinct) need no allocation — passed by value.
+    #
+    # 2. cbInvocation  — the C callback is called with the raw pointers and counts.
+    #    The callback runs synchronously inside the try block. Any exception thrown
+    #    by the callback is caught and discarded so it cannot escape the C ABI.
+    #    All pointers are valid for exactly the duration of this call.
+    #
+    # 3. postCallStmts — free every shared-heap buffer allocated in step 1, in the
+    #    same order:
+    #      string       → freeSharedCString()
+    #      seq[string]  → freeCString() each element, then deallocShared(array)
+    #      seq[prim]    → deallocShared(array)   (no per-element cleanup)
+    #      seq[object]  → deallocShared(array)   (CItem fields are value-copied)
+    #      array[N, T]  → deallocShared(array)   (always allocated, never nil)
+    #    postCallStmts runs unconditionally after the callback returns, whether
+    #    or not the callback threw. The foreign caller must not retain the pointers
+    #    after the callback returns — they are freed immediately.
     let evtParam = genSym(nskParam, "evt")
     let cbLocal = genSym(nskLet, "cb")
     let userDataLocal = genSym(nskLet, "userData")
@@ -257,6 +287,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
         let fName = fieldNames[i]
         let fType = fieldTypes[i]
         if isCStringType(fType):
+          # string: allocate a NUL-terminated copy on the shared heap, pass as
+          # const char*, free with freeSharedCString after the callback returns.
           let cVarIdent = genSym(nskLet, "c_" & $fName)
           preCallStmts.add(
             newTree(
@@ -274,11 +306,15 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           callbackCallArgs.add(cVarIdent)
           postCallStmts.add(newCall(ident("freeSharedCString"), cVarIdent))
         elif isSeqType(fType):
-          # Allocate a shared array, copy elements, pass pointer+count, free after
+          # seq[T]: allocate a contiguous shared-heap array, pass pointer+count,
+          # free after the callback returns. Three sub-cases:
           let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
           let countVarIdent = genSym(nskLet, "n_" & $fName)
           let elemName = seqItemTypeName(fType)
           if isSeqOfStringNode(fType):
+            # seq[string]: allocShared(n * sizeof(cstring)) for the pointer array,
+            # then allocCStringCopy per element. On free: freeCString each element
+            # first, then deallocShared the outer array.
             preCallStmts.add(
               quote do:
                 let `countVarIdent` = cint(`evtParam`.`fName`.len)
@@ -303,6 +339,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
                   deallocShared(`ptrVarIdent`)
             )
           elif isNimPrimitive(elemName):
+            # seq[primitive]: allocShared(n * sizeof(T)) + element copy. On free:
+            # deallocShared only — no per-element cleanup needed for value types.
             let primCNimType = toCFieldType(ident(elemName))
             preCallStmts.add(
               quote do:
@@ -324,7 +362,9 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
                   deallocShared(`ptrVarIdent`)
             )
           else:
-            # seq[object]: use existing CItem encode
+            # seq[object]: allocShared(n * sizeof(CItem)) + encode each element.
+            # On free: deallocShared only — string fields inside CItem are not
+            # separately heap-allocated for event callbacks (unlike CResult structs).
             let cItemIdent = ident(elemName & "CItem")
             let encodeFuncIdent = ident("encode" & elemName & "ToCItem")
             preCallStmts.add(
@@ -349,7 +389,10 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           callbackCallArgs.add(ptrVarIdent)
           callbackCallArgs.add(countVarIdent)
         elif isArrayTypeNode(fType):
-          # Flatten array to pointer + count
+          # array[N, T]: allocShared(N * sizeof(T)) + element copy, pass as
+          # const T* + int32_t count (same layout as seq[primitive] at the C ABI).
+          # The allocation is always non-nil (N is a compile-time constant > 0).
+          # On free: deallocShared unconditionally — no nil check needed.
           let n = arrayNodeSize(fType)
           let elemName = arrayNodeElemName(fType)
           let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)

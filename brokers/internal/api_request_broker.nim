@@ -432,6 +432,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   # ---------------------------------------------------------------------------
   # Step 4: Generate encode proc (Nim object → C result struct)
   # ---------------------------------------------------------------------------
+  #
+  # The encode proc converts the Nim result object into the flat C-ABI struct.
+  # Every pointer field it sets is allocated on the shared heap so the result
+  # can safely cross the Nim GC boundary and be read by foreign code on any
+  # thread. The free_result function generated in Step 4b frees exactly the
+  # memory allocated here — they must stay in sync.
   let encodeProcIdent = ident("encode" & typeDisplayName & "ToC")
   let objIdent = ident("obj")
   var hasSeqFields = false
@@ -550,6 +556,40 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   # ---------------------------------------------------------------------------
   # Step 4b: Generate free_result function
   # ---------------------------------------------------------------------------
+  #
+  # Memory model for request results
+  # ----------------------------------
+  # The encode proc (Step 4a) allocates all heap memory needed to represent the
+  # Nim result as a flat C struct. The generated free_<type>_result function
+  # mirrors that allocation exactly — it must free every pointer the encode proc
+  # set, in the same order, before returning. The foreign caller is responsible
+  # for calling free_<type>_result exactly once after it has finished reading the
+  # struct. C++ and Python wrappers call it automatically via RAII / finally.
+  #
+  # Field-type free strategies:
+  #
+  #   error_message   — always freed first; freeCString (may be nil, checked).
+  #
+  #   string field    — freeCString(r->field)  [allocated by allocCStringCopy]
+  #
+  #   seq[string]     — if count > 0 and pointer not nil:
+  #                       for each element: freeCString(arr[i])  (element copies)
+  #                       deallocShared(r->field)                (pointer array)
+  #                     Two-level free: inner strings then outer array.
+  #
+  #   seq[primitive]  — if count > 0 and pointer not nil:
+  #                       deallocShared(r->field)
+  #                     Single-level free: elements are value types, no per-element
+  #                     cleanup needed.
+  #
+  #   seq[object]     — if count > 0 and pointer not nil:
+  #                       for each CItem: freeCString any cstring fields inside it
+  #                       deallocShared(r->field)
+  #                     Two-level free: inner strings then outer CItem array.
+  #
+  #   array[N, T]     — inline in the struct; no pointer, nothing to free.
+  #
+  #   enum / primitive / distinct — value fields; nothing to free.
   block:
     let freeProcName = "free_" & baseExportName & "_result"
     let freeProcIdent = ident(freeProcName)
