@@ -923,7 +923,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
     # Build the request call with decoded args
     let brokerCtxIdent = ident("brokerCtx")
-    var requestCall = newCall(ident("request"), copyNimTree(typeIdent), brokerCtxIdent)
+    var requestCall =
+      newCall(ident("blockingRequest"), copyNimTree(typeIdent), brokerCtxIdent)
     for arg in nimCallArgs:
       requestCall.add(arg)
 
@@ -935,7 +936,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     funcBody.add(decodeStmts)
     funcBody.add(
       quote do:
-        let res = waitFor `requestCall`
+        let res = `requestCall`
         if res.isOk():
           return `encodeProcIdent`(res.get())
         else:

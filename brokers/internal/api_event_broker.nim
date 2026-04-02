@@ -566,7 +566,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       proc `regFuncIdent`(
           ctx: uint32, `callbackParamIdent`: `callbackTypeIdent`, userData: pointer
       ): uint64 {.exportc: `regFuncNameLit`, cdecl, dynlib.} =
-        let res = waitFor RegisterEventListenerResult.request(
+        let res = blockingRequest(
+          RegisterEventListenerResult,
           BrokerContext(ctx),
           0'i32,
           int32(`typeIdConst`),
@@ -594,13 +595,25 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       ) {.exportc: `deregFuncNameLit`, cdecl, dynlib.} =
         if handle == 0'u64:
           # Remove all listeners for this event type
-          discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil, nil, 0'u64
+          discard blockingRequest(
+            RegisterEventListenerResult,
+            BrokerContext(ctx),
+            2'i32,
+            int32(`typeIdConst`),
+            nil,
+            nil,
+            0'u64,
           )
         else:
           # Remove specific listener by handle
-          discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), nil, nil, handle
+          discard blockingRequest(
+            RegisterEventListenerResult,
+            BrokerContext(ctx),
+            1'i32,
+            int32(`typeIdConst`),
+            nil,
+            nil,
+            handle,
           )
 
   )
