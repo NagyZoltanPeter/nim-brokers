@@ -274,13 +274,6 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     result.add("            });\n")
     result.add("        }\n")
 
-  proc buildCppPrimitiveSeqParamSetup(
-      paramName: string, cppElemType: string
-  ): string {.compileTime.} =
-    ## For seq[primitive] input: build a temp std::vector and pass .data()/.size().
-    # Nothing special needed; we pass directly via .data() and .size()
-    "" # No pre-call setup needed
-
   proc buildCppStringSeqParamSetup(paramName: string): string {.compileTime.} =
     ## For seq[string] input: build temp std::vector<const char*> from .c_str().
     result = "        std::vector<const char*> " & paramName & "CStrs;\n"

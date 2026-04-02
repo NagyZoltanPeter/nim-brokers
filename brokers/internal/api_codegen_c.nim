@@ -51,7 +51,6 @@ proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
     int(nimType[1].intVal)
   else:
     error("array size must be an integer literal for FFI codegen", nimType[1])
-    0
 
 proc arrayNodeElemName*(nimType: NimNode): string {.compileTime.} =
   ## Extracts the element type name from an `array[N, T]` node.

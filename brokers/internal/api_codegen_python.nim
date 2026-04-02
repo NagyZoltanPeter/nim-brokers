@@ -13,7 +13,7 @@
 
 {.push raises: [].}
 
-import std/[macros, os, strutils]
+import std/[macros, strutils]
 import ./api_codegen_c
 
 export api_codegen_c
