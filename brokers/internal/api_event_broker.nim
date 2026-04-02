@@ -187,11 +187,26 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       for i in 0 ..< fieldNames.len:
         let fType = fieldTypes[i]
         if isSeqType(fType) or isArrayTypeNode(fType):
-          # Two params: pointer + cint count
+          # Two params: typed pointer + cint count
+          # Use concrete pointer type to match the C header typedef
+          let elemPtrType = block:
+            if isSeqOfStringNode(fType):
+              ident("cstring")
+            elif isSeqOfPrimitiveNode(fType) or isArrayTypeNode(fType):
+              let elemName =
+                if isArrayTypeNode(fType):
+                  arrayNodeElemName(fType)
+                else:
+                  seqItemTypeName(fType)
+              toCFieldType(ident(elemName))
+            elif isSeqType(fType):
+              let itemTypeName = seqItemTypeName(fType)
+              ident(itemTypeName & "CItem")
+            else:
+              ident("pointer")
+          let ptrType = newTree(nnkPtrTy, elemPtrType)
           callbackFormal.add(
-            newTree(
-              nnkIdentDefs, copyNimTree(fieldNames[i]), ident("pointer"), newEmptyNode()
-            )
+            newTree(nnkIdentDefs, copyNimTree(fieldNames[i]), ptrType, newEmptyNode())
           )
           callbackFormal.add(
             newTree(
@@ -204,7 +219,10 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
         elif isEnumRegistered($fType):
           callbackFormal.add(
             newTree(
-              nnkIdentDefs, copyNimTree(fieldNames[i]), ident("cint"), newEmptyNode()
+              nnkIdentDefs,
+              copyNimTree(fieldNames[i]),
+              copyNimTree(fType),
+              newEmptyNode(),
             )
           )
         else:
@@ -311,10 +329,12 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
           let countVarIdent = genSym(nskLet, "n_" & $fName)
           let elemName = seqItemTypeName(fType)
+          var seqPtrCastType: NimNode
           if isSeqOfStringNode(fType):
             # seq[string]: allocShared(n * sizeof(cstring)) for the pointer array,
             # then allocCStringCopy per element. On free: freeCString each element
             # first, then deallocShared the outer array.
+            seqPtrCastType = newTree(nnkPtrTy, ident("cstring"))
             preCallStmts.add(
               quote do:
                 let `countVarIdent` = cint(`evtParam`.`fName`.len)
@@ -342,6 +362,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             # seq[primitive]: allocShared(n * sizeof(T)) + element copy. On free:
             # deallocShared only — no per-element cleanup needed for value types.
             let primCNimType = toCFieldType(ident(elemName))
+            seqPtrCastType = newTree(nnkPtrTy, primCNimType)
             preCallStmts.add(
               quote do:
                 let `countVarIdent` = cint(`evtParam`.`fName`.len)
@@ -366,6 +387,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             # On free: deallocShared only — string fields inside CItem are not
             # separately heap-allocated for event callbacks (unlike CResult structs).
             let cItemIdent = ident(elemName & "CItem")
+            seqPtrCastType = newTree(nnkPtrTy, cItemIdent)
             let encodeFuncIdent = ident("encode" & elemName & "ToCItem")
             preCallStmts.add(
               quote do:
@@ -386,7 +408,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
                 if not `ptrVarIdent`.isNil:
                   deallocShared(`ptrVarIdent`)
             )
-          callbackCallArgs.add(ptrVarIdent)
+          callbackCallArgs.add(newTree(nnkCast, seqPtrCastType, ptrVarIdent))
           callbackCallArgs.add(countVarIdent)
         elif isArrayTypeNode(fType):
           # array[N, T]: allocShared(N * sizeof(T)) + element copy, pass as
@@ -412,16 +434,14 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             quote do:
               deallocShared(`ptrVarIdent`)
           )
-          callbackCallArgs.add(ptrVarIdent)
+          callbackCallArgs.add(
+            newTree(nnkCast, newTree(nnkPtrTy, primCNimType), ptrVarIdent)
+          )
           callbackCallArgs.add(countLit)
         elif isEnumRegistered($fType):
-          # Enum: pass as cint (ord)
-          callbackCallArgs.add(
-            newCall(
-              ident("cint"),
-              newCall(ident("ord"), newDotExpr(evtParam, copyNimTree(fName))),
-            )
-          )
+          # Enum: pass the enum value directly — callbackFormal now uses the
+          # actual enum type (copyNimTree(fType)), so no cint conversion needed.
+          callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
         elif isAliasOrDistinctRegistered($fType):
           # Alias/distinct: cast to underlying C field type
           let cFieldType = toCFieldType(fType)

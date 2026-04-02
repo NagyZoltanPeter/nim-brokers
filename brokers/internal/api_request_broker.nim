@@ -234,7 +234,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     ## Decode an array[N,T] input: cast pointer to ptr UncheckedArray and copyMem.
     let nimName = "nim_" & paramName
     let cElemType = $primElemCNimType(elemTypeName)
-    var code = "var " & nimName & ": array[" & $n & ", " & elemTypeName & "]\n"
+    var code = "var " & nimName & ": array[" & $n & ", " & elemTypeName & "] = default(array[" & $n & ", " & elemTypeName & "])\n"
     code.add("if not " & paramName & ".isNil:\n")
     code.add(
       "  let arr_" & paramName & " = cast[ptr UncheckedArray[" & cElemType & "]](" &
