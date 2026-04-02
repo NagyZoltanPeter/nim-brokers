@@ -234,7 +234,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     ## Decode an array[N,T] input: cast pointer to ptr UncheckedArray and copyMem.
     let nimName = "nim_" & paramName
     let cElemType = $primElemCNimType(elemTypeName)
-    var code = "var " & nimName & ": array[" & $n & ", " & elemTypeName & "] = default(array[" & $n & ", " & elemTypeName & "])\n"
+    var code =
+      "var " & nimName & ": array[" & $n & ", " & elemTypeName & "] = default(array[" &
+      $n & ", " & elemTypeName & "])\n"
     code.add("if not " & paramName & ".isNil:\n")
     code.add(
       "  let arr_" & paramName & " = cast[ptr UncheckedArray[" & cElemType & "]](" &
@@ -899,6 +901,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             nimCallArgs.add(nimParamIdent)
           elif isEnumNode(paramType):
             # enum param: cast from cint to enum type
+            let nimParamIdent = ident("nim_" & paramNameStr)
+            decodeStmts.add(
+              quote do:
+                let `nimParamIdent` = `paramType`(`cParamIdent`)
+            )
+            nimCallArgs.add(nimParamIdent)
+          elif isAliasOrDistinctRegistered($paramType):
+            # distinct/alias param: wrap C value in the Nim distinct type
             let nimParamIdent = ident("nim_" & paramNameStr)
             decodeStmts.add(
               quote do:

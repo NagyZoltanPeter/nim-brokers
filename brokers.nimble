@@ -355,15 +355,19 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      when defined(windows):
+      when defined(windows) or defined(macosx):
         # On Windows, chronos' waitForSingleObject fires its completion callback
         # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
         # is not a Nim thread.  With --mm:refc the stop-the-world GC only
         # suspends known Nim threads, so it can collect futures/handles still
         # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+        # On macOS, the same STW hazard applies across multiple context lifecycles
+        # under refc+release: GC can sweep futures still referenced by
+        # in-flight delivery/processing threads → SIGSEGV on stress tests.
+        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows/macOS.
         if "refc" in mm:
-          echo "Skipping (" & mm & ") on Windows: " &
+          echo "Skipping (" & mm & ") on " &
+            (when defined(windows): "Windows" else: "macOS") & ": " &
             "refc STW GC is incompatible with chronos thread-pool callbacks."
           continue
       buildPyTestLibrary(mm, release)
