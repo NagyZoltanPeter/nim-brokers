@@ -29,10 +29,10 @@
 
 import std/[macros, strutils]
 import ./api_schema, ./api_type
-import ./api_codegen_c
+import ./api_codegen_c, ./api_codegen_python
 
 export api_schema, api_type
-export api_codegen_c
+export api_codegen_c, api_codegen_python
 
 # ---------------------------------------------------------------------------
 # Phase 2: Typed macro that resolves a single external type
