@@ -28,6 +28,7 @@ jobs:
         nimble test --verbose
         nimble testApi --verbose
         nimble testFfiApi --verbose
+        nimble testFfiApiCpp --verbose
 
   examples:
     runs-on: ubuntu-latest

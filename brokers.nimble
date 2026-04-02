@@ -305,6 +305,25 @@ proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
     flags.add(" -d:release")
   exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
 
+proc pyTestCmakeBuildDir(): string =
+  "test/pytestlib/cmake-build"
+
+proc buildPyTestCmakeTarget(target = "") =
+  let cmakeDir = "test/pytestlib"
+  let buildDir = pyTestCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc pyTestCppExecutablePath(): string =
+  when defined(windows):
+    "test/pytestlib/build/test_pytestlib.exe"
+  else:
+    "test/pytestlib/build/test_pytestlib"
+
 proc soElfBits(soPath: string): int =
   ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
   ## determined (e.g. non-Linux, file tool absent).
@@ -385,6 +404,23 @@ task testFfiApi,
         continue
       exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
         quoteArg("test_*.py") & " -v"
+
+task testFfiApiCpp,
+  "Build and run the C++ FFI API binding tests (orc/refc × debug/release)":
+  for mm in ["orc", "refc"]:
+    for release in [false, true]:
+      let mode = if release: "release" else: "debug"
+      echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
+      when defined(windows) or defined(macosx):
+        if "refc" in mm:
+          echo "Skipping (" & mm & ") on " &
+            (when defined(windows): "Windows" else: "macOS") & ": " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
+      buildPyTestLibrary(mm, release)
+      buildPyTestCmakeTarget("test_pytestlib")
+      exec quoteArg(pyTestCppExecutablePath())
+
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
 

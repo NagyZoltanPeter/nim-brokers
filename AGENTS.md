@@ -36,6 +36,7 @@ nimble install -d
 nimble test
 nimble testApi
 nimble testFfiApi
+nimble testFfiApiCpp
 ```
 
 Current test task coverage:
@@ -43,6 +44,7 @@ Current test task coverage:
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
 - `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
+- 'nimble testFfiApiCpp' — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -102,6 +104,7 @@ GitHub Actions CI currently runs:
 - `nimble test`
 - `nimble testApi`
 - `nimble testFfiApi`
+- `nimble testFfiApiCpp`
 - `nimble runFfiExampleC`
 - `nimble runFfiExampleCpp`
 - `nimble runFfiExamplePy`
