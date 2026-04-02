@@ -224,6 +224,7 @@ def main() -> int:
             lib.offDeviceDiscovered()
             lib.offDeviceStatusChanged()
             lib.offDeviceBatch(h_batch)
+            lib.offSensorAlert(h_alert)
             print("  All event listeners removed.\n")
 
             print(f"  Total discovery events received: {discovery_count}")

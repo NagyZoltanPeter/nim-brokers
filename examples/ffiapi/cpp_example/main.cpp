@@ -215,7 +215,19 @@ int main() {
     if (!ids.empty()) {
         int64_t qid = ids[2];  // Edge-Switch-B
         printf("--- Query device id=%lld ---\n", (long long)qid);
-        auto res = lib.getDevice(qid);    // ── 6b. New type demos ───────────────────────────────────────────
+        auto res = lib.getDevice(qid);    
+
+        if (!res.ok()) {
+            fprintf(stderr, "  GetDevice error: %s\n", res.error().c_str());
+        } else {
+            printf("  name=\"%s\"  type=\"%s\"  addr=\"%s\"  online=%s\n",
+                   res->name.c_str(), res->deviceType.c_str(),
+                   res->address.c_str(), res->online ? "yes" : "no");
+        }
+        printf("\n");
+    }
+
+    // ── 6b. New type demos ───────────────────────────────────────────
     if (!ids.empty()) {
         int64_t qid = ids[0];  // Core-Router
 
@@ -266,17 +278,6 @@ int main() {
         printf("\n");
     }
 
-
-        if (!res.ok()) {
-            fprintf(stderr, "  GetDevice error: %s\n", res.error().c_str());
-        } else {
-            printf("  name=\"%s\"  type=\"%s\"  addr=\"%s\"  online=%s\n",
-                   res->name.c_str(), res->deviceType.c_str(),
-                   res->address.c_str(), res->online ? "yes" : "no");
-        }
-        printf("\n");
-    }
-
     // ── 7. Remove two devices (triggers DeviceStatusChanged × 2) ─────
     //    Both status listeners will fire for each removal.
     printf("--- Removing devices ---\n");
@@ -324,11 +325,11 @@ int main() {
     }
     printf("\n");
     
-    // ── 11. Remove all event listeners ─────────────────────────    printf("  Total status events received:   %d\n", statusCount);
+    // ── 11. Remove all event listeners ─────────────────────────    
     printf("--- Unsubscribing all ---\n");
     lib.offDeviceDiscovered();      // handle=0 → remove all
     lib.offSensorAlert();           // handle=0 → remove all
-    lib.offDeviceBatch(h_batch);    // remove by handle      // handle=0 → remove all
+    lib.offDeviceBatch(h_batch);    // remove by handle
     lib.offDeviceStatusChanged();   // handle=0 → remove all
     printf("  All event listeners removed.\n\n");
     
