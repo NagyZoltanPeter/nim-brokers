@@ -152,6 +152,10 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
   result = newStmtList()
 
+  # Emit foreign thread GC helper (once per compilation unit — safe if already
+  # emitted by a broker macro, the flag in api_common prevents duplicates).
+  result.add(emitEnsureForeignThreadGc())
+
   # Compile-time validation: ensure InitializeRequest and ShutdownRequest types exist
   result.add(
     quote do:
@@ -290,6 +294,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `freeCreateContextResultFuncIdent`(
           r: ptr `createContextResultIdent`
       ) {.exportc: `freeCreateContextResultFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         if r.isNil:
           return
         if not r.error_message.isNil:
@@ -694,6 +699,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `createContextFuncIdent`(): `createContextResultIdent` {.
           exportc: `createContextFuncNameLit`, cdecl, dynlib
       .} =
+        ensureForeignThreadGc()
         result.ctx = 0'u32
         result.error_message = nil
 
@@ -921,6 +927,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `shutdownFuncIdent`(
           ctx: uint32
       ) {.exportc: `shutdownFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         let initRes = ensureLibCtxInit()
         if initRes.isErr():
           error "Library shutdown skipped because initialization failed",
@@ -980,6 +987,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `freeStringFuncIdent`(
           s: cstring
       ) {.exportc: `freeStringFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         freeCString(s)
 
   )

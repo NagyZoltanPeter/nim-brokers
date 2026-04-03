@@ -348,7 +348,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
   result.add(generateMtRequestBroker(body))
 
-  # Step 2b: Generate per-type provider cleanup proc
+  # Step 2b: Emit foreign thread GC helper (once per compilation unit)
+  result.add(emitEnsureForeignThreadGc())
+
+  # Step 2c: Generate per-type provider cleanup proc
   let cleanupProcName = "cleanupApiRequestProvider_" & typeDisplayName
   let cleanupProcIdent = ident(cleanupProcName)
   let cleanupCtxIdent = genSym(nskParam, "ctx")
@@ -749,6 +752,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         proc `funcIdent`(
             ctx: uint32
         ): `cResultIdent` {.exportc: `funcNameLit`, cdecl, dynlib.} =
+          ensureForeignThreadGc()
           let brokerCtx = BrokerContext(ctx)
           let res = waitFor `typeIdent`.request(brokerCtx)
           if res.isOk():
@@ -922,6 +926,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       requestCall.add(arg)
 
     var funcBody = newStmtList()
+    funcBody.add(
+      quote do:
+        ensureForeignThreadGc()
+    )
     funcBody.add(
       quote do:
         let `brokerCtxIdent` = BrokerContext(ctx)

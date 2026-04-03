@@ -157,6 +157,9 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   result = newStmtList()
   result.add(generateMtEventBroker(body))
 
+  # Step 2b: Emit foreign thread GC helper (once per compilation unit)
+  result.add(emitEnsureForeignThreadGc())
+
   # Step 3: Assign compile-time type ID
   # NOTE: Must modify gApiEventTypeCounter directly here (not via a helper proc)
   # because the Nim VM does not persist side effects from called compileTime procs.
@@ -384,28 +387,45 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             )
           else:
             # seq[object]: allocShared(n * sizeof(CItem)) + encode each element.
-            # On free: deallocShared only — string fields inside CItem are not
-            # separately heap-allocated for event callbacks (unlike CResult structs).
+            # On free: free string fields inside each CItem, then deallocShared
+            # the outer array (encodeXToCItem allocates strings via allocCStringCopy).
+            let itemFields = lookupFfiStruct(elemName)
             let cItemIdent = ident(elemName & "CItem")
             seqPtrCastType = newTree(nnkPtrTy, cItemIdent)
             let encodeFuncIdent = ident("encode" & elemName & "ToCItem")
+            let arrVarIdent = genSym(nskLet, "arr_" & $fName)
+            let iiVarIdent = genSym(nskForVar, "ii_" & $fName)
+
+            var itemFreeStmts = newStmtList()
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                let ifNameIdent = ident(ifName)
+                itemFreeStmts.add(
+                  quote do:
+                    if not `arrVarIdent`[`iiVarIdent`].`ifNameIdent`.isNil:
+                      freeCString(`arrVarIdent`[`iiVarIdent`].`ifNameIdent`)
+                )
+
             preCallStmts.add(
               quote do:
                 let `countVarIdent` = cint(`evtParam`.`fName`.len)
                 let `ptrVarIdent` =
                   if `countVarIdent` > 0:
-                    let arr = cast[ptr UncheckedArray[`cItemIdent`]](allocShared(
+                    let `arrVarIdent` = cast[ptr UncheckedArray[`cItemIdent`]](allocShared(
                       int(`countVarIdent`) * sizeof(`cItemIdent`)
                     ))
-                    for ii in 0 ..< int(`countVarIdent`):
-                      arr[ii] = `encodeFuncIdent`(`evtParam`.`fName`[ii])
-                    cast[pointer](arr)
+                    for `iiVarIdent` in 0 ..< int(`countVarIdent`):
+                      `arrVarIdent`[`iiVarIdent`] = `encodeFuncIdent`(`evtParam`.`fName`[`iiVarIdent`])
+                    cast[pointer](`arrVarIdent`)
                   else:
                     nil
             )
             postCallStmts.add(
               quote do:
                 if not `ptrVarIdent`.isNil:
+                  let `arrVarIdent` = cast[ptr UncheckedArray[`cItemIdent`]](`ptrVarIdent`)
+                  for `iiVarIdent` in 0 ..< int(`countVarIdent`):
+                    `itemFreeStmts`
                   deallocShared(`ptrVarIdent`)
             )
           callbackCallArgs.add(newTree(nnkCast, seqPtrCastType, ptrVarIdent))
@@ -566,6 +586,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       proc `regFuncIdent`(
           ctx: uint32, `callbackParamIdent`: `callbackTypeIdent`, userData: pointer
       ): uint64 {.exportc: `regFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         let res = blockingRequest(
           RegisterEventListenerResult,
           BrokerContext(ctx),
@@ -593,6 +614,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       proc `deregFuncIdent`(
           ctx: uint32, handle: uint64
       ) {.exportc: `deregFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         if handle == 0'u64:
           # Remove all listeners for this event type
           discard blockingRequest(

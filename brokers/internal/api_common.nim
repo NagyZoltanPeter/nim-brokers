@@ -60,6 +60,11 @@ var gApiEventCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
   @[] ## Accumulates cleanup proc names for request provider teardown.
 
+var gApiForeignGcHelperEmitted* {.compileTime.}: bool = false
+  ## Flag: has the ensureForeignThreadGc() helper been emitted?
+  ## Each broker codegen module checks this before emitting the helper
+  ## to avoid duplicate definitions.
+
 # ---------------------------------------------------------------------------
 # Legacy FFI struct registry bridge
 # ---------------------------------------------------------------------------
@@ -122,3 +127,33 @@ proc allocSharedCString*(s: string): cstring =
 proc freeSharedCString*(s: cstring) =
   ## Free a C string allocated by `allocSharedCString`.
   freeCString(s)
+
+# ---------------------------------------------------------------------------
+# Foreign thread GC helper — emitted once per compilation unit
+# ---------------------------------------------------------------------------
+
+proc emitEnsureForeignThreadGc*(): NimNode {.compileTime.} =
+  ## Returns the AST for the per-thread foreign thread GC registration helper.
+  ## Call this from each broker codegen module; it emits the helper only once
+  ## per compilation unit (guarded by `gApiForeignGcHelperEmitted`).
+  if gApiForeignGcHelperEmitted:
+    return newStmtList()
+
+  gApiForeignGcHelperEmitted = true
+
+  let tvGcReg = genSym(nskVar, "gForeignGcRegistered")
+  let ensureIdent = ident("ensureForeignThreadGc")
+
+  result = quote do:
+    var `tvGcReg` {.threadvar.}: bool
+
+    proc `ensureIdent`() {.inline.} =
+      when compileOption("app", "lib"):
+        if not `tvGcReg`:
+          when declared(setupForeignThreadGc):
+            setupForeignThreadGc()
+          when declared(nimGC_setStackBottom):
+            var locals {.volatile, noinit.}: pointer
+            locals = addr(locals)
+            nimGC_setStackBottom(locals)
+          `tvGcReg` = true
