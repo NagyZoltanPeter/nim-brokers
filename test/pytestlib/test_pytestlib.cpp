@@ -1331,6 +1331,580 @@ static void test_concurrent_event_types() {
 }
 
 // ============================================================================
+// TestForeignThreadGcSafety
+// ============================================================================
+// These tests exercise the ensureForeignThreadGc() path: multiple C++ threads
+// (foreign to Nim) calling exported FFI functions concurrently.  Without
+// per-thread GC registration, the Nim GC would miss live references created
+// on threads other than the one that called _initialize(), leading to
+// premature collection, heap corruption, or crashes.
+// ============================================================================
+
+/// Spawn N threads, each making a request that creates Nim strings/seqs on
+/// the caller's stack before crossing into the broker.  Verifies that all
+/// responses are correct — no GC-induced corruption.
+static void test_foreign_thread_concurrent_requests() {
+    Pytestlib lib;
+    lib.createContext();
+    lib.initializeRequest("gc-test");
+
+    constexpr int kThreads = 8;
+    constexpr int kIters = 20;
+
+    struct ThreadResult {
+        bool ok = false;
+        std::string error;
+        std::vector<std::string> replies;
+    };
+    std::vector<ThreadResult> results(kThreads);
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                std::string msg = "thread-" + std::to_string(t) + "-msg-" + std::to_string(i);
+                auto r = lib.echoRequest(msg);
+                if (!r.ok()) {
+                    results[t].error = r.error();
+                    return;
+                }
+                if (i == 0) {
+                    results[t].ok = true;
+                }
+                // Verify the reply contains our thread identifier
+                std::string expectedPrefix = "gc-test:";
+                if (r->reply.find(expectedPrefix) != 0) {
+                    results[t].error = "unexpected reply: " + r->reply;
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    for (int t = 0; t < kThreads; ++t) {
+        if (!results[t].ok && results[t].error.empty()) {
+            // Thread didn't get to run its first iteration — shouldn't happen
+            results[t].ok = true;
+        }
+        if (!results[t].error.empty()) {
+            fprintf(stderr, "  thread %d error: %s\n", t, results[t].error.c_str());
+        }
+        CHECK(results[t].error.empty());
+    }
+
+    lib.shutdown();
+}
+
+/// Multiple foreign threads calling seq[string] result requests concurrently.
+/// This exercises the decode path for seq[string] params and the encode path
+/// for seq[string] results, both of which create GC-managed Nim objects on
+/// the foreign thread's stack.
+static void test_foreign_thread_concurrent_seq_string_requests() {
+    Pytestlib lib;
+    lib.createContext();
+    lib.initializeRequest("seq-str");
+
+    constexpr int kThreads = 6;
+    constexpr int kIters = 10;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                std::string prefix = "t" + std::to_string(t) + "i" + std::to_string(i);
+                int n = 5 + (t % 3);
+                auto r = lib.stringSeqRequest(prefix, n);
+                if (!r.ok()) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->items.size() != static_cast<size_t>(n)) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                for (int j = 0; j < n; ++j) {
+                    std::string expected = prefix + "-" + std::to_string(j);
+                    if (r->items[j] != expected) {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+/// Multiple foreign threads calling seq[int64] result requests concurrently.
+/// Exercises the decode/encode path for seq[primitive].
+static void test_foreign_thread_concurrent_seq_prim_requests() {
+    Pytestlib lib;
+    lib.createContext();
+
+    constexpr int kThreads = 6;
+    constexpr int kIters = 15;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                int n = 3 + (t % 4);
+                auto r = lib.primSeqRequest(n);
+                if (!r.ok()) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->values.size() != static_cast<size_t>(n)) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                for (size_t j = 0; j < r->values.size(); ++j) {
+                    if (r->values[j] != static_cast<int64_t>(j) * 10LL) {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+/// Multiple foreign threads calling seq[object] (Tag) result requests concurrently.
+/// This exercises the CItem encode/decode path where each Tag has two string
+/// fields allocated via allocCStringCopy on the shared heap.
+static void test_foreign_thread_concurrent_seq_object_requests() {
+    Pytestlib lib;
+    lib.createContext();
+
+    constexpr int kThreads = 4;
+    constexpr int kIters = 10;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                int n = 3 + (t % 5);
+                auto r = lib.objSeqResultRequest(n);
+                if (!r.ok()) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->tags.size() != static_cast<size_t>(n)) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                for (int j = 0; j < n; ++j) {
+                    std::string expectedKey = "key-" + std::to_string(j);
+                    std::string expectedVal = "val-" + std::to_string(j);
+                    if (r->tags[j].key != expectedKey || r->tags[j].value != expectedVal) {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+/// Multiple foreign threads calling seq[object] input param requests concurrently.
+/// Exercises the decode path for seq[CItem] where each CItem has string fields
+/// that must be converted to Nim strings on the foreign thread.
+static void test_foreign_thread_concurrent_seq_object_param_requests() {
+    Pytestlib lib;
+    lib.createContext();
+
+    constexpr int kThreads = 4;
+    constexpr int kIters = 8;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                int n = 2 + (t % 3);
+                std::vector<Tag> tags;
+                for (int j = 0; j < n; ++j) {
+                    Tag tag;
+                    tag.key = "thread" + std::to_string(t) + "-key" + std::to_string(j);
+                    tag.value = "thread" + std::to_string(t) + "-val" + std::to_string(j);
+                    tags.push_back(std::move(tag));
+                }
+                auto r = lib.objSeqParamRequest(tags);
+                if (!r.ok()) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->count != n) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->first != "thread" + std::to_string(t) + "-key0") {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+/// Multiple foreign threads calling createContext/shutdown in rapid succession.
+/// Each thread gets its own library instance and context, exercising the
+/// per-thread GC registration path in createContext and shutdown.
+static void test_foreign_thread_concurrent_lifecycle() {
+    constexpr int kThreads = 4;
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            Pytestlib lib;
+            auto cr = lib.createContext();
+            if (!cr.ok()) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            auto ir = lib.initializeRequest("lifecycle-t" + std::to_string(t));
+            if (!ir.ok()) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            // Make a request to verify the context is fully functional
+            auto r = lib.echoRequest("test");
+            if (!r.ok()) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            std::string expected = "lifecycle-t" + std::to_string(t) + ":test";
+            if (r->reply != expected) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            // destructor calls shutdown
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+}
+
+/// Mixed workload: multiple foreign threads making different types of requests
+/// concurrently, including requests that return error results (which allocate
+/// error_message via allocCStringCopy on the shared heap).
+static void test_foreign_thread_mixed_request_types() {
+    Pytestlib lib;
+    lib.createContext();
+    lib.initializeRequest("mixed");
+
+    constexpr int kThreads = 6;
+    constexpr int kIters = 10;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                switch (i % 5) {
+                case 0: {
+                    auto r = lib.echoRequest("t" + std::to_string(t));
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 1: {
+                    auto r = lib.counterRequest();
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->value <= 0) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 2: {
+                    auto r = lib.primScalarRequest(true, 42, 1000, 3.14);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->flag != true || r->i32 != 42) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 3: {
+                    auto r = lib.stringSeqRequest("x", 3);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->items.size() != 3) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 4: {
+                    auto r = lib.fixedArrayRequest(7);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->values[0] != 7) { failures.fetch_add(1); return; }
+                    break;
+                }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+/// Stress test: many foreign threads, many iterations, exercising all request
+/// types including seq[object] results and params.  Designed to trigger GC
+/// issues if foreign thread registration is broken.
+static void test_foreign_thread_stress_all_types() {
+    Pytestlib lib;
+    lib.createContext();
+    lib.initializeRequest("stress");
+
+    constexpr int kThreads = 8;
+    constexpr int kIters = 30;
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                switch (i % 8) {
+                case 0: {
+                    auto r = lib.echoRequest("stress-" + std::to_string(t));
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 1: {
+                    auto r = lib.counterRequest();
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 2: {
+                    auto r = lib.primScalarRequest(false, -100, -999999, -1.5);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 3: {
+                    auto r = lib.stringSeqRequest("s", 10);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->items.size() != 10) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 4: {
+                    auto r = lib.primSeqRequest(20);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->values.size() != 20) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 5: {
+                    auto r = lib.objSeqResultRequest(5);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->tags.size() != 5) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 6: {
+                    std::vector<Tag> tags;
+                    for (int j = 0; j < 3; ++j) {
+                        Tag tag;
+                        tag.key = "k" + std::to_string(j);
+                        tag.value = "v" + std::to_string(j);
+                        tags.push_back(std::move(tag));
+                    }
+                    auto r = lib.objSeqParamRequest(tags);
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->count != 3) { failures.fetch_add(1); return; }
+                    break;
+                }
+                case 7: {
+                    auto r = lib.seqStringParamRequest({"a", "b", "c"});
+                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (r->count != 3) { failures.fetch_add(1); return; }
+                    break;
+                }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    CHECK_EQ(failures.load(), 0);
+    lib.shutdown();
+}
+
+// ============================================================================
+// TestSeqObjectEventMemorySafety
+// ============================================================================
+// Tests for seq[object] event callbacks where CItem string fields are
+// allocated via allocCStringCopy and must be freed after the callback returns.
+// The old code leaked these strings.
+// ============================================================================
+
+/// Register a listener for TagSeqEvent (seq[Tag] with string fields), trigger
+/// multiple events, and verify all tag data is correctly received.  The CItem
+/// string fields must be freed after each callback — if they leak, this test
+/// would consume excessive memory over many iterations.
+static void test_seq_object_event_callback_data_correctness() {
+    Pytestlib lib;
+    lib.createContext();
+
+    struct TagData { std::string key; std::string value; };
+    SafeList<std::vector<TagData>> received;
+
+    auto h = lib.onTagSeqEvent(
+        [&received](Pytestlib&, std::span<const TagCItem> tags) {
+            std::vector<TagData> snapshot;
+            for (const auto& t : tags) {
+                snapshot.push_back(TagData{
+                    t.key ? std::string(t.key) : "",
+                    t.value ? std::string(t.value) : ""
+                });
+            }
+            received.push(std::move(snapshot));
+        });
+    CHECK_NE(h, 0ull);
+
+    // Trigger events via objSeqResultRequest (which emits TagSeqEvent)
+    lib.objSeqResultRequest(3);
+    lib.objSeqResultRequest(5);
+    lib.objSeqResultRequest(0);
+
+    waitFor([&] { return received.size() >= 3; });
+
+    CHECK_EQ(received.size(), 3u);
+
+    // First event: 3 tags
+    auto snap0 = received.at(0);
+    CHECK_EQ(snap0.size(), 3u);
+    CHECK_EQ(snap0[0].key, "key-0");
+    CHECK_EQ(snap0[0].value, "val-0");
+    CHECK_EQ(snap0[2].key, "key-2");
+    CHECK_EQ(snap0[2].value, "val-2");
+
+    // Second event: 5 tags
+    auto snap1 = received.at(1);
+    CHECK_EQ(snap1.size(), 5u);
+    CHECK_EQ(snap1[0].key, "key-0");
+    CHECK_EQ(snap1[4].value, "val-4");
+
+    // Third event: 0 tags (empty seq)
+    auto snap2 = received.at(2);
+    CHECK(snap2.empty());
+
+    lib.offTagSeqEvent(h);
+    lib.shutdown();
+}
+
+/// Rapid-fire seq[object] events to stress the CItem allocation/free path.
+/// If string fields inside CItems are not freed (the old bug), this would
+/// leak O(iterations * items * strings_per_item) allocations.
+static void test_seq_object_event_rapid_fire_no_leak() {
+    Pytestlib lib;
+    lib.createContext();
+
+    std::atomic<int> eventCount{0};
+    auto h = lib.onTagSeqEvent(
+        [&eventCount](Pytestlib&, std::span<const TagCItem>) {
+            eventCount.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    constexpr int kIterations = 100;
+    for (int i = 0; i < kIterations; ++i) {
+        lib.objSeqResultRequest(10); // each emits TagSeqEvent with 10 tags
+    }
+
+    waitFor([&] { return eventCount.load() >= kIterations; }, 10.0);
+    CHECK_EQ(eventCount.load(), kIterations);
+
+    lib.offTagSeqEvent(h);
+    lib.shutdown();
+}
+
+/// Multiple foreign threads registering event listeners and triggering events
+/// concurrently.  Verifies that event callback memory (CItem allocations) is
+/// safe when the delivery thread runs concurrently with foreign requester threads.
+static void test_seq_object_event_concurrent_listeners_and_requesters() {
+    Pytestlib lib;
+    lib.createContext();
+
+    std::atomic<int> eventCount{0};
+    auto h = lib.onTagSeqEvent(
+        [&eventCount](Pytestlib&, std::span<const TagCItem> tags) {
+            // Read tag data to ensure the CItem pointers are valid
+            for (const auto& t : tags) {
+                if (t.key) {
+                    volatile size_t len = std::strlen(t.key);
+                    (void)len;
+                }
+            }
+            eventCount.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    constexpr int kRequesterThreads = 4;
+    constexpr int kIters = 20;
+
+    std::atomic<int> requestFailures{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < kRequesterThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < kIters; ++i) {
+                auto r = lib.objSeqResultRequest(5 + (t % 3));
+                if (!r.ok()) {
+                    requestFailures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (r->tags.size() < 5) {
+                    requestFailures.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads)
+        th.join();
+
+    int expectedEvents = kRequesterThreads * kIters;
+    CHECK_EQ(requestFailures.load(), 0);
+    CHECK_EQ(eventCount.load(), expectedEvents);
+
+    lib.offTagSeqEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -1440,6 +2014,21 @@ int main() {
     RUN(test_two_scalar_event_listeners);
     RUN(test_remove_one_listener_keeps_other);
     RUN(test_concurrent_event_types);
+
+    printf("\n--- TestForeignThreadGcSafety ---\n");
+    RUN(test_foreign_thread_concurrent_requests);
+    RUN(test_foreign_thread_concurrent_seq_string_requests);
+    RUN(test_foreign_thread_concurrent_seq_prim_requests);
+    RUN(test_foreign_thread_concurrent_seq_object_requests);
+    RUN(test_foreign_thread_concurrent_seq_object_param_requests);
+    RUN(test_foreign_thread_concurrent_lifecycle);
+    RUN(test_foreign_thread_mixed_request_types);
+    RUN(test_foreign_thread_stress_all_types);
+
+    printf("\n--- TestSeqObjectEventMemorySafety ---\n");
+    RUN(test_seq_object_event_callback_data_correctness);
+    RUN(test_seq_object_event_rapid_fire_no_leak);
+    RUN(test_seq_object_event_concurrent_listeners_and_requesters);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

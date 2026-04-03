@@ -415,7 +415,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
                       int(`countVarIdent`) * sizeof(`cItemIdent`)
                     ))
                     for `iiVarIdent` in 0 ..< int(`countVarIdent`):
-                      `arrVarIdent`[`iiVarIdent`] = `encodeFuncIdent`(`evtParam`.`fName`[`iiVarIdent`])
+                      `arrVarIdent`[`iiVarIdent`] =
+                        `encodeFuncIdent`(`evtParam`.`fName`[`iiVarIdent`])
                     cast[pointer](`arrVarIdent`)
                   else:
                     nil
@@ -423,7 +424,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             postCallStmts.add(
               quote do:
                 if not `ptrVarIdent`.isNil:
-                  let `arrVarIdent` = cast[ptr UncheckedArray[`cItemIdent`]](`ptrVarIdent`)
+                  let `arrVarIdent` =
+                    cast[ptr UncheckedArray[`cItemIdent`]](`ptrVarIdent`)
                   for `iiVarIdent` in 0 ..< int(`countVarIdent`):
                     `itemFreeStmts`
                   deallocShared(`ptrVarIdent`)

@@ -143,6 +143,14 @@ RequestBroker(API):
 
   proc signature*(n: int32): Future[Result[ObjSeqResultRequest, string]] {.async.}
 
+## TagSeqRequest: triggers TagSeqEvent (seq[object] with string fields).
+## Returns count of tags emitted.
+RequestBroker(API):
+  type TagSeqRequest = object
+    count*: int32
+
+  proc signature*(n: int32): Future[Result[TagSeqRequest, string]] {.async.}
+
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] and seq[object] INPUT param coverage
 # ---------------------------------------------------------------------------
@@ -219,6 +227,12 @@ EventBroker(API):
 EventBroker(API):
   type FixedArrayEvent = object
     values*: array[4, int32]
+
+## TagSeqEvent: seq[Tag] (seq[object] with string fields) in callback field.
+## Exercises the CItem string allocation/free path in event callbacks.
+EventBroker(API):
+  type TagSeqEvent = object
+    tags*: seq[Tag]
 
 # ---------------------------------------------------------------------------
 # Provider state (per processing thread = per context)
@@ -337,7 +351,19 @@ proc setupProviders(ctx: BrokerContext) =
       var tags: seq[Tag] = @[]
       for i in 0 ..< int(n):
         tags.add(Tag(key: "key-" & $i, value: "val-" & $i))
+      await TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
       return ok(ObjSeqResultRequest(tags: tags)),
+  )
+
+  # --- TagSeqRequest: triggers TagSeqEvent (seq[object] with strings) ---
+  discard TagSeqRequest.setProvider(
+    ctx,
+    proc(n: int32): Future[Result[TagSeqRequest, string]] {.closure, async.} =
+      var tags: seq[Tag] = @[]
+      for i in 0 ..< int(n):
+        tags.add(Tag(key: "tag-key-" & $i, value: "tag-val-" & $i))
+      await TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
+      return ok(TagSeqRequest(count: int32(tags.len))),
   )
 
   # --- seq[T] input param providers ---

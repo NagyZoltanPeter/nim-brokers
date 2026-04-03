@@ -144,7 +144,7 @@ proc emitEnsureForeignThreadGc*(): NimNode {.compileTime.} =
   let tvGcReg = genSym(nskVar, "gForeignGcRegistered")
   let ensureIdent = ident("ensureForeignThreadGc")
 
-  result = quote do:
+  result = quote:
     var `tvGcReg` {.threadvar.}: bool
 
     proc `ensureIdent`() {.inline.} =
