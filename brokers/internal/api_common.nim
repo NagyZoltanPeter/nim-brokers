@@ -151,9 +151,14 @@ proc emitEnsureForeignThreadGc*(): NimNode {.compileTime.} =
       when compileOption("app", "lib"):
         if not `tvGcReg`:
           when declared(setupForeignThreadGc):
+            # setupForeignThreadGc already registers the thread with the GC
+            # and sets the stack bottom on modern Nim (>= 1.6).  Manually
+            # calling nimGC_setStackBottom on top of it can corrupt GC state.
             setupForeignThreadGc()
-          when declared(nimGC_setStackBottom):
-            var locals {.volatile, noinit.}: pointer
-            locals = addr(locals)
-            nimGC_setStackBottom(locals)
+          else:
+            # Fallback for very old Nim versions that lack setupForeignThreadGc.
+            when declared(nimGC_setStackBottom):
+              var locals {.volatile, noinit.}: pointer
+              locals = addr(locals)
+              nimGC_setStackBottom(locals)
           `tvGcReg` = true
