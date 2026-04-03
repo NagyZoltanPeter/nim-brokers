@@ -1898,6 +1898,9 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
 
     int expectedEvents = kRequesterThreads * kIters;
     CHECK_EQ(requestFailures.load(), 0);
+    // Events are delivered asynchronously on the delivery thread — wait
+    // for them to catch up, especially on slower 32-bit CI runners.
+    waitFor([&] { return eventCount.load() >= expectedEvents; });
     CHECK_EQ(eventCount.load(), expectedEvents);
 
     lib.offTagSeqEvent(h);
