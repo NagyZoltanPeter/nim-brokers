@@ -1083,6 +1083,287 @@ is deterministic.
 
 ---
 
+## Type Mapping Reference
+
+This section shows exactly how every Nim type that can appear in a broker
+declaration is translated through each layer of the FFI stack.
+
+### Legend
+
+The pipeline has four named representations for each type:
+
+| Representation | Description |
+|---|---|
+| **Nim source** | The type as written in the broker macro body |
+| **C ABI struct field** | The field type inside a `CItem` / `CResult` `{.exportc.}` struct |
+| **C header** | The type as written in the generated `.h` file |
+| **C++ wrapper** | The type used in the generated `.hpp` struct and method signatures |
+| **Python ctypes** | The field type in the generated `ctypes.Structure._fields_` list |
+| **Python dataclass** | The type annotation in the generated `@dataclass` |
+
+Result structs always carry an additional `char* error_message` / `cstring`
+field not shown in the per-type rows below. Count fields for `seq[T]`
+(`int32_t foo_count`) are also omitted from individual rows but are noted in
+the seq section.
+
+---
+
+### Primitive scalars
+
+| Nim | C ABI (`cint` etc.) | C header | C++ wrapper | Python ctypes | Python annotation |
+|---|---|---|---|---|---|
+| `int` / `int32` | `cint` | `int32_t` | `int32_t` | `ctypes.c_int32` | `int` |
+| `int8` | `int8` | `int8_t` | `int8_t` | `ctypes.c_int8` | `int` |
+| `int16` | `int16` | `int16_t` | `int16_t` | `ctypes.c_int16` | `int` |
+| `int64` | `int64` | `int64_t` | `int64_t` | `ctypes.c_int64` | `int` |
+| `uint` / `uint32` | `cuint` | `uint32_t` | `uint32_t` | `ctypes.c_uint32` | `int` |
+| `uint8` / `byte` | `uint8` | `uint8_t` | `uint8_t` | `ctypes.c_uint8` | `int` |
+| `uint16` | `uint16` | `uint16_t` | `uint16_t` | `ctypes.c_uint16` | `int` |
+| `uint64` | `uint64` | `uint64_t` | `uint64_t` | `ctypes.c_uint64` | `int` |
+| `float` / `float64` | `cdouble` | `double` | `double` | `ctypes.c_double` | `float` |
+| `float32` | `cfloat` | `float` | `float` | `ctypes.c_float` | `float` |
+| `bool` | `bool` | `bool` | `bool` | `ctypes.c_bool` | `bool` |
+| `pointer` | `pointer` | `void*` | `void*` | `ctypes.c_void_p` | `object` |
+| `BrokerContext` | `uint32` | `uint32_t` | `uint32_t` | `ctypes.c_uint32` | `int` |
+
+---
+
+### String types
+
+| Nim | C ABI | C struct field | C++ struct / param | Python ctypes | Python annotation |
+|---|---|---|---|---|---|
+| `string` (result field) | `cstring` | `char*` | `std::string` | `ctypes.c_char_p` | `str` |
+| `string` (input param) | `cstring` | `const char*` | `const std::string&` | `ctypes.c_char_p` | `str` |
+| `cstring` | `cstring` | `const char*` | `const std::string&` | `ctypes.c_char_p` | `str` |
+
+In Python, string result fields are decoded from `bytes` to `str` with
+`.decode("utf-8")` in the generated extraction code. Input string parameters
+are encoded with `.encode("utf-8")` before the `ctypes` call.
+
+---
+
+### Object types
+
+Plain Nim `object` types are the primary unit of structured data at the FFI
+boundary. The type auto-resolver generates a parallel `CItem` struct for each
+one.
+
+| Nim | C ABI (internal) | C header | C++ wrapper struct | Python ctypes | Python annotation |
+|---|---|---|---|---|---|
+| `type Foo* = object` | `FooCItem {.exportc.}` | `typedef struct { … } FooCItem;` | `struct Foo { … };` | `class FooCItem(ctypes.Structure)` | `Foo` (dataclass) |
+
+Field types within the struct follow the primitive, string, and nested rules
+from the other sections.
+
+When an object type is used as a result field (`result: Foo`) it appears
+directly as a nested struct field. When it is the element type of a `seq[Foo]`
+it appears as a pointer `FooCItem*` (C) / `std::vector<Foo>` (C++) / decoded
+list of `Foo` dataclass instances (Python).
+
+---
+
+### `seq[T]` — dynamic arrays
+
+`seq[T]` is split into a pointer field plus a count field at the C ABI
+boundary. The naming convention is `fieldName` + `fieldName_count`.
+
+#### `seq[object]` — sequence of a custom struct
+
+| Layer | Representation |
+|---|---|
+| Nim | `devices: seq[DeviceInfo]` |
+| C ABI struct | `pointer devices; int32 devices_count` |
+| C struct field | `DeviceInfoCItem* devices; int32_t devices_count;` |
+| C++ struct field | `std::vector<DeviceInfo> devices` |
+| C++ input param | `const std::vector<DeviceInfo>& devices` |
+| Python ctypes | `("devices", ctypes.c_void_p), ("devices_count", ctypes.c_int32)` |
+| Python dataclass | `devices: list[DeviceInfo] = field(default_factory=list)` |
+| Python extraction | cast `c_void_p` to `ctypes.POINTER(DeviceInfoCItem)`, loop and reconstruct `DeviceInfo` dataclasses |
+| Python input | build `DeviceInfoCItem` array, pass pointer + `len()` |
+
+#### `seq[string]` — sequence of strings
+
+| Layer | Representation |
+|---|---|
+| Nim | `tags: seq[string]` |
+| C ABI struct | `pointer tags; int32 tags_count` |
+| C struct field | `char** tags; int32_t tags_count;` |
+| C++ struct field | `std::vector<std::string> tags` |
+| Python ctypes | `("tags", ctypes.c_void_p), ("tags_count", ctypes.c_int32)` |
+| Python dataclass | `tags: list[str] = field(default_factory=list)` |
+| Python extraction | cast to `ctypes.POINTER(ctypes.c_char_p)`, decode each element |
+| Python input | encode each string, build `c_char_p` array, pass pointer + `len()` |
+
+#### `seq[primitive]` — sequence of a primitive type (e.g. `seq[byte]`)
+
+| Layer | Representation |
+|---|---|
+| Nim | `rawData: seq[byte]` |
+| C ABI struct | `pointer rawData; int32 rawData_count` |
+| C struct field | `uint8_t* rawData; int32_t rawData_count;` |
+| C++ struct field | `std::vector<uint8_t> rawData` |
+| Python ctypes | `("rawData", ctypes.c_void_p), ("rawData_count", ctypes.c_int32)` |
+| Python dataclass | `rawData: list[int] = field(default_factory=list)` |
+| Python extraction | cast to `ctypes.POINTER(ctypes.c_uint8)`, append each element |
+| Python input | build `(ctypes.c_uint8 * len(...))`, pass pointer + `len()` |
+
+The primitive element type follows the scalar mapping table. `seq[int32]`
+produces `int32_t*` / `ctypes.c_int32`, `seq[float32]` produces `float*` /
+`ctypes.c_float`, and so on.
+
+---
+
+### `array[N, T]` — fixed-size arrays
+
+Fixed-size arrays stay inline (no pointer or count field) at every layer.
+
+| Layer | Representation (example: `array[4, int32]`) |
+|---|---|
+| Nim | `capabilities: array[4, int32]` |
+| C ABI struct | `array[4, cint] capabilities` |
+| C struct field | `int32_t capabilities[4];` |
+| C++ struct field | `std::array<int32_t, 4> capabilities` |
+| C++ input param | `const std::array<int32_t, 4>& capabilities` |
+| Python ctypes | `("capabilities", ctypes.c_int32 * 4)` |
+| Python dataclass | `capabilities: list[int] = field(default_factory=list)` |
+| Python extraction | `list(c.capabilities)` |
+| Python input | build `(ctypes.c_int32 * 4)(*capabilities)`, pass pointer |
+
+The element type follows the scalar mapping. `array[N, float32]` produces
+`float32 capabilities[N]` in C and `ctypes.c_float * N` in Python.
+
+---
+
+### Enum types
+
+Nim enums are exported as C `typedef enum` with integer values, and as Python
+`IntEnum` subclasses.
+
+| Layer | Representation (example: `DeviceStatus`) |
+|---|---|
+| Nim declaration | `type DeviceStatus* = enum dsUnknown = 0, dsOnline = 1, …` |
+| C ABI struct field | `cint status` |
+| C header typedef | `typedef enum { DEVICE_STATUS_DS_UNKNOWN = 0, … } DeviceStatus;` |
+| C struct field | `DeviceStatus status;` |
+| C++ struct / param | `DeviceStatus status` (same enum typedef via `#include`) |
+| Python ctypes | `("status", ctypes.c_int32)` |
+| Python typedef | `class DeviceStatus(enum.IntEnum): …` (emitted before structs) |
+| Python dataclass | `status: DeviceStatus = 0` |
+| Python extraction | `DeviceStatus(c.status)` — wraps raw int in the IntEnum |
+| Python callback arg | `DeviceStatus(status)` — forwarded as IntEnum to Python callback |
+
+Enum value names are rendered as `SNAKE_CASE_OF_TYPE_SNAKE_CASE_OF_VALUE` in
+C (e.g. `DEVICE_STATUS_DS_ONLINE`). The Python IntEnum uses the same naming.
+
+---
+
+### Distinct types
+
+Nim `distinct` types generate a C typedef to their underlying primitive type
+and a Python type alias.
+
+| Layer | Representation (example: `SensorId = distinct int32`) |
+|---|---|
+| Nim declaration | `type SensorId* = distinct int32` |
+| C ABI struct field | `cint sensorId` (resolved to underlying `cint`) |
+| C header typedef | `typedef int32_t SensorId;` |
+| C struct field | `SensorId sensorId;` (typedef'd name) |
+| C++ struct / param | resolves to underlying type (`int32_t`) |
+| Python ctypes | `("sensorId", ctypes.c_int32)` (resolved to underlying ctypes type) |
+| Python typedef | `SensorId = int  # distinct int32` |
+| Python dataclass | `sensorId: SensorId = 0` |
+| Python extraction | `c.sensorId` (raw scalar; `SensorId` is just `int`) |
+
+For `Timestamp = distinct int64`, the C typedef is `int64_t`, the Python alias
+is `Timestamp = int`.
+
+> **Note:** Plain type aliases (`type Foo = Bar`) are transparent in Nim's
+> type system and cannot be preserved through `typed` macro parameters. Use
+> `distinct` when a named C typedef is required.
+
+---
+
+### Composite example: full struct
+
+The following shows how `GetSensorData` — which uses all four non-trivial type
+forms — maps through every layer:
+
+```nim
+type GetSensorData = object
+  sensorId*: SensorId      # distinct int32
+  rawData*:  seq[byte]     # seq[primitive]
+  status*:   DeviceStatus  # enum
+```
+
+**C struct** (`GetSensorDataCResult` in `mylib.h`):
+
+```c
+typedef struct {
+    char*        error_message;
+    int32_t      sensorId;
+    uint8_t*     rawData;
+    int32_t      rawData_count;
+    DeviceStatus status;
+} GetSensorDataCResult;
+```
+
+**C++ struct** (inside `mylib.hpp`):
+
+```cpp
+struct GetSensorData {
+    std::string             errorMessage;
+    int32_t                 sensorId{};
+    std::vector<uint8_t>    rawData;
+    DeviceStatus            status{};
+};
+```
+
+**Python ctypes structure** (inside `mylib.py`):
+
+```python
+class GetSensorDataCResult(ctypes.Structure):
+    _fields_ = [
+        ("error_message", ctypes.c_char_p),
+        ("sensorId",      ctypes.c_int32),
+        ("rawData",       ctypes.c_void_p),
+        ("rawData_count", ctypes.c_int32),
+        ("status",        ctypes.c_int32),
+    ]
+```
+
+**Python dataclass**:
+
+```python
+@dataclass
+class GetSensorData:
+    sensorId: SensorId            = 0
+    rawData:  list[int]           = field(default_factory=list)
+    status:   DeviceStatus        = 0
+```
+
+---
+
+### Event callback signatures
+
+For events, types appear in the generated callback typedef and in the C++/Python
+wrapper callback signatures.
+
+| Nim field type | C callback param | C++ callback param | Python callback param |
+|---|---|---|---|
+| `int64` | `int64_t` | `int64_t` | `int` |
+| `string` | `const char*` | `const std::string_view` | `str` (decoded) |
+| `bool` | `bool` | `bool` | `bool` |
+| `enum E` | `E` (typedef enum) | `E` | `E` (IntEnum, wrapped) |
+| `distinct T` | resolved C type | resolved C++ type | `int` / `float` (alias) |
+| `seq[T]` | `void*, int32_t count` | `std::span<const T>` | `list[T]` (decoded in trampoline) |
+| `array[N,T]` | `const elemType* ptr, int32_t count` | `std::span<const T>` | `list[T]` (decoded from pointer+count in trampoline) |
+
+C++ and Python event callbacks receive an owner parameter before the payload
+fields: `Mylib& owner` in C++, `owner: Mylib` in Python. The C ABI callback
+receives `uint32_t ctx, void* userData` as the first two arguments instead.
+
+---
+
 ## Related Documents
 
 - [Multi-Thread RequestBroker](MultiThread_RequestBroker.md)

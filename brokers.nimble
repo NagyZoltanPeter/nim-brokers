@@ -205,7 +205,7 @@ proc runNph(files: seq[string], emptyMessage: string) =
     for file in files:
       exec "nph " & quoteArg(file)
 
-task test, "Run all tests":
+task test, "Run all single and multi-threaded broker tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
     for opt in [
@@ -248,17 +248,17 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-        if "--mm:refc" in opt:
-          echo "Skipping " & f & " (" & opt & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+      # when defined(windows):
+      #   # On Windows, chronos' waitForSingleObject fires its completion callback
+      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+      #   # suspends known Nim threads, so it can collect futures/handles still
+      #   # referenced by the unsuspended thread-pool callback → crash.
+      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+      #   if "--mm:refc" in opt:
+      #     echo "Skipping " & f & " (" & opt & ") on Windows: " &
+      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #     continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
@@ -304,6 +304,25 @@ proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
   if release:
     flags.add(" -d:release")
   exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
+
+proc pyTestCmakeBuildDir(): string =
+  "test/pytestlib/cmake-build"
+
+proc buildPyTestCmakeTarget(target = "") =
+  let cmakeDir = "test/pytestlib"
+  let buildDir = pyTestCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc pyTestCppExecutablePath(): string =
+  when defined(windows):
+    "test/pytestlib/build/test_pytestlib.exe"
+  else:
+    "test/pytestlib/build/test_pytestlib"
 
 proc soElfBits(soPath: string): int =
   ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
@@ -355,17 +374,20 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-        if "refc" in mm:
-          echo "Skipping (" & mm & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+      # when defined(windows):
+      #   # On Windows, chronos' waitForSingleObject fires its completion callback
+      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+      #   # suspends known Nim threads, so it can collect futures/handles still
+      #   # referenced by the unsuspended thread-pool callback → crash.
+      #   # On macOS, the same STW hazard applies across multiple context lifecycles
+      #   # under refc+release: GC can sweep futures still referenced by
+      #   # in-flight delivery/processing threads → SIGSEGV on stress tests.
+      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+      #   if "refc" in mm:
+      #     echo "Skipping (" & mm & ") on Windows: " &
+      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #     continue
       buildPyTestLibrary(mm, release)
       let bits = soElfBits("test/pytestlib/build/libpytestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
@@ -381,6 +403,22 @@ task testFfiApi,
         continue
       exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
         quoteArg("test_*.py") & " -v"
+
+task testFfiApiCpp,
+  "Build and run the C++ FFI API binding tests (orc/refc × debug/release)":
+  for mm in ["orc", "refc"]:
+    for release in [false, true]:
+      let mode = if release: "release" else: "debug"
+      echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
+      # when defined(windows):
+      #   if "refc" in mm:
+      #     echo "Skipping (" & mm & ") on Windows: " &
+      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #     continue
+      buildPyTestLibrary(mm, release)
+      buildPyTestCmakeTarget("test_pytestlib")
+      exec quoteArg(pyTestCppExecutablePath())
+
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
 
@@ -407,3 +445,12 @@ task nph, "Install nph if needed and format modified Nim files":
 
 task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
+
+task alltests,
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp":
+  exec "nimble test"
+  exec "nimble testApi"
+  exec "nimble testFfiApi"
+  exec "nimble testFfiApiCpp"
+  exec "nimble runFfiExamplePy"
+  exec "nimble runFfiExampleCpp"

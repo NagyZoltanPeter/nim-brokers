@@ -107,6 +107,51 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     else:
       baseExportName
 
+  # ---------------------------------------------------------------------------
+  # Type classification helpers (used throughout codegen below)
+  # ---------------------------------------------------------------------------
+
+  proc isSeqOfPrimitiveNode(fType: NimNode): bool {.compileTime.} =
+    ## True when fType is seq[T] where T is a primitive (includes string).
+    if isSeqType(fType):
+      return isNimPrimitive(seqItemTypeName(fType))
+    false
+
+  proc isSeqOfStringNode(fType: NimNode): bool {.compileTime.} =
+    ## True when fType is seq[string] or seq[cstring].
+    if isSeqType(fType):
+      let elem = seqItemTypeName(fType).toLowerAscii()
+      return elem in ["string", "cstring"]
+    false
+
+  proc isSeqOfObjectNode(fType: NimNode): bool {.compileTime.} =
+    ## True when fType is seq[T] where T is a custom object (not primitive).
+    if isSeqType(fType):
+      return not isNimPrimitive(seqItemTypeName(fType))
+    false
+
+  proc isEnumNode(fType: NimNode): bool {.compileTime.} =
+    ## True when fType is a registered enum type.
+    if fType.kind == nnkIdent:
+      return isEnumRegistered($fType)
+    false
+
+  proc isDistinctNode(fType: NimNode): bool {.compileTime.} =
+    ## True when fType is a registered distinct type.
+    if fType.kind == nnkIdent:
+      for entry in gApiTypeRegistry:
+        if entry.name == $fType and entry.kind == atkDistinct:
+          return true
+    false
+
+  proc primElemCNimType(elemName: string): NimNode {.compileTime.} =
+    ## Returns the C-compatible Nim type for a primitive element name.
+    toCFieldType(ident(elemName))
+
+  # ---------------------------------------------------------------------------
+  # Decode helpers for seq input parameters
+  # ---------------------------------------------------------------------------
+
   proc buildSeqDecodeStmt(
       paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
   ): NimNode {.compileTime, raises: [ValueError].} =
@@ -138,6 +183,76 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     code.add("    ))")
     parseStmt(code)
 
+  proc buildPrimitiveSeqDecodeStmt(
+      paramName: string, elemTypeName: string
+  ): NimNode {.compileTime, raises: [ValueError].} =
+    ## Decode a seq[primitive] input: cast pointer to UncheckedArray, build seq.
+    let countName = paramName & "_count"
+    let arrName = "arr_" & paramName
+    let idxName = "i_" & paramName
+    let nimName = "nim_" & paramName
+    let cElemType = $primElemCNimType(elemTypeName)
+    var code = "var " & nimName & ": seq[" & elemTypeName & "] = @[]\n"
+    code.add("if " & countName & " > 0 and not " & paramName & ".isNil:\n")
+    code.add(
+      "  let " & arrName & " = cast[ptr UncheckedArray[" & cElemType & "]](" & paramName &
+        ")\n"
+    )
+    code.add(
+      "  " & nimName & " = newSeqOfCap[" & elemTypeName & "](int(" & countName & "))\n"
+    )
+    code.add("  for " & idxName & " in 0 ..< int(" & countName & "):\n")
+    code.add(
+      "    " & nimName & ".add(" & elemTypeName & "(" & arrName & "[" & idxName & "]))\n"
+    )
+    parseStmt(code)
+
+  proc buildStringSeqDecodeStmt(
+      paramName: string
+  ): NimNode {.compileTime, raises: [ValueError].} =
+    ## Decode a seq[string] input: cast pointer to UncheckedArray[cstring], convert each.
+    let countName = paramName & "_count"
+    let arrName = "arr_" & paramName
+    let idxName = "i_" & paramName
+    let nimName = "nim_" & paramName
+    var code = "var " & nimName & ": seq[string] = @[]\n"
+    code.add("if " & countName & " > 0 and not " & paramName & ".isNil:\n")
+    code.add(
+      "  let " & arrName & " = cast[ptr UncheckedArray[cstring]](" & paramName & ")\n"
+    )
+    code.add("  " & nimName & " = newSeqOfCap[string](int(" & countName & "))\n")
+    code.add("  for " & idxName & " in 0 ..< int(" & countName & "):\n")
+    code.add(
+      "    " & nimName & ".add(if " & arrName & "[" & idxName & "].isNil: \"\" else: $" &
+        arrName & "[" & idxName & "])\n"
+    )
+    parseStmt(code)
+
+  proc buildArrayDecodeStmt(
+      paramName: string, elemTypeName: string, n: int
+  ): NimNode {.compileTime, raises: [ValueError].} =
+    ## Decode an array[N,T] input: cast pointer to ptr UncheckedArray and copyMem.
+    let nimName = "nim_" & paramName
+    let cElemType = $primElemCNimType(elemTypeName)
+    var code =
+      "var " & nimName & ": array[" & $n & ", " & elemTypeName & "] = default(array[" &
+      $n & ", " & elemTypeName & "])\n"
+    code.add("if not " & paramName & ".isNil:\n")
+    code.add(
+      "  let arr_" & paramName & " = cast[ptr UncheckedArray[" & cElemType & "]](" &
+        paramName & ")\n"
+    )
+    code.add("  for i_" & paramName & " in 0 ..< " & $n & ":\n")
+    code.add(
+      "    " & nimName & "[i_" & paramName & "] = " & elemTypeName & "(arr_" & paramName &
+        "[i_" & paramName & "])\n"
+    )
+    parseStmt(code)
+
+  # ---------------------------------------------------------------------------
+  # C++ param setup helpers
+  # ---------------------------------------------------------------------------
+
   proc buildCppSeqParamSetup(
       paramName: string, itemTypeName: string, itemFields: seq[(string, string)]
   ): string {.compileTime.} =
@@ -157,6 +272,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         result.add(",")
       result.add("\n")
     result.add("            });\n")
+    result.add("        }\n")
+
+  proc buildCppStringSeqParamSetup(paramName: string): string {.compileTime.} =
+    ## For seq[string] input: build temp std::vector<const char*> from .c_str().
+    result = "        std::vector<const char*> " & paramName & "CStrs;\n"
+    result.add("        " & paramName & "CStrs.reserve(" & paramName & ".size());\n")
+    result.add("        for (const auto& s : " & paramName & ") {\n")
+    result.add("            " & paramName & "CStrs.push_back(s.c_str());\n")
     result.add("        }\n")
 
   proc buildPySeqParamSetup(
@@ -190,20 +313,45 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         "_items))(*" & paramName & "_items) if " & paramName & "_items else None\n"
     )
 
-  # Step 2: Generate all MT broker code
-  result = newStmtList()
+  proc buildPyStringSeqParamSetup(paramName: string): string {.compileTime.} =
+    result =
+      "        " & paramName & "_encoded = [s.encode('utf-8') for s in " & paramName &
+      "]\n"
+    result.add(
+      "        " & paramName & "_arr_type = ctypes.c_char_p * len(" & paramName &
+        "_encoded)\n"
+    )
+    result.add(
+      "        " & paramName & "_ptr = " & paramName & "_arr_type(*" & paramName &
+        "_encoded) if " & paramName & "_encoded else None\n"
+    )
 
-  # Auto-register external types referenced in the body (e.g. seq[DeviceInfo]).
-  # This emits typed macro calls that resolve fields via getTypeImpl and
-  # populate gApiTypeRegistry, eliminating the need for explicit ApiType.
-  let externalIdents = discoverExternalTypes(body)
-  if externalIdents.len > 0:
-    result.add(emitAutoRegistrations(externalIdents))
+  proc buildPyPrimSeqParamSetup(paramName, ctElem: string): string {.compileTime.} =
+    result =
+      "        " & paramName & "_arr_type = " & ctElem & " * len(" & paramName & ")\n"
+    result.add(
+      "        " & paramName & "_ptr = " & paramName & "_arr_type(*" & paramName &
+        ") if " & paramName & " else None\n"
+    )
+
+  proc buildPyArrayParamSetup(
+      paramName, ctElem: string, n: int
+  ): string {.compileTime.} =
+    result =
+      "        " & paramName & "_arr = (" & ctElem & " * " & $n & ")(*" & paramName &
+      ")\n"
+
+  # ---------------------------------------------------------------------------
+  # Step 2: Generate all MT broker code
+  # ---------------------------------------------------------------------------
+  result = newStmtList()
 
   result.add(generateMtRequestBroker(body))
 
-  # Step 2b: Generate per-type provider cleanup proc and register it for
-  # registerBrokerLibrary shutdown.
+  # Step 2b: Emit foreign thread GC helper (once per compilation unit)
+  result.add(emitEnsureForeignThreadGc())
+
+  # Step 2c: Generate per-type provider cleanup proc
   let cleanupProcName = "cleanupApiRequestProvider_" & typeDisplayName
   let cleanupProcIdent = ident(cleanupProcName)
   let cleanupCtxIdent = genSym(nskParam, "ctx")
@@ -215,7 +363,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   )
   gApiRequestCleanupProcNames.add(cleanupProcName)
 
-  # Step 3: Generate C result struct type
+  # ---------------------------------------------------------------------------
+  # Step 3: Generate C result struct type (Nim side with exportc)
+  # ---------------------------------------------------------------------------
   let cResultIdent = ident(typeDisplayName & "CResult")
   let exportedCResultIdent = postfix(copyNimTree(cResultIdent), "*")
 
@@ -231,11 +381,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   )
 
   # Add result fields (mapped to C-compatible types)
-  # seq[T] fields expand to two C fields: pointer + count
+  # seq[T] expands to pointer + cint count; array[N,T] stays as array[N,cType]
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      if isSeqType(fieldTypes[i]):
-        # seq[T] → pointer field + int32 count field
+      let fType = fieldTypes[i]
+      if isSeqType(fType):
+        # All seq[T] (primitive, string, object) → pointer + count
         cResultFields.add(
           newTree(
             nnkIdentDefs,
@@ -253,7 +404,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           )
         )
       else:
-        let cFieldType = toCFieldType(fieldTypes[i])
+        # array[N,T] → array[N, cType]; enum → cint; string → cstring; etc.
+        let cFieldType = toCFieldType(fType)
         cResultFields.add(
           newTree(
             nnkIdentDefs,
@@ -275,7 +427,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       if objTy.kind == nnkObjectTy:
         objTy[2] = cResultFields
 
+  # ---------------------------------------------------------------------------
   # Step 4: Generate encode proc (Nim object → C result struct)
+  # ---------------------------------------------------------------------------
+  #
+  # The encode proc converts the Nim result object into the flat C-ABI struct.
+  # Every pointer field it sets is allocated on the shared heap so the result
+  # can safely cross the Nim GC boundary and be read by foreign code on any
+  # thread. The free_result function generated in Step 4b frees exactly the
+  # memory allocated here — they must stay in sync.
   let encodeProcIdent = ident("encode" & typeDisplayName & "ToC")
   let objIdent = ident("obj")
   var hasSeqFields = false
@@ -284,7 +444,48 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     for i in 0 ..< fieldNames.len:
       let fName = fieldNames[i]
       let fType = fieldTypes[i]
-      if isSeqType(fType):
+      if isSeqOfStringNode(fType):
+        # seq[string]: allocate array of cstring pointers, copy-allocate each
+        hasSeqFields = true
+        let countFieldIdent = ident($fName & "_count")
+        let nIdent = genSym(nskLet, "n")
+        let arrIdent = genSym(nskLet, "arr")
+        let iIdent = genSym(nskForVar, "i")
+        encodeBody.add(
+          quote do:
+            let `nIdent` = `objIdent`.`fName`.len
+            result.`countFieldIdent` = cint(`nIdent`)
+            if `nIdent` > 0:
+              let `arrIdent` = cast[ptr UncheckedArray[cstring]](allocShared(
+                `nIdent` * sizeof(cstring)
+              ))
+              for `iIdent` in 0 ..< `nIdent`:
+                `arrIdent`[`iIdent`] = allocCStringCopy(`objIdent`.`fName`[`iIdent`])
+              result.`fName` = cast[pointer](`arrIdent`)
+        )
+      elif isSeqOfPrimitiveNode(fType):
+        # seq[primitive]: allocate raw array and copy elements
+        hasSeqFields = true
+        let elemName = seqItemTypeName(fType)
+        let primCNimType = primElemCNimType(elemName)
+        let countFieldIdent = ident($fName & "_count")
+        let nIdent = genSym(nskLet, "n")
+        let arrIdent = genSym(nskLet, "arr")
+        let iIdent = genSym(nskForVar, "i")
+        encodeBody.add(
+          quote do:
+            let `nIdent` = `objIdent`.`fName`.len
+            result.`countFieldIdent` = cint(`nIdent`)
+            if `nIdent` > 0:
+              let `arrIdent` = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                `nIdent` * sizeof(`primCNimType`)
+              ))
+              for `iIdent` in 0 ..< `nIdent`:
+                `arrIdent`[`iIdent`] = `primCNimType`(`objIdent`.`fName`[`iIdent`])
+              result.`fName` = cast[pointer](`arrIdent`)
+        )
+      elif isSeqOfObjectNode(fType):
+        # seq[object]: existing CItem encode
         hasSeqFields = true
         let itemTypeName = seqItemTypeName(fType)
         let cItemIdent = ident(itemTypeName & "CItem")
@@ -305,10 +506,30 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 `arrIdent`[`iIdent`] = `encodeFuncIdent`(`objIdent`.`fName`[`iIdent`])
               result.`fName` = cast[pointer](`arrIdent`)
         )
+      elif isEnumNode(fType):
+        # enum: ord() cast to cint
+        encodeBody.add(
+          quote do:
+            result.`fName` = cint(ord(`objIdent`.`fName`))
+        )
       elif isCStringType(fType):
         encodeBody.add(
           quote do:
             result.`fName` = allocCStringCopy(`objIdent`.`fName`)
+        )
+      elif isDistinctNode(fType):
+        # distinct type: cast through underlying type to match C field type
+        let cFieldTypeNode = toCFieldType(fType)
+        encodeBody.add(
+          quote do:
+            result.`fName` = cast[`cFieldTypeNode`](`objIdent`.`fName`)
+        )
+      elif isArrayTypeNode(fType):
+        # array[N,T]: direct field copy (works for primitive element types)
+        # For array[N, string] we'd need element-wise alloc, but that's rare
+        encodeBody.add(
+          quote do:
+            result.`fName` = `objIdent`.`fName`
         )
       else:
         encodeBody.add(
@@ -330,8 +551,43 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
     )
 
+  # ---------------------------------------------------------------------------
   # Step 4b: Generate free_result function
-  # Frees all allocated memory in a C result struct (strings, arrays, etc.)
+  # ---------------------------------------------------------------------------
+  #
+  # Memory model for request results
+  # ----------------------------------
+  # The encode proc (Step 4a) allocates all heap memory needed to represent the
+  # Nim result as a flat C struct. The generated free_<type>_result function
+  # mirrors that allocation exactly — it must free every pointer the encode proc
+  # set, in the same order, before returning. The foreign caller is responsible
+  # for calling free_<type>_result exactly once after it has finished reading the
+  # struct. C++ and Python wrappers call it automatically via RAII / finally.
+  #
+  # Field-type free strategies:
+  #
+  #   error_message   — always freed first; freeCString (may be nil, checked).
+  #
+  #   string field    — freeCString(r->field)  [allocated by allocCStringCopy]
+  #
+  #   seq[string]     — if count > 0 and pointer not nil:
+  #                       for each element: freeCString(arr[i])  (element copies)
+  #                       deallocShared(r->field)                (pointer array)
+  #                     Two-level free: inner strings then outer array.
+  #
+  #   seq[primitive]  — if count > 0 and pointer not nil:
+  #                       deallocShared(r->field)
+  #                     Single-level free: elements are value types, no per-element
+  #                     cleanup needed.
+  #
+  #   seq[object]     — if count > 0 and pointer not nil:
+  #                       for each CItem: freeCString any cstring fields inside it
+  #                       deallocShared(r->field)
+  #                     Two-level free: inner strings then outer CItem array.
+  #
+  #   array[N, T]     — inline in the struct; no pointer, nothing to free.
+  #
+  #   enum / primitive / distinct — value fields; nothing to free.
   block:
     let freeProcName = "free_" & baseExportName & "_result"
     let freeProcIdent = ident(freeProcName)
@@ -350,7 +606,30 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       for i in 0 ..< fieldNames.len:
         let fName = fieldNames[i]
         let fType = fieldTypes[i]
-        if isSeqType(fType):
+        if isSeqOfStringNode(fType):
+          # seq[string]: free each cstring, then the array
+          let countFieldIdent = ident($fName & "_count")
+          let arrIdent = genSym(nskLet, "arr")
+          let jIdent = genSym(nskForVar, "j")
+          freeBody.add(
+            quote do:
+              if `rIdent`.`countFieldIdent` > 0 and not `rIdent`.`fName`.isNil:
+                let `arrIdent` = cast[ptr UncheckedArray[cstring]](`rIdent`.`fName`)
+                for `jIdent` in 0 ..< `rIdent`.`countFieldIdent`:
+                  if not `arrIdent`[`jIdent`].isNil:
+                    freeCString(`arrIdent`[`jIdent`])
+                deallocShared(`rIdent`.`fName`)
+          )
+        elif isSeqOfPrimitiveNode(fType):
+          # seq[primitive]: just free the array (no per-element cleanup needed)
+          let countFieldIdent = ident($fName & "_count")
+          freeBody.add(
+            quote do:
+              if `rIdent`.`countFieldIdent` > 0 and not `rIdent`.`fName`.isNil:
+                deallocShared(`rIdent`.`fName`)
+          )
+        elif isSeqOfObjectNode(fType):
+          # seq[object]: free string fields inside each CItem, then the array
           let itemTypeName = seqItemTypeName(fType)
           let itemFields = lookupFfiStruct(itemTypeName)
           let countFieldIdent = ident($fName & "_count")
@@ -358,7 +637,6 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           let cItemIdent = ident(itemTypeName & "CItem")
           let jIdent = genSym(nskForVar, "j")
 
-          # Free string fields inside each array element, then the array
           var itemFreeStmts = newStmtList()
           for (ifName, ifType) in itemFields:
             if ifType.toLowerAscii() in ["string", "cstring"]:
@@ -384,6 +662,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               if not `rIdent`.`fName`.isNil:
                 freeCString(`rIdent`.`fName`)
           )
+        # enum, primitive, array[N,T] with primitive elements: nothing to free
 
     result.add(
       quote do:
@@ -418,7 +697,48 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         @[("r", "ptr " & typeDisplayName & "CResult")],
       )
 
+  # ---------------------------------------------------------------------------
+  # Helper: build C header fields for a result/input type
+  # ---------------------------------------------------------------------------
+
+  proc buildCHeaderFields(
+      fNames: seq[NimNode], fTypes: seq[NimNode], forOutput: bool
+  ): seq[(string, string)] {.compileTime.} =
+    for i in 0 ..< fNames.len:
+      let fType = fTypes[i]
+      if isSeqOfStringNode(fType):
+        # seq[string] → char** + count
+        if forOutput:
+          result.add(($fNames[i], "char**"))
+        else:
+          result.add(($fNames[i], "const char**"))
+        result.add(($fNames[i] & "_count", "int32_t"))
+      elif isSeqOfPrimitiveNode(fType):
+        # seq[primitive] → primType* + count
+        let elemName = seqItemTypeName(fType)
+        let cType = nimTypeToCSuffix(ident(elemName))
+        if forOutput:
+          result.add(($fNames[i], cType & "*"))
+        else:
+          result.add(($fNames[i], "const " & cType & "*"))
+        result.add(($fNames[i] & "_count", "int32_t"))
+      elif isSeqType(fType):
+        # seq[object] → CItem* + count
+        let itemTypeName = seqItemTypeName(fType)
+        result.add(($fNames[i], itemTypeName & "CItem*"))
+        result.add(($fNames[i] & "_count", "int32_t"))
+      elif isArrayTypeNode(fType):
+        # array[N, T] → encoded as "elemType[N]", generateCStruct handles layout
+        let cType = nimTypeToCSuffix(fType) # returns "elemType[N]"
+        result.add(($fNames[i], cType))
+      elif forOutput:
+        result.add(($fNames[i], nimTypeToCOutput(fType)))
+      else:
+        result.add(($fNames[i], nimTypeToCInput(fType)))
+
+  # ---------------------------------------------------------------------------
   # Step 5: Generate C-exported request functions
+  # ---------------------------------------------------------------------------
 
   # Zero-arg signature
   if not zeroArgSig.isNil():
@@ -432,6 +752,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         proc `funcIdent`(
             ctx: uint32
         ): `cResultIdent` {.exportc: `funcNameLit`, cdecl, dynlib.} =
+          ensureForeignThreadGc()
           let brokerCtx = BrokerContext(ctx)
           let res = waitFor `typeIdent`.request(brokerCtx)
           if res.isOk():
@@ -444,16 +765,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     )
 
     # Append header declarations
-    var headerFields: seq[(string, string)] = @[]
-    headerFields.add(("error_message", "char*"))
+    var headerFields: seq[(string, string)] = @[("error_message", "char*")]
     if hasInlineFields:
-      for i in 0 ..< fieldNames.len:
-        if isSeqType(fieldTypes[i]):
-          let itemTypeName = seqItemTypeName(fieldTypes[i])
-          headerFields.add(($fieldNames[i], itemTypeName & "CItem*"))
-          headerFields.add(($fieldNames[i] & "_count", "int32_t"))
-        else:
-          headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+      headerFields.add(buildCHeaderFields(fieldNames, fieldTypes, forOutput = true))
     let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
     if not hideFromForeignSurface:
       appendHeaderDecl(structDecl)
@@ -494,7 +808,43 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         let paramName = paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
         let paramNameStr = $paramName
-        if isSeqType(paramType):
+
+        if isSeqOfStringNode(paramType):
+          # seq[string] → const char** + cint count
+          let cParamIdent = ident(paramNameStr)
+          let countIdent = ident(paramNameStr & "_count")
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, ident("pointer"), newEmptyNode())
+          )
+          cFormalParams.add(
+            newTree(nnkIdentDefs, countIdent, ident("cint"), newEmptyNode())
+          )
+          decodeStmts.add(buildStringSeqDecodeStmt(paramNameStr))
+          nimCallArgs.add(ident("nim_" & paramNameStr))
+          headerParams.add((paramNameStr, "const char**"))
+          headerParams.add((paramNameStr & "_count", "int32_t"))
+          wrapperParams.add((paramNameStr, "pointer"))
+          wrapperParams.add((paramNameStr & "_count", "cint"))
+        elif isSeqOfPrimitiveNode(paramType):
+          # seq[primitive] → pointer + cint count
+          let elemName = seqItemTypeName(paramType)
+          let cParamIdent = ident(paramNameStr)
+          let countIdent = ident(paramNameStr & "_count")
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, ident("pointer"), newEmptyNode())
+          )
+          cFormalParams.add(
+            newTree(nnkIdentDefs, countIdent, ident("cint"), newEmptyNode())
+          )
+          decodeStmts.add(buildPrimitiveSeqDecodeStmt(paramNameStr, elemName))
+          nimCallArgs.add(ident("nim_" & paramNameStr))
+          let cElemType = nimTypeToCSuffix(ident(elemName))
+          headerParams.add((paramNameStr, "const " & cElemType & "*"))
+          headerParams.add((paramNameStr & "_count", "int32_t"))
+          wrapperParams.add((paramNameStr, "pointer"))
+          wrapperParams.add((paramNameStr & "_count", "cint"))
+        elif isSeqType(paramType):
+          # seq[object] — existing CItem path
           let itemTypeName = seqItemTypeName(paramType)
           let cParamIdent = ident(paramNameStr)
           let countIdent = ident(paramNameStr & "_count")
@@ -517,7 +867,21 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           headerParams.add((paramNameStr & "_count", "int32_t"))
           wrapperParams.add((paramNameStr, "pointer"))
           wrapperParams.add((paramNameStr & "_count", "cint"))
+        elif isArrayTypeNode(paramType):
+          # array[N, T] → pass as pointer, decode on Nim side
+          let n = arrayNodeSize(paramType)
+          let elemName = arrayNodeElemName(paramType)
+          let cParamIdent = ident(paramNameStr)
+          cFormalParams.add(
+            newTree(nnkIdentDefs, cParamIdent, ident("pointer"), newEmptyNode())
+          )
+          decodeStmts.add(buildArrayDecodeStmt(paramNameStr, elemName, n))
+          nimCallArgs.add(ident("nim_" & paramNameStr))
+          let cElemType = nimTypeToCSuffix(ident(elemName))
+          headerParams.add((paramNameStr, "const " & cElemType & "*"))
+          wrapperParams.add((paramNameStr, "pointer"))
         else:
+          # scalar types (including enums)
           let cParamType = toCFieldType(paramType)
           let cParamIdent = ident(paramNameStr)
 
@@ -532,6 +896,22 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 let `nimParamIdent` = $`cParamIdent`
             )
             nimCallArgs.add(nimParamIdent)
+          elif isEnumNode(paramType):
+            # enum param: cast from cint to enum type
+            let nimParamIdent = ident("nim_" & paramNameStr)
+            decodeStmts.add(
+              quote do:
+                let `nimParamIdent` = `paramType`(`cParamIdent`)
+            )
+            nimCallArgs.add(nimParamIdent)
+          elif isAliasOrDistinctRegistered($paramType):
+            # distinct/alias param: wrap C value in the Nim distinct type
+            let nimParamIdent = ident("nim_" & paramNameStr)
+            decodeStmts.add(
+              quote do:
+                let `nimParamIdent` = `paramType`(`cParamIdent`)
+            )
+            nimCallArgs.add(nimParamIdent)
           else:
             nimCallArgs.add(cParamIdent)
 
@@ -540,11 +920,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
     # Build the request call with decoded args
     let brokerCtxIdent = ident("brokerCtx")
-    var requestCall = newCall(ident("request"), copyNimTree(typeIdent), brokerCtxIdent)
+    var requestCall =
+      newCall(ident("blockingRequest"), copyNimTree(typeIdent), brokerCtxIdent)
     for arg in nimCallArgs:
       requestCall.add(arg)
 
     var funcBody = newStmtList()
+    funcBody.add(
+      quote do:
+        ensureForeignThreadGc()
+    )
     funcBody.add(
       quote do:
         let `brokerCtxIdent` = BrokerContext(ctx)
@@ -552,7 +937,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     funcBody.add(decodeStmts)
     funcBody.add(
       quote do:
-        let res = waitFor `requestCall`
+        let res = `requestCall`
         if res.isOk():
           return `encodeProcIdent`(res.get())
         else:
@@ -585,16 +970,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
     # If we haven't already added the struct (from zero-arg), add it now
     if zeroArgSig.isNil():
-      var headerFields: seq[(string, string)] = @[]
-      headerFields.add(("error_message", "char*"))
+      var headerFields: seq[(string, string)] = @[("error_message", "char*")]
       if hasInlineFields:
-        for i in 0 ..< fieldNames.len:
-          if isSeqType(fieldTypes[i]):
-            let itemTypeName = seqItemTypeName(fieldTypes[i])
-            headerFields.add(($fieldNames[i], itemTypeName & "CItem*"))
-            headerFields.add(($fieldNames[i] & "_count", "int32_t"))
-          else:
-            headerFields.add(($fieldNames[i], nimTypeToCOutput(fieldTypes[i])))
+        headerFields.add(buildCHeaderFields(fieldNames, fieldTypes, forOutput = true))
       let structDecl = generateCStruct(typeDisplayName & "CResult", headerFields)
       if not hideFromForeignSurface:
         appendHeaderDecl(structDecl)
@@ -607,22 +985,19 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         funcName, funcName, typeDisplayName & "CResult", wrapperParams
       )
 
+  # ---------------------------------------------------------------------------
   # Step 6: Generate C++ result struct + modern class methods
+  # ---------------------------------------------------------------------------
   let freeFuncName = apiPublicCName("free_" & baseExportName & "_result")
-
-  # Use placeholder for namespace — resolved during header generation
   let cppNs = "__CPP_NS__"
 
-  # Convert PascalCase type name to camelCase for method name
   var camelName = typeDisplayName
   if camelName.len > 0:
     camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A' .. 'Z'}))
 
   # 6a: Generate C++ result struct with RAII constructor from C struct
   block:
-    if hideFromForeignSurface:
-      discard
-    else:
+    if not hideFromForeignSurface:
       let cppResultName = typeDisplayName & "Result"
       var cppStruct = "struct " & cppResultName & " {\n"
       if hasInlineFields:
@@ -649,8 +1024,13 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           let fType = fieldTypes[i]
           if isCStringType(fType):
             ctorInits.add(fName & "(c." & fName & " ? c." & fName & " : \"\")")
-          elif isSeqType(fType):
-            discard
+          elif isSeqType(fType) or isArrayTypeNode(fType):
+            discard # handled in ctor body
+          elif isEnumNode(fType):
+            let enumTypeName = $fType
+            ctorInits.add(
+              fName & "(static_cast<" & enumTypeName & ">(c." & fName & "))"
+            )
           else:
             ctorInits.add(fName & "(c." & fName & ")")
         if ctorInits.len > 0:
@@ -660,7 +1040,38 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         for i in 0 ..< fieldNames.len:
           let fName = $fieldNames[i]
           let fType = fieldTypes[i]
-          if isSeqType(fType):
+          if isSeqOfStringNode(fType):
+            let countField = fName & "_count"
+            cppStruct.add(
+              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            )
+            cppStruct.add(
+              "            auto* arr = static_cast<char**>(c." & fName & ");\n"
+            )
+            cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
+            cppStruct.add(
+              "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
+            )
+            cppStruct.add(
+              "                " & fName & ".emplace_back(arr[i] ? arr[i] : \"\");\n"
+            )
+            cppStruct.add("        }\n")
+          elif isSeqOfPrimitiveNode(fType):
+            let elemName = seqItemTypeName(fType)
+            let cppElemType = nimTypeToCpp(ident(elemName))
+            let countField = fName & "_count"
+            cppStruct.add(
+              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            )
+            cppStruct.add(
+              "            auto* arr = static_cast<" & cppElemType & "*>(c." & fName &
+                ");\n"
+            )
+            cppStruct.add(
+              "            " & fName & ".assign(arr, arr + c." & countField & ");\n"
+            )
+            cppStruct.add("        }\n")
+          elif isSeqOfObjectNode(fType):
             let itemTypeName = seqItemTypeName(fType)
             let countField = fName & "_count"
             cppStruct.add(
@@ -676,6 +1087,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             )
             cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
             cppStruct.add("        }\n")
+          elif isArrayTypeNode(fType):
+            let n = arrayNodeSize(fType)
+            let elemName = arrayNodeElemName(fType)
+            let cppElemType = nimTypeToCpp(ident(elemName))
+            cppStruct.add(
+              "        std::copy(c." & fName & ", c." & fName & " + " & $n & ", " & fName &
+                ".begin());\n"
+            )
+            discard cppElemType # silence unused
       cppStruct.add("        " & freeFuncName & "(&c);\n")
       cppStruct.add("    }\n")
       cppStruct.add("};\n")
@@ -703,7 +1123,6 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
   if not hideFromForeignSurface and not argSig.isNil():
     let funcName = apiPublicCName(exportedFuncName(argSigName))
-    # Build C++ method params and C call args
     var cppParams: seq[string] = @[]
     var summaryParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
@@ -713,13 +1132,33 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         let paramName = $paramDef[i]
         let paramType = paramDef[paramDef.len - 2]
         let cppParamType =
-          if isSeqType(paramType):
+          if isSeqOfStringNode(paramType):
+            "const std::vector<std::string>&"
+          elif isSeqOfPrimitiveNode(paramType):
+            let elemName = seqItemTypeName(paramType)
+            "const std::vector<" & nimTypeToCpp(ident(elemName)) & ">&"
+          elif isSeqOfObjectNode(paramType):
             "const std::vector<" & cppNs & "::" & seqItemTypeName(paramType) & ">&"
+          elif isArrayTypeNode(paramType):
+            "const " & nimTypeToCpp(paramType) & "&"
           else:
             nimTypeToCppParam(paramType)
         cppParams.add(cppParamType & " " & paramName)
         summaryParams.add(paramName)
-        if isSeqType(paramType):
+
+        if isSeqOfStringNode(paramType):
+          cppPreCall.add(buildCppStringSeqParamSetup(paramName))
+          cppCallArgs.add(
+            ", " & paramName & "CStrs.empty() ? nullptr : " & paramName & "CStrs.data()"
+          )
+          cppCallArgs.add(", static_cast<int32_t>(" & paramName & ".size())")
+        elif isSeqOfPrimitiveNode(paramType):
+          # No pre-call setup; pass .data() and .size() directly
+          cppCallArgs.add(
+            ", " & paramName & ".empty() ? nullptr : " & paramName & ".data()"
+          )
+          cppCallArgs.add(", static_cast<int32_t>(" & paramName & ".size())")
+        elif isSeqOfObjectNode(paramType):
           let itemTypeName = seqItemTypeName(paramType)
           cppPreCall.add(
             buildCppSeqParamSetup(
@@ -731,10 +1170,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               "CItems.data()"
           )
           cppCallArgs.add(", static_cast<int32_t>(" & paramName & "CItems.size())")
+        elif isArrayTypeNode(paramType):
+          # std::array is layout-compatible with C array; pass .data()
+          cppCallArgs.add(", " & paramName & ".data()")
         elif isCStringType(paramType):
           cppCallArgs.add(", " & paramName & ".c_str()")
         else:
           cppCallArgs.add(", " & paramName)
+
     var cppMethod =
       "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
     cppMethod.add(cppPreCall)
@@ -771,7 +1214,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             if isSeqType(fType):
               pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
               pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
+            elif isArrayTypeNode(fType):
+              let n = arrayNodeSize(fType)
+              let elemName = arrayNodeElemName(fType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyCStruct.add(
+                "        (\"" & fName & "\", " & ctElem & " * " & $n & "),\n"
+              )
             else:
+              # nimTypeToCtypes now resolves enums → ctypes.c_int32
+              # and distinct/alias types → underlying ctypes type
               let ctField = nimTypeToCtypes(fType)
               pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
         pyCStruct.add("    ]")
@@ -804,10 +1256,19 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           for paramDef in argParams:
             for i in 0 ..< paramDef.len - 2:
               let paramType = paramDef[paramDef.len - 2]
-              if isSeqType(paramType):
+              if isSeqOfObjectNode(paramType):
                 let itemTypeName = seqItemTypeName(paramType)
                 argTypes.add(
                   ", ctypes.POINTER(" & itemTypeName & "CItem), ctypes.c_int32"
+                )
+              elif isSeqType(paramType):
+                # seq[primitive] or seq[string]: void* + count
+                argTypes.add(", ctypes.c_void_p, ctypes.c_int32")
+              elif isArrayTypeNode(paramType):
+                # array[N, T]: pointer to first element
+                let elemName = arrayNodeElemName(paramType)
+                argTypes.add(
+                  ", ctypes.POINTER(" & nimTypeToCtypes(ident(elemName)) & ")"
                 )
               else:
                 argTypes.add(", " & nimTypeToCtypes(paramType))
@@ -829,7 +1290,37 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         if isCStringType(fType):
           I & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
             " else \"\"\n"
-        elif isSeqType(fType):
+        elif isSeqOfStringNode(fType):
+          # seq[string]: char** → list[str]
+          var s = I & fName & "_list: list[str] = []\n"
+          s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+          s.add(
+            I & "    _str_arr = ctypes.cast(c." & fName &
+              ", ctypes.POINTER(ctypes.c_char_p))\n"
+          )
+          s.add(I & "    for _i in range(c." & fName & "_count):\n")
+          s.add(
+            I & "        " & fName &
+              "_list.append(_str_arr[_i].decode(\"utf-8\") if _str_arr[_i] else \"\")\n"
+          )
+          s.add(I & fName & " = " & fName & "_list\n")
+          s
+        elif isSeqOfPrimitiveNode(fType):
+          # seq[primitive]: primType* → list[int/float]
+          let elemName = seqItemTypeName(fType)
+          let ctElem = nimTypeToCtypes(ident(elemName))
+          var s = I & fName & "_list = []\n"
+          s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
+          s.add(
+            I & "    _arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & ctElem &
+              "))\n"
+          )
+          s.add(I & "    for _i in range(c." & fName & "_count):\n")
+          s.add(I & "        " & fName & "_list.append(_arr[_i])\n")
+          s.add(I & fName & " = " & fName & "_list\n")
+          s
+        elif isSeqOfObjectNode(fType):
+          # seq[CustomObject]: cast to CItem*, reconstruct dataclasses
           let itemType = seqItemTypeName(fType)
           var s = I & fName & "_list: list[" & itemType & "] = []\n"
           s.add(I & "if c." & fName & " and c." & fName & "_count > 0:\n")
@@ -858,6 +1349,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           s.add(I & "        ))\n")
           s.add(I & fName & " = " & fName & "_list\n")
           s
+        elif isArrayTypeNode(fType):
+          # array[N, T]: ctypes fixed-size array → Python list
+          I & fName & " = list(c." & fName & ")\n"
+        elif isEnumNode(fType):
+          # Enum: wrap raw int with the Python IntEnum class
+          I & fName & " = " & $fType & "(c." & fName & ")\n"
         else:
           I & fName & " = c." & fName & "\n"
 
@@ -906,7 +1403,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             pyParams.add(", " & paramName & ": " & pyType)
             aliasArgs.add(paramName)
             summaryParams.add(paramName)
-            if isSeqType(paramType):
+            if isSeqOfObjectNode(paramType):
               let itemTypeName = seqItemTypeName(paramType)
               pyPreCall.add(
                 buildPySeqParamSetup(
@@ -914,6 +1411,20 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 )
               )
               callArgs.add(", " & paramName & "_array, len(" & paramName & "_items)")
+            elif isSeqOfStringNode(paramType):
+              pyPreCall.add(buildPyStringSeqParamSetup(paramName))
+              callArgs.add(", " & paramName & "_ptr, len(" & paramName & ")")
+            elif isSeqOfPrimitiveNode(paramType):
+              let elemName = seqItemTypeName(paramType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyPreCall.add(buildPyPrimSeqParamSetup(paramName, ctElem))
+              callArgs.add(", " & paramName & "_ptr, len(" & paramName & ")")
+            elif isArrayTypeNode(paramType):
+              let n = arrayNodeSize(paramType)
+              let elemName = arrayNodeElemName(paramType)
+              let ctElem = nimTypeToCtypes(ident(elemName))
+              pyPreCall.add(buildPyArrayParamSetup(paramName, ctElem, n))
+              callArgs.add(", " & paramName & "_arr")
             elif isCStringType(paramType):
               callArgs.add(", " & paramName & ".encode(\"utf-8\")")
             else:
@@ -952,7 +1463,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         gApiPyInterfaceSummary.add(camelName & "()")
         gApiPyInterfaceSummary.add(pySnakeName & "()")
 
-  # Step 7: Append free_result header declaration (C side still needs it)
+  # Step 7: Append free_result header declaration
   if not hideFromForeignSurface:
     appendHeaderDecl(freeHeaderProto)
 

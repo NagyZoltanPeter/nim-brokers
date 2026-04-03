@@ -15,7 +15,7 @@
 
 {.push raises: [].}
 
-import std/[macros, strutils, locks]
+import std/[macros, strutils, locks, os]
 import chronos, chronicles
 import results
 import asyncchannels
@@ -810,6 +810,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
               # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
               # (e.g. trySendSync returning bool, or close that defers inner dealloc).
+              # Cancel the pending recv future to deregister the ThreadSignal wait
+              # from the chronos dispatcher — prevents access violation if this
+              # thread exits while provider later calls fireSync() (Windows IOCP).
+              await cancelAndWait(recvFut)
               return err(
                 "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                   completedRes.error.msg
@@ -823,6 +827,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
               # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
               # (e.g. trySendSync returning bool, or close that defers inner dealloc).
+              await cancelAndWait(recvFut)
               return err(
                 "RequestBroker(" & `typeNameLit` &
                   "): cross-thread request timed out after " & $`timeoutVarIdent`
@@ -847,6 +852,119 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         proc request*(
             _: typedesc[`typeIdent`]
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+          return
+            err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
+
+    )
+
+  # ── blockingRequest (zero-arg) ──────────────────────────────────────
+  # Synchronous variant for use in FFI callbacks and non-async contexts.
+  # Same-thread path calls the provider directly via blockingAwait.
+  # Cross-thread path busy-polls the response channel with sleep(1) until
+  # the provider sends its result or the timeout expires.
+  if not zeroArgSig.isNil():
+    result.add(
+      quote do:
+        proc blockingRequest*(
+            _: typedesc[`typeIdent`]
+        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+          return blockingRequest(`typeIdent`, DefaultBrokerContext)
+
+    )
+    result.add(
+      quote do:
+        proc blockingRequest*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+          `initProcIdent`()
+          var reqChan: ptr AsyncChannel[`requestMsgName`]
+          var sameThread = false
+          let myThreadGen = currentMtThreadGen()
+
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  sameThread = true
+                else:
+                  reqChan = `globalBucketsIdent`[i].requestChan
+                break
+
+          if sameThread:
+            var provider: `zeroArgProviderName`
+            for i in 0 ..< `tvNoArgCtxIdent`.len:
+              if `tvNoArgCtxIdent`[i] == brokerCtx:
+                provider = `tvNoArgHandlerIdent`[i]
+                break
+            if provider.isNil():
+              return err(
+                "RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered"
+              )
+            let catchedRes = catch:
+              blockingAwait(provider())
+            if catchedRes.isErr():
+              return err(
+                "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+                  catchedRes.error.msg
+              )
+            let providerRes = catchedRes.get()
+            if providerRes.isOk():
+              let resultValue = providerRes.get()
+              when compiles(resultValue.isNil()):
+                if resultValue.isNil():
+                  return err(
+                    "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
+                  )
+            return providerRes
+          else:
+            if reqChan.isNil():
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): no zero-arg provider registered for broker context " & $brokerCtx
+              )
+            let respChan = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
+              AsyncChannel[Result[`typeIdent`, string]], 1
+            ))
+            discard respChan[].open()
+            var msg = `requestMsgName`(
+              isShutdown: false, requestKind: 0, responseChan: respChan
+            )
+            reqChan[].sendSync(msg)
+            let deadline = Moment.now() + `timeoutVarIdent`
+            var gotResponse = false
+            var response: Result[`typeIdent`, string]
+            while Moment.now() < deadline:
+              let tryRes =
+                try:
+                  respChan[].chan[].tryRecv()
+                except Exception:
+                  (dataAvailable: false, msg: response)
+              if tryRes.dataAvailable:
+                response = tryRes.msg
+                gotResponse = true
+                break
+              sleep(1)
+            if not gotResponse:
+              # Intentional leak on timeout — same rationale as async request().
+              # Do NOT close: AsyncChannel.close() destroys the inner Channel
+              # (deallocShared + nil on .chan field), so a later provider sendSync
+              # would dereference nil — a crash.
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): cross-thread request timed out after " & $`timeoutVarIdent`
+              )
+            respChan[].close()
+            deallocShared(respChan)
+            return response
+
+    )
+  else:
+    result.add(
+      quote do:
+        proc blockingRequest*(
+            _: typedesc[`typeIdent`]
+        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
 
@@ -1006,6 +1124,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
             # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
             # (e.g. trySendSync returning bool, or close that defers inner dealloc).
+            # Cancel the pending recv future to deregister the ThreadSignal wait
+            # from the chronos dispatcher — prevents access violation if this
+            # thread exits while provider later calls fireSync() (Windows IOCP).
+            await cancelAndWait(recvFut)
             return err(
               "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                 completedRes.error.msg
@@ -1019,6 +1141,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
             # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
             # (e.g. trySendSync returning bool, or close that defers inner dealloc).
+            await cancelAndWait(recvFut)
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): cross-thread request timed out after " & $`timeoutVarIdent`
@@ -1046,6 +1169,186 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         requestPragmas,
         newEmptyNode(),
         requestBodyKeyed,
+      )
+    )
+
+  # ── blockingRequest (with-args) ─────────────────────────────────────
+  # Synchronous variant for use in FFI callbacks and non-async contexts.
+  if not argSig.isNil():
+    let brParamDefs = cloneParams(argParams)
+    let brArgNameIdents = collectParamNames(brParamDefs)
+    let brPragmas = quote:
+      {.gcsafe, raises: [].}
+
+    # Non-keyed forward proc.
+    var brFormalParams = newTree(nnkFormalParams)
+    brFormalParams.add(
+      newTree(nnkBracketExpr, ident("Result"), copyNimTree(typeIdent), ident("string"))
+    )
+    brFormalParams.add(
+      newTree(
+        nnkIdentDefs,
+        ident("_"),
+        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+        newEmptyNode(),
+      )
+    )
+    for paramDef in brParamDefs:
+      brFormalParams.add(paramDef)
+
+    var brForwardCall = newCall(ident("blockingRequest"))
+    brForwardCall.add(copyNimTree(typeIdent))
+    brForwardCall.add(ident("DefaultBrokerContext"))
+    for argName in brArgNameIdents:
+      brForwardCall.add(argName)
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("blockingRequest"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        brFormalParams,
+        brPragmas,
+        newEmptyNode(),
+        newStmtList(newTree(nnkReturnStmt, brForwardCall)),
+      )
+    )
+
+    # Keyed blockingRequest with same-thread optimization.
+    let brParamDefsKeyed = cloneParams(argParams)
+    let brArgNameIdentsKeyed = collectParamNames(brParamDefsKeyed)
+    var brFormalParamsKeyed = newTree(nnkFormalParams)
+    brFormalParamsKeyed.add(
+      newTree(nnkBracketExpr, ident("Result"), copyNimTree(typeIdent), ident("string"))
+    )
+    brFormalParamsKeyed.add(
+      newTree(
+        nnkIdentDefs,
+        ident("_"),
+        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+        newEmptyNode(),
+      )
+    )
+    brFormalParamsKeyed.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
+    )
+    for paramDef in brParamDefsKeyed:
+      brFormalParamsKeyed.add(paramDef)
+
+    let brProviderSymKeyed = genSym(nskVar, "provider")
+    var brProviderCallKeyed = newCall(brProviderSymKeyed)
+    for argName in brArgNameIdentsKeyed:
+      brProviderCallKeyed.add(argName)
+
+    let brRespChanIdent = ident("respChan")
+    let brReqChanIdent = ident("reqChan")
+    let brSameThreadIdent = ident("sameThread")
+
+    var brMsgConstruction = newTree(nnkObjConstr, requestMsgName)
+    brMsgConstruction.add(newTree(nnkExprColonExpr, ident("isShutdown"), newLit(false)))
+    brMsgConstruction.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
+    for argName in brArgNameIdentsKeyed:
+      brMsgConstruction.add(newTree(nnkExprColonExpr, argName, argName))
+    brMsgConstruction.add(
+      newTree(nnkExprColonExpr, ident("responseChan"), brRespChanIdent)
+    )
+
+    var brRequestBodyKeyed = newStmtList()
+    brRequestBodyKeyed.add(
+      quote do:
+        `initProcIdent`()
+        var `brReqChanIdent`: ptr AsyncChannel[`requestMsgName`]
+        var `brSameThreadIdent` = false
+        let myThreadGen = currentMtThreadGen()
+
+        withLock(`globalLockIdent`):
+          for i in 0 ..< `globalBucketCountIdent`:
+            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+              if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                `brSameThreadIdent` = true
+              else:
+                `brReqChanIdent` = `globalBucketsIdent`[i].requestChan
+              break
+
+        if `brSameThreadIdent`:
+          var `brProviderSymKeyed`: `argProviderName`
+          for i in 0 ..< `tvWithArgCtxIdent`.len:
+            if `tvWithArgCtxIdent`[i] == brokerCtx:
+              `brProviderSymKeyed` = `tvWithArgHandlerIdent`[i]
+              break
+          if `brProviderSymKeyed`.isNil():
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): no provider registered for input signature"
+            )
+          let catchedRes = catch:
+            blockingAwait(`brProviderCallKeyed`)
+          if catchedRes.isErr():
+            return err(
+              "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+                catchedRes.error.msg
+            )
+          let providerRes = catchedRes.get()
+          if providerRes.isOk():
+            let resultValue = providerRes.get()
+            when compiles(resultValue.isNil()):
+              if resultValue.isNil():
+                return err(
+                  "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
+                )
+          return providerRes
+        else:
+          if `brReqChanIdent`.isNil():
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): no provider registered for broker context " & $brokerCtx
+            )
+          let `brRespChanIdent` = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
+            AsyncChannel[Result[`typeIdent`, string]], 1
+          ))
+          discard `brRespChanIdent`[].open()
+          var msg = `brMsgConstruction`
+          `brReqChanIdent`[].sendSync(msg)
+          let deadline = Moment.now() + `timeoutVarIdent`
+          var gotResponse = false
+          var response: Result[`typeIdent`, string]
+          while Moment.now() < deadline:
+            let tryRes =
+              try:
+                `brRespChanIdent`[].chan[].tryRecv()
+              except Exception:
+                (dataAvailable: false, msg: response)
+            if tryRes.dataAvailable:
+              response = tryRes.msg
+              gotResponse = true
+              break
+            sleep(1)
+          if not gotResponse:
+            # Intentional leak on timeout — same rationale as async request().
+            # Do NOT close: AsyncChannel.close() destroys the inner Channel
+            # (deallocShared + nil on .chan field), so a later provider sendSync
+            # would dereference nil — a crash.
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): cross-thread request timed out after " & $`timeoutVarIdent`
+            )
+          `brRespChanIdent`[].close()
+          deallocShared(`brRespChanIdent`)
+          return response
+    )
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("blockingRequest"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        brFormalParamsKeyed,
+        brPragmas,
+        newEmptyNode(),
+        brRequestBodyKeyed,
       )
     )
 

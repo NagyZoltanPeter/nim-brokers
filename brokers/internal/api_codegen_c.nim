@@ -14,6 +14,9 @@
 {.push raises: [].}
 
 import std/[compilesettings, macros, os, strutils]
+import ./api_schema
+
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Forward imports — shared helpers from api_common
@@ -36,50 +39,94 @@ proc seqItemTypeName*(nimType: NimNode): string {.compileTime.} =
   assert isSeqType(nimType)
   $nimType[1]
 
+proc isArrayTypeNode*(nimType: NimNode): bool {.compileTime.} =
+  ## Returns true if the type node represents `array[N, T]`.
+  nimType.kind == nnkBracketExpr and nimType.len == 3 and
+    ($nimType[0]).toLowerAscii() == "array"
+
+proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
+  ## Extracts N from an `array[N, T]` node.
+  assert isArrayTypeNode(nimType)
+  if nimType[1].kind == nnkIntLit:
+    int(nimType[1].intVal)
+  else:
+    error("array size must be an integer literal for FFI codegen", nimType[1])
+
+proc arrayNodeElemName*(nimType: NimNode): string {.compileTime.} =
+  ## Extracts the element type name from an `array[N, T]` node.
+  assert isArrayTypeNode(nimType)
+  $nimType[2]
+
+proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.}
+
+proc nimTypeToCSuffixIdent(name: string): string {.compileTime.} =
+  ## Internal: map a plain identifier name to its C type suffix.
+  ## Checks the schema registry for enums, aliases, and distinct types.
+  case name.toLowerAscii()
+  of "int", "int32":
+    "int32_t"
+  of "int8":
+    "int8_t"
+  of "int16":
+    "int16_t"
+  of "int64":
+    "int64_t"
+  of "uint", "uint32":
+    "uint32_t"
+  of "uint8":
+    "uint8_t"
+  of "uint16":
+    "uint16_t"
+  of "uint64":
+    "uint64_t"
+  of "float", "float64":
+    "double"
+  of "float32":
+    "float"
+  of "bool":
+    "bool"
+  of "string":
+    "const char*"
+  of "cstring":
+    "const char*"
+  of "brokercontext":
+    "uint32_t"
+  of "pointer":
+    "void*"
+  of "byte":
+    "uint8_t"
+  else:
+    # Check schema registry for aliases/distinct types
+    if isEnumRegistered(name):
+      name # enum typedef name is used directly
+    elif isAliasOrDistinctRegistered(name):
+      # Recurse on the underlying type
+      nimTypeToCSuffix(ident(resolveUnderlyingType(name)))
+    else:
+      name # user-defined struct name
+
 proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
   ## Returns the C type suffix for struct field declarations.
+  ## For array[N,T] returns "elemType[N]" — caller must detect "[" suffix
+  ## and use `baseType fieldName[N]` syntax in struct generation.
   case nimType.kind
   of nnkIdent:
-    let name = ($nimType).toLowerAscii()
-    case name
-    of "int", "int32":
-      "int32_t"
-    of "int8":
-      "int8_t"
-    of "int16":
-      "int16_t"
-    of "int64":
-      "int64_t"
-    of "uint", "uint32":
-      "uint32_t"
-    of "uint8":
-      "uint8_t"
-    of "uint16":
-      "uint16_t"
-    of "uint64":
-      "uint64_t"
-    of "float", "float64":
-      "double"
-    of "float32":
-      "float"
-    of "bool":
-      "bool"
-    of "string":
-      "const char*"
-    of "cstring":
-      "const char*"
-    of "brokercontext":
-      "uint32_t"
-    of "pointer":
-      "void*"
-    else:
-      $nimType
+    nimTypeToCSuffixIdent($nimType)
   of nnkBracketExpr:
     if isSeqType(nimType):
-      seqItemTypeName(nimType) & "CItem*"
+      let elemName = seqItemTypeName(nimType)
+      if isNimPrimitive(elemName):
+        # seq[primitive] → direct pointer to primitive type
+        nimTypeToCSuffixIdent(elemName) & "*"
+      else:
+        elemName & "CItem*"
+    elif isArrayTypeNode(nimType):
+      let n = arrayNodeSize(nimType)
+      let elemName = arrayNodeElemName(nimType)
+      nimTypeToCSuffixIdent(elemName) & "[" & $n & "]"
     else:
       error(
-        "Generic types other than seq[T] are not yet supported in API broker FFI",
+        "Generic types other than seq[T] and array[N,T] are not yet supported in API broker FFI",
         nimType,
       )
   else:
@@ -135,10 +182,15 @@ proc generateCStruct*(
     structName: string, fields: seq[(string, string)]
 ): string {.compileTime.} =
   ## Generates a C struct definition string.
+  ## Handles array fields encoded as "elemType[N]" in fieldType.
   result = "typedef struct {\n"
   for (fieldName, fieldType) in fields:
-    if fieldType.endsWith("*"):
-      result.add("    " & fieldType & " " & fieldName & ";\n")
+    let bracketPos = fieldType.find('[')
+    if bracketPos >= 0:
+      # Array type: "int32_t[3]" → "int32_t fieldName[3]"
+      let baseType = fieldType[0 ..< bracketPos]
+      let arraySuffix = fieldType[bracketPos .. ^1]
+      result.add("    " & baseType & " " & fieldName & arraySuffix & ";\n")
     else:
       result.add("    " & fieldType & " " & fieldName & ";\n")
   result.add("} " & structName & ";\n")
@@ -156,10 +208,7 @@ proc generateCFuncProto*(
       if not first:
         result.add(", ")
       first = false
-      if paramType.endsWith("*"):
-        result.add(paramType & " " & paramName)
-      else:
-        result.add(paramType & " " & paramName)
+      result.add(paramType & " " & paramName)
   result.add(");\n")
 
 # ---------------------------------------------------------------------------
@@ -179,6 +228,21 @@ proc toSnakeCase*(name: string): string {.compileTime.} =
       result.add(chr(ord(ch) + 32))
     else:
       result.add(ch)
+
+proc generateCEnum*(
+    enumName: string, values: seq[tuple[name: string, ordinal: int]]
+): string {.compileTime.} =
+  ## Generates a C typedef enum definition.
+  ## Values are prefixed with SCREAMING_SNAKE_CASE enum name to avoid
+  ## global namespace collisions in C.
+  let prefix = toSnakeCase(enumName).toUpperAscii()
+  result = "typedef enum {\n"
+  for v in values:
+    result.add(
+      "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
+        ",\n"
+    )
+  result.add("} " & enumName & ";\n")
 
 # ---------------------------------------------------------------------------
 # Output directory helpers

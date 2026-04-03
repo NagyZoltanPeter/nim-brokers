@@ -137,9 +137,28 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
   let typeDisplayName = sanitizeIdentName(typeIdent)
 
+  # ---------------------------------------------------------------------------
+  # Type classification helpers
+  # ---------------------------------------------------------------------------
+
+  proc isSeqOfStringNode(fType: NimNode): bool {.compileTime.} =
+    if isSeqType(fType):
+      let elem = seqItemTypeName(fType).toLowerAscii()
+      return elem in ["string", "cstring"]
+    false
+
+  proc isSeqOfPrimitiveNode(fType: NimNode): bool {.compileTime.} =
+    if isSeqType(fType):
+      return isNimPrimitive(seqItemTypeName(fType))
+    false
+
+  # ---------------------------------------------------------------------------
   # Step 2: Generate all MT event broker code (Nim threads keep full listen/emit)
   result = newStmtList()
   result.add(generateMtEventBroker(body))
+
+  # Step 2b: Emit foreign thread GC helper (once per compilation unit)
+  result.add(emitEnsureForeignThreadGc())
 
   # Step 3: Assign compile-time type ID
   # NOTE: Must modify gApiEventTypeCounter directly here (not via a helper proc)
@@ -154,10 +173,12 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   )
 
   # Step 4: Generate C callback type
+  # seq[T] and array[N,T] fields each expand to two callback params (ptr + count).
+  # Enum fields map to cint.
   let callbackTypeIdent = ident(typeDisplayName & "CCallback")
   let exportedCallbackIdent = postfix(copyNimTree(callbackTypeIdent), "*")
 
-  if hasInlineFields:
+  block:
     var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
     callbackFormal.add(
       newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
@@ -165,27 +186,55 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     callbackFormal.add(
       newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
     )
-    for i in 0 ..< fieldNames.len:
-      let cFieldType = toCFieldType(fieldTypes[i])
-      callbackFormal.add(
-        newTree(nnkIdentDefs, copyNimTree(fieldNames[i]), cFieldType, newEmptyNode())
-      )
-    let callbackPragmas = newTree(nnkPragma, ident("cdecl"))
-    let callbackProcType = newTree(nnkProcTy, callbackFormal, callbackPragmas)
-    result.add(
-      newTree(
-        nnkTypeSection,
-        newTree(nnkTypeDef, exportedCallbackIdent, newEmptyNode(), callbackProcType),
-      )
-    )
-  else:
-    var callbackFormal = newTree(nnkFormalParams, newEmptyNode())
-    callbackFormal.add(
-      newTree(nnkIdentDefs, ident("ctx"), ident("uint32"), newEmptyNode())
-    )
-    callbackFormal.add(
-      newTree(nnkIdentDefs, ident("userData"), ident("pointer"), newEmptyNode())
-    )
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        let fType = fieldTypes[i]
+        if isSeqType(fType) or isArrayTypeNode(fType):
+          # Two params: typed pointer + cint count
+          # Use concrete pointer type to match the C header typedef
+          let elemPtrType = block:
+            if isSeqOfStringNode(fType):
+              ident("cstring")
+            elif isSeqOfPrimitiveNode(fType) or isArrayTypeNode(fType):
+              let elemName =
+                if isArrayTypeNode(fType):
+                  arrayNodeElemName(fType)
+                else:
+                  seqItemTypeName(fType)
+              toCFieldType(ident(elemName))
+            elif isSeqType(fType):
+              let itemTypeName = seqItemTypeName(fType)
+              ident(itemTypeName & "CItem")
+            else:
+              ident("pointer")
+          let ptrType = newTree(nnkPtrTy, elemPtrType)
+          callbackFormal.add(
+            newTree(nnkIdentDefs, copyNimTree(fieldNames[i]), ptrType, newEmptyNode())
+          )
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs,
+              ident($fieldNames[i] & "_count"),
+              ident("cint"),
+              newEmptyNode(),
+            )
+          )
+        elif isEnumRegistered($fType):
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs,
+              copyNimTree(fieldNames[i]),
+              copyNimTree(fType),
+              newEmptyNode(),
+            )
+          )
+        else:
+          let cFieldType = toCFieldType(fType)
+          callbackFormal.add(
+            newTree(
+              nnkIdentDefs, copyNimTree(fieldNames[i]), cFieldType, newEmptyNode()
+            )
+          )
     let callbackPragmas = newTree(nnkPragma, ident("cdecl"))
     let callbackProcType = newTree(nnkProcTy, callbackFormal, callbackPragmas)
     result.add(
@@ -215,6 +264,36 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     let handlesIdent = ident("g" & typeDisplayName & "ApiListenerHandles")
 
     # Build wrapper lambda body: converts event fields to C types, calls callback
+    #
+    # Memory model for event callbacks
+    # ---------------------------------
+    # The generated async wrapper proc runs on the delivery thread. For each
+    # event emission it performs three phases, driven by the code below:
+    #
+    # 1. preCallStmts  — allocate and populate shared-heap buffers for every
+    #    field type that cannot be passed by value across the C ABI:
+    #      string       → allocCStringCopy()  (NUL-terminated copy on shared heap)
+    #      seq[string]  → allocShared(n * sizeof(cstring)) + per-element copies
+    #      seq[prim]    → allocShared(n * sizeof(primType)) + element copy loop
+    #      seq[object]  → allocShared(n * sizeof(CItem)) + encode loop
+    #      array[N, T]  → allocShared(N * sizeof(elemType)) + element copy loop
+    #    Scalars (int, bool, enum, distinct) need no allocation — passed by value.
+    #
+    # 2. cbInvocation  — the C callback is called with the raw pointers and counts.
+    #    The callback runs synchronously inside the try block. Any exception thrown
+    #    by the callback is caught and discarded so it cannot escape the C ABI.
+    #    All pointers are valid for exactly the duration of this call.
+    #
+    # 3. postCallStmts — free every shared-heap buffer allocated in step 1, in the
+    #    same order:
+    #      string       → freeSharedCString()
+    #      seq[string]  → freeCString() each element, then deallocShared(array)
+    #      seq[prim]    → deallocShared(array)   (no per-element cleanup)
+    #      seq[object]  → deallocShared(array)   (CItem fields are value-copied)
+    #      array[N, T]  → deallocShared(array)   (always allocated, never nil)
+    #    postCallStmts runs unconditionally after the callback returns, whether
+    #    or not the callback threw. The foreign caller must not retain the pointers
+    #    after the callback returns — they are freed immediately.
     let evtParam = genSym(nskParam, "evt")
     let cbLocal = genSym(nskLet, "cb")
     let userDataLocal = genSym(nskLet, "userData")
@@ -229,6 +308,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
         let fName = fieldNames[i]
         let fType = fieldTypes[i]
         if isCStringType(fType):
+          # string: allocate a NUL-terminated copy on the shared heap, pass as
+          # const char*, free with freeSharedCString after the callback returns.
           let cVarIdent = genSym(nskLet, "c_" & $fName)
           preCallStmts.add(
             newTree(
@@ -245,6 +326,150 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           )
           callbackCallArgs.add(cVarIdent)
           postCallStmts.add(newCall(ident("freeSharedCString"), cVarIdent))
+        elif isSeqType(fType):
+          # seq[T]: allocate a contiguous shared-heap array, pass pointer+count,
+          # free after the callback returns. Three sub-cases:
+          let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
+          let countVarIdent = genSym(nskLet, "n_" & $fName)
+          let elemName = seqItemTypeName(fType)
+          var seqPtrCastType: NimNode
+          if isSeqOfStringNode(fType):
+            # seq[string]: allocShared(n * sizeof(cstring)) for the pointer array,
+            # then allocCStringCopy per element. On free: freeCString each element
+            # first, then deallocShared the outer array.
+            seqPtrCastType = newTree(nnkPtrTy, ident("cstring"))
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let arr = cast[ptr UncheckedArray[cstring]](allocShared(
+                      int(`countVarIdent`) * sizeof(cstring)
+                    ))
+                    for ii in 0 ..< int(`countVarIdent`):
+                      arr[ii] = allocCStringCopy(`evtParam`.`fName`[ii])
+                    cast[pointer](arr)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  let arr = cast[ptr UncheckedArray[cstring]](`ptrVarIdent`)
+                  for ii in 0 ..< int(`countVarIdent`):
+                    if not arr[ii].isNil:
+                      freeCString(arr[ii])
+                  deallocShared(`ptrVarIdent`)
+            )
+          elif isNimPrimitive(elemName):
+            # seq[primitive]: allocShared(n * sizeof(T)) + element copy. On free:
+            # deallocShared only — no per-element cleanup needed for value types.
+            let primCNimType = toCFieldType(ident(elemName))
+            seqPtrCastType = newTree(nnkPtrTy, primCNimType)
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let arr = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                      int(`countVarIdent`) * sizeof(`primCNimType`)
+                    ))
+                    for ii in 0 ..< int(`countVarIdent`):
+                      arr[ii] = `primCNimType`(`evtParam`.`fName`[ii])
+                    cast[pointer](arr)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  deallocShared(`ptrVarIdent`)
+            )
+          else:
+            # seq[object]: allocShared(n * sizeof(CItem)) + encode each element.
+            # On free: free string fields inside each CItem, then deallocShared
+            # the outer array (encodeXToCItem allocates strings via allocCStringCopy).
+            let itemFields = lookupFfiStruct(elemName)
+            let cItemIdent = ident(elemName & "CItem")
+            seqPtrCastType = newTree(nnkPtrTy, cItemIdent)
+            let encodeFuncIdent = ident("encode" & elemName & "ToCItem")
+            let arrVarIdent = genSym(nskLet, "arr_" & $fName)
+            let iiVarIdent = genSym(nskForVar, "ii_" & $fName)
+
+            var itemFreeStmts = newStmtList()
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                let ifNameIdent = ident(ifName)
+                itemFreeStmts.add(
+                  quote do:
+                    if not `arrVarIdent`[`iiVarIdent`].`ifNameIdent`.isNil:
+                      freeCString(`arrVarIdent`[`iiVarIdent`].`ifNameIdent`)
+                )
+
+            preCallStmts.add(
+              quote do:
+                let `countVarIdent` = cint(`evtParam`.`fName`.len)
+                let `ptrVarIdent` =
+                  if `countVarIdent` > 0:
+                    let `arrVarIdent` = cast[ptr UncheckedArray[`cItemIdent`]](allocShared(
+                      int(`countVarIdent`) * sizeof(`cItemIdent`)
+                    ))
+                    for `iiVarIdent` in 0 ..< int(`countVarIdent`):
+                      `arrVarIdent`[`iiVarIdent`] =
+                        `encodeFuncIdent`(`evtParam`.`fName`[`iiVarIdent`])
+                    cast[pointer](`arrVarIdent`)
+                  else:
+                    nil
+            )
+            postCallStmts.add(
+              quote do:
+                if not `ptrVarIdent`.isNil:
+                  let `arrVarIdent` =
+                    cast[ptr UncheckedArray[`cItemIdent`]](`ptrVarIdent`)
+                  for `iiVarIdent` in 0 ..< int(`countVarIdent`):
+                    `itemFreeStmts`
+                  deallocShared(`ptrVarIdent`)
+            )
+          callbackCallArgs.add(newTree(nnkCast, seqPtrCastType, ptrVarIdent))
+          callbackCallArgs.add(countVarIdent)
+        elif isArrayTypeNode(fType):
+          # array[N, T]: allocShared(N * sizeof(T)) + element copy, pass as
+          # const T* + int32_t count (same layout as seq[primitive] at the C ABI).
+          # The allocation is always non-nil (N is a compile-time constant > 0).
+          # On free: deallocShared unconditionally — no nil check needed.
+          let n = arrayNodeSize(fType)
+          let elemName = arrayNodeElemName(fType)
+          let ptrVarIdent = genSym(nskLet, "ptr_" & $fName)
+          let countLit = newLit(cint(n))
+          let primCNimType = toCFieldType(ident(elemName))
+          preCallStmts.add(
+            quote do:
+              let `ptrVarIdent` = block:
+                let arr = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                  `n` * sizeof(`primCNimType`)
+                ))
+                for ii in 0 ..< `n`:
+                  arr[ii] = `primCNimType`(`evtParam`.`fName`[ii])
+                cast[pointer](arr)
+          )
+          postCallStmts.add(
+            quote do:
+              deallocShared(`ptrVarIdent`)
+          )
+          callbackCallArgs.add(
+            newTree(nnkCast, newTree(nnkPtrTy, primCNimType), ptrVarIdent)
+          )
+          callbackCallArgs.add(countLit)
+        elif isEnumRegistered($fType):
+          # Enum: pass the enum value directly — callbackFormal now uses the
+          # actual enum type (copyNimTree(fType)), so no cint conversion needed.
+          callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
+        elif isAliasOrDistinctRegistered($fType):
+          # Alias/distinct: cast to underlying C field type
+          let cFieldType = toCFieldType(fType)
+          callbackCallArgs.add(
+            newTree(nnkCast, cFieldType, newDotExpr(evtParam, copyNimTree(fName)))
+          )
         else:
           callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
 
@@ -363,7 +588,9 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       proc `regFuncIdent`(
           ctx: uint32, `callbackParamIdent`: `callbackTypeIdent`, userData: pointer
       ): uint64 {.exportc: `regFuncNameLit`, cdecl, dynlib.} =
-        let res = waitFor RegisterEventListenerResult.request(
+        ensureForeignThreadGc()
+        let res = blockingRequest(
+          RegisterEventListenerResult,
           BrokerContext(ctx),
           0'i32,
           int32(`typeIdConst`),
@@ -389,15 +616,28 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       proc `deregFuncIdent`(
           ctx: uint32, handle: uint64
       ) {.exportc: `deregFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         if handle == 0'u64:
           # Remove all listeners for this event type
-          discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 2'i32, int32(`typeIdConst`), nil, nil, 0'u64
+          discard blockingRequest(
+            RegisterEventListenerResult,
+            BrokerContext(ctx),
+            2'i32,
+            int32(`typeIdConst`),
+            nil,
+            nil,
+            0'u64,
           )
         else:
           # Remove specific listener by handle
-          discard waitFor RegisterEventListenerResult.request(
-            BrokerContext(ctx), 1'i32, int32(`typeIdConst`), nil, nil, handle
+          discard blockingRequest(
+            RegisterEventListenerResult,
+            BrokerContext(ctx),
+            1'i32,
+            int32(`typeIdConst`),
+            nil,
+            nil,
+            handle,
           )
 
   )
@@ -410,8 +650,26 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   callbackHeaderParams.add("void* userData")
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      let cType = nimTypeToCInput(fieldTypes[i])
-      callbackHeaderParams.add(cType & " " & $fieldNames[i])
+      let fName = $fieldNames[i]
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        callbackHeaderParams.add("const char** " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isSeqOfPrimitiveNode(fType):
+        let elemCType = nimTypeToCSuffix(ident(seqItemTypeName(fType)))
+        callbackHeaderParams.add("const " & elemCType & "* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isSeqType(fType):
+        let itemTypeName = seqItemTypeName(fType)
+        callbackHeaderParams.add(itemTypeName & "CItem* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      elif isArrayTypeNode(fType):
+        let elemCType = nimTypeToCSuffix(ident(arrayNodeElemName(fType)))
+        callbackHeaderParams.add("const " & elemCType & "* " & fName)
+        callbackHeaderParams.add("int32_t " & fName & "_count")
+      else:
+        let cType = nimTypeToCInput(fType)
+        callbackHeaderParams.add(cType & " " & fName)
 
   var callbackTypedef = "typedef void (*" & callbackTypeIdent.repr & ")("
   if callbackHeaderParams.len == 0:
@@ -580,17 +838,66 @@ private:
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fName = $fieldNames[i]
-      let cbType = nimTypeToCppCallbackParam(fieldTypes[i])
-      let cType = nimTypeToCInput(fieldTypes[i])
-      cppCbParams.add(cbType & " " & fName)
-      cppCbSummaryParams.add(fName)
-      cTrampolineParams.add(cType & " " & fName)
-      if isCStringType(fieldTypes[i]):
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        # C++ callback sees std::span<const char*>
+        cppCbParams.add("std::span<const char*> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const char** " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
         traitInvokeArgs.add(
-          fName & " ? std::string_view(" & fName & ") : std::string_view()"
+          "std::span<const char*>(" & fName & ", " & fName & "_count)"
         )
-      else:
+      elif isSeqOfPrimitiveNode(fType):
+        let elemName = seqItemTypeName(fType)
+        let cppElemType = nimTypeToCpp(ident(elemName))
+        let cElemType = nimTypeToCSuffix(ident(elemName))
+        cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const " & cElemType & "* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
+        )
+      elif isSeqType(fType):
+        let itemTypeName = seqItemTypeName(fType)
+        cppCbParams.add("std::span<const " & itemTypeName & "CItem> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(itemTypeName & "CItem* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & itemTypeName & "CItem>(" & fName & ", " & fName &
+            "_count)"
+        )
+      elif isArrayTypeNode(fType):
+        let elemName = arrayNodeElemName(fType)
+        let cppElemType = nimTypeToCpp(ident(elemName))
+        let cElemType = nimTypeToCSuffix(ident(elemName))
+        cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add("const " & cElemType & "* " & fName)
+        cTrampolineParams.add("int32_t " & fName & "_count")
+        traitInvokeArgs.add(
+          "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
+        )
+      elif isEnumRegistered($fType):
+        let enumTypeName = $fType
+        cppCbParams.add(enumTypeName & " " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(enumTypeName & " " & fName)
         traitInvokeArgs.add(fName)
+      else:
+        let cbType = nimTypeToCppCallbackParam(fType)
+        let cType = nimTypeToCInput(fType)
+        cppCbParams.add(cbType & " " & fName)
+        cppCbSummaryParams.add(fName)
+        cTrampolineParams.add(cType & " " & fName)
+        if isCStringType(fType):
+          traitInvokeArgs.add(
+            fName & " ? std::string_view(" & fName & ") : std::string_view()"
+          )
+        else:
+          traitInvokeArgs.add(fName)
 
   let traitName = typeDisplayName & "EventTraits"
   var trait = "struct " & traitName & " {\n"
@@ -639,7 +946,25 @@ private:
   var cArgTypes: seq[string] = @[]
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
-      cArgTypes.add(nimTypeToCInput(fieldTypes[i]))
+      let fType = fieldTypes[i]
+      if isSeqOfStringNode(fType):
+        cArgTypes.add("const char**")
+        cArgTypes.add("int32_t")
+      elif isSeqOfPrimitiveNode(fType):
+        cArgTypes.add("const " & nimTypeToCSuffix(ident(seqItemTypeName(fType))) & "*")
+        cArgTypes.add("int32_t")
+      elif isSeqType(fType):
+        cArgTypes.add(seqItemTypeName(fType) & "CItem*")
+        cArgTypes.add("int32_t")
+      elif isArrayTypeNode(fType):
+        cArgTypes.add(
+          "const " & nimTypeToCSuffix(ident(arrayNodeElemName(fType))) & "*"
+        )
+        cArgTypes.add("int32_t")
+      elif isEnumRegistered($fType):
+        cArgTypes.add($fType)
+      else:
+        cArgTypes.add(nimTypeToCInput(fType))
 
   var dispatcherDecl =
     "    using " & dispatcherAlias & " = EventDispatcher<__CPP_CLASS__, " & traitName
@@ -700,7 +1025,16 @@ private:
       cfuncArgs.add("ctypes.c_void_p")
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
-          cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
+          if isSeqType(fieldTypes[i]):
+            cfuncArgs.add("ctypes.c_void_p")
+            cfuncArgs.add("ctypes.c_int32")
+          elif isArrayTypeNode(fieldTypes[i]):
+            # C ABI: const elemType* ptr + int32_t count (Nim heap-copies the array)
+            let ctElem = nimTypeToCtypes(ident(arrayNodeElemName(fieldTypes[i])))
+            cfuncArgs.add("ctypes.POINTER(" & ctElem & ")")
+            cfuncArgs.add("ctypes.c_int32")
+          else:
+            cfuncArgs.add(nimTypeToCtypes(fieldTypes[i]))
 
       let cfuncName = "self._" & typeDisplayName & "CCallback"
       gApiPyCallbackSetup.add(
@@ -718,19 +1052,104 @@ private:
       )
       gApiPyCallbackSetup.add("_lib." & publicDeregFuncName & ".restype = None")
 
-    # Build Python callback parameter list and forwarding
-    var pyCallbackParams: seq[string] = @[]
+    # Build Python callback parameter list and forwarding.
+    # pyTrampolineParams: raw names matching CFUNCTYPE arg count
+    #   (seq[T] fields expand to two names: foo + foo_count)
+    # pyUserParams: one name per Nim field (for summary/callable hint)
+    # pyDecodeLines: multi-line decode code emitted inside trampoline body
+    # pyForwards: expressions forwarded to the Python callback
+    var pyTrampolineParams: seq[string] = @[]
+    var pyUserParams: seq[string] = @[]
+    var pyDecodeLines: string = ""
     var pyForwards: seq[string] = @[]
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
         let fName = $fieldNames[i]
         let snakeFname = toSnakeCase(fName)
-        pyCallbackParams.add(snakeFname)
-        if isCStringType(fieldTypes[i]):
+        let fType = fieldTypes[i]
+        pyUserParams.add(snakeFname)
+        if isCStringType(fType):
+          pyTrampolineParams.add(snakeFname)
           pyForwards.add(
             snakeFname & ".decode(\"utf-8\") if " & snakeFname & " else \"\""
           )
+        elif isSeqType(fType):
+          # CFUNCTYPE emits two args: pointer + count
+          pyTrampolineParams.add(snakeFname)
+          pyTrampolineParams.add(snakeFname & "_count")
+          let elemName = seqItemTypeName(fType)
+          let listVar = "_" & snakeFname & "_list"
+          if elemName.toLowerAscii() in ["string", "cstring"]:
+            pyDecodeLines.add("            " & listVar & ": list[str] = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _str_arr = ctypes.cast(" & snakeFname &
+                ", ctypes.POINTER(ctypes.c_char_p))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add(
+              "                    " & listVar &
+                ".append(_str_arr[_i].decode('utf-8') if _str_arr[_i] else '')\n"
+            )
+          elif isNimPrimitive(elemName):
+            let ctElem = nimTypeToCtypes(ident(elemName))
+            pyDecodeLines.add("            " & listVar & " = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+                ctElem & "))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          else:
+            # seq[CustomObject]: cast to CItem*, reconstruct
+            pyDecodeLines.add("            " & listVar & " = []\n")
+            pyDecodeLines.add(
+              "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+            )
+            pyDecodeLines.add(
+              "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+                elemName & "CItem))\n"
+            )
+            pyDecodeLines.add(
+              "                for _i in range(" & snakeFname & "_count):\n"
+            )
+            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          pyForwards.add(listVar)
+        elif isArrayTypeNode(fType):
+          # C ABI: pointer + count (same layout as seq[primitive])
+          pyTrampolineParams.add(snakeFname)
+          pyTrampolineParams.add(snakeFname & "_count")
+          let elemName = arrayNodeElemName(fType)
+          let ctElem = nimTypeToCtypes(ident(elemName))
+          let listVar = "_" & snakeFname & "_list"
+          pyDecodeLines.add("            " & listVar & " = []\n")
+          pyDecodeLines.add(
+            "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
+          )
+          pyDecodeLines.add(
+            "                _arr = ctypes.cast(" & snakeFname & ", ctypes.POINTER(" &
+              ctElem & "))\n"
+          )
+          pyDecodeLines.add(
+            "                for _i in range(" & snakeFname & "_count):\n"
+          )
+          pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+          pyForwards.add(listVar)
+        elif isEnumRegistered($fType):
+          # Wrap raw int with the Python IntEnum class
+          pyTrampolineParams.add(snakeFname)
+          pyForwards.add($fType & "(" & snakeFname & ")")
         else:
+          pyTrampolineParams.add(snakeFname)
           pyForwards.add(snakeFname)
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
@@ -744,7 +1163,7 @@ private:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
     let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
     var pySummaryParams: seq[string] = @[("owner")]
-    pySummaryParams.add(pyCallbackParams)
+    pySummaryParams.add(pyUserParams)
 
     # on_<event> method
     block:
@@ -756,11 +1175,13 @@ private:
           " events.\n\n        The callback receives the owning Mylib instance as its first\n        argument instead of the raw ctx value so ownership stays at the\n        wrapper level while the C ABI details remain hidden. Returns a\n        handle for removal.\"\"\"\n"
       )
       m.add("        self._requireContext()\n")
-      # Build the trampoline that decodes strings
+      # Build the trampoline that decodes ABI values to Python types
       m.add("        @" & cfuncTypeName & "\n")
       var trampolineParams = @["_ctx", "_user_data"]
-      trampolineParams.add(pyCallbackParams)
+      trampolineParams.add(pyTrampolineParams)
       m.add("        def _trampoline(" & trampolineParams.join(", ") & "):\n")
+      if pyDecodeLines.len > 0:
+        m.add(pyDecodeLines)
       var pyCallbackInvokeArgs = @["self"]
       pyCallbackInvokeArgs.add(pyForwards)
       m.add("            callback(" & pyCallbackInvokeArgs.join(", ") & ")\n")

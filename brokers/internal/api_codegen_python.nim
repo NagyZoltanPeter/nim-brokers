@@ -13,7 +13,7 @@
 
 {.push raises: [].}
 
-import std/[macros, os, strutils]
+import std/[macros, strutils]
 import ./api_codegen_c
 
 export api_codegen_c
@@ -38,7 +38,7 @@ proc nimTypeToCtypes*(nimType: NimNode): string {.compileTime.} =
       "ctypes.c_int64"
     of "uint", "uint32":
       "ctypes.c_uint32"
-    of "uint8":
+    of "uint8", "byte":
       "ctypes.c_uint8"
     of "uint16":
       "ctypes.c_uint16"
@@ -57,10 +57,19 @@ proc nimTypeToCtypes*(nimType: NimNode): string {.compileTime.} =
     of "pointer":
       "ctypes.c_void_p"
     else:
-      $nimType & "CItem" # user-defined ctypes Structure
+      # Check schema registry for enums and distinct/alias types
+      if isEnumRegistered($nimType):
+        "ctypes.c_int32"
+      elif isAliasOrDistinctRegistered($nimType):
+        nimTypeToCtypes(ident(resolveUnderlyingType($nimType)))
+      else:
+        $nimType & "CItem" # user-defined ctypes Structure
   of nnkBracketExpr:
     if isSeqType(nimType):
       "ctypes.c_void_p" # pointer to array
+    elif isArrayTypeNode(nimType):
+      # Element type — caller appends " * N" for _fields_ entries
+      nimTypeToCtypes(ident(arrayNodeElemName(nimType)))
     else:
       "ctypes.c_void_p"
   else:
@@ -73,7 +82,7 @@ proc nimTypeToPyAnnotation*(nimType: NimNode): string {.compileTime.} =
     let name = ($nimType).toLowerAscii()
     case name
     of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
-        "uint64":
+        "uint64", "byte":
       "int"
     of "float", "float32", "float64":
       "float"
@@ -85,7 +94,11 @@ proc nimTypeToPyAnnotation*(nimType: NimNode): string {.compileTime.} =
       $nimType # user-defined dataclass name
   of nnkBracketExpr:
     if isSeqType(nimType):
-      "list[" & seqItemTypeName(nimType) & "]"
+      let elemName = seqItemTypeName(nimType)
+      "list[" & nimTypeToPyAnnotation(ident(elemName)) & "]"
+    elif isArrayTypeNode(nimType):
+      let elemAnnotation = nimTypeToPyAnnotation(ident(arrayNodeElemName(nimType)))
+      "list[" & elemAnnotation & "]"
     else:
       "object"
   else:
@@ -98,7 +111,7 @@ proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
     let name = ($nimType).toLowerAscii()
     case name
     of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
-        "uint64":
+        "uint64", "byte":
       "0"
     of "float", "float32", "float64":
       "0.0"
@@ -107,15 +120,27 @@ proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
     of "string", "cstring":
       "\"\""
     else:
-      "None"
+      if isEnumRegistered($nimType) or isAliasOrDistinctRegistered($nimType):
+        "0"
+      else:
+        "None"
   of nnkBracketExpr:
-    if isSeqType(nimType): "field(default_factory=list)" else: "None"
+    if isSeqType(nimType):
+      "field(default_factory=list)"
+    elif isArrayTypeNode(nimType):
+      "field(default_factory=list)"
+    else:
+      "None"
   else:
     "None"
 
 # ---------------------------------------------------------------------------
 # Compile-time accumulators
 # ---------------------------------------------------------------------------
+
+var gApiPyTypedefs* {.compileTime.}: seq[string] = @[]
+  ## Python IntEnum classes and type aliases (enums, distinct types).
+  ## Output before ctypes structs so downstream code can reference them.
 
 var gApiPyCtypesStructs* {.compileTime.}: seq[string] =
   @[] ## ctypes.Structure subclass definitions (CItem + CResult types).
@@ -169,6 +194,7 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("from __future__ import annotations\n\n")
   py.add("import ctypes\n")
   py.add("import ctypes.util\n")
+  py.add("import enum\n")
   py.add("import os\n")
   py.add("import sys\n")
   py.add("import threading\n")
@@ -223,6 +249,19 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("class " & className & "Error(Exception):\n")
   py.add("    \"\"\"Raised when a library call returns an error.\"\"\"\n")
   py.add("    pass\n\n")
+
+  # Enum / type alias definitions (IntEnum classes, SensorId = int, etc.)
+  if gApiPyTypedefs.len > 0:
+    py.add(
+      "# ---------------------------------------------------------------------------\n"
+    )
+    py.add("# Enums and type aliases\n")
+    py.add(
+      "# ---------------------------------------------------------------------------\n\n"
+    )
+    for td in gApiPyTypedefs:
+      py.add(td)
+      py.add("\n\n")
 
   # ctypes Structure definitions
   py.add(
