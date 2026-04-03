@@ -930,7 +930,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             var gotResponse = false
             var response: Result[`typeIdent`, string]
             while Moment.now() < deadline:
-              let tryRes = respChan[].chan[].tryRecv()
+              let tryRes = try:
+                respChan[].chan[].tryRecv()
+              except ValueError:
+                (dataAvailable: false, msg: response)
               if tryRes.dataAvailable:
                 response = tryRes.msg
                 gotResponse = true
@@ -1301,7 +1304,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           var gotResponse = false
           var response: Result[`typeIdent`, string]
           while Moment.now() < deadline:
-            let tryRes = `brRespChanIdent`[].chan[].tryRecv()
+            let tryRes = try:
+              `brRespChanIdent`[].chan[].tryRecv()
+            except ValueError:
+              (dataAvailable: false, msg: response)
             if tryRes.dataAvailable:
               response = tryRes.msg
               gotResponse = true
