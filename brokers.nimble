@@ -205,7 +205,7 @@ proc runNph(files: seq[string], emptyMessage: string) =
     for file in files:
       exec "nph " & quoteArg(file)
 
-task test, "Run all tests":
+task test, "Run all single and multi-threaded broker tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
     for opt in [
@@ -445,3 +445,12 @@ task nph, "Install nph if needed and format modified Nim files":
 
 task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
+
+task alltests,
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp":
+  exec "nimble test"
+  exec "nimble testApi"
+  exec "nimble testFfiApi"
+  exec "nimble testFfiApiCpp"
+  exec "nimble runFfiExamplePy"
+  exec "nimble runFfiExampleCpp"
