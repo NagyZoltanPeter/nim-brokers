@@ -4,3 +4,4 @@ nimbledeps
 build/
 **/build/*
 **/cmake-build/
+.gitnexus
