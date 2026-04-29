@@ -813,7 +813,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               # Cancel the pending recv future to deregister the ThreadSignal wait
               # from the chronos dispatcher — prevents access violation if this
               # thread exits while provider later calls fireSync() (Windows IOCP).
-              await cancelAndWait(recvFut)
+              recvFut.cancelSoon()
               return err(
                 "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                   completedRes.error.msg
@@ -827,7 +827,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
               # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
               # (e.g. trySendSync returning bool, or close that defers inner dealloc).
-              await cancelAndWait(recvFut)
+              recvFut.cancelSoon()
               return err(
                 "RequestBroker(" & `typeNameLit` &
                   "): cross-thread request timed out after " & $`timeoutVarIdent`
@@ -1127,7 +1127,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             # Cancel the pending recv future to deregister the ThreadSignal wait
             # from the chronos dispatcher — prevents access violation if this
             # thread exits while provider later calls fireSync() (Windows IOCP).
-            await cancelAndWait(recvFut)
+            recvFut.cancel()
             return err(
               "RequestBroker(" & `typeNameLit` & "): recv failed: " &
                 completedRes.error.msg
@@ -1141,7 +1141,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             # nobody reads.  Intentional leak (~200 bytes + OS signal handle).
             # TODO: upstream fix in nim-asyncchannels — need a safe abandon API
             # (e.g. trySendSync returning bool, or close that defers inner dealloc).
-            await cancelAndWait(recvFut)
+            recvFut.cancel()
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): cross-thread request timed out after " & $`timeoutVarIdent`

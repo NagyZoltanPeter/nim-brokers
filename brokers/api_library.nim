@@ -955,6 +955,18 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
 
+        # Drain residual callSoon callbacks left pending on the calling thread.
+        # Under --mm:refc, each waitFor leaves callbacks after the poll sentinel;
+        # without draining, the ZCT grows across context lifecycles and eventually
+        # triggers collectZCT on a freed cell (cell.typ == nil → SIGSEGV).
+        block:
+          proc drainCallerCallbacks() {.async: (raises: []).} =
+            let sleepRes = catch:
+              await sleepAsync(milliseconds(1))
+            if sleepRes.isErr():
+              discard
+          waitFor drainCallerCallbacks()
+
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
         joinThread(entryPtr.delivThread)
