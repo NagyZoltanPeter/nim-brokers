@@ -248,17 +248,17 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-        if "--mm:refc" in opt:
-          echo "Skipping " & f & " (" & opt & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+      # when defined(windows):
+      #   # On Windows, chronos' waitForSingleObject fires its completion callback
+      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+      #   # suspends known Nim threads, so it can collect futures/handles still
+      #   # referenced by the unsuspended thread-pool callback → crash.
+      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+      #   if "--mm:refc" in opt:
+      #     echo "Skipping " & f & " (" & opt & ") on Windows: " &
+      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #     continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
@@ -374,16 +374,16 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      when defined(windows):
+      # when defined(windows):
         # On Windows, chronos' waitForSingleObject fires its completion callback
         # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
         # is not a Nim thread.  With --mm:refc the stop-the-world GC only
         # suspends known Nim threads, so it can collect futures/handles still
         # referenced by the unsuspended thread-pool callback → crash.Skip refc on Windows.
-        if "refc" in mm:
-          echo "Skipping (" & mm & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+        # if "refc" in mm:
+        #   echo "Skipping (" & mm & ") on Windows: " &
+        #     "refc STW GC is incompatible with chronos thread-pool callbacks."
+        #   continue
       buildTypeMapTestLibrary(mm, release)
       let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
@@ -406,11 +406,11 @@ task testFfiApiCpp,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
-      when defined(windows):
-        if "refc" in mm:
-          echo "Skipping (" & mm & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+      # when defined(windows):
+      #   if "refc" in mm:
+      #     echo "Skipping (" & mm & ") on Windows: " &
+      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #     continue
       buildTypeMapTestLibrary(mm, release)
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
