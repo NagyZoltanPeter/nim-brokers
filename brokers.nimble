@@ -375,15 +375,15 @@ task testFfiApi,
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
       # when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.Skip refc on Windows.
-        # if "refc" in mm:
-        #   echo "Skipping (" & mm & ") on Windows: " &
-        #     "refc STW GC is incompatible with chronos thread-pool callbacks."
-        #   continue
+      # On Windows, chronos' waitForSingleObject fires its completion callback
+      # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+      # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+      # suspends known Nim threads, so it can collect futures/handles still
+      # referenced by the unsuspended thread-pool callback → crash.Skip refc on Windows.
+      # if "refc" in mm:
+      #   echo "Skipping (" & mm & ") on Windows: " &
+      #     "refc STW GC is incompatible with chronos thread-pool callbacks."
+      #   continue
       buildTypeMapTestLibrary(mm, release)
       let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default

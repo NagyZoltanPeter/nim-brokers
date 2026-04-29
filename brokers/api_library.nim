@@ -965,6 +965,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
               await sleepAsync(milliseconds(1))
             if sleepRes.isErr():
               discard
+
           waitFor drainCallerCallbacks()
 
         # Signal delivery thread shutdown first

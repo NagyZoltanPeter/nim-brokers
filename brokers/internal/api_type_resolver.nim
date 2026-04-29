@@ -415,7 +415,9 @@ proc emitAutoRegistrations*(externalIdents: seq[NimNode]): NimNode {.compileTime
 # Array size const discovery and pre-registration
 # ---------------------------------------------------------------------------
 
-proc collectArraySizeIdents(n: NimNode, found: var seq[NimNode], seen: var seq[string]) {.compileTime.} =
+proc collectArraySizeIdents(
+    n: NimNode, found: var seq[NimNode], seen: var seq[string]
+) {.compileTime.} =
   ## Recursively walk the AST and collect ident nodes used as the size of
   ## `array[Size, T]` expressions. Deduplicates by name.
   if n.kind == nnkBracketExpr and n.len == 3 and ($n[0]).toLowerAscii() == "array":

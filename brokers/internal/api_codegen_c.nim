@@ -81,8 +81,7 @@ proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
       value
     else:
       error(
-        "array size const must resolve to an integer literal for FFI codegen",
-        sizeNode,
+        "array size const must resolve to an integer literal for FFI codegen", sizeNode
       )
   of nnkIdent:
     # Untyped ident — for `array[ConstName, T]` the broker macro pre-pass
