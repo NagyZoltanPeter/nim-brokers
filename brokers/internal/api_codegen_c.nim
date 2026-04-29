@@ -13,7 +13,7 @@
 
 {.push raises: [].}
 
-import std/[compilesettings, macros, os, strutils]
+import std/[compilesettings, macros, os, strutils, tables]
 import ./api_schema
 
 export api_schema
@@ -44,13 +44,66 @@ proc isArrayTypeNode*(nimType: NimNode): bool {.compileTime.} =
   nimType.kind == nnkBracketExpr and nimType.len == 3 and
     ($nimType[0]).toLowerAscii() == "array"
 
-proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
-  ## Extracts N from an `array[N, T]` node.
-  assert isArrayTypeNode(nimType)
-  if nimType[1].kind == nnkIntLit:
-    int(nimType[1].intVal)
+proc constNodeIntValue(impl: NimNode): (bool, int) {.compileTime.} =
+  ## Returns (true, value) if `impl` is (or wraps) an integer literal const value.
+  if impl.kind == nnkIntLit:
+    (true, int(impl.intVal))
+  elif impl.kind == nnkConstDef and impl[2].kind == nnkIntLit:
+    (true, int(impl[2].intVal))
   else:
-    error("array size must be an integer literal for FFI codegen", nimType[1])
+    (false, 0)
+
+# Compile-time registry for user-defined int consts used as array sizes.
+# Populated in a typed pre-pass (`registerArraySizeConst`) so the deferred
+# untyped codegen can resolve `array[ConstName, T]` to a literal length.
+var gArraySizeConsts* {.compileTime.}: Table[string, int]
+
+proc registerArraySizeValue*(name: string, value: int) {.compileTime.} =
+  gArraySizeConsts[name] = value
+
+proc lookupArraySizeConst*(name: string): (bool, int) {.compileTime.} =
+  if gArraySizeConsts.hasKey(name):
+    (true, gArraySizeConsts.getOrDefault(name, 0))
+  else:
+    (false, 0)
+
+proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
+  ## Extracts N from an `array[N, T]` node, supporting integer literals,
+  ## resolved const symbols, and pre-registered const identifiers.
+  assert isArrayTypeNode(nimType)
+  let sizeNode = nimType[1]
+  case sizeNode.kind
+  of nnkIntLit:
+    int(sizeNode.intVal)
+  of nnkSym:
+    let (ok, value) = constNodeIntValue(sizeNode.getImpl())
+    if ok:
+      value
+    else:
+      error(
+        "array size const must resolve to an integer literal for FFI codegen",
+        sizeNode,
+      )
+  of nnkIdent:
+    # Untyped ident — for `array[ConstName, T]` the broker macro pre-pass
+    # registers the const value via `registerArraySizeConst`. Look it up.
+    let (ok, value) = lookupArraySizeConst(sizeNode.strVal)
+    if ok:
+      value
+    else:
+      error(
+        "array size '" & sizeNode.strVal &
+          "' is not a registered int const. The broker pre-pass should have " &
+          "resolved it — ensure the const is in scope where the broker is " &
+          "declared.",
+        sizeNode,
+      )
+  else:
+    error(
+      "array size must be an integer literal or const for FFI codegen (got " &
+        $sizeNode.kind & ": " & sizeNode.repr & ")",
+      sizeNode,
+    )
 
 proc arrayNodeElemName*(nimType: NimNode): string {.compileTime.} =
   ## Extracts the element type name from an `array[N, T]` node.

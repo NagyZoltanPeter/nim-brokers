@@ -1,6 +1,6 @@
-## pytestlib — API test library for Python binding validation
-## ===========================================================
-## Exercises every Nim→C→Python type mapping through request params,
+## typemappingtestlib — API test library for C/C++/Python binding validation
+## =========================================================================
+## Exercises every Nim→C→C++/Python type mapping through request params,
 ## request results, and event callback fields.
 ##
 ## Type coverage:
@@ -9,11 +9,11 @@
 ##   Distinct:       JobId (distinct int32), Timestamp (distinct int64)
 ##   seq results:    seq[byte], seq[string], seq[int64], seq[Tag]
 ##   seq params:     seq[Tag] (seq[object]), seq[string], seq[int64]
-##   array results:  array[4, int32]
+##   array results:  array[4, int32], array[ConstArrayLen, int32] (const-defined size)
 ##   Event fields:   all of the above
 ##
 ## Build (from repo root):
-##   nimble buildPyTestLib
+##   nimble buildTypeMapTestLib
 
 {.push raises: [].}
 
@@ -40,6 +40,9 @@ type Timestamp* = distinct int64
 type Tag* = object
   key*: string
   value*: string
+
+## ConstArrayLen — exercises const-defined array size in FFI codegen.
+const ConstArrayLen* = 6
 
 # ---------------------------------------------------------------------------
 # Request Brokers — original
@@ -135,6 +138,19 @@ RequestBroker(API):
     ts*: Timestamp
 
   proc signature*(seed: int32): Future[Result[FixedArrayRequest, string]] {.async.}
+
+## ConstArrayRequest: returns array[ConstArrayLen, int32] = [seed*1 .. seed*ConstArrayLen].
+## Exercises const-defined array size in FFI codegen (nnkIdent path of arrayNodeSize).
+RequestBroker(API):
+  type ConstArrayRequest = object
+    values*: array[ConstArrayLen, int32]
+
+  proc signature*(seed: int32): Future[Result[ConstArrayRequest, string]] {.async.}
+
+## ConstArrayEvent: array[ConstArrayLen, int32] in callback field (same const path).
+EventBroker(API):
+  type ConstArrayEvent = object
+    values*: array[ConstArrayLen, int32]
 
 ## ObjSeqResultRequest: returns seq[Tag] with n entries (key-i / val-i).
 RequestBroker(API):
@@ -345,6 +361,16 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(FixedArrayRequest(values: vals, ts: Timestamp(int64(seed)))),
   )
 
+  discard ConstArrayRequest.setProvider(
+    ctx,
+    proc(seed: int32): Future[Result[ConstArrayRequest, string]] {.closure, async.} =
+      var vals: array[ConstArrayLen, int32]
+      for i in 0 ..< ConstArrayLen:
+        vals[i] = seed * int32(i + 1)
+      await ConstArrayEvent.emit(gProviderCtx, ConstArrayEvent(values: vals))
+      return ok(ConstArrayRequest(values: vals)),
+  )
+
   discard ObjSeqResultRequest.setProvider(
     ctx,
     proc(n: int32): Future[Result[ObjSeqResultRequest, string]] {.closure, async.} =
@@ -411,7 +437,7 @@ proc setupProviders(ctx: BrokerContext) =
 
 registerBrokerLibrary:
   name:
-    "pytestlib"
+    "typemappingtestlib"
   initializeRequest:
     InitializeRequest
   shutdownRequest:

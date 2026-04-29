@@ -1254,13 +1254,19 @@ macro generateApiEventBrokerDeferred*(body: untyped): untyped =
 proc generateApiEventBroker*(body: NimNode): NimNode =
   ## Two-phase API event broker generation:
   ## 1. Emit `autoRegisterApiType` calls for external types (typed macro phase)
-  ## 2. Emit deferred codegen macro that runs AFTER types are registered
+  ##    and `registerArraySizeConst` calls for array-size const idents
+  ## 2. Emit deferred codegen macro that runs AFTER registrations complete
   result = newStmtList()
 
-  # Phase 1: auto-register external types
+  # Phase 1a: auto-register external types
   let externalIdents = discoverExternalTypes(body)
   if externalIdents.len > 0:
     result.add(emitAutoRegistrations(externalIdents))
+
+  # Phase 1b: pre-resolve const idents used as array sizes
+  let sizeIdents = discoverArraySizeIdents(body)
+  if sizeIdents.len > 0:
+    result.add(emitArraySizeRegistrations(sizeIdents))
 
   # Phase 2: deferred codegen
   result.add(newCall(ident("generateApiEventBrokerDeferred"), copyNimTree(body)))

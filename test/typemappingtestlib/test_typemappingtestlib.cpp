@@ -1,8 +1,8 @@
 /**
- * test_pytestlib.cpp
- * ==================
- * C++ port of test_pytestlib.py — covers every Nim→C→C++ type mapping
- * through the generated C++ wrapper (pytestlib.hpp).
+ * test_typemappingtestlib.cpp
+ * ===========================
+ * C++ port of test_typemappingtestlib.py — covers every Nim→C→C++ type mapping
+ * through the generated C++ wrapper (typemappingtestlib.hpp).
  *
  * Type mapping coverage:
  *   Scalars:    bool, int32, int64, float64, string
@@ -10,12 +10,12 @@
  *   Distinct:   JobId (int32), Timestamp (int64)
  *   seq result: seq[byte], seq[string], seq[int64], seq[Tag]
  *   seq params: seq[Tag], seq[string], seq[int64]
- *   array:      array[4, int32]
+ *   array:      array[4, int32], array[ConstArrayLen, int32] (const-defined size)
  *   Events:     all of the above in callback fields
  *
  * Build (from repo root):
- *   nimble buildPyTestLib
- *   (cmake step handled by  nimble testFfiApiCpp)
+ *   nimble buildTypeMapTestLib
+ *   (cmake step handled by nimble testTypeMap)
  */
 
 #include <array>
@@ -29,9 +29,9 @@
 #include <thread>
 #include <vector>
 
-#include "pytestlib.hpp"
+#include "typemappingtestlib.hpp"
 
-using namespace pytestlib;
+using namespace typemappingtestlib;
 
 // ============================================================================
 // Minimal test framework
@@ -149,7 +149,7 @@ static bool waitFor(Pred pred, double timeoutSec = 2.0) {
 // ============================================================================
 
 static void test_lifecycle_create_and_shutdown() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     CHECK(!lib.validContext());
     auto r = lib.createContext();
     CHECK(r.ok());
@@ -162,7 +162,7 @@ static void test_lifecycle_create_and_shutdown() {
 static void test_lifecycle_raii_shutdown() {
     uint32_t savedCtx = 0;
     {
-        Pytestlib lib;
+        Typemappingtestlib lib;
         lib.createContext();
         savedCtx = lib.ctx();
         CHECK_NE(savedCtx, 0u);
@@ -173,14 +173,14 @@ static void test_lifecycle_raii_shutdown() {
 }
 
 static void test_lifecycle_double_shutdown_is_safe() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.shutdown();
     lib.shutdown(); // must not crash
 }
 
 static void test_lifecycle_double_create_returns_error() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     auto r1 = lib.createContext();
     CHECK(r1.ok());
     auto r2 = lib.createContext();
@@ -189,7 +189,7 @@ static void test_lifecycle_double_create_returns_error() {
 }
 
 static void test_lifecycle_request_without_context_fails() {
-    Pytestlib lib; // ctx_ == 0
+    Typemappingtestlib lib; // ctx_ == 0
     auto r = lib.echoRequest("hello");
     CHECK(!r.ok());
 }
@@ -199,7 +199,7 @@ static void test_lifecycle_request_without_context_fails() {
 // ============================================================================
 
 static void test_requests_initialize() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.initializeRequest("test-label");
     CHECK(r.ok());
@@ -208,7 +208,7 @@ static void test_requests_initialize() {
 }
 
 static void test_requests_echo() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("ctx-A");
     auto r = lib.echoRequest("hello");
@@ -218,7 +218,7 @@ static void test_requests_echo() {
 }
 
 static void test_requests_counter_increments() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     for (int32_t expected = 1; expected <= 3; ++expected) {
         auto r = lib.counterRequest();
@@ -229,7 +229,7 @@ static void test_requests_counter_increments() {
 }
 
 static void test_requests_multiple_echo() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("multi");
     for (int i = 0; i < 5; ++i) {
@@ -245,11 +245,11 @@ static void test_requests_multiple_echo() {
 // ============================================================================
 
 static void test_events_counter_changed() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::pair<uint32_t, int32_t>> received;
-    auto h = lib.onCounterChanged([&received, &lib](Pytestlib& owner, int32_t v) {
+    auto h = lib.onCounterChanged([&received, &lib](Typemappingtestlib& owner, int32_t v) {
         received.push({owner.ctx(), v});
     });
     CHECK_NE(h, 0ull);
@@ -271,11 +271,11 @@ static void test_events_counter_changed() {
 }
 
 static void test_events_off_stops_delivery() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<int32_t> received;
-    auto h = lib.onCounterChanged([&received](Pytestlib&, int32_t v) {
+    auto h = lib.onCounterChanged([&received](Typemappingtestlib&, int32_t v) {
         received.push(v);
     });
 
@@ -301,7 +301,7 @@ static void sleepMs(int ms) {
 }
 
 static void test_context_independent_counters() {
-    Pytestlib lib1, lib2;
+    Typemappingtestlib lib1, lib2;
     lib1.createContext();
     lib2.createContext();
     CHECK_NE(lib1.ctx(), lib2.ctx());
@@ -321,7 +321,7 @@ static void test_context_independent_counters() {
 }
 
 static void test_context_independent_echo() {
-    Pytestlib lib1, lib2;
+    Typemappingtestlib lib1, lib2;
     lib1.createContext();
     lib2.createContext();
 
@@ -338,14 +338,14 @@ static void test_context_independent_echo() {
 
 static void test_context_independent_events() {
     SafeList<int32_t> events1, events2;
-    Pytestlib lib1, lib2;
+    Typemappingtestlib lib1, lib2;
     lib1.createContext();
     lib2.createContext();
 
     auto h1 =
-        lib1.onCounterChanged([&events1](Pytestlib&, int32_t v) { events1.push(v); });
+        lib1.onCounterChanged([&events1](Typemappingtestlib&, int32_t v) { events1.push(v); });
     auto h2 =
-        lib2.onCounterChanged([&events2](Pytestlib&, int32_t v) { events2.push(v); });
+        lib2.onCounterChanged([&events2](Typemappingtestlib&, int32_t v) { events2.push(v); });
 
     lib1.counterRequest();
     lib1.counterRequest();
@@ -369,7 +369,7 @@ static void test_context_independent_events() {
 }
 
 static void test_context_shutdown_one_does_not_affect_other() {
-    Pytestlib lib1, lib2;
+    Typemappingtestlib lib1, lib2;
     lib1.createContext();
     lib2.createContext();
 
@@ -391,7 +391,7 @@ static void test_context_shutdown_one_does_not_affect_other() {
 // ============================================================================
 
 static void test_scalar_bool_true() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(true, 0, 0, 0.0);
     CHECK(r.ok());
@@ -400,7 +400,7 @@ static void test_scalar_bool_true() {
 }
 
 static void test_scalar_bool_false() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(false, 0, 0, 0.0);
     CHECK(r.ok());
@@ -409,7 +409,7 @@ static void test_scalar_bool_false() {
 }
 
 static void test_scalar_int32_roundtrip() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     auto r1 = lib.primScalarRequest(false, INT32_MIN, 0, 0.0);
@@ -424,7 +424,7 @@ static void test_scalar_int32_roundtrip() {
 }
 
 static void test_scalar_int64_roundtrip() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     int64_t big = 9'000'000'000'000LL;
     auto r = lib.primScalarRequest(false, 0, big, 0.0);
@@ -434,7 +434,7 @@ static void test_scalar_int64_roundtrip() {
 }
 
 static void test_scalar_float64_roundtrip() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     double pi = 3.141592653589793;
     auto r = lib.primScalarRequest(false, 0, 0, pi);
@@ -444,7 +444,7 @@ static void test_scalar_float64_roundtrip() {
 }
 
 static void test_scalar_all_fields_roundtrip() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(true, 42, 1'000'000'000LL, 2.718);
     CHECK(r.ok());
@@ -456,13 +456,13 @@ static void test_scalar_all_fields_roundtrip() {
 }
 
 static void test_scalar_prim_scalar_event() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     struct Evt { bool flag; int32_t i32; int64_t i64; double f64; };
     SafeList<Evt> evts;
     auto h = lib.onPrimScalarEvent(
-        [&evts](Pytestlib&, bool flag, int32_t i32, int64_t i64, double f64) {
+        [&evts](Typemappingtestlib&, bool flag, int32_t i32, int64_t i64, double f64) {
             evts.push({flag, i32, i64, f64});
         });
 
@@ -481,12 +481,12 @@ static void test_scalar_prim_scalar_event() {
 }
 
 static void test_scalar_prim_scalar_event_false_flag() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<bool> evts;
     auto h = lib.onPrimScalarEvent(
-        [&evts](Pytestlib&, bool flag, int32_t, int64_t, double) {
+        [&evts](Typemappingtestlib&, bool flag, int32_t, int64_t, double) {
             evts.push(flag);
         });
 
@@ -505,7 +505,7 @@ static void test_scalar_prim_scalar_event_false_flag() {
 // ============================================================================
 
 static void test_enum_roundtrip_low() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 10);
     CHECK(r.ok());
@@ -515,7 +515,7 @@ static void test_enum_roundtrip_low() {
 }
 
 static void test_enum_roundtrip_high() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_HIGH, 1);
     CHECK(r.ok());
@@ -525,7 +525,7 @@ static void test_enum_roundtrip_high() {
 }
 
 static void test_enum_roundtrip_critical() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_CRITICAL, 1);
     CHECK(r.ok());
@@ -534,7 +534,7 @@ static void test_enum_roundtrip_critical() {
 }
 
 static void test_distinct_jobid_echoed() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
     CHECK(r.ok());
@@ -543,7 +543,7 @@ static void test_distinct_jobid_echoed() {
 }
 
 static void test_distinct_jobid_next() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
     CHECK(r.ok());
@@ -552,7 +552,7 @@ static void test_distinct_jobid_next() {
 }
 
 static void test_distinct_jobid_zero() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.typedScalarRequest(PRIORITY_P_MEDIUM, 0);
     CHECK(r.ok());
@@ -562,7 +562,7 @@ static void test_distinct_jobid_zero() {
 }
 
 static void test_all_priority_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     Priority priorities[] = {
         PRIORITY_P_LOW, PRIORITY_P_MEDIUM, PRIORITY_P_HIGH, PRIORITY_P_CRITICAL
@@ -576,13 +576,13 @@ static void test_all_priority_values() {
 }
 
 static void test_typed_scalar_event_enum() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     struct Evt { Priority priority; int32_t jobId; int64_t ts; };
     SafeList<Evt> evts;
     auto h = lib.onTypedScalarEvent(
-        [&evts](Pytestlib&, Priority p, int32_t jid, int64_t ts) {
+        [&evts](Typemappingtestlib&, Priority p, int32_t jid, int64_t ts) {
             evts.push({p, jid, ts});
         });
 
@@ -601,12 +601,12 @@ static void test_typed_scalar_event_enum() {
 }
 
 static void test_typed_scalar_event_distinct_timestamp() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<int64_t> evts;
     auto h = lib.onTypedScalarEvent(
-        [&evts](Pytestlib&, Priority, int32_t, int64_t ts) { evts.push(ts); });
+        [&evts](Typemappingtestlib&, Priority, int32_t, int64_t ts) { evts.push(ts); });
 
     lib.typedScalarRequest(PRIORITY_P_LOW, 3);
     waitFor([&] { return evts.size() >= 1; });
@@ -619,7 +619,7 @@ static void test_typed_scalar_event_distinct_timestamp() {
 }
 
 static void test_fixedarray_result_contains_timestamp() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(99);
     CHECK(r.ok());
@@ -632,7 +632,7 @@ static void test_fixedarray_result_contains_timestamp() {
 // ============================================================================
 
 static void test_seq_byte_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
     CHECK(r.ok());
@@ -641,7 +641,7 @@ static void test_seq_byte_empty() {
 }
 
 static void test_seq_byte_length() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(8);
     CHECK(r.ok());
@@ -650,7 +650,7 @@ static void test_seq_byte_length() {
 }
 
 static void test_seq_byte_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(5);
     CHECK(r.ok());
@@ -661,7 +661,7 @@ static void test_seq_byte_values() {
 }
 
 static void test_seq_byte_wrap_around() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(260);
     CHECK(r.ok());
@@ -673,7 +673,7 @@ static void test_seq_byte_wrap_around() {
 }
 
 static void test_seq_byte_single_element() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(1);
     CHECK(r.ok());
@@ -683,7 +683,7 @@ static void test_seq_byte_single_element() {
 }
 
 static void test_seq_byte_large() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(100);
     CHECK(r.ok());
@@ -698,7 +698,7 @@ static void test_seq_byte_large() {
 // ============================================================================
 
 static void test_seq_string_result_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("x", 0);
     CHECK(r.ok());
@@ -707,7 +707,7 @@ static void test_seq_string_result_empty() {
 }
 
 static void test_seq_string_result_count() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("item", 4);
     CHECK(r.ok());
@@ -716,7 +716,7 @@ static void test_seq_string_result_count() {
 }
 
 static void test_seq_string_result_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("tag", 3);
     CHECK(r.ok());
@@ -728,7 +728,7 @@ static void test_seq_string_result_values() {
 }
 
 static void test_seq_string_result_special_chars() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("a/b:c", 2);
     CHECK(r.ok());
@@ -739,7 +739,7 @@ static void test_seq_string_result_special_chars() {
 }
 
 static void test_seq_string_param_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({});
     CHECK(r.ok());
@@ -749,7 +749,7 @@ static void test_seq_string_param_empty() {
 }
 
 static void test_seq_string_param_single() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"hello"});
     CHECK(r.ok());
@@ -759,7 +759,7 @@ static void test_seq_string_param_single() {
 }
 
 static void test_seq_string_param_multiple() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"alpha", "beta", "gamma"});
     CHECK(r.ok());
@@ -769,7 +769,7 @@ static void test_seq_string_param_multiple() {
 }
 
 static void test_seq_string_param_unicode() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"héllo", "wörld"});
     CHECK(r.ok());
@@ -779,12 +779,12 @@ static void test_seq_string_param_unicode() {
 }
 
 static void test_string_seq_event() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<std::string>> evts;
     auto h = lib.onStringSeqEvent(
-        [&evts](Pytestlib&, std::span<const char*> items) {
+        [&evts](Typemappingtestlib&, std::span<const char*> items) {
             std::vector<std::string> v;
             for (const char* s : items)
                 v.emplace_back(s ? s : "");
@@ -806,12 +806,12 @@ static void test_string_seq_event() {
 }
 
 static void test_string_seq_event_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<std::string>> evts;
     auto h = lib.onStringSeqEvent(
-        [&evts](Pytestlib&, std::span<const char*> items) {
+        [&evts](Typemappingtestlib&, std::span<const char*> items) {
             evts.push(std::vector<std::string>(items.begin(), items.end()));
         });
 
@@ -830,7 +830,7 @@ static void test_string_seq_event_empty() {
 // ============================================================================
 
 static void test_prim_seq_result_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(0);
     CHECK(r.ok());
@@ -839,7 +839,7 @@ static void test_prim_seq_result_empty() {
 }
 
 static void test_prim_seq_result_length() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(5);
     CHECK(r.ok());
@@ -848,7 +848,7 @@ static void test_prim_seq_result_length() {
 }
 
 static void test_prim_seq_result_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(4);
     CHECK(r.ok());
@@ -859,7 +859,7 @@ static void test_prim_seq_result_values() {
 }
 
 static void test_prim_seq_result_large_int64() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(3);
     CHECK(r.ok());
@@ -868,7 +868,7 @@ static void test_prim_seq_result_large_int64() {
 }
 
 static void test_prim_seq_param_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({});
     CHECK(r.ok());
@@ -878,7 +878,7 @@ static void test_prim_seq_param_empty() {
 }
 
 static void test_prim_seq_param_single() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({42LL});
     CHECK(r.ok());
@@ -888,7 +888,7 @@ static void test_prim_seq_param_single() {
 }
 
 static void test_prim_seq_param_sum() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({1LL, 2LL, 3LL, 4LL, 5LL});
     CHECK(r.ok());
@@ -898,7 +898,7 @@ static void test_prim_seq_param_sum() {
 }
 
 static void test_prim_seq_param_large_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     int64_t big = 1'000'000'000'000LL;
     auto r = lib.primSeqParamRequest({big, big});
@@ -909,12 +909,12 @@ static void test_prim_seq_param_large_values() {
 }
 
 static void test_prim_seq_event() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<int64_t>> evts;
     auto h = lib.onPrimSeqEvent(
-        [&evts](Pytestlib&, std::span<const int64_t> values) {
+        [&evts](Typemappingtestlib&, std::span<const int64_t> values) {
             evts.push(std::vector<int64_t>(values.begin(), values.end()));
         });
 
@@ -933,12 +933,12 @@ static void test_prim_seq_event() {
 }
 
 static void test_prim_seq_event_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<int64_t>> evts;
     auto h = lib.onPrimSeqEvent(
-        [&evts](Pytestlib&, std::span<const int64_t> values) {
+        [&evts](Typemappingtestlib&, std::span<const int64_t> values) {
             evts.push(std::vector<int64_t>(values.begin(), values.end()));
         });
 
@@ -957,7 +957,7 @@ static void test_prim_seq_event_empty() {
 // ============================================================================
 
 static void test_array_result_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(5);
     CHECK(r.ok());
@@ -969,7 +969,7 @@ static void test_array_result_values() {
 }
 
 static void test_array_result_length() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(1);
     CHECK(r.ok());
@@ -978,7 +978,7 @@ static void test_array_result_length() {
 }
 
 static void test_array_result_seed_zero() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(0);
     CHECK(r.ok());
@@ -988,7 +988,7 @@ static void test_array_result_seed_zero() {
 }
 
 static void test_array_result_negative_seed() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(-3);
     CHECK(r.ok());
@@ -1000,7 +1000,7 @@ static void test_array_result_negative_seed() {
 }
 
 static void test_array_result_timestamp() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(42);
     CHECK(r.ok());
@@ -1009,12 +1009,12 @@ static void test_array_result_timestamp() {
 }
 
 static void test_fixed_array_event() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<int32_t>> evts;
     auto h = lib.onFixedArrayEvent(
-        [&evts](Pytestlib&, std::span<const int32_t> values) {
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
             evts.push(std::vector<int32_t>(values.begin(), values.end()));
         });
 
@@ -1034,12 +1034,12 @@ static void test_fixed_array_event() {
 }
 
 static void test_fixed_array_event_zero_seed() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<int32_t>> evts;
     auto h = lib.onFixedArrayEvent(
-        [&evts](Pytestlib&, std::span<const int32_t> values) {
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
             evts.push(std::vector<int32_t>(values.begin(), values.end()));
         });
 
@@ -1055,12 +1055,12 @@ static void test_fixed_array_event_zero_seed() {
 }
 
 static void test_fixed_array_multiple_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<std::vector<int32_t>> evts;
     auto h = lib.onFixedArrayEvent(
-        [&evts](Pytestlib&, std::span<const int32_t> values) {
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
             evts.push(std::vector<int32_t>(values.begin(), values.end()));
         });
 
@@ -1091,7 +1091,7 @@ static void test_fixed_array_multiple_requests() {
 // ============================================================================
 
 static void test_obj_seq_param_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqParamRequest({});
     CHECK(r.ok());
@@ -1108,7 +1108,7 @@ static Tag makeTag(std::string key, std::string value) {
 }
 
 static void test_obj_seq_param_single() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     std::vector<Tag> tags = {makeTag("mykey", "myval")};
     auto r = lib.objSeqParamRequest(tags);
@@ -1119,7 +1119,7 @@ static void test_obj_seq_param_single() {
 }
 
 static void test_obj_seq_param_multiple() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     std::vector<Tag> tags = {
         makeTag("first", "1"), makeTag("second", "2"), makeTag("third", "3")
@@ -1132,7 +1132,7 @@ static void test_obj_seq_param_multiple() {
 }
 
 static void test_obj_seq_param_string_encoding() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     std::vector<Tag> tags = {makeTag("key with spaces", "value/path")};
     auto r = lib.objSeqParamRequest(tags);
@@ -1143,7 +1143,7 @@ static void test_obj_seq_param_string_encoding() {
 }
 
 static void test_obj_seq_result_empty() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(0);
     CHECK(r.ok());
@@ -1152,7 +1152,7 @@ static void test_obj_seq_result_empty() {
 }
 
 static void test_obj_seq_result_length() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(4);
     CHECK(r.ok());
@@ -1161,7 +1161,7 @@ static void test_obj_seq_result_length() {
 }
 
 static void test_obj_seq_result_keys() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(3);
     CHECK(r.ok());
@@ -1173,7 +1173,7 @@ static void test_obj_seq_result_keys() {
 }
 
 static void test_obj_seq_result_values() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(3);
     CHECK(r.ok());
@@ -1184,7 +1184,7 @@ static void test_obj_seq_result_values() {
 }
 
 static void test_obj_seq_result_tag_fields() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(2);
     CHECK(r.ok());
@@ -1196,7 +1196,7 @@ static void test_obj_seq_result_tag_fields() {
 }
 
 static void test_obj_seq_roundtrip() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     // Generate tags via result request
     auto gen = lib.objSeqResultRequest(3);
@@ -1210,20 +1210,134 @@ static void test_obj_seq_roundtrip() {
 }
 
 // ============================================================================
+// TestConstArraySize — array[ConstArrayLen, int32] (const-defined size)
+// Exercises the arrayNodeSize nnkIdent path in api_codegen_c.nim.
+// ============================================================================
+
+static constexpr size_t kConstArrayLen = 6;
+
+static void test_const_array_result_length() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.constArrayRequest(1);
+    CHECK(r.ok());
+    CHECK_EQ(r->values.size(), kConstArrayLen);
+    lib.shutdown();
+}
+
+static void test_const_array_result_values() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    // Provider: values[i] = seed * (i + 1)
+    auto r = lib.constArrayRequest(3);
+    CHECK(r.ok());
+    CHECK_EQ(r->values.size(), kConstArrayLen);
+    int32_t expected[] = {3, 6, 9, 12, 15, 18};
+    for (size_t i = 0; i < kConstArrayLen; ++i)
+        CHECK_EQ(r->values[i], expected[i]);
+    lib.shutdown();
+}
+
+static void test_const_array_result_zero_seed() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.constArrayRequest(0);
+    CHECK(r.ok());
+    for (auto v : r->values)
+        CHECK_EQ(v, 0);
+    lib.shutdown();
+}
+
+static void test_const_array_result_negative_seed() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.constArrayRequest(-2);
+    CHECK(r.ok());
+    int32_t expected[] = {-2, -4, -6, -8, -10, -12};
+    for (size_t i = 0; i < kConstArrayLen; ++i)
+        CHECK_EQ(r->values[i], expected[i]);
+    lib.shutdown();
+}
+
+static void test_const_array_event_values() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<std::vector<int32_t>> evts;
+    auto h = lib.onConstArrayEvent(
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
+            evts.push(std::vector<int32_t>(values.begin(), values.end()));
+        });
+
+    lib.constArrayRequest(2);
+    waitFor([&] { return evts.size() >= 1; });
+
+    CHECK_EQ(evts.size(), 1u);
+    auto snap = evts.at(0);
+    CHECK_EQ(snap.size(), kConstArrayLen);
+    int32_t expected[] = {2, 4, 6, 8, 10, 12};
+    for (size_t i = 0; i < kConstArrayLen; ++i)
+        CHECK_EQ(snap[i], expected[i]);
+
+    lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+static void test_const_array_event_length() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<std::vector<int32_t>> evts;
+    auto h = lib.onConstArrayEvent(
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
+            evts.push(std::vector<int32_t>(values.begin(), values.end()));
+        });
+
+    lib.constArrayRequest(1);
+    waitFor([&] { return evts.size() >= 1; });
+
+    CHECK_EQ(evts.at(0).size(), kConstArrayLen);
+
+    lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+static void test_const_array_event_zero_seed() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<std::vector<int32_t>> evts;
+    auto h = lib.onConstArrayEvent(
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
+            evts.push(std::vector<int32_t>(values.begin(), values.end()));
+        });
+
+    lib.constArrayRequest(0);
+    waitFor([&] { return evts.size() >= 1; });
+
+    CHECK_EQ(evts.size(), 1u);
+    for (auto v : evts.at(0))
+        CHECK_EQ(v, 0);
+
+    lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // TestMultipleEventListeners
 // ============================================================================
 
 static void test_two_scalar_event_listeners() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<int32_t> evts1, evts2;
     auto h1 = lib.onPrimScalarEvent(
-        [&evts1](Pytestlib&, bool, int32_t i32, int64_t, double) {
+        [&evts1](Typemappingtestlib&, bool, int32_t i32, int64_t, double) {
             evts1.push(i32);
         });
     auto h2 = lib.onPrimScalarEvent(
-        [&evts2](Pytestlib&, bool, int32_t i32, int64_t, double) {
+        [&evts2](Typemappingtestlib&, bool, int32_t i32, int64_t, double) {
             evts2.push(i32);
         });
 
@@ -1242,16 +1356,16 @@ static void test_two_scalar_event_listeners() {
 }
 
 static void test_remove_one_listener_keeps_other() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<int32_t> evts1, evts2;
     auto h1 = lib.onPrimScalarEvent(
-        [&evts1](Pytestlib&, bool, int32_t i32, int64_t, double) {
+        [&evts1](Typemappingtestlib&, bool, int32_t i32, int64_t, double) {
             evts1.push(i32);
         });
     auto h2 = lib.onPrimScalarEvent(
-        [&evts2](Pytestlib&, bool, int32_t i32, int64_t, double) {
+        [&evts2](Typemappingtestlib&, bool, int32_t i32, int64_t, double) {
             evts2.push(i32);
         });
 
@@ -1276,7 +1390,7 @@ static void test_remove_one_listener_keeps_other() {
 }
 
 static void test_concurrent_event_types() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     SafeList<int32_t> scalarEvts;
@@ -1284,15 +1398,15 @@ static void test_concurrent_event_types() {
     SafeList<std::vector<std::string>> stringEvts;
 
     auto hs = lib.onPrimScalarEvent(
-        [&scalarEvts](Pytestlib&, bool, int32_t i32, int64_t, double) {
+        [&scalarEvts](Typemappingtestlib&, bool, int32_t i32, int64_t, double) {
             scalarEvts.push(i32);
         });
     auto ha = lib.onFixedArrayEvent(
-        [&arrayEvts](Pytestlib&, std::span<const int32_t> values) {
+        [&arrayEvts](Typemappingtestlib&, std::span<const int32_t> values) {
             arrayEvts.push(std::vector<int32_t>(values.begin(), values.end()));
         });
     auto hst = lib.onStringSeqEvent(
-        [&stringEvts](Pytestlib&, std::span<const char*> items) {
+        [&stringEvts](Typemappingtestlib&, std::span<const char*> items) {
             std::vector<std::string> v;
             for (const char* s : items)
                 v.emplace_back(s ? s : "");
@@ -1344,7 +1458,7 @@ static void test_concurrent_event_types() {
 /// the caller's stack before crossing into the broker.  Verifies that all
 /// responses are correct — no GC-induced corruption.
 static void test_foreign_thread_concurrent_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("gc-test");
 
@@ -1403,7 +1517,7 @@ static void test_foreign_thread_concurrent_requests() {
 /// for seq[string] results, both of which create GC-managed Nim objects on
 /// the foreign thread's stack.
 static void test_foreign_thread_concurrent_seq_string_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("seq-str");
 
@@ -1448,7 +1562,7 @@ static void test_foreign_thread_concurrent_seq_string_requests() {
 /// Multiple foreign threads calling seq[int64] result requests concurrently.
 /// Exercises the decode/encode path for seq[primitive].
 static void test_foreign_thread_concurrent_seq_prim_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     constexpr int kThreads = 6;
@@ -1491,7 +1605,7 @@ static void test_foreign_thread_concurrent_seq_prim_requests() {
 /// This exercises the CItem encode/decode path where each Tag has two string
 /// fields allocated via allocCStringCopy on the shared heap.
 static void test_foreign_thread_concurrent_seq_object_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     constexpr int kThreads = 4;
@@ -1536,7 +1650,7 @@ static void test_foreign_thread_concurrent_seq_object_requests() {
 /// Exercises the decode path for seq[CItem] where each CItem has string fields
 /// that must be converted to Nim strings on the foreign thread.
 static void test_foreign_thread_concurrent_seq_object_param_requests() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     constexpr int kThreads = 4;
@@ -1590,7 +1704,7 @@ static void test_foreign_thread_concurrent_lifecycle() {
 
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t]() {
-            Pytestlib lib;
+            Typemappingtestlib lib;
             auto cr = lib.createContext();
             if (!cr.ok()) {
                 failures.fetch_add(1, std::memory_order_relaxed);
@@ -1626,7 +1740,7 @@ static void test_foreign_thread_concurrent_lifecycle() {
 /// concurrently, including requests that return error results (which allocate
 /// error_message via allocCStringCopy on the shared heap).
 static void test_foreign_thread_mixed_request_types() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("mixed");
 
@@ -1685,7 +1799,7 @@ static void test_foreign_thread_mixed_request_types() {
 /// types including seq[object] results and params.  Designed to trigger GC
 /// issues if foreign thread registration is broken.
 static void test_foreign_thread_stress_all_types() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
     lib.initializeRequest("stress");
 
@@ -1776,14 +1890,14 @@ static void test_foreign_thread_stress_all_types() {
 /// string fields must be freed after each callback — if they leak, this test
 /// would consume excessive memory over many iterations.
 static void test_seq_object_event_callback_data_correctness() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     struct TagData { std::string key; std::string value; };
     SafeList<std::vector<TagData>> received;
 
     auto h = lib.onTagSeqEvent(
-        [&received](Pytestlib&, std::span<const TagCItem> tags) {
+        [&received](Typemappingtestlib&, std::span<const TagCItem> tags) {
             std::vector<TagData> snapshot;
             for (const auto& t : tags) {
                 snapshot.push_back(TagData{
@@ -1830,12 +1944,12 @@ static void test_seq_object_event_callback_data_correctness() {
 /// If string fields inside CItems are not freed (the old bug), this would
 /// leak O(iterations * items * strings_per_item) allocations.
 static void test_seq_object_event_rapid_fire_no_leak() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Pytestlib&, std::span<const TagCItem>) {
+        [&eventCount](Typemappingtestlib&, std::span<const TagCItem>) {
             eventCount.fetch_add(1, std::memory_order_relaxed);
         });
 
@@ -1855,12 +1969,12 @@ static void test_seq_object_event_rapid_fire_no_leak() {
 /// concurrently.  Verifies that event callback memory (CItem allocations) is
 /// safe when the delivery thread runs concurrently with foreign requester threads.
 static void test_seq_object_event_concurrent_listeners_and_requesters() {
-    Pytestlib lib;
+    Typemappingtestlib lib;
     lib.createContext();
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Pytestlib&, std::span<const TagCItem> tags) {
+        [&eventCount](Typemappingtestlib&, std::span<const TagCItem> tags) {
             // Read tag data to ensure the CItem pointers are valid
             for (const auto& t : tags) {
                 if (t.key) {
@@ -1912,7 +2026,7 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
 // ============================================================================
 
 int main() {
-    printf("test_pytestlib — C++ type mapping coverage\n\n");
+    printf("test_typemappingtestlib — C++ type mapping coverage\n\n");
 
     printf("--- TestLifecycle ---\n");
     RUN(test_lifecycle_create_and_shutdown);
@@ -2000,6 +2114,15 @@ int main() {
     RUN(test_fixed_array_event);
     RUN(test_fixed_array_event_zero_seed);
     RUN(test_fixed_array_multiple_requests);
+
+    printf("\n--- TestConstArraySize ---\n");
+    RUN(test_const_array_result_length);
+    RUN(test_const_array_result_values);
+    RUN(test_const_array_result_zero_seed);
+    RUN(test_const_array_result_negative_seed);
+    RUN(test_const_array_event_values);
+    RUN(test_const_array_event_length);
+    RUN(test_const_array_event_zero_seed);
 
     printf("\n--- TestSeqObjectTypes ---\n");
     RUN(test_obj_seq_param_empty);

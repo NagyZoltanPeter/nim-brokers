@@ -248,17 +248,17 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      # when defined(windows):
-      #   # On Windows, chronos' waitForSingleObject fires its completion callback
-      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-      #   # suspends known Nim threads, so it can collect futures/handles still
-      #   # referenced by the unsuspended thread-pool callback → crash.
-      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-      #   if "--mm:refc" in opt:
-      #     echo "Skipping " & f & " (" & opt & ") on Windows: " &
-      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #     continue
+      when defined(windows):
+        # On Windows, chronos' waitForSingleObject fires its completion callback
+        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+        # suspends known Nim threads, so it can collect futures/handles still
+        # referenced by the unsuspended thread-pool callback → crash.
+        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
+        if "--mm:refc" in opt:
+          echo "Skipping " & f & " (" & opt & ") on Windows: " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
@@ -296,21 +296,21 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
-proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
+proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/pytestlib/build"
-  flags.add(nimMainPrefixFlag("pytestlib"))
+    " --path:. --outdir:test/typemappingtestlib/build"
+  flags.add(nimMainPrefixFlag("typemappingtestlib"))
   if release:
     flags.add(" -d:release")
-  exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
+  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
-proc pyTestCmakeBuildDir(): string =
-  "test/pytestlib/cmake-build"
+proc typeMapTestCmakeBuildDir(): string =
+  "test/typemappingtestlib/cmake-build"
 
-proc buildPyTestCmakeTarget(target = "") =
-  let cmakeDir = "test/pytestlib"
-  let buildDir = pyTestCmakeBuildDir()
+proc buildTypeMapTestCmakeTarget(target = "") =
+  let cmakeDir = "test/typemappingtestlib"
+  let buildDir = typeMapTestCmakeBuildDir()
   mkDir(buildDir)
   exec "cmake -S " & cmakeDir & " -B " & buildDir
   if target.len == 0:
@@ -318,11 +318,11 @@ proc buildPyTestCmakeTarget(target = "") =
   else:
     exec "cmake --build " & buildDir & " --target " & target
 
-proc pyTestCppExecutablePath(): string =
+proc typeMapTestCppExecutablePath(): string =
   when defined(windows):
-    "test/pytestlib/build/test_pytestlib.exe"
+    "test/typemappingtestlib/build/test_typemappingtestlib.exe"
   else:
-    "test/pytestlib/build/test_pytestlib"
+    "test/typemappingtestlib/build/test_typemappingtestlib"
 
 proc soElfBits(soPath: string): int =
   ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
@@ -365,8 +365,8 @@ proc findPythonForBits(wantBits: int): string =
       return c
   return ""
 
-task buildPyTestLib, "Build the Python binding test library":
-  buildPyTestLibrary()
+task buildTypeMapTestLib, "Build the type mapping test library (C/C++/Python)":
+  buildTypeMapTestLibrary()
 
 task testFfiApi,
   "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
@@ -374,22 +374,18 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      # when defined(windows):
-      #   # On Windows, chronos' waitForSingleObject fires its completion callback
-      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-      #   # suspends known Nim threads, so it can collect futures/handles still
-      #   # referenced by the unsuspended thread-pool callback → crash.
-      #   # On macOS, the same STW hazard applies across multiple context lifecycles
-      #   # under refc+release: GC can sweep futures still referenced by
-      #   # in-flight delivery/processing threads → SIGSEGV on stress tests.
-      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-      #   if "refc" in mm:
-      #     echo "Skipping (" & mm & ") on Windows: " &
-      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #     continue
-      buildPyTestLibrary(mm, release)
-      let bits = soElfBits("test/pytestlib/build/libpytestlib.so")
+      when defined(windows):
+        # On Windows, chronos' waitForSingleObject fires its completion callback
+        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
+        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
+        # suspends known Nim threads, so it can collect futures/handles still
+        # referenced by the unsuspended thread-pool callback → crash.Skip refc on Windows.
+        if "refc" in mm:
+          echo "Skipping (" & mm & ") on Windows: " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
+      buildTypeMapTestLibrary(mm, release)
+      let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
       # Python and let ctypes report any mismatch itself.
       let python =
@@ -401,7 +397,7 @@ task testFfiApi,
         echo "Skipping Python tests: no " & $bits &
           "-bit Python interpreter found to match the compiled .so."
         continue
-      exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
+      exec quoteArg(python) & " -m unittest discover -s test/typemappingtestlib -p " &
         quoteArg("test_*.py") & " -v"
 
 task testFfiApiCpp,
@@ -410,14 +406,14 @@ task testFfiApiCpp,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
-      # when defined(windows):
-      #   if "refc" in mm:
-      #     echo "Skipping (" & mm & ") on Windows: " &
-      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #     continue
-      buildPyTestLibrary(mm, release)
-      buildPyTestCmakeTarget("test_pytestlib")
-      exec quoteArg(pyTestCppExecutablePath())
+      when defined(windows):
+        if "refc" in mm:
+          echo "Skipping (" & mm & ") on Windows: " &
+            "refc STW GC is incompatible with chronos thread-pool callbacks."
+          continue
+      buildTypeMapTestLibrary(mm, release)
+      buildTypeMapTestCmakeTarget("test_typemappingtestlib")
+      exec quoteArg(typeMapTestCppExecutablePath())
 
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
@@ -447,10 +443,11 @@ task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
 
 task alltests,
-  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp":
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC":
   exec "nimble test"
   exec "nimble testApi"
   exec "nimble testFfiApi"
   exec "nimble testFfiApiCpp"
   exec "nimble runFfiExamplePy"
   exec "nimble runFfiExampleCpp"
+  exec "nimble runFfiExampleC"

@@ -42,7 +42,7 @@ set_target_properties(torpedo_cpp PROPERTIES
 )
 
 # Detect the architecture of the Nim-built .so and force the C++ compiler
-# to match (same rationale as pytestlib CMakeLists.txt).
+# to match (same rationale as typemappingtestlib CMakeLists.txt).
 if(UNIX AND NOT APPLE)
     set(SO_PATH "${TORPEDOLIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}torpedolib${CMAKE_SHARED_LIBRARY_SUFFIX}")
     if(EXISTS "${SO_PATH}")

@@ -44,7 +44,7 @@ Current test task coverage:
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
 - `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
-- 'nimble testFfiApiCpp' — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
+- `nimble testFfiApiCpp` — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -243,7 +243,7 @@ test/
   test_api_request_broker.nim
   test_api_event_broker.nim
   test_api_library_init.nim
-  pytestlib/                - similar to ffiapi example, it supports e2e testing of nim brokers through FFI and py bindings.
+  typemappingtestlib/       - exercises every Nim→C→C++/Python type mapping through FFI and generated bindings.
 ```
 
 ## Coding Conventions

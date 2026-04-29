@@ -411,4 +411,50 @@ proc emitAutoRegistrations*(externalIdents: seq[NimNode]): NimNode {.compileTime
   for typeIdent in externalIdents:
     result.add(newCall(ident("autoRegisterApiType"), typeIdent))
 
+# ---------------------------------------------------------------------------
+# Array size const discovery and pre-registration
+# ---------------------------------------------------------------------------
+
+proc collectArraySizeIdents(n: NimNode, found: var seq[NimNode], seen: var seq[string]) {.compileTime.} =
+  ## Recursively walk the AST and collect ident nodes used as the size of
+  ## `array[Size, T]` expressions. Deduplicates by name.
+  if n.kind == nnkBracketExpr and n.len == 3 and ($n[0]).toLowerAscii() == "array":
+    let sizeNode = n[1]
+    if sizeNode.kind == nnkIdent:
+      let name = sizeNode.strVal
+      if name notin seen:
+        seen.add(name)
+        found.add(sizeNode)
+  for child in n.children:
+    collectArraySizeIdents(child, found, seen)
+
+proc discoverArraySizeIdents*(body: NimNode): seq[NimNode] {.compileTime.} =
+  ## Scan an untyped macro body for identifiers used as `array[Ident, T]`
+  ## sizes. Returns ident nodes for each unique name.
+  result = @[]
+  var seen: seq[string] = @[]
+  collectArraySizeIdents(body, result, seen)
+
+{.pop.}
+
+macro registerArraySizeConst*(name: static[string], value: static[int]): untyped =
+  ## Typed pre-pass: Nim resolves the const reference at the call site
+  ## (in user scope) so we receive its int value, which we record in the
+  ## compile-time registry that `arrayNodeSize` consults.
+  registerArraySizeValue(name, value)
+  result = newStmtList()
+
+{.push raises: [].}
+
+proc emitArraySizeRegistrations*(sizeIdents: seq[NimNode]): NimNode {.compileTime.} =
+  ## Generate `registerArraySizeConst("Name", Name)` calls for each ident
+  ## used as an array size. Nim resolves the second arg via `static[int]`,
+  ## storing the int in the registry so `arrayNodeSize` can find it.
+  result = newStmtList()
+  for sizeIdent in sizeIdents:
+    let nameLit = newLit(sizeIdent.strVal)
+    result.add(
+      newCall(ident("registerArraySizeConst"), nameLit, copyNimTree(sizeIdent))
+    )
+
 {.pop.}

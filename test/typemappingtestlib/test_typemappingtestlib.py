@@ -7,11 +7,11 @@ Type mapping coverage:
   Distinct:   JobId (int32), Timestamp (int64)     (request param, result field, event field)
   seq result: seq[byte], seq[string], seq[int64], seq[Tag]
   seq params: seq[Tag] (seq[object]), seq[string], seq[int64]
-  array:      array[4, int32]                      (result field, event field)
+  array:      array[4, int32], array[ConstArrayLen, int32] (result field, event field)
   Events:     all of the above in callback fields
 
 Build the test library first:
-    nimble buildPyTestLib
+    nimble buildTypeMapTestLib
 
 Run:
     nimble testPy
@@ -27,7 +27,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "build"))
 
-from pytestlib import Priority, Pytestlib, PytestlibError, Tag
+from typemappingtestlib import (
+    Priority,
+    Typemappingtestlib as Lib,
+    TypemappingtestlibError as LibError,
+    Tag,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +56,7 @@ class TestLifecycle(unittest.TestCase):
     """Validate correct initialize and teardown."""
 
     def test_create_and_shutdown(self):
-        lib = Pytestlib()
+        lib = Lib()
         self.assertFalse(lib)
         lib.createContext()
         self.assertTrue(lib)
@@ -60,27 +65,27 @@ class TestLifecycle(unittest.TestCase):
         self.assertFalse(lib)
 
     def test_context_manager(self):
-        with Pytestlib() as lib:
+        with Lib() as lib:
             lib.createContext()
             self.assertTrue(lib)
             self.assertNotEqual(lib.ctx, 0)
         self.assertFalse(lib)
 
     def test_double_shutdown_is_safe(self):
-        lib = Pytestlib()
+        lib = Lib()
         lib.createContext()
         lib.shutdown()
         lib.shutdown()  # Should not raise
 
     def test_double_create_raises(self):
-        with Pytestlib() as lib:
+        with Lib() as lib:
             lib.createContext()
-            with self.assertRaises(PytestlibError):
+            with self.assertRaises(LibError):
                 lib.createContext()
 
     def test_request_without_context_raises(self):
-        lib = Pytestlib()
-        with self.assertRaises(PytestlibError):
+        lib = Lib()
+        with self.assertRaises(LibError):
             lib.echoRequest("hello")
 
 
@@ -88,7 +93,7 @@ class TestRequests(unittest.TestCase):
     """Issue multiple requests and validate results."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -119,7 +124,7 @@ class TestEvents(unittest.TestCase):
     """Consume events from the library."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -172,7 +177,7 @@ class TestContextSeparation(unittest.TestCase):
         time.sleep(0.05)
 
     def test_independent_counters(self):
-        with Pytestlib() as lib1, Pytestlib() as lib2:
+        with Lib() as lib1, Lib() as lib2:
             lib1.createContext()
             lib2.createContext()
             self.assertNotEqual(lib1.ctx, lib2.ctx)
@@ -192,7 +197,7 @@ class TestContextSeparation(unittest.TestCase):
             self.assertEqual(res.value, 4)
 
     def test_independent_echo(self):
-        with Pytestlib() as lib1, Pytestlib() as lib2:
+        with Lib() as lib1, Lib() as lib2:
             lib1.createContext()
             lib2.createContext()
 
@@ -206,7 +211,7 @@ class TestContextSeparation(unittest.TestCase):
         events1: list[int] = []
         events2: list[int] = []
 
-        with Pytestlib() as lib1, Pytestlib() as lib2:
+        with Lib() as lib1, Lib() as lib2:
             lib1.createContext()
             lib2.createContext()
 
@@ -228,8 +233,8 @@ class TestContextSeparation(unittest.TestCase):
             lib2.offCounterChanged(h2)
 
     def test_shutdown_one_does_not_affect_other(self):
-        lib1 = Pytestlib()
-        lib2 = Pytestlib()
+        lib1 = Lib()
+        lib2 = Lib()
         lib1.createContext()
         lib2.createContext()
 
@@ -253,7 +258,7 @@ class TestScalarTypes(unittest.TestCase):
     """PrimScalarRequest + PrimScalarEvent: bool, int32, int64, float64 roundtrip."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -332,7 +337,7 @@ class TestEnumDistinctTypes(unittest.TestCase):
     """TypedScalarRequest + TypedScalarEvent: enum (Priority) and distinct (JobId, Timestamp)."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -428,7 +433,7 @@ class TestSeqByteResult(unittest.TestCase):
     """ByteSeqRequest: seq[byte] result field."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -474,7 +479,7 @@ class TestSeqStringTypes(unittest.TestCase):
     """StringSeqRequest (result) + SeqStringParamRequest (input param) + StringSeqEvent."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -560,7 +565,7 @@ class TestSeqPrimTypes(unittest.TestCase):
     """PrimSeqRequest (result) + PrimSeqParamRequest (input param) + PrimSeqEvent."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -648,7 +653,7 @@ class TestFixedArrayTypes(unittest.TestCase):
     """FixedArrayRequest (result) + FixedArrayEvent: array[4, int32]."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -731,7 +736,7 @@ class TestSeqObjectTypes(unittest.TestCase):
     """ObjSeqParamRequest (input) + ObjSeqResultRequest (result): seq[Tag]."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):
@@ -807,6 +812,84 @@ class TestSeqObjectTypes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# array[ConstArrayLen, int32] — const-defined size
+# ---------------------------------------------------------------------------
+
+
+class TestConstArraySize(unittest.TestCase):
+    """ConstArrayRequest + ConstArrayEvent: array size given by a Nim const (ConstArrayLen=6).
+
+    This exercises the arrayNodeSize nnkSym path in api_codegen_c.nim.
+    """
+
+    ARRAY_LEN = 6
+
+    def setUp(self):
+        self.lib = Lib()
+        self.lib.createContext()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_const_array_result_length(self):
+        res = self.lib.constArrayRequest(1)
+        self.assertEqual(len(res.values), self.ARRAY_LEN)
+
+    def test_const_array_result_values(self):
+        # Provider: values[i] = seed * (i + 1)
+        res = self.lib.constArrayRequest(3)
+        self.assertEqual(res.values, [3, 6, 9, 12, 15, 18])
+
+    def test_const_array_result_zero_seed(self):
+        res = self.lib.constArrayRequest(0)
+        self.assertEqual(res.values, [0, 0, 0, 0, 0, 0])
+
+    def test_const_array_result_negative_seed(self):
+        res = self.lib.constArrayRequest(-2)
+        self.assertEqual(res.values, [-2, -4, -6, -8, -10, -12])
+
+    def test_const_array_event_values(self):
+        evts: list[list[int]] = []
+        handle = self.lib.onConstArrayEvent(
+            lambda owner, values: evts.append(list(values))
+        )
+
+        self.lib.constArrayRequest(2)
+        wait_for(evts, 1)
+
+        self.assertEqual(len(evts), 1)
+        self.assertEqual(evts[0], [2, 4, 6, 8, 10, 12])
+
+        self.lib.offConstArrayEvent(handle)
+
+    def test_const_array_event_length(self):
+        evts: list[list[int]] = []
+        handle = self.lib.onConstArrayEvent(
+            lambda owner, values: evts.append(list(values))
+        )
+
+        self.lib.constArrayRequest(1)
+        wait_for(evts, 1)
+
+        self.assertEqual(len(evts[0]), self.ARRAY_LEN)
+
+        self.lib.offConstArrayEvent(handle)
+
+    def test_const_array_event_zero_seed(self):
+        evts: list[list[int]] = []
+        handle = self.lib.onConstArrayEvent(
+            lambda owner, values: evts.append(list(values))
+        )
+
+        self.lib.constArrayRequest(0)
+        wait_for(evts, 1)
+
+        self.assertEqual(evts[0], [0, 0, 0, 0, 0, 0])
+
+        self.lib.offConstArrayEvent(handle)
+
+
+# ---------------------------------------------------------------------------
 # Multi-event stress: multiple listeners, multiple event types
 # ---------------------------------------------------------------------------
 
@@ -815,7 +898,7 @@ class TestMultipleEventListeners(unittest.TestCase):
     """Register multiple callbacks for the same event; verify all fire."""
 
     def setUp(self):
-        self.lib = Pytestlib()
+        self.lib = Lib()
         self.lib.createContext()
 
     def tearDown(self):

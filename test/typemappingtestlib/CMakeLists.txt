@@ -1,43 +1,43 @@
 cmake_minimum_required(VERSION 3.16)
-project(pytestlib_cpp_test CXX)
+project(typemappingtestlib_cpp_test CXX)
 
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
-# PYTESTLIB_DIR can be overridden at configure time; defaults to build/
+# TYPEMAPTEST_DIR can be overridden at configure time; defaults to build/
 # relative to this CMakeLists.txt.
-if(NOT PYTESTLIB_DIR)
-    set(PYTESTLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
+if(NOT TYPEMAPTEST_DIR)
+    set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
 endif()
 
-get_filename_component(PYTESTLIB_DIR "${PYTESTLIB_DIR}" ABSOLUTE)
+get_filename_component(TYPEMAPTEST_DIR "${TYPEMAPTEST_DIR}" ABSOLUTE)
 
-if(NOT EXISTS "${PYTESTLIB_DIR}/pytestlib.hpp")
+if(NOT EXISTS "${TYPEMAPTEST_DIR}/typemappingtestlib.hpp")
     message(FATAL_ERROR
-        "pytestlib.hpp not found in ${PYTESTLIB_DIR}.\n"
-        "Run  nimble buildPyTestLib  first.")
+        "typemappingtestlib.hpp not found in ${TYPEMAPTEST_DIR}.\n"
+        "Run  nimble buildTypeMapTestLib  first.")
 endif()
 
-add_library(pytestlib SHARED IMPORTED)
-set_target_properties(pytestlib PROPERTIES
+add_library(typemappingtestlib SHARED IMPORTED)
+set_target_properties(typemappingtestlib PROPERTIES
     IMPORTED_LOCATION
-        "${PYTESTLIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}pytestlib${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    INTERFACE_INCLUDE_DIRECTORIES "${PYTESTLIB_DIR}"
+        "${TYPEMAPTEST_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}typemappingtestlib${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TYPEMAPTEST_DIR}"
 )
 if(APPLE)
-    set_target_properties(pytestlib PROPERTIES
-        IMPORTED_SONAME "@rpath/libpytestlib.dylib"
+    set_target_properties(typemappingtestlib PROPERTIES
+        IMPORTED_SONAME "@rpath/libtypemappingtestlib.dylib"
     )
 endif()
 
 # ---------------------------------------------------------------------------
 # C++ test binary
 # ---------------------------------------------------------------------------
-add_executable(test_pytestlib test_pytestlib.cpp)
-set_target_properties(test_pytestlib PROPERTIES
+add_executable(test_typemappingtestlib test_typemappingtestlib.cpp)
+set_target_properties(test_typemappingtestlib PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
-    RUNTIME_OUTPUT_DIRECTORY "${PYTESTLIB_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${TYPEMAPTEST_DIR}"
 )
 
 # Detect the architecture of the Nim-built .so and force the C++ compiler
@@ -45,7 +45,7 @@ set_target_properties(test_pytestlib PROPERTIES
 # 64-bit .so while gcc defaults to 32-bit — linking fails with "file in
 # wrong format" unless we pass -m64.
 if(UNIX AND NOT APPLE)
-    set(SO_PATH "${PYTESTLIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}pytestlib${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(SO_PATH "${TYPEMAPTEST_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}typemappingtestlib${CMAKE_SHARED_LIBRARY_SUFFIX}")
     if(EXISTS "${SO_PATH}")
         execute_process(
             COMMAND file "${SO_PATH}"
@@ -62,27 +62,27 @@ if(UNIX AND NOT APPLE)
         if(DEFINED LIB_BITS)
             if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND LIB_BITS EQUAL 64)
                 message(STATUS "Nim library is 64-bit, forcing C++ compiler to match")
-                target_compile_options(test_pytestlib PRIVATE -m64)
-                target_link_options(test_pytestlib PRIVATE -m64)
+                target_compile_options(test_typemappingtestlib PRIVATE -m64)
+                target_link_options(test_typemappingtestlib PRIVATE -m64)
             elseif(CMAKE_SIZEOF_VOID_P EQUAL 8 AND LIB_BITS EQUAL 32)
                 message(STATUS "Nim library is 32-bit, forcing C++ compiler to match")
-                target_compile_options(test_pytestlib PRIVATE -m32)
-                target_link_options(test_pytestlib PRIVATE -m32)
+                target_compile_options(test_typemappingtestlib PRIVATE -m32)
+                target_link_options(test_typemappingtestlib PRIVATE -m32)
             endif()
         endif()
     endif()
 endif()
 
-target_link_libraries(test_pytestlib PRIVATE pytestlib)
+target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)
 
-# Embed RPATH so the binary finds libpytestlib next to itself at runtime.
+# Embed RPATH so the binary finds libtypemappingtestlib next to itself at runtime.
 if(APPLE)
-    set_target_properties(test_pytestlib PROPERTIES
+    set_target_properties(test_typemappingtestlib PROPERTIES
         BUILD_RPATH  "@loader_path"
         INSTALL_RPATH "@loader_path"
     )
 elseif(UNIX)
-    set_target_properties(test_pytestlib PROPERTIES
+    set_target_properties(test_typemappingtestlib PROPERTIES
         BUILD_RPATH  "$ORIGIN"
         INSTALL_RPATH "$ORIGIN"
     )
@@ -90,10 +90,10 @@ endif()
 
 # Windows: copy the DLL next to the test binary
 if(WIN32)
-    add_custom_command(TARGET test_pytestlib POST_BUILD
+    add_custom_command(TARGET test_typemappingtestlib POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PYTESTLIB_DIR}/pytestlib.dll"
-            "$<TARGET_FILE_DIR:test_pytestlib>/pytestlib.dll"
-        COMMENT "Copying pytestlib.dll next to test binary"
+            "${TYPEMAPTEST_DIR}/typemappingtestlib.dll"
+            "$<TARGET_FILE_DIR:test_typemappingtestlib>/typemappingtestlib.dll"
+        COMMENT "Copying typemappingtestlib.dll next to test binary"
     )
 endif()
