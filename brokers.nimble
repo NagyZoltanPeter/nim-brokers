@@ -447,14 +447,68 @@ task testFfiApiCpp,
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
 
-task testFfiApiCppAsan,
-  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, orc, debug)":
-  echo "\n=== testFfiApiCppAsan (clang, mm:orc, debug) ==="
-  buildTypeMapTestLibraryAsan()
-  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+proc setAsanEnv() =
   putEnv("MallocNanoZone", "0")
   putEnv("ASAN_OPTIONS", "detect_leaks=0")
+
+proc asanCompileFlags(): string =
+  "-fsanitize=address -fno-omit-frame-pointer"
+
+proc asanLinkFlags(sharedLib: bool = false): string =
+  result = "-fsanitize=address"
+  when defined(linux):
+    if sharedLib:
+      result.add(" -shared-libasan")
+
+proc testAsan(mm: string, path: string) =
+  let outputPath = joinPath("build", path & "_asan_" & mm)
+  let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
+  let flags =
+    "--cc:clang -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm & " --passC:" &
+    quoteArg(asanCompileFlags()) & " --passL:" & quoteArg(asanLinkFlags()) &
+    " --path:. --out:" & quoteArg(outputPath)
+  exec "nim c " & flags & " test/" & path & ".nim"
+  setAsanEnv()
+  echo "=== RUN  " & label & " ==="
+  let (output, exitCode) = gorgeEx(outputPath)
+  if output.len > 0:
+    echo output
+  if exitCode != 0:
+    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
+    quit(1)
+  echo "=== PASS " & label & " ==="
+
+task testFfiApiCppAsanOrc,
+  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, orc, debug)":
+  echo "\n=== testFfiApiCppAsanOrc (clang, mm:orc, debug) ==="
+  buildTypeMapTestLibraryAsan("orc")
+  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+  setAsanEnv()
   exec quoteArg(typeMapTestCppAsanExecutablePath())
+
+task testFfiApiCppAsanRefc,
+  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, refc, debug)":
+  echo "\n=== testFfiApiCppAsanRefc (clang, mm:refc, debug) ==="
+  buildTypeMapTestLibraryAsan("refc")
+  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+  setAsanEnv()
+  exec quoteArg(typeMapTestCppAsanExecutablePath())
+
+task testMtEventBrokerAsanOrc,
+  "Run multi-thread event broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_event_broker")
+
+task testMtEventBrokerAsanRefc,
+  "Run multi-thread event broker tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_multi_thread_event_broker")
+
+task testMtRequestBrokerAsanOrc,
+  "Run multi-thread request broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_request_broker")
+
+task testMtRequestBrokerAsanRefc,
+  "Run multi-thread request broker tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_multi_thread_request_broker")
 
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
@@ -492,3 +546,11 @@ task alltests,
   exec "nimble runFfiExamplePy"
   exec "nimble runFfiExampleCpp"
   exec "nimble runFfiExampleC"
+
+tasks allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
+  exec "nimble testFfiApiCppAsanOrc"
+  exec "nimble testFfiApiCppAsanRefc"
+  exec "nimble testMtEventBrokerAsanOrc"
+  exec "nimble testMtEventBrokerAsanRefc"
+  exec "nimble testMtRequestBrokerAsanOrc"
+  exec "nimble testMtRequestBrokerAsanRefc"

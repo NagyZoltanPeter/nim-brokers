@@ -1,0 +1,115 @@
+name: Memcheck CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner platform"
+        required: true
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+      nim-version:
+        description: "Nim compiler version"
+        required: true
+        type: choice
+        default: version-2-2
+        options:
+          - version-2-2
+          - version-2-0
+          - devel
+      tasks:
+        description: "ASAN task(s) to run"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - testFfiApiCppAsanOrc
+          - testFfiApiCppAsanRefc
+          - testMtEventBrokerAsanOrc
+          - testMtEventBrokerAsanRefc
+          - testMtRequestBrokerAsanOrc
+          - testMtRequestBrokerAsanRefc
+
+permissions:
+  contents: read
+
+jobs:
+  memcheck-ci:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ inputs.nim-version }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y clang
+
+      - name: Ensure clang in PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvmBin) {
+            Write-Host "Found LLVM at $llvmBin"
+            echo $llvmBin >> $env:GITHUB_PATH
+          } else {
+            Write-Host "LLVM not found, installing via choco..."
+            choco install llvm -y --no-progress
+            echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          nim --version
+          nimble --version
+          clang --version || echo "clang not available"
+          cmake --version || echo "cmake not available"
+
+      - name: Install dependencies
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
+      - name: Run tasks (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc"
+          [ "$TASKS" = "all" ] && TASKS="$ALL"
+          for task in $TASKS; do
+            echo "=== nimble $task ==="
+            nimble --verbose "$task" -y || exit 1
+          done
+
+      - name: Run tasks (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TASKS: ${{ inputs.tasks }}
+        shell: pwsh
+        run: |
+          $all = @(
+            "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
+            "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
+            "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc"
+          )
+          $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }
+          foreach ($task in $taskList) {
+            Write-Host "=== nimble $task ==="
+            nimble --verbose $task -y
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "=== FAILED: nimble $task ==="
+              exit $LASTEXITCODE
+            }
+          }
