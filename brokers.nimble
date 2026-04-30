@@ -547,7 +547,7 @@ task alltests,
   exec "nimble runFfiExampleCpp"
   exec "nimble runFfiExampleC"
 
-tasks allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
+task allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
   exec "nimble testFfiApiCppAsanOrc"
   exec "nimble testFfiApiCppAsanRefc"
   exec "nimble testMtEventBrokerAsanOrc"
