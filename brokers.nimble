@@ -324,6 +324,39 @@ proc typeMapTestCppExecutablePath(): string =
   else:
     "test/typemappingtestlib/build/test_typemappingtestlib"
 
+proc typeMapTestAsanBuildDir(): string =
+  "test/typemappingtestlib/cmake-build-asan"
+
+proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
+  let asanCompile = "-fsanitize=address -fno-omit-frame-pointer"
+  let asanLink =
+    when defined(linux): "-fsanitize=address -shared-libasan" else: "-fsanitize=address"
+  var flags =
+    "--cc:clang -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
+    " --passC:" & quoteArg(asanCompile) & " --passL:" & quoteArg(asanLink) &
+    " --path:. --outdir:test/typemappingtestlib/build-asan"
+  flags.add(nimMainPrefixFlag("typemappingtestlib"))
+  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
+
+proc buildTypeMapTestCmakeTargetAsan(target = "") =
+  let cmakeDir = "test/typemappingtestlib"
+  let buildDir = typeMapTestAsanBuildDir()
+  let outDir = getCurrentDir() / "test/typemappingtestlib/build-asan"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir &
+    " -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++" &
+    " -DASAN=ON -DTYPEMAPTEST_DIR=" & quoteArg(outDir)
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc typeMapTestCppAsanExecutablePath(): string =
+  when defined(windows):
+    "test/typemappingtestlib/build-asan/test_typemappingtestlib.exe"
+  else:
+    "test/typemappingtestlib/build-asan/test_typemappingtestlib"
+
 proc soElfBits(soPath: string): int =
   ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
   ## determined (e.g. non-Linux, file tool absent).
@@ -414,6 +447,18 @@ task testFfiApiCpp,
       buildTypeMapTestLibrary(mm, release)
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
+
+task testFfiApiCppAsan,
+  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, orc, debug)":
+  echo "\n=== testFfiApiCppAsan (clang, mm:orc, debug) ==="
+  buildTypeMapTestLibraryAsan()
+  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+  putEnv("MallocNanoZone", "0")
+  putEnv("ASAN_OPTIONS", "detect_leaks=0")
+  # Raise fd limit: each AsyncChannel.open() needs 2 fds (socketpair on macOS).
+  # Regular zsh terminals inherit the macOS default of 256; ASAN + many broker
+  # channels exhaust it silently (open() returns err, chan stays nil → crash).
+  exec "sh -c 'ulimit -n 10240 && " & typeMapTestCppAsanExecutablePath() & "'"
 
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()

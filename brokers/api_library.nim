@@ -531,6 +531,43 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
     )
     result.add(cleanupProc)
 
+  # Generate aggregate processLoop shutdown proc (async — awaits per-type procs)
+  let shutdownAllProcessLoopsIdent = ident("shutdownAllApiEventProcessLoops")
+  block:
+    let shutdownCtxIdent = genSym(nskParam, "ctx")
+    var shutdownBody = newStmtList()
+    for procName in gApiEventProcessLoopShutdownProcNames:
+      shutdownBody.add(
+        newCall(ident("await"), newCall(ident(procName), shutdownCtxIdent))
+      )
+    let shutdownFormalParams = newTree(
+      nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, shutdownCtxIdent, ident("BrokerContext"), newEmptyNode()),
+    )
+    let asyncPragma = newTree(
+      nnkPragma,
+      newTree(
+        nnkExprColonExpr,
+        ident("async"),
+        newTree(
+          nnkTupleConstr,
+          newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+        ),
+      ),
+    )
+    let shutdownProc = newTree(
+      nnkProcDef,
+      shutdownAllProcessLoopsIdent,
+      newEmptyNode(),
+      newEmptyNode(),
+      shutdownFormalParams,
+      asyncPragma,
+      newEmptyNode(),
+      shutdownBody,
+    )
+    result.add(shutdownProc)
+
   # Processing thread proc
   result.add(
     quote do:
@@ -638,9 +675,14 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
           # Cleanup: drop all registered event listeners
           `cleanupAllIdent`(arg.ctx)
-          # Remove the RegisterEventListenerResult provider so its global
-          # bucket entry is freed and does not accumulate across context lifetimes.
+          # Remove the RegisterEventListenerResult provider before entering the
+          # processLoop shutdown so that any in-flight on<Event>() requests processed
+          # during the shutdown waitFor return an error instead of calling listen()
+          # on a partially-torn-down bucket registry.
           RegisterEventListenerResult.clearProvider(arg.ctx)
+          # Terminate all processLoop coroutines on this thread and await them before
+          # the thread exits to prevent use-after-free on thread-local allocators.
+          waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
 
     )
   elif hasEventHandlers:
@@ -669,9 +711,8 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
           waitFor awaitShutdown(addr arg.shutdownFlag)
 
-          # Remove the RegisterEventListenerResult provider so its global
-          # bucket entry is freed and does not accumulate across context lifetimes.
           RegisterEventListenerResult.clearProvider(arg.ctx)
+          waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
 
     )
   else:

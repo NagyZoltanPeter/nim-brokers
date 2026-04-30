@@ -258,7 +258,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
-        deallocShared(`globalBucketsIdent`)
+        # Intentional leak: see equivalent comment in mt_event_broker.nim grow.
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
 
@@ -512,7 +512,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
               AsyncChannel[`requestMsgName`], 1
             ))
-            discard spawnChan[].open()
+            let spawnChanOpenRes = spawnChan[].open()
+            if spawnChanOpenRes.isErr():
+              raiseAssert "RequestBroker(" & `typeNameLit` &
+                "): failed to open process channel: " & spawnChanOpenRes.error
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: DefaultBrokerContext,
@@ -580,7 +583,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
               AsyncChannel[`requestMsgName`], 1
             ))
-            discard spawnChan[].open()
+            let spawnChanOpenRes = spawnChan[].open()
+            if spawnChanOpenRes.isErr():
+              raiseAssert "RequestBroker(" & `typeNameLit` &
+                "): failed to open process channel: " & spawnChanOpenRes.error
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
@@ -642,7 +648,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
               AsyncChannel[`requestMsgName`], 1
             ))
-            discard spawnChan[].open()
+            let spawnChanOpenRes = spawnChan[].open()
+            if spawnChanOpenRes.isErr():
+              raiseAssert "RequestBroker(" & `typeNameLit` &
+                "): failed to open process channel: " & spawnChanOpenRes.error
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: DefaultBrokerContext,
@@ -711,7 +720,10 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             spawnChan = cast[ptr AsyncChannel[`requestMsgName`]](createShared(
               AsyncChannel[`requestMsgName`], 1
             ))
-            discard spawnChan[].open()
+            let spawnChanOpenRes = spawnChan[].open()
+            if spawnChanOpenRes.isErr():
+              raiseAssert "RequestBroker(" & `typeNameLit` &
+                "): failed to open process channel: " & spawnChanOpenRes.error
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
@@ -793,7 +805,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             let respChan = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
               AsyncChannel[Result[`typeIdent`, string]], 1
             ))
-            discard respChan[].open()
+            let respChanOpenRes = respChan[].open()
+            if respChanOpenRes.isErr():
+              deallocShared(respChan)
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): failed to open response channel: " & respChanOpenRes.error
+              )
             var msg = `requestMsgName`(
               isShutdown: false, requestKind: 0, responseChan: respChan
             )
@@ -926,7 +944,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             let respChan = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
               AsyncChannel[Result[`typeIdent`, string]], 1
             ))
-            discard respChan[].open()
+            let respChanOpenRes = respChan[].open()
+            if respChanOpenRes.isErr():
+              deallocShared(respChan)
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): failed to open response channel: " & respChanOpenRes.error
+              )
             var msg = `requestMsgName`(
               isShutdown: false, requestKind: 0, responseChan: respChan
             )
@@ -1109,7 +1133,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           let `respChanIdent` = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
             AsyncChannel[Result[`typeIdent`, string]], 1
           ))
-          discard `respChanIdent`[].open()
+          let respChanOpenRes = `respChanIdent`[].open()
+          if respChanOpenRes.isErr():
+            deallocShared(`respChanIdent`)
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): failed to open response channel: " & respChanOpenRes.error
+            )
           var msg = `msgConstruction`
           `reqChanIdent`[].sendSync(msg)
           let recvFut = `respChanIdent`.recv()
@@ -1308,7 +1338,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           let `brRespChanIdent` = cast[ptr AsyncChannel[Result[`typeIdent`, string]]](createShared(
             AsyncChannel[Result[`typeIdent`, string]], 1
           ))
-          discard `brRespChanIdent`[].open()
+          let brRespChanOpenRes = `brRespChanIdent`[].open()
+          if brRespChanOpenRes.isErr():
+            deallocShared(`brRespChanIdent`)
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): failed to open response channel: " & brRespChanOpenRes.error
+            )
           var msg = `brMsgConstruction`
           `brReqChanIdent`[].sendSync(msg)
           let deadline = Moment.now() + `timeoutVarIdent`

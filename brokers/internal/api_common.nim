@@ -60,6 +60,9 @@ var gApiEventCleanupProcNames* {.compileTime.}: seq[string] =
 var gApiRequestCleanupProcNames* {.compileTime.}: seq[string] =
   @[] ## Accumulates cleanup proc names for request provider teardown.
 
+var gApiEventProcessLoopShutdownProcNames* {.compileTime.}: seq[string] =
+  @[] ## Accumulates async processLoop shutdown proc names for delivery thread teardown.
+
 var gApiForeignGcHelperEmitted* {.compileTime.}: bool = false
   ## Flag: has the ensureForeignThreadGc() helper been emitted?
   ## Each broker codegen module checks this before emitting the helper

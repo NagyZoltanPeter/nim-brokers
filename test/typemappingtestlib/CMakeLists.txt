@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(typemappingtestlib_cpp_test CXX)
 
+option(ASAN "Enable AddressSanitizer (requires clang)" OFF)
+
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
@@ -71,6 +73,14 @@ if(UNIX AND NOT APPLE)
             endif()
         endif()
     endif()
+endif()
+
+if(ASAN)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(WARNING "ASAN=ON but compiler is not clang — results may vary")
+    endif()
+    target_compile_options(test_typemappingtestlib PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(test_typemappingtestlib PRIVATE -fsanitize=address)
 endif()
 
 target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)

@@ -1239,6 +1239,9 @@ private:
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))
   gApiEventCleanupProcNames.add(cleanupProcName)
+  gApiEventProcessLoopShutdownProcNames.add(
+    "shutdownProcessLoopsForCtx" & typeDisplayName
+  )
 
   when defined(brokerDebug):
     echo result.repr
