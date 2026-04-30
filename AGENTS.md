@@ -22,7 +22,7 @@ All brokers support **BrokerContext** for scoping — allowing multiple independ
 |--------|-----------------------------------------------|------------------------------------------------------|
 | State storage | Thread-local global (`{.threadvar.}`) | Shared memory (`createShared`) + per-thread threadvar |
 | Thread safety | None needed (single event loop) | `Lock`-protected global bucket registry |
-| Cross-thread dispatch | N/A | Via `AsyncChannel` per (context, thread) pair |
+| Cross-thread dispatch | N/A | Via `Channel[T]` (0 fds) per (context, thread) + one shared `ThreadSignalPtr` per thread |
 | Context binding | Per-thread bucket lookup | Per (brokerCtx, threadId, threadGen) triple |
 
 Multi-thread brokers detect same-thread calls (direct dispatch) vs cross-thread calls (channel-based dispatch) automatically.
@@ -173,7 +173,8 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Global bucket registry: `Lock`-protected shared array of buckets, each identified by `(brokerCtx, threadId, threadGen)`.
 - Thread identity: `addr mtThreadIdMarker` (threadvar address) + monotonic generation counter to disambiguate reused threadvar addresses across thread lifetimes.
 - Same-thread dispatch: direct asyncSpawn (EventBroker) or direct provider call (RequestBroker).
-- Cross-thread dispatch: `AsyncChannel` per bucket, with a `processLoop` on the listener/provider thread that reads from the channel.
+- Cross-thread dispatch: `Channel[T]` (0 OS fds) per bucket. A single shared `ThreadSignalPtr` per thread wakes one `brokerDispatchLoop` coroutine that drains all registered `ThreadDispatchPollFn` closures via non-blocking `tryRecv`. fd count: **O(threads)** regardless of broker type count.
+- Shared dispatcher infrastructure lives in `brokers/internal/mt_broker_common.nim`: `getOrInitBrokerSignal`, `registerBrokerPoller`, `brokerDispatchLoop`, `ensureBrokerDispatchStarted`, `fireBrokerSignal`.
 - Initialization: atomic CAS-based one-time init per broker type.
 
 ### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)

@@ -1,6 +1,6 @@
 # nim-brokers
 
-Type-safe, thread-local, decoupled messaging patterns for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos) and [nim-async-channels](https://github.com/status-im/nim-async-channels).
+Type-safe, thread-local, decoupled messaging patterns for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos).
 
 nim-brokers provides three compile-time macro-generated broker patterns that enable event-driven and request-response communication between modules without direct dependencies.
 
@@ -132,7 +132,7 @@ Info.clearProviders()
 
 ### RequestBroker (multi-thread)
 
-Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via async channels. Same-thread requests bypass channels entirely for near-zero overhead.
+Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via a zero-fd channel and a shared per-thread signal. Same-thread requests bypass channels entirely for near-zero overhead.
 
 ```nim
 import std/atomics, std/threads
@@ -192,7 +192,7 @@ echo Weather.requestTimeout()                   # 2 seconds
 **Performance considerations:**
 
 - **Same-thread path** adds only a mutex + threadvar scan (~25 µs debug, sub-microsecond release).
-- **Cross-thread path** allocates a one-shot response channel per request (~187 µs debug / ~2-5 µs release with ORC). `--mm:refc` is ~2-3x slower due to deep-copy semantics on `sendSync`.
+- **Cross-thread path** allocates a one-shot response channel per request (~187 µs debug / ~2-5 µs release with ORC). `--mm:refc` is ~2-3x slower due to deep-copy semantics on `Channel[T].send`.
 - The provider serves requests sequentially on its event loop; throughput is bounded by handler execution time.
 - For high-throughput scenarios (>10K req/s), consider batching at the application level or using `--mm:orc`.
 
@@ -200,7 +200,7 @@ See [Multi-Thread RequestBroker](doc/MultiThread_RequestBroker.md) for architect
 
 ### EventBroker (multi-thread)
 
-Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** thread; events emitted from **any** thread are broadcast to all registered listeners. Same-thread delivery uses `asyncSpawn` (no channel); cross-thread delivery uses `AsyncChannel` per listener-thread.
+Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** thread; events emitted from **any** thread are broadcast to all registered listeners. Same-thread delivery uses `asyncSpawn` (no channel); cross-thread delivery uses a `Channel[T]` per listener-thread plus a shared per-thread signal — zero OS file descriptors per broker type.
 
 ```nim
 import brokers/event_broker
@@ -246,8 +246,8 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 **Performance considerations:**
 
 - **Same-thread path** bypasses channels entirely — events dispatch directly via `asyncSpawn`.
-- **Cross-thread path** uses `sendSync` to each listener thread's channel (~20-160 µs debug, sub-millisecond release).
-- Broadcast fan-out: one channel per (BrokerContext, listener-thread) pair.
+- **Cross-thread path** sends to each listener thread's `Channel[T]` then wakes the shared signal (~20-160 µs debug, sub-millisecond release).
+- Broadcast fan-out: one `Channel[T]` per (BrokerContext, listener-thread) pair; all broker types on a thread share one `ThreadSignalPtr`.
 - For high-throughput scenarios, prefer `--mm:orc` and `-d:release`.
 
 See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
@@ -458,13 +458,16 @@ Shared memory (process lifetime):
   Lock (OS mutex)                                     ~40-64 bytes
   Init + count + cap                                  ~25 bytes
 
-  Bucket[0]: (Default, threadA, chanA, threadGen, active, hasListeners)  — 3 buckets
-  Bucket[1]: (Default, threadB, chanB, threadGen, active, hasListeners)
-  Bucket[2]: (Default, threadC, chanC, threadGen, active, hasListeners)
+  Bucket[0]: (Default, threadA, chanA, signalA, threadGen, active, hasListeners)
+  Bucket[1]: (Default, threadB, chanB, signalB, threadGen, active, hasListeners)
+  Bucket[2]: (Default, threadC, chanC, signalC, threadGen, active, hasListeners)
 
-  AsyncChannel × 3       ~200 bytes each              ~600 bytes
-    (one per listener-thread; includes ptr Channel
-     + ThreadSignalPtr with OS pipe/eventfd)
+  Channel[T] × 3         ~80 bytes each               ~240 bytes
+    (one per listener-thread; mutex + condvar only — zero OS fds)
+
+Per-thread (one-time, shared by ALL broker types on that thread):
+  ThreadSignalPtr × 3    ~2 OS fds each (macOS: socketpair)
+  brokerDispatchLoop: one Future per thread            ~128 bytes × 3
 
 Threadvar (per thread, GC-managed):
   Thread A: tvCtxs[Default], tvHandlers[{1: cb1}], tvNextIds[2]
@@ -474,17 +477,17 @@ Threadvar (per thread, GC-managed):
   Thread C: tvCtxs[Default], tvHandlers[{1: cb4}], tvNextIds[2]
             ~16 + 48 + 8 = ~72 bytes
 
-Per-thread processLoop:
-  One Future per listener-thread                      ~128 bytes × 3
-
-Total: ~1.6 KB for 3 listener-threads, 4 listeners, 1 context.
+Total: ~1.2 KB for 3 listener-threads, 4 listeners, 1 context.
 ```
 
 **Key points:**
 - Channels are allocated **per (BrokerContext, listener-thread)** pair — not per listener. Thread B's two listeners share one channel.
+- Each `Channel[T]` uses only mutex + condvar — **zero OS file descriptors**.
+- The `ThreadSignalPtr` (which holds the OS fd) is **shared** across all broker types on a thread. Adding more broker types costs zero additional fds.
+- `brokerDispatchLoop`: a single shared async coroutine per thread wakes on the shared signal and drains all registered poll fns.
 - Each bucket includes a `threadGen: uint64` field to disambiguate reused threadvar addresses across thread lifetimes, and an `active: bool` flag.
-- Emitter threads allocate **zero** persistent memory — `emit()` only acquires the lock, snapshots targets, and sends via `sendSync`.
-- Buckets persist across `dropListener`/`listen` cycles (channel reuse). Only program shutdown leaks them.
+- Emitter threads allocate **zero** persistent memory — `emit()` only acquires the lock, snapshots targets, sends to each `Channel[T]`, and fires the target thread's shared signal.
+- Buckets persist across `dropListener`/`listen` cycles (channel reuse).
 
 ### RequestBroker(mt) — example
 
@@ -497,22 +500,27 @@ Shared memory (process lifetime):
   Init + count + cap                                   ~25 bytes
   Timeout var (Duration = int64)                       ~8 bytes
 
-  Bucket[0]: (Default, threadA, requestChan, threadGen)  — 1 bucket
+  Bucket[0]: (Default, threadA, requestChan, providerSignal, threadGen)
     (RequestBroker has ONE bucket per context,
      unlike EventBroker which has one per listener-thread)
 
-  AsyncChannel × 1 (request channel)  ~200 bytes
-    Shared by all requester threads via sendSync
+  Channel[T] × 1 (request channel)    ~80 bytes (mutex + condvar, zero OS fds)
+    Shared by all requester threads
+
+Per-thread (one-time, shared by ALL broker types on that thread):
+  ThreadSignalPtr: providerSignal (thread A) + requesterSignal (each requester thread)
+    Each = ~2 OS fds (macOS: socketpair)
 
 Threadvar (provider thread A only):
   tvCtxs[Default], tvHandlers[handler]
   ~16 + 8 = ~24 bytes
 
 Per-request (cross-thread only, transient):
-  Response channel        ~200 bytes (createShared + open)
-  Deallocated on success; intentionally leaked on timeout
+  Response channel        ~80 bytes Channel[T] (createShared, no OS fds)
+  One-shot poller registered on requester thread's dispatcher
+  Deallocated on success; intentionally leaked on timeout (no OS resource leak)
 
-Total baseline: ~660 bytes for 1 provider, 1 context.
+Total baseline: ~400 bytes for 1 provider, 1 context.
 ```
 
 **Per-request cost:**
@@ -520,13 +528,13 @@ Total baseline: ~660 bytes for 1 provider, 1 context.
 | Path | Allocation | Lifetime |
 |------|-----------|----------|
 | Same-thread (Thread A → A) | Zero | — |
-| Cross-thread (Thread B → A) | ~200 bytes response channel | Freed after response; leaked on timeout |
+| Cross-thread (Thread B → A) | ~80 bytes response channel | Freed after response; leaked on timeout (safe — no OS fds) |
 
 **Key points:**
 - Same-thread requests have **zero channel overhead** — the provider handler is called directly from threadvar.
-- Cross-thread requests allocate one response channel per call (`createShared` ~200 bytes). This is deallocated on success. On timeout, the channel is intentionally leaked open (provider may still write to it).
-- The request channel is shared — all requester threads `sendSync` into the same channel. The provider's `processLoop` drains it sequentially.
-- Adding a second `BrokerContext` on the same provider thread costs one additional bucket + channel (~240 bytes) plus one threadvar entry (~24 bytes).
+- Cross-thread requests allocate one `Channel[T]` for the response per call (~80 bytes, zero OS fds). Deallocated on success. On timeout, leaked safely (provider's eventual `send` writes into an unread channel — no crash, no OS resource leak).
+- The request channel is shared — all requester threads `send` into the same `Channel[T]`. A shared `brokerDispatchLoop` on the provider thread drains it via `tryRecv`.
+- Adding a second `BrokerContext` on the same provider thread costs one additional bucket + channel (~160 bytes) plus one threadvar entry (~24 bytes).
 
 ### Comparison
 
@@ -534,11 +542,11 @@ Total baseline: ~660 bytes for 1 provider, 1 context.
 |---|---|---|---|---|
 | Storage | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars |
 | Shared memory | None | None | Bucket array + Lock | Bucket array + Lock |
-| Channels | None | None | One per listener-thread | One per context (request) + one per cross-thread call (response) |
-| Per-call cost | Zero | Zero | Zero | ~200 bytes response channel (cross-thread only) |
-| OS resources | None | None | pipe/eventfd per channel | pipe/eventfd per channel + per cross-thread call |
-| Baseline per context | ~100 bytes | ~16 bytes | ~450 bytes (bucket + channel + processLoop) | ~450 bytes (bucket + channel + processLoop) |
-| Intentional leaks | None | None | Channel on shutdown | Request channel on clearProvider; response channel on timeout |
+| Channels | None | None | One `Channel[T]` per listener-thread | One `Channel[T]` per context (request) + one per cross-thread call (response) |
+| Per-call cost | Zero | Zero | Zero | ~80 bytes response channel (cross-thread only) |
+| OS resources | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) |
+| Baseline per context | ~100 bytes | ~16 bytes | ~300 bytes (bucket + Channel[T] + poll fn) | ~300 bytes (bucket + Channel[T] + poll fn) |
+| Intentional leaks | None | None | Channel[T] on shutdown (no OS fds — safe) | Response Channel[T] on timeout (no OS fds — safe) |
 
 ## Known Limitations
 
@@ -546,13 +554,13 @@ Total baseline: ~660 bytes for 1 provider, 1 context.
 
 `nimble testApi` skips all `--mm:refc` variants on Windows. ORC (`--mm:orc`) is fully supported on all platforms.
 
-**Root cause:** chronos' async `waitForSingleObject` — used internally by `AsyncChannel.recv` whenever a response has not yet arrived — registers a completion callback via the Win32 `RegisterWaitForSingleObject` API. That callback fires on a **Windows thread-pool thread**, which is not a Nim thread and is therefore invisible to the garbage collector.
+**Root cause:** chronos' async `waitForSingleObject` — used internally by `ThreadSignalPtr.wait()` (the shared per-thread broker dispatcher signal) whenever it waits for the next message — registers a completion callback via the Win32 `RegisterWaitForSingleObject` API. That callback fires on a **Windows thread-pool thread**, which is not a Nim thread and is therefore invisible to the garbage collector.
 
 With `--mm:refc` the GC is stop-the-world: it pauses all *known* Nim threads before scanning the heap. Because the thread-pool thread is not tracked, the GC can collect futures and wait-handles that the callback is still referencing, producing an access violation.
 
 With `--mm:orc` there is no stop-the-world phase — reference counting is fully atomic — so the same thread-pool callback is safe.
 
-The `--mm:refc` limitation applies only to the **FFI API layer** (`RequestBroker(API)` / `EventBroker(API)` / `registerBrokerLibrary`). Plain multi-thread broker tests (`RequestBroker(mt)`, `EventBroker(mt)`) pass on Windows under `--mm:refc` because those tests keep all callers on Nim threads that run persistent async event loops, which means the response event is typically already signalled by the time the receiver polls — bypassing the `RegisterWaitForSingleObject` code path entirely.
+The `--mm:refc` limitation applies only to the **FFI API layer** (`RequestBroker(API)` / `EventBroker(API)` / `registerBrokerLibrary`). Plain multi-thread broker tests (`RequestBroker(mt)`, `EventBroker(mt)`) pass on Windows under `--mm:refc` because those tests keep all callers on Nim threads that run persistent async event loops, which means the shared broker signal is typically already fired by the time the dispatcher polls — bypassing the `RegisterWaitForSingleObject` code path entirely.
 
 **Recommendation:** use `--mm:orc` (the Nim default since 2.0) when building FFI API libraries on Windows.
 
