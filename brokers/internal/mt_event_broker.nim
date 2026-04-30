@@ -5,7 +5,7 @@
 ## to all registered listeners across all threads (broadcast fan-out).
 ##
 ## Same-thread listeners bypass channels and are dispatched directly via asyncSpawn.
-## Cross-thread delivery uses AsyncChannel per listener-thread.
+## Cross-thread delivery uses Channel[T] + per-thread shared signal (0 fds).
 ##
 ## The broker does NOT own or spawn threads — that is the user's responsibility.
 ## The global registry uses `createShared` / raw pointers so it is safe under
@@ -15,19 +15,17 @@
 ## than in the shared bucket, avoiding the need to cast closures to raw pointers.
 ##
 ## `dropListener` must be called from the thread that registered the listener.
-## `dropAllListeners` can be called from any thread — it sends shutdown to all
-## listener threads for the context, and each processLoop drains in-flight tasks
-## and cleans up its own threadvars.
+## `dropAllListeners` can be called from any thread — it sends emkClearListeners
+## to all listener threads for the context.
 
 {.push raises: [].}
 
 import std/[macros, locks, tables]
 import chronos, chronicles
 import results
-import asyncchannels
 import ./helper/broker_utils, ../broker_context, ./mt_broker_common
 
-export results, chronos, broker_context, asyncchannels, chronicles, mt_broker_common
+export results, chronos, broker_context, chronicles, mt_broker_common
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -67,18 +65,21 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
   let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
-  let processLoopIdent = ident("processLoop" & typeDisplayName)
   let listenerTaskIdent = ident("notify" & typeDisplayName & "Listener")
+  let handleEventMsgIdent = ident("handleEventMsg" & typeDisplayName)
+  let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
+  let clearListenersIdent = ident("clearListeners" & typeDisplayName)
 
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
   let tvNextIdsIdent = ident("g" & typeDisplayName & "TvNextIds")
+  let tvListenerFutsIdent = ident("g" & typeDisplayName & "TvListenerFuts")
+  let tvShutdownFutsIdent = ident("g" & typeDisplayName & "TvShutdownFuts")
 
   let listenImplIdent = ident("listen" & typeDisplayName & "MtImpl")
   let emitImplIdent = ident("emit" & typeDisplayName & "MtImpl")
   let dropListenerImplIdent = ident("drop" & typeDisplayName & "MtListenerImpl")
   let dropAllListenersImplIdent = ident("dropAll" & typeDisplayName & "MtListenersImpl")
-  let tvProcessLoopFutureIdent = ident("g" & typeDisplayName & "TvProcessLoopFutures")
   let shutdownProcessLoopsForCtxIdent =
     ident("shutdownProcessLoopsForCtx" & typeDisplayName)
 
@@ -99,8 +100,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
         `eventMsgKindName` {.pure.} = enum
           emkEvent ## Normal event delivery
-          emkClearListeners ## Clear threadvar handlers, keep processLoop alive
-          emkShutdown ## Drain in-flight tasks and exit processLoop
+          emkClearListeners ## Clear threadvar handlers, keep poll fn alive
+          emkShutdown ## Exit poll fn (no drain — in-flight futures run naturally)
 
         `eventMsgName` = object
           kind: `eventMsgKindName`
@@ -108,7 +109,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
         `bucketName` = object
           brokerCtx: BrokerContext
-          eventChan: ptr AsyncChannel[`eventMsgName`]
+          eventChan: ptr Channel[`eventMsgName`]
+          listenerSignal: ThreadSignalPtr
           threadId: pointer
           threadGen: uint64 ## Disambiguates reused threadvar addresses
           active: bool
@@ -161,12 +163,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
-        # Intentional leak: with --mm:orc, createShared falls back to the
-        # thread-local allocator, so deallocShared on the old buffer would
-        # dereference the allocating thread's MemRegion (c.owner) which may
-        # already be freed after that thread exits → use-after-free.
-        # Old arrays are tiny (initial cap 4, doubles each grow) so the
-        # accumulated leak is bounded and only occurs at broker teardown.
+        # Intentional leak: see equivalent comment in mt_request_broker.nim grow.
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
 
@@ -174,14 +171,16 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
   # ── Threadvar listener storage ────────────────────────────────────────
   # Parallel seqs: contexts, handler tables, next-ID counters.
-  # Index i corresponds to one (BrokerContext, this-thread) listener group.
+  # tvListenerFutsIdent: in-flight listener callback futures (for shutdown drain).
+  # tvShutdownFutsIdent: per-bucket shutdown futures (completed by poll fn on emkShutdown).
   result.add(
     quote do:
       var `tvListenerCtxIdent` {.threadvar.}: seq[BrokerContext]
       var `tvListenerHandlersIdent` {.threadvar.}:
         seq[Table[uint64, `handlerProcIdent`]]
       var `tvNextIdsIdent` {.threadvar.}: seq[uint64]
-      var `tvProcessLoopFutureIdent` {.threadvar.}: seq[(BrokerContext, Future[void])]
+      var `tvListenerFutsIdent` {.threadvar.}: seq[(BrokerContext, Future[void])]
+      var `tvShutdownFutsIdent` {.threadvar.}: seq[(BrokerContext, Future[void])]
   )
 
   # ── Listener notify wrapper ───────────────────────────────────────────
@@ -200,93 +199,92 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
   )
 
-  # ── Process loop ──────────────────────────────────────────────────────
-  # Runs on the listener thread. Receives events from cross-thread emitters
-  # and dispatches to local listeners. Tracks in-flight futures for clean shutdown.
-  let ecIdent = ident("eventChan")
-  let loopCtxIdent = ident("loopCtx")
-  let ecPtrType = quote:
-    ptr AsyncChannel[`eventMsgName`]
-
+  # ── Clear listeners helper ────────────────────────────────────────────
+  # Removes the handler table entry for the given context from all threadvars.
+  # Safe to call from within {.cast(gcsafe).} because it only touches threadvars.
   result.add(
     quote do:
-      proc `processLoopIdent`(
-          `ecIdent`: `ecPtrType`, `loopCtxIdent`: BrokerContext
-      ) {.async: (raises: []).} =
-        var inFlight: seq[Future[void]] = @[]
-
-        proc drainInFlight() {.async: (raises: []).} =
-          for fut in inFlight:
-            if not fut.finished():
-              try:
-                discard await withTimeout(fut, chronos.seconds(5))
-              except CatchableError:
-                discard
-          inFlight.setLen(0)
-
-        proc clearThreadvarListeners() =
+      proc `clearListenersIdent`(loopCtx: BrokerContext) {.gcsafe, raises: [].} =
+        {.cast(gcsafe).}:
           for i in 0 ..< `tvListenerCtxIdent`.len:
-            if `tvListenerCtxIdent`[i] == `loopCtxIdent`:
+            if `tvListenerCtxIdent`[i] == loopCtx:
               `tvListenerHandlersIdent`[i].clear()
               `tvListenerCtxIdent`.del(i)
               `tvListenerHandlersIdent`.del(i)
               `tvNextIdsIdent`.del(i)
               break
 
-        while true:
-          let recvRes = catch:
-            await `ecIdent`.recv()
-          if recvRes.isErr():
-            break
-          let msg = recvRes.get()
+  )
 
-          case msg.kind
-          of `eventMsgKindName`.emkShutdown:
-            # Drain in-flight listeners, clean threadvars, exit loop.
-            await drainInFlight()
-            clearThreadvarListeners()
-            break
-          of `eventMsgKindName`.emkClearListeners:
-            # Drain in-flight listeners and clear threadvar handler table,
-            # but keep processLoop alive for future re-listen on this bucket.
-            await drainInFlight()
-            clearThreadvarListeners()
-            # continue — loop stays alive, waiting for new events
-          of `eventMsgKindName`.emkEvent:
-            # Prune completed futures — await marks them as consumed so Chronos
-            # does not warn about unresolved futures.  The await is instant
-            # because the future has already finished.
-            var j = 0
-            while j < inFlight.len:
-              if inFlight[j].finished():
-                try:
-                  await inFlight[j] # instant — consumes the future
-                except CatchableError:
-                  discard # notifyListener is raises:[], but Chronos needs the guard
-                inFlight.del(j)
-              else:
-                inc j
+  # ── Handle event message async proc ──────────────────────────────────
+  # Dispatches a single emkEvent to all local listeners.
+  # Tracks spawned futures in tvListenerFutsIdent for clean shutdown.
+  result.add(
+    quote do:
+      proc `handleEventMsgIdent`(
+          event: `typeIdent`, loopCtx: BrokerContext
+      ) {.async: (raises: []).} =
+        # Prune completed in-flight futures for this context.
+        var i = 0
+        while i < `tvListenerFutsIdent`.len:
+          if `tvListenerFutsIdent`[i][0] == loopCtx and
+              `tvListenerFutsIdent`[i][1].finished():
+            `tvListenerFutsIdent`.del(i)
+          else:
+            inc i
 
-            # Dispatch to all local listeners for this context.
-            var idx = -1
-            for i in 0 ..< `tvListenerCtxIdent`.len:
-              if `tvListenerCtxIdent`[i] == `loopCtxIdent`:
-                idx = i
-                break
-            if idx >= 0:
-              var callbacks: seq[`handlerProcIdent`] = @[]
-              for cb in `tvListenerHandlersIdent`[idx].values:
-                callbacks.add(cb)
-              for cb in callbacks:
-                # Schedule listener — returns Future, already on the event loop.
-                let fut = `listenerTaskIdent`(cb, msg.event)
-                inFlight.add(fut)
-        # After loop: we do NOT close or deallocShared the channel here.
-        # A concurrent emitter may still hold a pointer captured before the
-        # bucket was removed from the registry, and sendSync on a closed
-        # channel is undefined behavior. Leaving it open is safe: the channel
-        # is drained, nobody reads from it, and the small per-channel leak
-        # only occurs at teardown.
+        # Dispatch to all local listeners for this context.
+        var idx = -1
+        for j in 0 ..< `tvListenerCtxIdent`.len:
+          if `tvListenerCtxIdent`[j] == loopCtx:
+            idx = j
+            break
+        if idx >= 0:
+          var callbacks: seq[`handlerProcIdent`] = @[]
+          for cb in `tvListenerHandlersIdent`[idx].values:
+            callbacks.add(cb)
+          for cb in callbacks:
+            let fut: Future[void] = `listenerTaskIdent`(cb, event)
+            `tvListenerFutsIdent`.add((loopCtx, fut))
+            asyncSpawn fut
+
+  )
+
+  # ── Poll fn maker ─────────────────────────────────────────────────────
+  # Returns a ThreadDispatchPollFn closure that drains the event channel.
+  # Return codes: 0 = nothing, 1 = processed (keep), 2 = shutdown (remove).
+  result.add(
+    quote do:
+      proc `pollFnMakerIdent`(
+          eventChan: ptr Channel[`eventMsgName`],
+          loopCtx: BrokerContext,
+          shutdownFut: Future[void],
+      ): ThreadDispatchPollFn =
+        let capturedChan = eventChan
+        let capturedCtx = loopCtx
+        let capturedShutdownFut = shutdownFut
+        return proc(): int {.gcsafe, raises: [].} =
+          {.cast(gcsafe).}:
+            let tryRes =
+              try:
+                capturedChan[].tryRecv()
+              except Exception:
+                return 0
+            if not tryRes.dataAvailable:
+              return 0
+            let msg = tryRes.msg
+            case msg.kind
+            of `eventMsgKindName`.emkShutdown:
+              `clearListenersIdent`(capturedCtx)
+              if not capturedShutdownFut.finished:
+                capturedShutdownFut.complete()
+              return 2
+            of `eventMsgKindName`.emkClearListeners:
+              `clearListenersIdent`(capturedCtx)
+              return 1
+            of `eventMsgKindName`.emkEvent:
+              asyncSpawn `handleEventMsgIdent`(msg.event, capturedCtx)
+              return 1
 
   )
 
@@ -320,35 +318,31 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         `tvListenerHandlersIdent`[tvIdx][newId] = handler
 
         # Ensure a bucket + channel exists for (brokerCtx, this thread).
-        # Reuse existing bucket if one exists with matching threadGen
-        # (same thread incarnation — processLoop still alive).
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
         var bucketExists = false
-        var spawnChan: ptr AsyncChannel[`eventMsgName`]
+        var spawnChan: ptr Channel[`eventMsgName`]
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
                 `globalBucketsIdent`[i].threadId == myThreadId and
                 `globalBucketsIdent`[i].threadGen == myThreadGen:
-              # Reuse existing bucket — same thread incarnation, processLoop alive.
               `globalBucketsIdent`[i].hasListeners = true
               bucketExists = true
               break
           if not bucketExists:
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr AsyncChannel[`eventMsgName`]](createShared(
-              AsyncChannel[`eventMsgName`], 1
+            let chan = cast[ptr Channel[`eventMsgName`]](createShared(
+              Channel[`eventMsgName`], 1
             ))
-            let chanOpenRes = chan[].open()
-            if chanOpenRes.isErr():
-              raiseAssert "EventBroker(" & `typeNameLit` &
-                "): failed to open event channel: " & chanOpenRes.error
+            chan[].open(0)
+            let listenerSig = getOrInitBrokerSignal()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
               eventChan: chan,
+              listenerSignal: listenerSig,
               threadId: myThreadId,
               threadGen: myThreadGen,
               active: true,
@@ -356,12 +350,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             )
             `globalBucketCountIdent` += 1
             spawnChan = chan
-        # asyncSpawn outside lock to prevent potential deadlock if
-        # processLoop or its listeners acquire the same lock.
+        # Register poll fn and dispatcher outside lock.
         if not bucketExists and not spawnChan.isNil:
-          let processLoopFut = `processLoopIdent`(spawnChan, brokerCtx)
-          `tvProcessLoopFutureIdent`.add((brokerCtx, Future[void](processLoopFut)))
-          asyncSpawn processLoopFut
+          let shutdownFut =
+            newFuture[void]("eventBroker." & `typeNameLit` & ".shutdown")
+          `tvShutdownFutsIdent`.add((brokerCtx, shutdownFut))
+          registerBrokerPoller(`pollFnMakerIdent`(spawnChan, brokerCtx, shutdownFut))
+          ensureBrokerDispatchStarted()
 
         return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
 
@@ -385,10 +380,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   )
 
   # ── emit impl ─────────────────────────────────────────────────────────
-  # emit is an async proc. Callers in async contexts use `await`;
-  # callers in {.thread.} procs with no event loop use `waitFor`.
-  # - Cross-thread: async channel send (non-blocking on event loop)
-  # - Same-thread: asyncSpawn to local listeners (fire-and-forget)
   result.add(
     quote do:
       proc `emitImplIdent`(
@@ -403,7 +394,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
         # Collect targets under lock
         type EvTarget = object
-          eventChan: ptr AsyncChannel[`eventMsgName`]
+          eventChan: ptr Channel[`eventMsgName`]
+          listenerSignal: ThreadSignalPtr
           isSameThread: bool
 
         var targets: seq[EvTarget] = @[]
@@ -416,6 +408,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               targets.add(
                 EvTarget(
                   eventChan: `globalBucketsIdent`[i].eventChan,
+                  listenerSignal: `globalBucketsIdent`[i].listenerSignal,
                   isSameThread: `globalBucketsIdent`[i].threadId == myThreadId,
                 )
               )
@@ -438,9 +431,14 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               for cb in callbacks:
                 asyncSpawn `listenerTaskIdent`(cb, event)
           else:
-            # Cross-thread: send via channel (sendSync is brief — buffer + signal)
+            # Cross-thread: send via Channel[T] and wake the listener's dispatcher.
             let msg = `eventMsgName`(kind: `eventMsgKindName`.emkEvent, event: event)
-            target.eventChan[].sendSync(msg)
+            {.cast(gcsafe).}:
+              try:
+                target.eventChan[].send(msg)
+              except Exception:
+                discard
+            fireBrokerSignal(target.listenerSignal)
 
   )
 
@@ -465,7 +463,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
     let typedescParamType =
       newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
 
-    # Async pragma: {.async: (raises: []).}
     let asyncPragma = newTree(
       nnkPragma,
       newTree(
@@ -561,7 +558,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       ) =
         if handle.id == 0'u64:
           return
-        # Enforce: must be called from the thread that registered the listener
         if handle.threadId != currentMtThreadId():
           error "dropListener called from wrong thread",
             eventType = `typeNameLit`,
@@ -579,9 +575,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
         `tvListenerHandlersIdent`[tvIdx].del(handle.id)
 
-        # If no more listeners for this context on this thread, mark bucket
-        # as having no listeners. The bucket, channel, and processLoop stay
-        # alive for future re-listen reuse.
         if `tvListenerHandlersIdent`[tvIdx].len == 0:
           `tvListenerCtxIdent`.del(tvIdx)
           `tvListenerHandlersIdent`.del(tvIdx)
@@ -600,17 +593,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   )
 
   # ── dropAllListeners impl ─────────────────────────────────────────────
-  # Callable from any thread. Shuts down ALL listener threads for this context.
   result.add(
     quote do:
       proc `dropAllListenersImplIdent`(brokerCtx: BrokerContext) =
         `initProcIdent`()
 
-        # Phase 1: Under lock, mark all matching buckets as having no listeners.
-        # Collect channels for remote threads (need to send emkClearListeners).
-        # Buckets are NOT removed — they stay alive for future re-listen reuse.
         let myThreadId = currentMtThreadId()
-        var chansToClear: seq[ptr AsyncChannel[`eventMsgName`]] = @[]
+        var chansToClear: seq[(ptr Channel[`eventMsgName`], ThreadSignalPtr)] = @[]
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
@@ -618,9 +607,14 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
                 `globalBucketsIdent`[i].hasListeners:
               `globalBucketsIdent`[i].hasListeners = false
               if `globalBucketsIdent`[i].threadId != myThreadId:
-                chansToClear.add(`globalBucketsIdent`[i].eventChan)
+                chansToClear.add(
+                  (
+                    `globalBucketsIdent`[i].eventChan,
+                    `globalBucketsIdent`[i].listenerSignal,
+                  )
+                )
 
-        # Phase 2: Clean up local threadvar entries if current thread has listeners
+        # Clean local threadvar entries
         var tvIdx = -1
         for i in 0 ..< `tvListenerCtxIdent`.len:
           if `tvListenerCtxIdent`[i] == brokerCtx:
@@ -632,11 +626,14 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           `tvListenerHandlersIdent`.del(tvIdx)
           `tvNextIdsIdent`.del(tvIdx)
 
-        # Phase 3: Send emkClearListeners to remote-thread channels.
-        # processLoop drains in-flight tasks and clears handler closures
-        # but stays alive for future re-listen.
-        for chan in chansToClear:
-          chan[].sendSync(`eventMsgName`(kind: `eventMsgKindName`.emkClearListeners))
+        # Send emkClearListeners to remote-thread channels.
+        for (chan, sig) in chansToClear:
+          {.cast(gcsafe).}:
+            try:
+              chan[].send(`eventMsgName`(kind: `eventMsgKindName`.emkClearListeners))
+            except Exception:
+              discard
+          fireBrokerSignal(sig)
 
   )
 
@@ -662,10 +659,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   )
 
   # ── shutdownProcessLoopsForCtx (used by API teardown) ─────────────────
-  # Sends emkShutdown to all processLoop channels owned by the current thread
-  # for the given context, then awaits their futures so the event loop collects
-  # all live objects before the thread exits. Must be called from the same
-  # thread that registered the listeners (i.e. the API delivery thread).
+  # Sends emkShutdown to all poll fns for the given context on the current thread,
+  # awaits their shutdown futures, then drains any in-flight listener futures.
+  # Must be called from the same thread that registered the listeners.
   result.add(
     quote do:
       proc `shutdownProcessLoopsForCtxIdent`(
@@ -673,27 +669,59 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       ) {.async: (raises: []).} =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
-        var chansToShutdown: seq[ptr AsyncChannel[`eventMsgName`]] = @[]
+        var chansToShutdown: seq[(ptr Channel[`eventMsgName`], ThreadSignalPtr)] = @[]
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == ctx and
                 `globalBucketsIdent`[i].threadId == myThreadId and
                 `globalBucketsIdent`[i].threadGen == myThreadGen and
                 `globalBucketsIdent`[i].active:
-              chansToShutdown.add(`globalBucketsIdent`[i].eventChan)
+              chansToShutdown.add(
+                (
+                  `globalBucketsIdent`[i].eventChan,
+                  `globalBucketsIdent`[i].listenerSignal,
+                )
+              )
               `globalBucketsIdent`[i].active = false
-        for chan in chansToShutdown:
-          chan[].sendSync(`eventMsgName`(kind: `eventMsgKindName`.emkShutdown))
+
+        # Collect shutdown futures BEFORE sending (they're in tvShutdownFutsIdent).
+        var shutdownFuts: seq[Future[void]] = @[]
+        var i = 0
+        while i < `tvShutdownFutsIdent`.len:
+          if `tvShutdownFutsIdent`[i][0] == ctx:
+            shutdownFuts.add(`tvShutdownFutsIdent`[i][1])
+            `tvShutdownFutsIdent`.del(i)
+          else:
+            inc i
+
+        # Send emkShutdown and wake the listener thread's dispatcher.
+        for (chan, sig) in chansToShutdown:
+          {.cast(gcsafe).}:
+            try:
+              chan[].send(`eventMsgName`(kind: `eventMsgKindName`.emkShutdown))
+            except Exception:
+              discard
+          fireBrokerSignal(sig)
+
+        # Await shutdown confirmation (poll fn processed emkShutdown).
+        for fut in shutdownFuts:
+          if not fut.finished():
+            try:
+              discard await withTimeout(fut, chronos.seconds(5))
+            except CatchableError:
+              discard
+
+        # Drain in-flight listener futures for this context.
         var j = 0
-        while j < `tvProcessLoopFutureIdent`.len:
-          if `tvProcessLoopFutureIdent`[j][0] == ctx:
-            let fut = `tvProcessLoopFutureIdent`[j][1]
+        while j < `tvListenerFutsIdent`.len:
+          if `tvListenerFutsIdent`[j][0] == ctx:
+            let fut = `tvListenerFutsIdent`[j][1]
             if not fut.finished():
               try:
                 discard await withTimeout(fut, chronos.seconds(5))
               except CatchableError:
                 discard
-            `tvProcessLoopFutureIdent`.del(j)
+            `tvListenerFutsIdent`.del(j)
           else:
             inc j
 

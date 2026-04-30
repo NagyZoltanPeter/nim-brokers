@@ -13,7 +13,6 @@ requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
-requires "https://github.com/status-im/nim-async-channels"
 
 proc quoteArg(arg: string): string =
   if defined(windows):
@@ -455,10 +454,7 @@ task testFfiApiCppAsan,
   buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
   putEnv("MallocNanoZone", "0")
   putEnv("ASAN_OPTIONS", "detect_leaks=0")
-  # Raise fd limit: each AsyncChannel.open() needs 2 fds (socketpair on macOS).
-  # Regular zsh terminals inherit the macOS default of 256; ASAN + many broker
-  # channels exhaust it silently (open() returns err, chan stays nil → crash).
-  exec "sh -c 'ulimit -n 10240 && " & typeMapTestCppAsanExecutablePath() & "'"
+  exec quoteArg(typeMapTestCppAsanExecutablePath())
 
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
