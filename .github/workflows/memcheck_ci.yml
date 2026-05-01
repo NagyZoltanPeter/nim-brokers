@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       nim-version:
-        description: "Nim compiler version"
+        description: "Nim compiler branch (nim-lang/Nim branch name)"
         required: true
         type: choice
-        default: "2.2.4"
+        default: "version-2-2"
         options:
-          - "2.2.4"
-          - "2.2.0"
-          - devel
+          - "version-2-2"
+          - "version-2-0"
+          - "devel"
       tasks:
         description: "ASAN task(s) to run"
         required: true
