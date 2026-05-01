@@ -7,10 +7,10 @@ on:
         description: "Nim compiler version"
         required: true
         type: choice
-        default: version-2-2
+        default: "2.2.4"
         options:
-          - version-2-2
-          - version-2-0
+          - "2.2.4"
+          - "2.2.0"
           - devel
       tasks:
         description: "ASAN task(s) to run"
