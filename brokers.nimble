@@ -124,11 +124,12 @@ proc torpedoExecutablePath(): string =
 
 proc test(env, path: string) =
   let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
+  let runPath = outputPath.addFileExt(ExeExt)
   let label = path & " [" & env & "]"
   exec "nim c " & env & " --path:. --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
   echo "=== RUN  " & label & " ==="
-  let (output, exitCode) = gorgeEx(outputPath)
+  let (output, exitCode) = gorgeEx(runPath)
   if output.len > 0:
     echo output
   if exitCode != 0:
@@ -462,6 +463,7 @@ proc asanLinkFlags(sharedLib: bool = false): string =
 
 proc testAsan(mm: string, path: string) =
   let outputPath = joinPath("build", path & "_asan_" & mm)
+  let runPath = outputPath.addFileExt(ExeExt)
   let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
   let flags =
     "--cc:clang -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm & " --passC:" &
@@ -470,7 +472,7 @@ proc testAsan(mm: string, path: string) =
   exec "nim c " & flags & " test/" & path & ".nim"
   setAsanEnv()
   echo "=== RUN  " & label & " ==="
-  let (output, exitCode) = gorgeEx(outputPath)
+  let (output, exitCode) = gorgeEx(runPath)
   if output.len > 0:
     echo output
   if exitCode != 0:
