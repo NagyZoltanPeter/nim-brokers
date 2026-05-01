@@ -13,14 +13,15 @@ on:
           - macos-latest
           - windows-latest
       nim-version:
-        description: "Nim compiler version"
+        description: "Nim compiler version (semver, accepted by jiro4989/setup-nim-action)"
         required: true
         type: choice
-        default: version-2-2
+        default: "2.2.4"
         options:
-          - version-2-2
-          - version-2-0
-          - devel
+          - "2.2.4"
+          - "2.2.0"
+          - "2.0.0"
+          - "devel"
       tasks:
         description: "ASAN task(s) to run"
         required: true
