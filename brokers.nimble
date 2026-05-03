@@ -361,9 +361,17 @@ proc buildTypeMapTestCmakeTargetAsan(target = "") =
   let buildDir = typeMapTestAsanBuildDir()
   let outDir = getCurrentDir() / "test/typemappingtestlib/build-asan"
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir &
+  var configure =
+    "cmake -S " & cmakeDir & " -B " & buildDir &
     " -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++" &
     " -DASAN=ON -DTYPEMAPTEST_DIR=" & quoteArg(outDir)
+  when defined(windows):
+    # The default Visual Studio + MSVC toolchain on Windows ignores
+    # CMAKE_*_COMPILER and link.exe cannot consume clang's asan output
+    # (LNK4044 /fsanitize=address; LNK1104 typemappingtestlib-NOTFOUND).
+    # Ninja drives clang/lld directly and matches the Nim --cc:clang build.
+    configure.add(" -G Ninja -DCMAKE_LINKER_TYPE=LLD")
+  exec configure
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
