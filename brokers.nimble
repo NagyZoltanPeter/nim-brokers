@@ -327,13 +327,31 @@ proc typeMapTestCppExecutablePath(): string =
 proc typeMapTestAsanBuildDir(): string =
   "test/typemappingtestlib/cmake-build-asan"
 
+proc setAsanEnv() =
+  putEnv("MallocNanoZone", "0")
+  putEnv(
+    "ASAN_OPTIONS",
+    "detect_leaks=0:symbolize=1:print_stacktrace=1:halt_on_error=1:abort_on_error=0:strict_string_checks=1",
+  )
+  if not existsEnv("ASAN_SYMBOLIZER_PATH"):
+    let llvmSym = findExe("llvm-symbolizer")
+    if llvmSym.len > 0:
+      putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
+
+proc asanCompileFlags(): string =
+  "-fsanitize=address -fno-omit-frame-pointer -g"
+
+proc asanLinkFlags(sharedLib: bool = false): string =
+  result = "-fsanitize=address -g"
+  when defined(linux):
+    if sharedLib:
+      result.add(" -shared-libasan")
+
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
-  let asanCompile = "-fsanitize=address -fno-omit-frame-pointer"
-  let asanLink =
-    when defined(linux): "-fsanitize=address -shared-libasan" else: "-fsanitize=address"
   var flags =
-    "--cc:clang -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --passC:" & quoteArg(asanCompile) & " --passL:" & quoteArg(asanLink) &
+    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
+    quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
@@ -448,35 +466,17 @@ task testFfiApiCpp,
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
 
-proc setAsanEnv() =
-  putEnv("MallocNanoZone", "0")
-  putEnv("ASAN_OPTIONS", "detect_leaks=0")
-
-proc asanCompileFlags(): string =
-  "-fsanitize=address -fno-omit-frame-pointer"
-
-proc asanLinkFlags(sharedLib: bool = false): string =
-  result = "-fsanitize=address"
-  when defined(linux):
-    if sharedLib:
-      result.add(" -shared-libasan")
-
 proc testAsan(mm: string, path: string) =
   let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
   let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
   let flags =
-    "--cc:clang -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm & " --passC:" &
-    quoteArg(asanCompileFlags()) & " --passL:" & quoteArg(asanLinkFlags()) &
-    " --path:. --out:" & quoteArg(outputPath)
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" &
+    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
+    quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
   exec "nim c " & flags & " test/" & path & ".nim"
   setAsanEnv()
   echo "=== RUN  " & label & " ==="
-  let (output, exitCode) = gorgeEx(outputPath)
-  if output.len > 0:
-    echo output
-  if exitCode != 0:
-    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
-    quit(1)
+  exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
 
 task testFfiApiCppAsanOrc,
