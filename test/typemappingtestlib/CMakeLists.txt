@@ -31,6 +31,14 @@ if(APPLE)
         IMPORTED_SONAME "@rpath/libtypemappingtestlib.dylib"
     )
 endif()
+if(WIN32)
+    # Linking against a SHARED IMPORTED target on Windows needs the import
+    # library (.lib), not just the runtime DLL referenced by IMPORTED_LOCATION.
+    # Nim emits typemappingtestlib.lib alongside the .dll in TYPEMAPTEST_DIR.
+    set_target_properties(typemappingtestlib PROPERTIES
+        IMPORTED_IMPLIB "${TYPEMAPTEST_DIR}/typemappingtestlib.lib"
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # C++ test binary
