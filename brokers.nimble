@@ -87,6 +87,34 @@ proc nimWindowsImplibFlag(outDir, libName: string): string =
   else:
     ""
 
+proc skipNim224MacosRefcDebug(mm: string, release: bool, label: string): bool =
+  ## Returns true (and prints a skip notice) for the one specific combo
+  ## with a known upstream Nim 2.2.4 stdlib regression:
+  ##
+  ##   macOS + Nim 2.2.4 + --mm:refc + debug build
+  ##
+  ## Sustained Channel[T].send of complex seq/object payloads triggers
+  ## heap corruption in refc through stdlib system/channels_builtin.nim
+  ## storeAux deep-copy. Fixed in Nim 2.2.10. Affects MT brokers and the
+  ## Broker FFI API (which both rely on Channel[T] for cross-thread
+  ## delivery). Linux-amd64 + 2.2.4 + refc debug is unaffected; refc
+  ## release on the same Nim/OS is unaffected. See README → Known
+  ## Limitations for the full reasoning.
+  when defined(macosx) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
+    if mm == "refc" and not release:
+      echo "Skipping " & label & " (mm:refc debug) on macOS + Nim 2.2.4: known stdlib " &
+        "Channel[T].send deep-copy regression (fixed in 2.2.10)."
+      return true
+  false
+
+proc skipNim224MacosRefcDebugFromOpt(opt, label: string): bool =
+  ## Wrapper for the iteration loops that pass full Nim option strings
+  ## (e.g. "-d:release --mm:refc --threads:on") rather than discrete
+  ## (mm, release) values.
+  let mm = if "--mm:refc" in opt: "refc" else: "orc"
+  let release = "-d:release" in opt
+  skipNim224MacosRefcDebug(mm, release, label)
+
 proc skipRefcOnWindows(opt, label: string): bool =
   ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
   ## Windows. See README → "Platform Support" + "Known Limitations" for the
@@ -292,6 +320,8 @@ task test, "Run all single and multi-threaded broker tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
+      if skipNim224MacosRefcDebugFromOpt(opt, f):
+        continue
       test opt, f
 
 task perftest, "Run performance and stress tests":
@@ -306,6 +336,8 @@ task perftest, "Run performance and stress tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
+      if skipNim224MacosRefcDebugFromOpt(opt, f):
+        continue
       test opt, f
 
 task testApi, "Run FFI API broker tests":
@@ -319,6 +351,8 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
+        continue
+      if skipNim224MacosRefcDebugFromOpt(opt, f):
         continue
       let extraOpt =
         if f == "test_api_library_init":
@@ -504,6 +538,8 @@ task testFfiApi,
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
       if skipRefcOnWindows(mm, "testFfiApi (" & mode & ")"):
         continue
+      if skipNim224MacosRefcDebug(mm, release, "testFfiApi"):
+        continue
       buildTypeMapTestLibrary(mm, release)
       let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
@@ -527,6 +563,8 @@ task testFfiApiCpp,
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
       if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
+        continue
+      if skipNim224MacosRefcDebug(mm, release, "testFfiApiCpp"):
         continue
       buildTypeMapTestLibrary(mm, release)
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")

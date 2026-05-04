@@ -706,6 +706,14 @@ worthwhile.
 the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers remain
 fully refc-compatible on every platform.
 
+### Nim 2.2.4 stdlib `Channel[T].send` regression on macOS (refc + debug only)
+
+Tracked, narrow scope. CI's nimble tasks (`test`, `perftest`, `testApi`, `testFfiApi`, `testFfiApiCpp`) automatically skip the **macOS + Nim 2.2.4 + `--mm:refc` + debug** iteration with a clear log message; every other combination of `mm × build mode × OS` on Nim 2.2.4 passes.
+
+The crash signature is sustained `Channel[T].send` deep-copy of complex `seq[object]` payloads through `system/channels_builtin.nim:storeAux`, recursing into refc's `newObjNoInit` / `gc_common.prepareDealloc` and reading from a freed cell. Reproducible with the rapid-fire `(mt)` event broadcast pattern in `test/typemappingtestlib/test_typemappingtestlib.cpp:test_seq_object_event_rapid_fire_no_leak` (100 iterations, 10 tags each). Linux-amd64 + 2.2.4 + refc debug is **unaffected**, and refc release on macOS + 2.2.4 is **unaffected** — only the four-way intersection trips.
+
+The bug is in Nim's stdlib and was fixed by 2.2.10. If you build production code on macOS with Nim 2.2.4 and `--mm:refc`, prefer release mode or upgrade to Nim ≥ 2.2.10.
+
 ### Nim devel (2.3.x) refc release-mode FFI crash
 
 Tracked, not blocking. CI runs Nim devel as `continue-on-error: true` (`build-devel` job in `ci.yml`). Locally reproducible on macOS arm64 with `--mm:refc -d:release` and Nim 2.3.1: after roughly four `createContext` / `shutdown` lifecycle iterations, the next allocation crashes inside the refc allocator at `system/alloc.nim:942` (`c.freeList = c.freeList.next` reading address `0x8`). The same code passes on Nim 2.0.16, 2.2.10 and on devel under refc *debug*; only refc + release + devel crashes.
