@@ -64,6 +64,23 @@ proc nimWindowsCcFlag(): string =
   ## keeps both halves on the release UCRT.
   when defined(windows): " --cc:clang" else: ""
 
+proc skipRefcOnWindows(opt, label: string): bool =
+  ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
+  ## Windows. See README → "Platform Support" + "Known Limitations" for the
+  ## reasoning: chronos' Win32 RegisterWaitForSingleObject path fires its
+  ## completion on a thread-pool thread that the refc stop-the-world GC
+  ## cannot suspend, leading to use-after-free on
+  ## ThreadSignalPtr/Channel-driven workloads. This affects every layer that
+  ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
+  ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
+  ## phase, so the same code is safe under --mm:orc.
+  when defined(windows):
+    if "--mm:refc" in opt or "refc" == opt:
+      echo "Skipping " & label & " (" & opt &
+        ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
+      return true
+  false
+
 proc cmakeWindowsConfigureExtras(): string =
   ## On Windows we drive cmake with Ninja + clang/clang++ + lld, pin the
   ## release UCRT and select RelWithDebInfo. The default Visual Studio
@@ -248,6 +265,8 @@ task test, "Run all single and multi-threaded broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
+      if skipRefcOnWindows(opt, f):
+        continue
       test opt, f
 
 task perftest, "Run performance and stress tests":
@@ -260,6 +279,8 @@ task perftest, "Run performance and stress tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
+      if skipRefcOnWindows(opt, f):
+        continue
       test opt, f
 
 task testApi, "Run FFI API broker tests":
@@ -272,17 +293,8 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      # when defined(windows):
-      #   # On Windows, chronos' waitForSingleObject fires its completion callback
-      #   # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-      #   # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-      #   # suspends known Nim threads, so it can collect futures/handles still
-      #   # referenced by the unsuspended thread-pool callback → crash.
-      #   # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-      #   if "--mm:refc" in opt:
-      #     echo "Skipping " & f & " (" & opt & ") on Windows: " &
-      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #     continue
+      if skipRefcOnWindows(opt, f):
+        continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
@@ -464,16 +476,8 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      # when defined(windows):
-      # On Windows, chronos' waitForSingleObject fires its completion callback
-      # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-      # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-      # suspends known Nim threads, so it can collect futures/handles still
-      # referenced by the unsuspended thread-pool callback → crash.Skip refc on Windows.
-      # if "refc" in mm:
-      #   echo "Skipping (" & mm & ") on Windows: " &
-      #     "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #   continue
+      if skipRefcOnWindows(mm, "testFfiApi (" & mode & ")"):
+        continue
       buildTypeMapTestLibrary(mm, release)
       let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
@@ -496,11 +500,8 @@ task testFfiApiCpp,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
-      # when defined(windows):
-      #   if "refc" in mm:
-      #     echo "Skipping (" & mm & ") on Windows: " &
-      #       "refc STW GC is incompatible with chronos thread-pool callbacks."
-      #     continue
+      if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
+        continue
       buildTypeMapTestLibrary(mm, release)
       buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
@@ -528,6 +529,8 @@ task testFfiApiCppAsanOrc,
 
 task testFfiApiCppAsanRefc,
   "Build and run C++ FFI API binding tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testFfiApiCppAsanRefc"):
+    return
   echo "\n=== testFfiApiCppAsanRefc (clang, mm:refc, debug) ==="
   buildTypeMapTestLibraryAsan("refc")
   buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
@@ -540,6 +543,8 @@ task testMtEventBrokerAsanOrc,
 
 task testMtEventBrokerAsanRefc,
   "Run multi-thread event broker tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtEventBrokerAsanRefc"):
+    return
   testAsan("refc", "test_multi_thread_event_broker")
 
 task testMtRequestBrokerAsanOrc,
@@ -548,6 +553,8 @@ task testMtRequestBrokerAsanOrc,
 
 task testMtRequestBrokerAsanRefc,
   "Run multi-thread request broker tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtRequestBrokerAsanRefc"):
+    return
   testAsan("refc", "test_multi_thread_request_broker")
 
 task buildTorpedoExample, "Build the torpedo FFI example library":

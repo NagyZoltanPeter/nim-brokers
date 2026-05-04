@@ -548,6 +548,35 @@ Total baseline: ~400 bytes for 1 provider, 1 context.
 | Baseline per context | ~100 bytes | ~16 bytes | ~300 bytes (bucket + Channel[T] + poll fn) | ~300 bytes (bucket + Channel[T] + poll fn) |
 | Intentional leaks | None | None | Channel[T] on shutdown (no OS fds — safe) | Response Channel[T] on timeout (no OS fds — safe) |
 
+## Platform Support
+
+The single-thread brokers (`EventBroker`, `RequestBroker`, `MultiRequestBroker`)
+are pure threadvar code with no chronos cross-thread machinery — every memory
+manager works on every platform. The multi-thread (`(mt)`) brokers and the
+Broker FFI API both use chronos' `ThreadSignalPtr` for cross-thread wakeup; on
+Windows that primitive routes through `RegisterWaitForSingleObject`, which
+fires its completion callback on a Win32 thread-pool thread the refc GC
+cannot suspend (see [Known Limitations](#known-limitations) for the full
+reasoning). As a result, **`--mm:refc` is unsupported on Windows for the
+multi-thread brokers and the Broker FFI API** — use `--mm:orc` (Nim's default
+since 2.0).
+
+| Layer | Linux orc | Linux refc | macOS orc | macOS refc | Windows orc | Windows refc |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| `EventBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `RequestBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `MultiRequestBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `EventBroker(mt)` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `RequestBroker(mt)` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `EventBroker(API)` (Broker FFI) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `RequestBroker(API)` (Broker FFI) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `registerBrokerLibrary` (FFI runtime) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+
+The `nimble` test tasks reflect this matrix: refc combinations for `(mt)` and
+`(API)` brokers are **automatically skipped on Windows** with a clear log
+message. CI does not enforce them, and consuming projects should build
+Windows binaries with `--mm:orc`.
+
 ## Windows Support
 
 The Broker FFI API is supported on Windows, but with stricter toolchain
@@ -616,19 +645,56 @@ same tasks plus the AddressSanitizer variants.
 
 ## Known Limitations
 
-### `--mm:refc` is not supported for FFI API tests on Windows
+### `--mm:refc` is unsupported on Windows for the multi-thread and FFI API brokers
 
-`nimble testApi` skips all `--mm:refc` variants on Windows. ORC (`--mm:orc`) is fully supported on all platforms.
+`nimble test`, `nimble perftest`, `nimble testApi`, `nimble testFfiApi`,
+`nimble testFfiApiCpp`, `testFfiApiCppAsanRefc`, `testMtEventBrokerAsanRefc`
+and `testMtRequestBrokerAsanRefc` automatically skip `--mm:refc` variants on
+Windows. ORC (`--mm:orc`) is fully supported on every platform and is the
+recommended memory manager for nim-brokers code that crosses thread
+boundaries on Windows.
 
-**Root cause:** chronos' async `waitForSingleObject` — used internally by `ThreadSignalPtr.wait()` (the shared per-thread broker dispatcher signal) whenever it waits for the next message — registers a completion callback via the Win32 `RegisterWaitForSingleObject` API. That callback fires on a **Windows thread-pool thread**, which is not a Nim thread and is therefore invisible to the garbage collector.
+**Root cause.** Both the `(mt)` brokers and the Broker FFI API runtime use
+chronos' `ThreadSignalPtr.wait()` to receive cross-thread wakeups. On Windows
+the chronos implementation registers a completion callback through the
+Win32 `RegisterWaitForSingleObject` API, and the OS fires that callback on a
+**Windows thread-pool thread** — a thread that is not a Nim thread and is
+therefore invisible to the garbage collector.
 
-With `--mm:refc` the GC is stop-the-world: it pauses all *known* Nim threads before scanning the heap. Because the thread-pool thread is not tracked, the GC can collect futures and wait-handles that the callback is still referencing, producing an access violation.
+Refc's garbage collector is stop-the-world: it pauses every *known* Nim
+thread before scanning the heap. Because the thread-pool thread is unknown,
+refc can free futures and wait-handles that the callback is still
+referencing, producing access violations and use-after-free bugs. ORC has no
+stop-the-world phase — its reference counting is fully atomic and its cycle
+collector runs in-thread — so the same thread-pool callback is safe.
 
-With `--mm:orc` there is no stop-the-world phase — reference counting is fully atomic — so the same thread-pool callback is safe.
+**Why `(mt)` brokers are also affected on Windows.** Earlier documentation
+said `(mt)` refc tests pass on Windows because their workloads tend to keep
+the broker signal pre-fired by the time the dispatcher polls, sometimes
+short-circuiting the `RegisterWaitForSingleObject` slow path. That is true
+for the existing test suite under light load, but it is a property of the
+test patterns — not a guarantee. Sustained idle periods, foreign-thread
+attaches, and stress workloads such as ASAN's
+`test_foreign_thread_concurrent_lifecycle` all reach the slow path and
+expose the same use-after-free deterministically. Treat `(mt)` refc on
+Windows the same as FFI API refc: unsupported.
 
-The `--mm:refc` limitation applies only to the **FFI API layer** (`RequestBroker(API)` / `EventBroker(API)` / `registerBrokerLibrary`). Plain multi-thread broker tests (`RequestBroker(mt)`, `EventBroker(mt)`) pass on Windows under `--mm:refc` because those tests keep all callers on Nim threads that run persistent async event loops, which means the shared broker signal is typically already fired by the time the dispatcher polls — bypassing the `RegisterWaitForSingleObject` code path entirely.
+**Why the FFI API cannot work around it.** The FFI API runtime spawns
+dedicated processing and delivery threads that block on
+`ThreadSignalPtr.wait()` by design, and foreign threads (C / C++ / Python)
+drive that wait through requests, event registrations and lifecycle
+operations. The thread-pool callback path is therefore part of the steady
+state, not a corner case. A workaround would require either an upstream
+chronos rewrite of the Windows wait primitive, or replacing
+`ThreadSignalPtr` in `mt_broker_common.nim` with a Nim-thread-only
+blocking-receive design — both substantial efforts that would still leave
+foreign-thread attach/detach hazards for refc unresolved. Given that ORC is
+Nim's default since 2.0 and refc is legacy, neither workaround is
+worthwhile.
 
-**Recommendation:** use `--mm:orc` (the Nim default since 2.0) when building FFI API libraries on Windows.
+**Recommendation.** Build any nim-brokers code that uses `(mt)` brokers or
+the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers remain
+fully refc-compatible on every platform.
 
 ### `--nimMainPrefix` is not needed on Windows, and cannot be used there
 
