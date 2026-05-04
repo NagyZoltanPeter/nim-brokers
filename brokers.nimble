@@ -339,13 +339,19 @@ proc setAsanEnv() =
       putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
 
 proc asanCompileFlags(): string =
-  "-fsanitize=address -fno-omit-frame-pointer -g"
+  result = "-fsanitize=address -fno-omit-frame-pointer -g"
+  when defined(windows):
+    # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
+    result.add(" -gcodeview")
 
 proc asanLinkFlags(sharedLib: bool = false): string =
   result = "-fsanitize=address -g"
   when defined(linux):
     if sharedLib:
       result.add(" -shared-libasan")
+  when defined(windows):
+    # Tell lld to emit a PDB so ASAN frames carry function/line info.
+    result.add(" -Wl,/debug")
 
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
   var flags =
@@ -370,7 +376,9 @@ proc buildTypeMapTestCmakeTargetAsan(target = "") =
     # CMAKE_*_COMPILER and link.exe cannot consume clang's asan output
     # (LNK4044 /fsanitize=address; LNK1104 typemappingtestlib-NOTFOUND).
     # Ninja drives clang/lld directly and matches the Nim --cc:clang build.
-    configure.add(" -G Ninja -DCMAKE_LINKER_TYPE=LLD")
+    # RelWithDebInfo selects the release UCRT (matches the Nim DLL) while
+    # keeping debug info for ASAN symbolization.
+    configure.add(" -G Ninja -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=RelWithDebInfo")
   exec configure
   if target.len == 0:
     exec "cmake --build " & buildDir
