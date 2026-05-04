@@ -195,12 +195,12 @@ proc test(env, path: string) =
   exec "nim c " & env & " --path:. --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
   echo "=== RUN  " & label & " ==="
-  let (output, exitCode) = gorgeEx(outputPath)
-  if output.len > 0:
-    echo output
-  if exitCode != 0:
-    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
-    quit(1)
+  # Use exec (live stdout+stderr) instead of gorgeEx so a SIGSEGV / runtime
+  # abort that fires before the buffered output is flushed still surfaces
+  # its Nim stack trace to the CI log. gorgeEx captured stdout only and
+  # printed it after the binary exited, which loses any backtrace the Nim
+  # runtime writes to stderr at crash time.
+  exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
 
 proc isExcludedNimPath(path: string): bool =
