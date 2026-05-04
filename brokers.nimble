@@ -3,7 +3,8 @@ import std/[os, strutils]
 # Package
 version = "0.1.0"
 author = "Status Research & Development GmbH"
-description = "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
+description =
+  "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
 license = "MIT"
 skipDirs = @["tests", "examples", "tools"]
 
