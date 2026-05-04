@@ -16,11 +16,10 @@ on:
         description: "Nim compiler version (semver, accepted by jiro4989/setup-nim-action)"
         required: true
         type: choice
-        default: "2.2.4"
+        default: "2.2.10"
         options:
+          - "2.2.10"
           - "2.2.4"
-          - "2.2.0"
-          - "2.0.0"
           - "devel"
       tasks:
         description: "ASAN task(s) to run"
