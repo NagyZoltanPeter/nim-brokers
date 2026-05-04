@@ -582,7 +582,7 @@ Windows binaries with `--mm:orc`.
 | Nim version | CI status | Notes |
 |---|---|---|
 | **2.2.x** (current head of `version-2-2` branch — 2.2.10 at time of writing) | ✅ blocking | Recommended. The minimum supported stable release. |
-| **devel** (currently 2.3.x) | ⚠️ informational | Tracked via a separate `continue-on-error: true` job in `ci.yml` so upstream regressions don't block PRs. May fail at any time as Nim devel changes daily — see the entry under [Known Limitations](#known-limitations). |
+| **devel** (currently 2.3.x) | ⚠️ manual | Not part of the blocking PR matrix. GitHub Actions does not allow `continue-on-error` on reusable-workflow callers, and `nimbus-common-workflow` exposes no informational-version flag. Devel coverage is on-demand via the **`memcheck_ci.yml` → "Run workflow" → `nim-version: devel`** dispatch (or by running the same `nimble` tasks locally). The current 2.3.x regression is documented under [Known Limitations](#known-limitations). |
 | **2.0.x** and earlier | ❌ unsupported | Dropped on 2026-05-04. Refc + foreign-thread allocator on macOS deterministically SIGSEGVs in `genericSeqAssign`/`rawAlloc` for `seq[object]` and `array[N,T]` payloads crossing the FFI boundary. 2.2 fixes that path. |
 
 If you build an FFI API library on top of nim-brokers, pin `requires "nim >= 2.2.0"` in your `.nimble` file. Single-thread brokers compile fine on older Nim too, but the multi-thread and FFI paths assume 2.2's runtime fixes.
