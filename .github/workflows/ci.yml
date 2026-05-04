@@ -18,14 +18,31 @@ permissions:
   contents: read
 
 jobs:
+  # Stable: blocking. Tracks the latest 2.2.x release. Nim 2.0 was dropped
+  # because refc + chronos thread-pool callbacks on Windows and refc +
+  # foreign-thread allocator on macOS both crash deterministically under
+  # 2.0; 2.2 fixed the macOS side.
   build:
     uses: status-im/nimbus-common-workflow/.github/workflows/common.yml@main
     with:
-      # Drop Nim 2.0.x: refc + chronos thread-pool callback path on Windows
-      # and refc + foreign-thread allocator on macOS both crash deterministically
-      # under that toolchain, and 2.2 fixed the macOS side. version-2-2 tracks
-      # the latest stable on the 2.2 branch (2.2.10 at time of writing).
-      nim-versions: '["version-2-2", "devel"]'
+      nim-versions: '["version-2-2"]'
+      nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
+      test-command: |
+        nimble setup -l
+        nimble test --verbose
+        nimble testApi --verbose
+        nimble testFfiApi --verbose
+        nimble testFfiApiCpp --verbose
+
+  # Devel: informational. continue-on-error so an upstream Nim regression
+  # does not block PRs. Nim 2.3.1 currently regresses refc release-mode
+  # cross-thread allocation (heap corruption in alloc.nim:942 after
+  # repeated createContext/shutdown lifecycles); stable 2.2 is unaffected.
+  build-devel:
+    continue-on-error: true
+    uses: status-im/nimbus-common-workflow/.github/workflows/common.yml@main
+    with:
+      nim-versions: '["devel"]'
       nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
       test-command: |
         nimble setup -l

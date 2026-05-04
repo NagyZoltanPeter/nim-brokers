@@ -577,6 +577,16 @@ The `nimble` test tasks reflect this matrix: refc combinations for `(mt)` and
 message. CI does not enforce them, and consuming projects should build
 Windows binaries with `--mm:orc`.
 
+## Supported Nim Versions
+
+| Nim version | CI status | Notes |
+|---|---|---|
+| **2.2.x** (current head of `version-2-2` branch — 2.2.10 at time of writing) | ✅ blocking | Recommended. The minimum supported stable release. |
+| **devel** (currently 2.3.x) | ⚠️ informational | Tracked via a separate `continue-on-error: true` job in `ci.yml` so upstream regressions don't block PRs. May fail at any time as Nim devel changes daily — see the entry under [Known Limitations](#known-limitations). |
+| **2.0.x** and earlier | ❌ unsupported | Dropped on 2026-05-04. Refc + foreign-thread allocator on macOS deterministically SIGSEGVs in `genericSeqAssign`/`rawAlloc` for `seq[object]` and `array[N,T]` payloads crossing the FFI boundary. 2.2 fixes that path. |
+
+If you build an FFI API library on top of nim-brokers, pin `requires "nim >= 2.2.0"` in your `.nimble` file. Single-thread brokers compile fine on older Nim too, but the multi-thread and FFI paths assume 2.2's runtime fixes.
+
 ## Windows Support
 
 The Broker FFI API is supported on Windows, but with stricter toolchain
@@ -695,6 +705,14 @@ worthwhile.
 **Recommendation.** Build any nim-brokers code that uses `(mt)` brokers or
 the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers remain
 fully refc-compatible on every platform.
+
+### Nim devel (2.3.x) refc release-mode FFI crash
+
+Tracked, not blocking. CI runs Nim devel as `continue-on-error: true` (`build-devel` job in `ci.yml`). Locally reproducible on macOS arm64 with `--mm:refc -d:release` and Nim 2.3.1: after roughly four `createContext` / `shutdown` lifecycle iterations, the next allocation crashes inside the refc allocator at `system/alloc.nim:942` (`c.freeList = c.freeList.next` reading address `0x8`). The same code passes on Nim 2.0.16, 2.2.10 and on devel under refc *debug*; only refc + release + devel crashes.
+
+The crash signature is heap corruption — `c.freeList` is non-nil at line 939 but stale by line 942 — consistent with a release-mode codegen / GC regression on the cross-thread allocator path that ships in 2.3.x. Workarounds inside nim-brokers would be brittle; the right fix is upstream. We refresh devel coverage on every CI run so that once the regression clears, the informational job will go green again.
+
+If you hit this locally, switch to `--mm:orc` or pin to Nim 2.2.x stable.
 
 ### `--nimMainPrefix` is not needed on Windows, and cannot be used there
 
