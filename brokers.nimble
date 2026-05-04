@@ -62,15 +62,30 @@ proc nimWindowsCcFlag(): string =
   ## cmake via Visual Studio + MSVC by default (ucrt.dll). Mixing two CRTs
   ## across the DLL boundary causes heap/stdio/TLS mismatches that surface
   ## as random crashes at process teardown. Forcing clang on the Nim side
-  ## keeps both halves on the release UCRT.
+  ## keeps both halves on a single CRT (MinGW msvcrt or release UCRT,
+  ## depending on which clang the runner ships).
+  when defined(windows): " --cc:clang" else: ""
+
+proc nimWindowsImplibFlag(outDir, libName: string): string =
+  ## Force lld to emit an import library at a known path next to the DLL.
   ##
-  ## We also pass `-Wl,/debug` so lld switches to its MSVC-driver mode and
-  ## emits a real `.lib` import library next to the DLL. Without that flag
-  ## clang/gnu-driver lld defaults to gnu-mode and writes `libfoo.dll.a`,
-  ## which the cmake side cannot consume via the `IMPORTED_IMPLIB` paths
-  ## we set. `/debug` is a no-op when no PDB info is present, so it has
-  ## no effect on the non-asan output beyond linker-mode selection.
-  when defined(windows): " --cc:clang --passL:-Wl,/debug" else: ""
+  ## clang in gnu-driver mode (the only mode available when the runner
+  ## ships MinGW-bundled clang under external/mingw-amd64/bin) defaults
+  ## to ld.lld in gnu-mode, which does NOT auto-emit any import library.
+  ## The cmake consumer then fails with "ninja: error: '<libName>.lib'
+  ## missing and no known rule to make it" because our IMPORTED_IMPLIB
+  ## cmake property points at that path.
+  ##
+  ## Passing `-Wl,--out-implib=<path>` makes lld write a gnu-format
+  ## import library at the requested path. The file extension is purely
+  ## conventional — we keep `.lib` so that the cmake IMPORTED_IMPLIB
+  ## paths stay uniform across asan (MSVC-format .lib) and non-asan
+  ## (gnu-format .lib) builds. Both formats are accepted by clang+lld
+  ## consumers in gnu-driver mode.
+  when defined(windows):
+    " --passL:-Wl,--out-implib=" & outDir & "/" & libName & ".lib"
+  else:
+    ""
 
 proc skipRefcOnWindows(opt, label: string): bool =
   ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
@@ -107,6 +122,7 @@ proc buildFfiExampleFlags(generatePy = false): string =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
   result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build", "mylib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -122,6 +138,7 @@ proc buildTorpedoExampleFlags(generatePy = false): string =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
   result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build", "torpedolib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -346,6 +363,7 @@ proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
     " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
   if release:
     flags.add(" -d:release")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
