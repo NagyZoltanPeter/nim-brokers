@@ -478,8 +478,28 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   # Return codes: 0 = nothing, 1 = processed (keep), 2 = shutdown (remove).
   # One poll fn is registered per broker type per provider thread.
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
+  let deferredFreeReqChanIdent = ident("deferredFreeReqChan" & typeDisplayName)
   result.add(
     quote do:
+      proc `deferredFreeReqChanIdent`(
+          chanPtr: ptr Channel[`requestMsgName`]
+      ) {.async: (raises: []).} =
+        # Wait briefly so any cross-thread sender that captured `chanPtr` under
+        # the previous lock state has time to complete its send().  After that
+        # grace window, close + free.  Channel.close() doesn't synchronise with
+        # senders by itself, but the ~50ms delay swallows realistic latencies
+        # while keeping the leak bounded.
+        let sleepRes = catch:
+          await sleepAsync(milliseconds(50))
+        if sleepRes.isErr():
+          discard
+        {.cast(gcsafe).}:
+          try:
+            chanPtr[].close()
+          except Exception:
+            discard
+        deallocShared(chanPtr)
+
       proc `pollFnMakerIdent`(
           spawnChan: ptr Channel[`requestMsgName`], loopCtx: BrokerContext
       ): ThreadDispatchPollFn =
@@ -496,6 +516,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               return 0
             let msg = tryRes.msg
             if msg.isShutdown:
+              # Defer channel teardown so in-flight senders that already passed
+              # the bucket lookup can complete safely.  See deferredFreeReqChan.
+              asyncSpawn `deferredFreeReqChanIdent`(capturedChan)
               return 2
             asyncSpawn `handleMsgIdent`(msg, capturedCtx)
             return 1
@@ -854,9 +877,15 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             let responseFut =
               newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
             # Register a one-shot response poller.  When the provider sends its
-            # result, the poller completes responseFut and frees respChan.
+            # result, the poller completes responseFut and frees respChan.  If
+            # the provider never responds (crashed / hung), the poller still
+            # gives up and frees once the drop-dead deadline elapses, bounding
+            # the leak that previously persisted forever past timeout.
             let capturedRespChan = respChan
             let capturedResponseFut = responseFut
+            let respDropDeadDeadline =
+              Moment.now() + `timeoutVarIdent` * 5 + chronos.seconds(60)
+            let capturedRespDeadline = respDropDeadDeadline
             registerBrokerPoller(
               proc(): int {.gcsafe, raises: [].} =
                 {.cast(gcsafe).}:
@@ -866,6 +895,16 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                     except Exception:
                       return 0
                   if not tryRes.dataAvailable:
+                    if Moment.now() > capturedRespDeadline:
+                      # Provider never responded within the grace window.
+                      # Close the channel (further sends raise harmlessly) and
+                      # free the memory.  Self-remove the poller.
+                      try:
+                        capturedRespChan[].close()
+                      except Exception:
+                        discard
+                      deallocShared(capturedRespChan)
+                      return 2
                     return 0
                   if not capturedResponseFut.finished:
                     capturedResponseFut.complete(tryRes.msg)
@@ -1199,6 +1238,9 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
           let capturedRespChan = `respChanIdent`
           let capturedResponseFut = responseFut
+          let respDropDeadDeadline =
+            Moment.now() + `timeoutVarIdent` * 5 + chronos.seconds(60)
+          let capturedRespDeadline = respDropDeadDeadline
           registerBrokerPoller(
             proc(): int {.gcsafe, raises: [].} =
               {.cast(gcsafe).}:
@@ -1208,6 +1250,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                   except Exception:
                     return 0
                 if not tryRes.dataAvailable:
+                  if Moment.now() > capturedRespDeadline:
+                    try:
+                      capturedRespChan[].close()
+                    except Exception:
+                      discard
+                    deallocShared(capturedRespChan)
+                    return 2
                   return 0
                 if not capturedResponseFut.finished:
                   capturedResponseFut.complete(tryRes.msg)

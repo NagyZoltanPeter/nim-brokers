@@ -253,8 +253,28 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   # ── Poll fn maker ─────────────────────────────────────────────────────
   # Returns a ThreadDispatchPollFn closure that drains the event channel.
   # Return codes: 0 = nothing, 1 = processed (keep), 2 = shutdown (remove).
+  let deferredFreeEventChanIdent = ident("deferredFreeEventChan" & typeDisplayName)
   result.add(
     quote do:
+      proc `deferredFreeEventChanIdent`(
+          chanPtr: ptr Channel[`eventMsgName`]
+      ) {.async: (raises: []).} =
+        # Brief grace window so any cross-thread emitter that captured
+        # `chanPtr` under the previous lock state can complete its send().
+        # Channel.close() doesn't synchronise with senders by itself; the
+        # ~50ms delay swallows realistic latencies while keeping the leak
+        # bounded.  See mt_request_broker for the equivalent rationale.
+        let sleepRes = catch:
+          await sleepAsync(milliseconds(50))
+        if sleepRes.isErr():
+          discard
+        {.cast(gcsafe).}:
+          try:
+            chanPtr[].close()
+          except Exception:
+            discard
+        deallocShared(chanPtr)
+
       proc `pollFnMakerIdent`(
           eventChan: ptr Channel[`eventMsgName`],
           loopCtx: BrokerContext,
@@ -278,6 +298,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               `clearListenersIdent`(capturedCtx)
               if not capturedShutdownFut.finished:
                 capturedShutdownFut.complete()
+              # Defer channel teardown so in-flight emitters that already
+              # passed the bucket lookup can complete safely.
+              asyncSpawn `deferredFreeEventChanIdent`(capturedChan)
               return 2
             of `eventMsgKindName`.emkClearListeners:
               `clearListenersIdent`(capturedCtx)
@@ -670,8 +693,16 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
         var chansToShutdown: seq[(ptr Channel[`eventMsgName`], ThreadSignalPtr)] = @[]
+        # Remove matching buckets entirely (shift-down).  Marking active=false
+        # was insufficient: a subsequent listen() on the same (ctx, thread,
+        # threadGen) tuple would find the dead bucket, set hasListeners=true
+        # and skip registerBrokerPoller — emits would silently never fire.
+        # Removing the slot forces listen() to allocate a fresh channel and
+        # poll fn.  The captured chanPtr is freed by the poll fn's deferred
+        # free path so in-flight emitters can complete safely.
         withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
+          var i = 0
+          while i < `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == ctx and
                 `globalBucketsIdent`[i].threadId == myThreadId and
                 `globalBucketsIdent`[i].threadGen == myThreadGen and
@@ -682,7 +713,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
                   `globalBucketsIdent`[i].listenerSignal,
                 )
               )
-              `globalBucketsIdent`[i].active = false
+              for j in i ..< `globalBucketCountIdent` - 1:
+                `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
+              `globalBucketCountIdent` -= 1
+            else:
+              inc i
 
         # Collect shutdown futures BEFORE sending (they're in tvShutdownFutsIdent).
         var shutdownFuts: seq[Future[void]] = @[]

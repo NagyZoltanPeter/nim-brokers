@@ -112,6 +112,18 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
       await signal.wait()
     if waitRes.isErr():
       break
+  # Dispatcher is exiting (e.g. thread shutting down).  Close the per-thread
+  # signal so its OS handle (eventfd on Linux, pipe pair on macOS) is reclaimed
+  # instead of leaking on every createContext/processing-thread cycle.  Reset
+  # the threadvar state so a future ensureBrokerDispatchStarted() on a reused
+  # threadvar address (refc) starts fresh.
+  let sig = gBrokerThreadSignal
+  gBrokerThreadSignal = nil
+  gBrokerDispatchStarted = false
+  if not sig.isNil:
+    let closeRes = sig.close()
+    if closeRes.isErr():
+      discard
 
 proc ensureBrokerDispatchStarted*() =
   ## Start the per-thread dispatch loop if not already running.
