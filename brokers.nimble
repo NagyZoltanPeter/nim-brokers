@@ -55,10 +55,33 @@ proc nimMainPrefixFlag(prefix: string): string =
   else:
     result = " --nimMainPrefix:" & prefix
 
+proc nimWindowsCcFlag(): string =
+  ## On Windows we standardize FFI builds on clang. Nim's default cc on
+  ## Windows is MinGW gcc (msvcrt.dll), but the C/C++ side is built by
+  ## cmake via Visual Studio + MSVC by default (ucrt.dll). Mixing two CRTs
+  ## across the DLL boundary causes heap/stdio/TLS mismatches that surface
+  ## as random crashes at process teardown. Forcing clang on the Nim side
+  ## keeps both halves on the release UCRT.
+  when defined(windows): " --cc:clang" else: ""
+
+proc cmakeWindowsConfigureExtras(): string =
+  ## On Windows we drive cmake with Ninja + clang/clang++ + lld, pin the
+  ## release UCRT and select RelWithDebInfo. The default Visual Studio
+  ## generator ignores CMAKE_*_COMPILER for the toolset and pulls in MSVC
+  ## link.exe + the debug UCRT for Debug configs — both incompatible with
+  ## the clang-built Nim DLLs.
+  when defined(windows):
+    " -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++" &
+      " -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=RelWithDebInfo" &
+      " -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"
+  else:
+    ""
+
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
+  result.add(nimWindowsCcFlag())
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -73,6 +96,7 @@ proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
+  result.add(nimWindowsCcFlag())
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -91,7 +115,7 @@ proc buildFfiCmakeTarget(target = "") =
   let cmakeDir = "examples/ffiapi"
   let buildDir = ffiExamplesBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -110,7 +134,7 @@ proc buildTorpedoCmakeTarget(target = "") =
   let cmakeDir = "examples/torpedo"
   let buildDir = torpedoCmakeBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -301,6 +325,7 @@ proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
     "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
     " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
+  flags.add(nimWindowsCcFlag())
   if release:
     flags.add(" -d:release")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
@@ -312,7 +337,7 @@ proc buildTypeMapTestCmakeTarget(target = "") =
   let cmakeDir = "test/typemappingtestlib"
   let buildDir = typeMapTestCmakeBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -367,18 +392,16 @@ proc buildTypeMapTestCmakeTargetAsan(target = "") =
   let buildDir = typeMapTestAsanBuildDir()
   let outDir = getCurrentDir() / "test/typemappingtestlib/build-asan"
   mkDir(buildDir)
+  # On non-Windows, the asan build pins clang/clang++ directly. On Windows,
+  # cmakeWindowsConfigureExtras() supplies Ninja+clang+lld+RelWithDebInfo+UCRT
+  # — the same toolchain we use for the non-asan path, so heap/CRT match.
   var configure =
-    "cmake -S " & cmakeDir & " -B " & buildDir &
-    " -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++" &
-    " -DASAN=ON -DTYPEMAPTEST_DIR=" & quoteArg(outDir)
+    "cmake -S " & cmakeDir & " -B " & buildDir & " -DASAN=ON -DTYPEMAPTEST_DIR=" &
+    quoteArg(outDir)
   when defined(windows):
-    # The default Visual Studio + MSVC toolchain on Windows ignores
-    # CMAKE_*_COMPILER and link.exe cannot consume clang's asan output
-    # (LNK4044 /fsanitize=address; LNK1104 typemappingtestlib-NOTFOUND).
-    # Ninja drives clang/lld directly and matches the Nim --cc:clang build.
-    # RelWithDebInfo selects the release UCRT (matches the Nim DLL) while
-    # keeping debug info for ASAN symbolization.
-    configure.add(" -G Ninja -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=RelWithDebInfo")
+    configure.add(cmakeWindowsConfigureExtras())
+  else:
+    configure.add(" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++")
   exec configure
   if target.len == 0:
     exec "cmake --build " & buildDir

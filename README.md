@@ -548,6 +548,72 @@ Total baseline: ~400 bytes for 1 provider, 1 context.
 | Baseline per context | ~100 bytes | ~16 bytes | ~300 bytes (bucket + Channel[T] + poll fn) | ~300 bytes (bucket + Channel[T] + poll fn) |
 | Intentional leaks | None | None | Channel[T] on shutdown (no OS fds — safe) | Response Channel[T] on timeout (no OS fds — safe) |
 
+## Windows Support
+
+The Broker FFI API is supported on Windows, but with stricter toolchain
+requirements than Linux/macOS. The reason is the Windows C runtime split: a
+Nim-built DLL and a C/C++/Python consumer **must share the same C runtime**,
+otherwise pointers allocated on one heap and freed on the other (or
+unmatched stdio/TLS/exception state) produce intermittent crashes — typically
+at process teardown, occasionally earlier.
+
+### Required toolchain on Windows
+
+- **LLVM 19+ (clang, clang++, lld, llvm-symbolizer) on `PATH`.** The
+  `nimble` tasks for FFI builds force `--cc:clang` on Windows so the Nim
+  DLL links against the release UCRT (`ucrtbase.dll`, `MSVCP140.dll`).
+  The default Nim toolchain shipped by `setup-nim-action` is MinGW gcc
+  (`msvcrt.dll`), which is **not compatible** with MSVC- or clang-built
+  consumers across a DLL boundary.
+- **Ninja on `PATH`.** All `nimble` cmake tasks switch to
+  `-G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_LINKER_TYPE=LLD`
+  on Windows. The default Visual Studio + MSVC generator silently ignores
+  the requested compiler for the toolset, links the C++ side against the
+  debug UCRT (`ucrtbased.dll`) for Debug configurations, and link.exe
+  cannot consume clang's `-fsanitize=address` output.
+- **Release UCRT pinning.** All Windows cmake configurations are driven
+  with `-DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL`
+  so consumer binaries match the release UCRT used by the Nim DLL.
+- **AddressSanitizer.** When running the `*Asan*` tasks on Windows
+  (`testFfiApiCppAsan*`, `testMt*Asan*`), the workflow additionally
+  prepends the directory of `clang_rt.asan_dynamic-x86_64.dll`
+  (typically under `C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\`)
+  to `PATH`. Without it the test executable fails `STATUS_DLL_NOT_FOUND`
+  on launch with no diagnostic output.
+
+### Limitations on Windows
+
+- **`--mm:refc` is unsupported for FFI API tests.** See the dedicated
+  note under [Known Limitations](#known-limitations) — a Windows
+  thread-pool callback used by chronos' async wait is invisible to the
+  refc stop-the-world GC. Use `--mm:orc` (the default since Nim 2.0).
+- **`--nimMainPrefix` is unused on Windows.** See [Known
+  Limitations](#known-limitations) for the rationale.
+- **CRT-mixing with MinGW-built consumers is not supported.** The Nim
+  DLLs produced by these tasks expect MSVC-compatible consumers built
+  with clang or clang-cl on the release UCRT. Pure-MinGW consumer
+  builds are out of scope.
+- **C/C++/Python consumers must use a single CRT.** When linking against
+  the generated `<libname>.lib` import library, build with the same
+  release UCRT (`/MD`) settings used here. Mixing `/MDd` with the
+  Nim-built DLL produces the cross-heap bad-free symptom.
+
+### Verifying on Windows locally
+
+From a shell with LLVM and Ninja on `PATH`:
+
+```
+nimble testApi
+nimble testFfiApi
+nimble testFfiApiCpp
+nimble runFfiExampleC
+nimble runFfiExampleCpp
+nimble runFfiExamplePy
+```
+
+The `Memcheck CI` GitHub Actions workflow (`memcheck_ci.yml`) covers the
+same tasks plus the AddressSanitizer variants.
+
 ## Known Limitations
 
 ### `--mm:refc` is not supported for FFI API tests on Windows

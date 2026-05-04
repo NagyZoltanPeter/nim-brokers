@@ -29,6 +29,13 @@ if(APPLE)
         IMPORTED_SONAME "@rpath/libtorpedolib.dylib"
     )
 endif()
+if(WIN32)
+    # Linking a SHARED IMPORTED target on Windows needs the import library
+    # (.lib) in addition to the runtime DLL — Nim emits both alongside.
+    set_target_properties(torpedolib PROPERTIES
+        IMPORTED_IMPLIB "${TORPEDOLIB_DIR}/torpedolib.lib"
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Modern C++ example

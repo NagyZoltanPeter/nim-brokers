@@ -31,6 +31,13 @@ if(APPLE)
         IMPORTED_SONAME "@rpath/libmylib.dylib"
     )
 endif()
+if(WIN32)
+    # Linking a SHARED IMPORTED target on Windows needs the import library
+    # (.lib) in addition to the runtime DLL — Nim emits both alongside.
+    set_target_properties(mylib PROPERTIES
+        IMPORTED_IMPLIB "${MYLIB_DIR}/mylib.lib"
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Pure C example

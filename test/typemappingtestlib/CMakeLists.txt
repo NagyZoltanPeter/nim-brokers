@@ -90,16 +90,10 @@ if(ASAN)
     target_compile_options(test_typemappingtestlib PRIVATE -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(test_typemappingtestlib PRIVATE -fsanitize=address)
     if(WIN32)
-        # The Nim-built typemappingtestlib.dll is compiled with clang in
-        # gnu-driver mode and links the release UCRT (ucrtbase.dll + MSVCP140.dll).
-        # If the C++ consumer ends up on the debug UCRT (ucrtbased.dll +
-        # MSVCP140D.dll), objects allocated in one heap end up freed via the
-        # other at process teardown — ASAN reports a bad-free with no user
-        # frames. Pin the test binary to the release UCRT so heaps match.
-        set_target_properties(test_typemappingtestlib PROPERTIES
-            MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"
-        )
-        # Windows ASAN symbolization needs PDB (CodeView), not DWARF.
+        # CRT alignment is handled at configure time via
+        # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL — see brokers.nimble's
+        # cmakeWindowsConfigureExtras(). Only the ASAN-specific PDB flags
+        # remain here, since debug-info format is per-target.
         target_compile_options(test_typemappingtestlib PRIVATE -gcodeview)
         target_link_options(test_typemappingtestlib PRIVATE -Wl,/debug)
     endif()
