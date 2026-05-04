@@ -174,7 +174,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
   # Step 4: Generate C callback type
   # seq[T] and array[N,T] fields each expand to two callback params (ptr + count).
-  # Enum fields map to cint.
+  # Enum fields map to cint (int32) — Nim default-sized enums can be as narrow
+  # as 1 byte; widening to cint matches the C/C++ enum (int) and Python c_int32.
   let callbackTypeIdent = ident(typeDisplayName & "CCallback")
   let exportedCallbackIdent = postfix(copyNimTree(callbackTypeIdent), "*")
 
@@ -220,12 +221,16 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             )
           )
         elif isEnumRegistered($fType):
+          # ABI: enum params cross the FFI as cint (int32). The C/C++ header
+          # declares the param as the enum typedef (int-sized in C) and the
+          # Python CFUNCTYPE uses c_int32. A Nim default-sized enum can be as
+          # narrow as 1 byte for ordinals 0..3, so without this widening Nim
+          # would only write the low byte to the cdecl arg slot — the upper
+          # bytes carry register garbage and the foreign side reads a corrupt
+          # value (manifested as test_typed_scalar_event_enum failing).
           callbackFormal.add(
             newTree(
-              nnkIdentDefs,
-              copyNimTree(fieldNames[i]),
-              copyNimTree(fType),
-              newEmptyNode(),
+              nnkIdentDefs, copyNimTree(fieldNames[i]), ident("cint"), newEmptyNode()
             )
           )
         else:
@@ -461,9 +466,11 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           )
           callbackCallArgs.add(countLit)
         elif isEnumRegistered($fType):
-          # Enum: pass the enum value directly — callbackFormal now uses the
-          # actual enum type (copyNimTree(fType)), so no cint conversion needed.
-          callbackCallArgs.add(newDotExpr(evtParam, copyNimTree(fName)))
+          # Widen Nim's possibly-narrow enum field to cint to match the
+          # foreign-side ABI (see callbackFormal above).
+          callbackCallArgs.add(
+            newCall(ident("cint"), newDotExpr(evtParam, copyNimTree(fName)))
+          )
         elif isAliasOrDistinctRegistered($fType):
           # Alias/distinct: cast to underlying C field type
           let cFieldType = toCFieldType(fType)
