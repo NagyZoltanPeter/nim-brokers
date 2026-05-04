@@ -18,29 +18,90 @@ permissions:
   contents: read
 
 jobs:
-  # Stable: blocking. Tracks the latest 2.2.x release. Nim 2.0 was dropped
-  # because refc + chronos thread-pool callbacks on Windows and refc +
-  # foreign-thread allocator on macOS both crash deterministically under
-  # 2.0; 2.2 fixed the macOS side. Devel is excluded from blocking PR
-  # checks while the 2.3.x refc-release-mode allocator regression is
-  # outstanding (see README → Known Limitations); developers can verify
-  # devel manually via the memcheck_ci.yml workflow_dispatch.
+  # Inline matrix: replaces the previous status-im/nimbus-common-workflow
+  # caller so we can mark devel as informational with continue-on-error
+  # (GitHub forbids that field on `uses:` reusable-workflow jobs).
+  #
+  # Nim 2.0.x is unsupported (refc + foreign-thread regression on macOS;
+  # see README). 2.2.4 and 2.2.10 both gate PRs; devel is per-matrix-entry
+  # continue-on-error so upstream regressions don't block merges.
+  #
+  # Linux gcc-14 and other architectures (raspberry-pi / android) are
+  # planned as later phases.
   build:
-    uses: status-im/nimbus-common-workflow/.github/workflows/common.yml@main
-    with:
-      nim-versions: '["version-2-2"]'
-      nimble-version: 1267aa826b187ede62f8e1deb9eb40ca1038260f
-      test-command: |
-        nimble setup -l
-        nimble test --verbose
-        nimble testApi --verbose
-        nimble testFfiApi --verbose
-        nimble testFfiApiCpp --verbose
+    name: ${{ matrix.platform.id }} / Nim ${{ matrix.nim }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    continue-on-error: ${{ matrix.nim == 'devel' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        nim: ["2.2.4", "2.2.10", "devel"]
+        platform:
+          - { id: linux-amd64,  runs-on: ubuntu-latest }
+          - { id: win-amd64,    runs-on: windows-latest }
+          - { id: macos-arm64,  runs-on: macos-14 }
+          - { id: macos-amd64,  runs-on: macos-13 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure clang in PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # nimWindowsCcFlag in brokers.nimble forces --cc:clang for FFI
+          # builds (CRT alignment with the cmake side). LLVM ships at
+          # C:\Program Files\LLVM\bin on windows-latest but is not on
+          # PATH by default.
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvmBin) {
+            Write-Host "Found LLVM at $llvmBin"
+            echo $llvmBin >> $env:GITHUB_PATH
+          } else {
+            Write-Host "LLVM not found, installing via choco..."
+            choco install llvm -y --no-progress
+            echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          nim --version
+          nimble --version
+          cmake --version
+          python3 --version || python --version || true
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
+      - name: Run nimble test
+        shell: bash
+        run: nimble test --verbose
+
+      - name: Run nimble testApi
+        shell: bash
+        run: nimble testApi --verbose
+
+      - name: Run nimble testFfiApi
+        shell: bash
+        run: nimble testFfiApi --verbose
+
+      - name: Run nimble testFfiApiCpp
+        shell: bash
+        run: nimble testFfiApiCpp --verbose
 
   examples:
     runs-on: ubuntu-latest
     env:
-      NIM_VERSION: '2.2.0'
+      NIM_VERSION: '2.2.10'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
