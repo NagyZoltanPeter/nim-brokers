@@ -63,7 +63,14 @@ proc nimWindowsCcFlag(): string =
   ## across the DLL boundary causes heap/stdio/TLS mismatches that surface
   ## as random crashes at process teardown. Forcing clang on the Nim side
   ## keeps both halves on the release UCRT.
-  when defined(windows): " --cc:clang" else: ""
+  ##
+  ## We also pass `-Wl,/debug` so lld switches to its MSVC-driver mode and
+  ## emits a real `.lib` import library next to the DLL. Without that flag
+  ## clang/gnu-driver lld defaults to gnu-mode and writes `libfoo.dll.a`,
+  ## which the cmake side cannot consume via the `IMPORTED_IMPLIB` paths
+  ## we set. `/debug` is a no-op when no PDB info is present, so it has
+  ## no effect on the non-asan output beyond linker-mode selection.
+  when defined(windows): " --cc:clang --passL:-Wl,/debug" else: ""
 
 proc skipRefcOnWindows(opt, label: string): bool =
   ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
