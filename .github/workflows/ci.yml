@@ -41,6 +41,12 @@ jobs:
           - { id: win-amd64,    runs-on: windows-latest }
           - { id: macos-arm64,  runs-on: macos-14 }
           - { id: macos-amd64,  runs-on: macos-13 }
+        exclude:
+          # jiro4989/setup-nim-action does not support installing Nim devel
+          # on Windows. Manual devel verification on Windows stays available
+          # via memcheck_ci.yml workflow_dispatch.
+          - nim: "devel"
+            platform: { id: win-amd64, runs-on: windows-latest }
     steps:
       - uses: actions/checkout@v4
 
