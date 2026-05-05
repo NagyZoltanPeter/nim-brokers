@@ -288,6 +288,66 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         check("rt.prim_seq_param_large.count", 100, r.value.count)
         check("rt.prim_seq_param_large.total", sum(big), r.value.total)
 
+    # ========================================================================
+    # Lifecycle parity (Phase 9B) — exercise edge cases on the C ABI
+    # directly, since the Python Lib class is RAII-shaped.
+    # ========================================================================
+    import ctypes  # noqa: E402
+    raw = mod._LIB
+
+    # 1) create_and_shutdown — happy path via raw C ABI
+    raw.typemappingtestlib_cbor_initialize()
+    err_p = ctypes.c_char_p()
+    ctx = raw.typemappingtestlib_cbor_createContext(ctypes.byref(err_p))
+    check("lc.create_and_shutdown.ctx_nonzero", True, ctx != 0)
+    st = raw.typemappingtestlib_cbor_shutdown(ctx)
+    check("lc.create_and_shutdown.shutdown_ok", 0, st)
+
+    # 2) RAII via context manager — reusing Lib() after a previous Lib
+    #    closed must succeed (no global corruption).
+    saved = None
+    with mod.Lib() as scoped:
+        check("lc.raii.scoped_isOk", True, scoped.context != 0)
+        saved = scoped.context
+    after = mod.Lib()
+    try:
+        check("lc.raii.after_scope_isOk", True, after.context != 0)
+        check("lc.raii.distinct_ctx", True, after.context != saved)
+    finally:
+        after.close()
+
+    # 3) double_shutdown_is_safe
+    err_p = ctypes.c_char_p()
+    c = raw.typemappingtestlib_cbor_createContext(ctypes.byref(err_p))
+    s1 = raw.typemappingtestlib_cbor_shutdown(c)
+    s2 = raw.typemappingtestlib_cbor_shutdown(c)
+    check("lc.double_shutdown.first_ok", 0, s1)
+    check("lc.double_shutdown.second_returns_neg1", -1, s2)
+
+    # 4) shutdown_unknown_ctx_safe
+    s = raw.typemappingtestlib_cbor_shutdown(0xDEADBEEF)
+    check("lc.shutdown_unknown.returns_neg1", -1, s)
+
+    # 5) call_with_invalid_ctx — must not succeed (either non-zero
+    #    framework status, or status==0 with err envelope).
+    import cbor2  # noqa: E402
+    resp_buf = ctypes.c_void_p()
+    resp_len = ctypes.c_int32()
+    st = raw.typemappingtestlib_cbor_call(
+        0, b"echo_request", None, 0, ctypes.byref(resp_buf), ctypes.byref(resp_len)
+    )
+    not_ok = st != 0
+    if st == 0 and resp_buf and resp_len.value > 0:
+        payload = ctypes.string_at(resp_buf, resp_len.value)
+        try:
+            env = cbor2.loads(payload)
+            not_ok = isinstance(env, dict) and ("err" in env) and ("ok" not in env)
+        except Exception:
+            not_ok = True
+    if resp_buf:
+        raw.typemappingtestlib_cbor_freeBuffer(resp_buf)
+    check("lc.call_with_zero_ctx.does_not_succeed", True, not_ok)
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)

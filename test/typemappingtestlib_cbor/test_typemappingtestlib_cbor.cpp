@@ -375,6 +375,85 @@ int main() {
     check("rt.prim_seq_param_large.total", expected, rBig.value().total);
   }
 
+  // ============================================================================
+  // Lifecycle parity (Phase 9B) — bypass RAII Lib and drive the C ABI
+  // directly to exercise edge cases (double-shutdown, unknown ctx,
+  // ctx=0 call). Native suite has equivalent tests via Lib.createContext()
+  // / Lib.shutdown(); the CBOR Lib only exposes RAII, so we hit the C
+  // entry points to cover the same failure modes.
+  // ============================================================================
+  {
+    // 1) create_and_shutdown — happy path
+    {
+      typemappingtestlib_cbor_initialize();
+      char* err = nullptr;
+      uint32_t c = typemappingtestlib_cbor_createContext(&err);
+      check("lc.create_and_shutdown.ctx_nonzero", true, c != 0);
+      if (err != nullptr) typemappingtestlib_cbor_freeBuffer(err);
+      int32_t st = typemappingtestlib_cbor_shutdown(c);
+      check("lc.create_and_shutdown.shutdown_ok", static_cast<int32_t>(0), st);
+    }
+
+    // 2) raii_dtor_shutdown — scoped Lib auto-shuts down; another Lib
+    //    after must succeed (no global state corruption).
+    {
+      uint32_t saved = 0;
+      {
+        tmlib::Lib scoped;
+        check("lc.raii.scoped_isOk", true, scoped.isOk());
+        saved = scoped.context();
+      }
+      tmlib::Lib after;
+      check("lc.raii.after_scope_isOk", true, after.isOk());
+      check("lc.raii.distinct_ctx", true, after.context() != saved);
+    }
+
+    // 3) double_shutdown_is_safe — second call returns -1 sentinel,
+    //    no crash.
+    {
+      char* err = nullptr;
+      uint32_t c = typemappingtestlib_cbor_createContext(&err);
+      if (err != nullptr) typemappingtestlib_cbor_freeBuffer(err);
+      int32_t s1 = typemappingtestlib_cbor_shutdown(c);
+      int32_t s2 = typemappingtestlib_cbor_shutdown(c);
+      check("lc.double_shutdown.first_ok", static_cast<int32_t>(0), s1);
+      check("lc.double_shutdown.second_returns_neg1", static_cast<int32_t>(-1), s2);
+    }
+
+    // 4) shutdown_unknown_ctx_safe — random unregistered ctx must not
+    //    crash and must return -1.
+    {
+      int32_t st = typemappingtestlib_cbor_shutdown(0xDEADBEEFu);
+      check("lc.shutdown_unknown.returns_neg1", static_cast<int32_t>(-1), st);
+    }
+
+    // 5) call_with_invalid_ctx_fails — _call with ctx=0 (unregistered)
+    //    can either return a framework error code OR a Result-envelope
+    //    err. Either way the request must NOT succeed. We accept both:
+    //    framework-level non-zero status, or status==0 with the response
+    //    envelope carrying an `err` field. Crashing/hanging is not OK.
+    {
+      void* respBuf = nullptr;
+      int32_t respLen = 0;
+      int32_t st = typemappingtestlib_cbor_call(
+          0, "echo_request", nullptr, 0, &respBuf, &respLen);
+      bool nonOkOutcome = (st != 0);
+      if (st == 0 && respBuf != nullptr && respLen > 0) {
+        // Decode the envelope: must carry `err`, not `ok`.
+        std::vector<uint8_t> bytes(static_cast<uint8_t*>(respBuf),
+                                   static_cast<uint8_t*>(respBuf) + respLen);
+        try {
+          auto j = jsoncons::cbor::decode_cbor<jsoncons::json>(bytes);
+          nonOkOutcome = j.contains("err") && !j.contains("ok");
+        } catch (...) {
+          nonOkOutcome = true;  // undecodable envelope counts as not-ok
+        }
+      }
+      check("lc.call_with_zero_ctx.does_not_succeed", true, nonOkOutcome);
+      if (respBuf != nullptr) typemappingtestlib_cbor_freeBuffer(respBuf);
+    }
+  }
+
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {
     std::cerr << "FAILED: " << g_fails << " check(s) did not match\n";
