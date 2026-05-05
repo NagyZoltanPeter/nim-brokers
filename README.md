@@ -302,6 +302,45 @@ nimble runFfiExamplePy
 
 See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
 
+### CBOR FFI strategy
+
+The default FFI strategy emits a per-request typed C ABI (struct + free
+helper per type). The CBOR strategy — selected with
+`-d:BrokerFfiApiCBOR` — collapses every library to the same fixed
+10-function ABI plus a single event-callback typedef, with CBOR as the
+on-wire format. Wrappers carry the typed surface (typed `Lib::*`
+methods on C++, `IntEnum` + `dataclass` on Python) and decode/encode
+through `jsoncons::cbor` (C++) or `cbor2` (Python). Buffer ownership
+rule: every `void*` crossing the ABI is allocated by Nim and freed by
+Nim.
+
+Each library also emits a `<lib>.cddl` schema next to its `.h`/`.hpp`
+and exposes a runtime discovery API (`<lib>_listApis`,
+`<lib>_getSchema`) returning the same schema as a CBOR-encoded
+`LibraryDescriptor`.
+
+Build and run the CBOR-mode examples:
+
+```sh
+nimble runFfiCborExampleCpp     # build lib + jsoncons C++ example
+nimble runFfiCborExamplePy      # build lib + generated Python wrapper + run
+nimble runTypeMapTestLibCborPy  # full type-mapping parity test (Python)
+nimble runTypeMapTestLibCborCpp # full type-mapping parity test (C++)
+```
+
+The C++ wrapper expects [jsoncons](https://github.com/danielaparker/jsoncons)
+headers under `vendor/jsoncons/include` (header-only, no build step).
+The Python wrapper requires `cbor2` on the active interpreter
+(`pip install --user cbor2`).
+
+| Aspect | Native strategy | CBOR strategy |
+|--------|-----------------|---------------|
+| C ABI surface | Per-request typed structs + free helpers | Fixed 10-function ABI + event callback typedef |
+| Wire format | Native C structs (per-language conversion) | CBOR everywhere (`jsoncons` / `cbor2`) |
+| Buffer ownership | Mixed (per-helper) | Uniform (Nim allocates, Nim frees) |
+| Discovery API | Static headers | Static `<lib>.cddl` + runtime `_listApis` / `_getSchema` |
+| Compile flag | `-d:BrokerFfiApiNative` (default) | `-d:BrokerFfiApiCBOR` |
+
 ### Torpedo Duel — a richer FFI API example
 
 The `examples/torpedo/` directory contains a full game example that pushes the

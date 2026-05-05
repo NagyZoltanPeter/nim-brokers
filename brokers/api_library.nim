@@ -23,10 +23,17 @@
 
 {.push raises: [].}
 
-import std/[atomics, locks, macros, os, strutils]
+import std/[atomics, locks, macros, os, strutils, tables]
 import chronos, chronicles
 import results
 import ./broker_context, ./internal/api_common
+import ./internal/api_codegen_cbor_h
+import ./internal/api_codegen_cbor_hpp
+import ./internal/api_codegen_cbor_py
+import ./internal/api_codegen_cbor_cddl
+import ./internal/api_cbor_descriptor
+
+export api_cbor_descriptor
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -37,12 +44,19 @@ export results, chronos, chronicles, broker_context, api_common
 proc parseLibraryConfig(
     body: NimNode
 ): tuple[
-  name: string, initializeRequest: NimNode, shutdownRequest: NimNode, refType: NimNode
+  name: string,
+  initializeRequest: NimNode,
+  shutdownRequest: NimNode,
+  refType: NimNode,
+  ffiMode: BrokerFfiMode,
+  ffiModeExplicit: bool,
 ] {.compileTime.} =
   var name = ""
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
+  var ffiMode = mfCbor
+  var ffiModeExplicit = false
 
   for stmt in body:
     if stmt.kind == nnkCall and stmt.len == 2:
@@ -71,6 +85,23 @@ proc parseLibraryConfig(
           refTy = value[0]
         else:
           refTy = value
+      of "ffimode":
+        var modeNode = value
+        if modeNode.kind == nnkStmtList and modeNode.len == 1:
+          modeNode = modeNode[0]
+        var modeText = ""
+        case modeNode.kind
+        of nnkStrLit:
+          modeText = modeNode.strVal
+        of nnkIdent, nnkSym:
+          modeText = $modeNode
+        else:
+          error(
+            "ffiMode must be the identifier or string literal `cbor` or `native`",
+            modeNode,
+          )
+        ffiMode = parseFfiModeLiteral(modeText)
+        ffiModeExplicit = true
       else:
         error("Unknown registerBrokerLibrary key: " & key, stmt)
     else:
@@ -91,6 +122,8 @@ proc parseLibraryConfig(
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
+    ffiMode: ffiMode,
+    ffiModeExplicit: ffiModeExplicit,
   )
 
 proc parseTypeExpr(
@@ -108,8 +141,56 @@ proc parseTypeExpr(
 # Macro
 # ---------------------------------------------------------------------------
 
+proc registerBrokerLibraryNativeImpl(
+  body: NimNode,
+  config:
+    tuple[
+      name: string,
+      initializeRequest: NimNode,
+      shutdownRequest: NimNode,
+      refType: NimNode,
+      ffiMode: BrokerFfiMode,
+      ffiModeExplicit: bool,
+    ],
+): NimNode
+
+proc registerBrokerLibraryCborImpl(
+  body: NimNode,
+  config:
+    tuple[
+      name: string,
+      initializeRequest: NimNode,
+      shutdownRequest: NimNode,
+      refType: NimNode,
+      ffiMode: BrokerFfiMode,
+      ffiModeExplicit: bool,
+    ],
+): NimNode
+
 proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let config = parseLibraryConfig(body)
+
+  # Resolve FFI mode (compile flag-driven; config field is a consistency check).
+  let resolvedMode = resolveFfiMode(config.ffiMode, config.ffiModeExplicit, config.name)
+
+  case resolvedMode
+  of mfNative:
+    registerBrokerLibraryNativeImpl(body, config)
+  of mfCbor:
+    registerBrokerLibraryCborImpl(body, config)
+
+proc registerBrokerLibraryNativeImpl(
+    body: NimNode,
+    config:
+      tuple[
+        name: string,
+        initializeRequest: NimNode,
+        shutdownRequest: NimNode,
+        refType: NimNode,
+        ffiMode: BrokerFfiMode,
+        ffiModeExplicit: bool,
+      ],
+): NimNode =
   let libName = config.name
   let libNameLit = newLit(libName)
   let initializeReqIdent = config.initializeRequest
@@ -1126,6 +1207,938 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
     generatePythonFile(outDir, libNameResolved)
 
   when defined(brokerDebug):
+    echo result.repr
+
+# ---------------------------------------------------------------------------
+# CBOR-mode library codegen.
+#
+# Emits the small fixed C ABI surface (initialize / createContext / shutdown
+# / allocBuffer / freeBuffer / call) plus a per-library dispatch case
+# statement that routes apiName strings to the adapter procs registered by
+# `RequestBroker(API)` expansions. Buffer ownership: every void* crossing
+# the ABI is allocated by Nim and freed by Nim. Threading: a dedicated
+# processing thread runs `setupProviders(ctx)` and the chronos event loop
+# that drives the request providers; foreign threads invoke `<lib>_call`
+# and use `waitFor` to drive a momentary chronos loop on the calling
+# thread, which dispatches across the MT broker channel to the processing
+# thread. Events are not yet wired (Phase 3).
+# ---------------------------------------------------------------------------
+
+proc registerBrokerLibraryCborImpl(
+    body: NimNode,
+    config:
+      tuple[
+        name: string,
+        initializeRequest: NimNode,
+        shutdownRequest: NimNode,
+        refType: NimNode,
+        ffiMode: BrokerFfiMode,
+        ffiModeExplicit: bool,
+      ],
+): NimNode =
+  let libName = config.name
+  gApiLibraryName = libName
+
+  let initializeReqIdent = config.initializeRequest
+  let shutdownReqIdent = config.shutdownRequest
+
+  # Identifiers
+  let initFuncName = libName & "_initialize"
+  let initFuncNameLit = newLit(initFuncName)
+  let initFuncIdent = ident(initFuncName)
+  let createContextFuncName = libName & "_createContext"
+  let createContextFuncNameLit = newLit(createContextFuncName)
+  let createContextFuncIdent = ident(createContextFuncName)
+  let shutdownFuncName = libName & "_shutdown"
+  let shutdownFuncNameLit = newLit(shutdownFuncName)
+  let shutdownFuncIdent = ident(shutdownFuncName)
+  let callFuncName = libName & "_call"
+  let callFuncNameLit = newLit(callFuncName)
+  let callFuncIdent = ident(callFuncName)
+  let allocBufFuncName = libName & "_allocBuffer"
+  let allocBufFuncNameLit = newLit(allocBufFuncName)
+  let allocBufFuncIdent = ident(allocBufFuncName)
+  let freeBufFuncName = libName & "_freeBuffer"
+  let freeBufFuncNameLit = newLit(freeBufFuncName)
+  let freeBufFuncIdent = ident(freeBufFuncName)
+
+  let nimMainIdent = ident(libName & "NimMain")
+  let nimInitFlagIdent = ident("g" & libName & "NimInit")
+  let gcRegFlagIdent = ident("g" & libName & "GcReg")
+  let ctxEntryIdent = ident(libName & "CborCtxEntry")
+  let procThreadArgIdent = ident(libName & "CborThreadArg")
+  let procThreadProcIdent = ident(libName & "CborProcessingThread")
+  let ctxsIdent = ident("g" & libName & "CborCtxs")
+  let ctxsLockIdent = ident("g" & libName & "CborCtxsLock")
+  let ctxsInitIdent = ident("g" & libName & "CborCtxsInit")
+  let dispatchProcIdent = ident(libName & "CborDispatch")
+  let libNameLit = newLit(libName)
+
+  # Event subscription identifiers (used by the per-event installers and the
+  # subscribe / unsubscribe C exports).
+  let eventCallbackTypeIdent = ident(libName & "CborEventCallback")
+  let subscriptionTypeIdent = ident(libName & "CborSubscription")
+  let subsKeyTypeIdent = ident(libName & "CborSubsKey")
+  let subsTableIdent = ident("g" & libName & "CborSubs")
+  let subsLockIdent = ident("g" & libName & "CborSubsLock")
+  let subsHandleIdent = ident("g" & libName & "CborNextSubHandle")
+  let subscribeFuncName = libName & "_subscribe"
+  let subscribeFuncNameLit = newLit(subscribeFuncName)
+  let subscribeFuncIdent = ident(subscribeFuncName)
+  let unsubscribeFuncName = libName & "_unsubscribe"
+  let unsubscribeFuncNameLit = newLit(unsubscribeFuncName)
+  let unsubscribeFuncIdent = ident(unsubscribeFuncName)
+  let knownEventPredIdent = ident(libName & "CborIsKnownEvent")
+  let installAllListenersIdent = ident(libName & "CborInstallAllListeners")
+
+  # Discovery / introspection identifiers (Phase 6).
+  let listApisFuncName = libName & "_listApis"
+  let listApisFuncNameLit = newLit(listApisFuncName)
+  let listApisFuncIdent = ident(listApisFuncName)
+  let getSchemaFuncName = libName & "_getSchema"
+  let getSchemaFuncNameLit = newLit(getSchemaFuncName)
+  let getSchemaFuncIdent = ident(getSchemaFuncName)
+  let descriptorIdent = ident("g" & libName & "CborDescriptor")
+  let apiListIdent = ident("g" & libName & "CborApiList")
+  let descriptorBuildIdent = ident(libName & "CborBuildDescriptor")
+  let apiListBuildIdent = ident(libName & "CborBuildApiList")
+
+  # Hard cap on a single buffer to detect runaway encodes.
+  let bufSizeCap = newLit(64 * 1024 * 1024)
+
+  result = newStmtList()
+
+  # Compile-time validation of the mandatory request types.
+  result.add(
+    quote do:
+      when not compiles(typeof(`initializeReqIdent`)):
+        {.
+          error:
+            "registerBrokerLibrary: initializeRequest type '" &
+            astToStr(`initializeReqIdent`) &
+            "' is not defined. Ensure a RequestBroker(API) declaring this type " &
+            "appears before registerBrokerLibrary."
+        .}
+      when not compiles(typeof(`shutdownReqIdent`)):
+        {.
+          error:
+            "registerBrokerLibrary: shutdownRequest type '" &
+            astToStr(`shutdownReqIdent`) &
+            "' is not defined. Ensure a RequestBroker(API) declaring this type " &
+            "appears before registerBrokerLibrary."
+        .}
+  )
+
+  # Foreign-thread GC bootstrap (once per compilation unit).
+  result.add(emitEnsureForeignThreadGc())
+
+  # NimMain import on POSIX (Windows DllMain auto-runs it).
+  when not defined(windows):
+    let nimMainImportName = newLit(libName & "NimMain")
+    result.add(
+      quote do:
+        proc `nimMainIdent`() {.importc: `nimMainImportName`, cdecl.}
+    )
+
+  # ------------------------------------------------------------------
+  # Build the dispatch case statement from accumulated request entries.
+  # Snapshot and clear the accumulator so a second registerBrokerLibrary in
+  # the same compilation unit (a future multi-library scenario) starts fresh.
+  # ------------------------------------------------------------------
+  # Snapshot the registered request adapters and event entries. We
+  # deliberately do NOT clear the global accumulators here — Nim's
+  # compile-time VM aliases `let` copies of seqs back to the source, so
+  # resetting before reading would leave us with an empty list. A future
+  # multi-library-per-compilation scenario would need a different pattern
+  # (e.g., snapshot a length and slice from there next time).
+  let entries = gApiCborRequestEntries
+  let eventEntries = gApiCborEventEntries
+
+  # The dispatch proc is async and returns just `seq[byte]`. To signal
+  # "unknown apiName" without raising or capturing a `var bool`, the
+  # convention is: empty seq + the calling `<lib>_call` checks against the
+  # known-name set (a separate non-async predicate proc).
+  let knownNamePredIdent = ident(libName & "CborIsKnownApiName")
+
+  var caseStmt = nnkCaseStmt.newTree(ident("apiName"))
+  for entry in entries:
+    let nameLit = newLit(entry.apiName)
+    let adapterCall = newCall(ident(entry.adapterProc), ident("ctx"), ident("reqBuf"))
+    let branchBody = newStmtList(
+      nnkReturnStmt.newTree(nnkCommand.newTree(ident("await"), adapterCall))
+    )
+    caseStmt.add(nnkOfBranch.newTree(nameLit, branchBody))
+  caseStmt.add(
+    nnkElse.newTree(
+      newStmtList(nnkReturnStmt.newTree(prefix(nnkBracket.newTree(), "@")))
+    )
+  )
+
+  let dispatchProc = nnkProcDef.newTree(
+    postfix(dispatchProcIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      nnkBracketExpr.newTree(
+        ident("Future"), nnkBracketExpr.newTree(ident("seq"), ident("byte"))
+      ),
+      newIdentDefs(ident("apiName"), ident("string")),
+      newIdentDefs(ident("ctx"), ident("BrokerContext")),
+      newIdentDefs(ident("reqBuf"), nnkBracketExpr.newTree(ident("seq"), ident("byte"))),
+    ),
+    nnkPragma.newTree(
+      newColonExpr(
+        ident("async"),
+        nnkTupleConstr.newTree(newColonExpr(ident("raises"), nnkBracket.newTree())),
+      ),
+      ident("gcsafe"),
+    ),
+    newEmptyNode(),
+    newStmtList(caseStmt),
+  )
+  result.add(dispatchProc)
+
+  # Companion predicate: foreign caller dispatch needs to distinguish
+  # "unknown name" from "known name with empty response". Predicate is a
+  # plain non-async proc so `<lib>_call` can call it directly.
+  var nameSet = newStmtList()
+  var nameCase = nnkCaseStmt.newTree(ident("apiName"))
+  for entry in entries:
+    nameCase.add(
+      nnkOfBranch.newTree(
+        newLit(entry.apiName), newStmtList(nnkReturnStmt.newTree(ident("true")))
+      )
+    )
+  nameCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+  nameSet.add(nameCase)
+  let knownProc = nnkProcDef.newTree(
+    postfix(knownNamePredIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      ident("bool"), newIdentDefs(ident("apiName"), ident("string"))
+    ),
+    nnkPragma.newTree(ident("gcsafe")),
+    newEmptyNode(),
+    nameSet,
+  )
+  result.add(knownProc)
+
+  # ------------------------------------------------------------------
+  # Event known-name predicate (companion to request side).
+  # ------------------------------------------------------------------
+  block:
+    var eventCase = nnkCaseStmt.newTree(ident("eventName"))
+    for e in eventEntries:
+      eventCase.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName), newStmtList(nnkReturnStmt.newTree(ident("true")))
+        )
+      )
+    eventCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+    let eventKnownProc = nnkProcDef.newTree(
+      postfix(knownEventPredIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(
+        ident("bool"), newIdentDefs(ident("eventName"), ident("string"))
+      ),
+      nnkPragma.newTree(ident("gcsafe")),
+      newEmptyNode(),
+      newStmtList(eventCase),
+    )
+    result.add(eventKnownProc)
+
+  # ------------------------------------------------------------------
+  # Per-library types and globals.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      type
+        `procThreadArgIdent` = object
+          ctx: BrokerContext
+          shutdownFlag: Atomic[int]
+          processingReady: Atomic[int]
+          processingErrorMessage: cstring
+
+        `ctxEntryIdent` = object
+          ctx: BrokerContext
+          procThread: Thread[ptr `procThreadArgIdent`]
+          arg: ptr `procThreadArgIdent`
+          active: bool
+
+        `eventCallbackTypeIdent`* = proc(
+          ctx: uint32,
+          eventName: cstring,
+          payloadBuf: pointer,
+          payloadLen: int32,
+          userData: pointer,
+        ) {.cdecl, gcsafe, raises: [].}
+
+        `subscriptionTypeIdent` = object
+          handle: uint64
+          cb: `eventCallbackTypeIdent`
+          userData: pointer
+
+        `subsKeyTypeIdent` = tuple[ctx: uint32, eventName: string]
+
+      var `ctxsIdent`: seq[ptr `ctxEntryIdent`]
+      var `ctxsLockIdent`: Lock
+      var `ctxsInitIdent`: Atomic[int]
+
+      var `subsTableIdent`: Table[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]
+      var `subsLockIdent`: Lock
+      var `subsHandleIdent`: Atomic[uint64]
+
+      var `nimInitFlagIdent`: Atomic[int]
+      var `gcRegFlagIdent` {.threadvar.}: bool
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_initialize` — Nim runtime + GC setup. Idempotent.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `initFuncIdent`*() {.exportc: `initFuncNameLit`, cdecl, dynlib.} =
+        # Step 1: one-time Nim runtime init.
+        while true:
+          case `nimInitFlagIdent`.load(moAcquire)
+          of 2:
+            break
+          of -1:
+            return
+          of 1:
+            sleep(1)
+          else:
+            var expected = 0
+            if `nimInitFlagIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
+              when compileOption("app", "lib") and not defined(windows):
+                let initRes = catch:
+                  `nimMainIdent`()
+                if initRes.isErr():
+                  error "Failed to initialize Nim runtime",
+                    library = `libNameLit`, detail = initRes.error.msg
+                  `nimInitFlagIdent`.store(-1, moRelease)
+                  return
+              `nimInitFlagIdent`.store(2, moRelease)
+              break
+
+        # Step 2: per-thread foreign GC registration.
+        when compileOption("app", "lib"):
+          if not `gcRegFlagIdent`:
+            when declared(setupForeignThreadGc):
+              setupForeignThreadGc()
+            `gcRegFlagIdent` = true
+          when declared(nimGC_setStackBottom):
+            var locals {.volatile, noinit.}: pointer
+            locals = addr(locals)
+            nimGC_setStackBottom(locals)
+
+        # Step 3: lazy-init the global ctx registry and the subs map/lock.
+        var ctxsExpected = 0
+        if `ctxsInitIdent`.compareExchange(ctxsExpected, 1, moAcquire, moRelaxed):
+          initLock(`ctxsLockIdent`)
+          initLock(`subsLockIdent`)
+          `subsTableIdent` =
+            initTable[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]()
+          `ctxsInitIdent`.store(2, moRelease)
+        else:
+          while `ctxsInitIdent`.load(moAcquire) != 2:
+            sleep(1)
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_allocBuffer` / `<lib>_freeBuffer`.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `allocBufFuncIdent`*(
+          size: int32
+      ): pointer {.exportc: `allocBufFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if size <= 0 or size.int > `bufSizeCap`:
+          return nil
+        allocShared0(size.int)
+
+      proc `freeBufFuncIdent`*(
+          buf: pointer
+      ) {.exportc: `freeBufFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if not buf.isNil:
+          deallocShared(buf)
+
+  )
+
+  # ------------------------------------------------------------------
+  # Per-event listener installers.
+  #
+  # Each installer registers an MT-broker listener whose body:
+  #   1. Snapshots the subscription list for (ctx, eventName) under the
+  #      subs lock (so concurrent subscribe/unsubscribe doesn't iterate
+  #      while we mutate).
+  #   2. CBOR-encodes the event payload once (callback fan-out reuses the
+  #      buffer for all subscribers).
+  #   3. Allocates a shared-heap buffer, copies the bytes in, invokes each
+  #      subscriber's C callback synchronously, frees the buffer.
+  #
+  # The listener captures the per-library globals — they live for the
+  # lifetime of the library, so closure capture is safe.
+  # ------------------------------------------------------------------
+  var installerNames: seq[string] = @[]
+  for e in eventEntries:
+    let eventTypeIdent = ident(e.typeName)
+    let installerIdent = ident(libName & "Cbor" & e.typeName & "Installer")
+    let eventNameLit = newLit(e.apiName)
+    installerNames.add($installerIdent)
+    result.add(
+      quote do:
+        proc `installerIdent`*(ctx: BrokerContext): Result[void, string] =
+          proc handler(
+              evt: `eventTypeIdent`
+          ): Future[void] {.async: (raises: []), gcsafe.} =
+            let key: `subsKeyTypeIdent` = (uint32(ctx), `eventNameLit`)
+            var subs: seq[`subscriptionTypeIdent`]
+            {.cast(gcsafe).}:
+              withLock `subsLockIdent`:
+                subs = `subsTableIdent`.getOrDefault(key)
+            if subs.len == 0:
+              return
+            let encRes = cborEncode(evt)
+            if encRes.isErr:
+              return
+            let bytes = encRes.value
+            var buf: pointer = nil
+            if bytes.len > 0:
+              buf = allocShared0(bytes.len)
+              copyMem(buf, unsafeAddr bytes[0], bytes.len)
+            for sub in subs:
+              if sub.cb.isNil:
+                continue
+              sub.cb(
+                uint32(ctx), `eventNameLit`.cstring, buf, int32(bytes.len), sub.userData
+              )
+            if not buf.isNil:
+              deallocShared(buf)
+
+          let listenRes = `eventTypeIdent`.listen(ctx, handler)
+          if listenRes.isErr:
+            return Result[void, string].err(listenRes.error)
+          return Result[void, string].ok()
+
+    )
+
+  # ------------------------------------------------------------------
+  # Umbrella installer: called from the processing thread after
+  # setupProviders so listeners are live before any foreign caller can
+  # subscribe.
+  # ------------------------------------------------------------------
+  var installerCalls = newStmtList()
+  for installerName in installerNames:
+    let installerIdent = ident(installerName)
+    installerCalls.add(
+      newTree(nnkPrefix, ident("?"), newCall(installerIdent, ident("ctx")))
+    )
+  installerCalls.add(
+    nnkReturnStmt.newTree(
+      newCall(
+        newDotExpr(
+          nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("string")),
+          ident("ok"),
+        )
+      )
+    )
+  )
+  let installAllProc = nnkProcDef.newTree(
+    postfix(installAllListenersIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("string")),
+      newIdentDefs(ident("ctx"), ident("BrokerContext")),
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    installerCalls,
+  )
+  result.add(installAllProc)
+
+  # ------------------------------------------------------------------
+  # `<lib>_subscribe` / `<lib>_unsubscribe`.
+  #
+  # Subscribe handle convention: 0 == failure (unknown event, allocation
+  # error, nil callback for non-probe paths). 1 is reserved as the
+  # "supported" sentinel returned for probe calls (cb == nil). Real
+  # subscriptions start at 2 to avoid colliding with these reserved
+  # values.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `subscribeFuncIdent`*(
+          ctx: uint32,
+          eventNameC: cstring,
+          cb: `eventCallbackTypeIdent`,
+          userData: pointer,
+      ): uint64 {.exportc: `subscribeFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if eventNameC.isNil:
+          return 0'u64
+        let name = $eventNameC
+        if not `knownEventPredIdent`(name):
+          return 0'u64
+        if cb.isNil:
+          # Probe mode: caller wants to know whether the eventName is
+          # supported by this library version. 1 is a sentinel never
+          # returned for real subscriptions.
+          return 1'u64
+        # Real subscription handle: skip 0 (failure) and 1 (probe).
+        let h = `subsHandleIdent`.fetchAdd(1, moRelaxed) + 2'u64
+        {.cast(gcsafe).}:
+          withLock `subsLockIdent`:
+            let key: `subsKeyTypeIdent` = (ctx, name)
+            var current = `subsTableIdent`.getOrDefault(key)
+            current.add(`subscriptionTypeIdent`(handle: h, cb: cb, userData: userData))
+            `subsTableIdent`[key] = current
+        return h
+
+      proc `unsubscribeFuncIdent`*(
+          ctx: uint32, eventNameC: cstring, handle: uint64
+      ): int32 {.exportc: `unsubscribeFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if eventNameC.isNil:
+          return -1'i32
+        let name = $eventNameC
+        {.cast(gcsafe).}:
+          withLock `subsLockIdent`:
+            let key: `subsKeyTypeIdent` = (ctx, name)
+            var subs = `subsTableIdent`.getOrDefault(key)
+            if subs.len == 0:
+              return -2'i32
+            if handle == 0'u64:
+              `subsTableIdent`.del(key)
+              return 0'i32
+            var idx = -1
+            for i in 0 ..< subs.len:
+              if subs[i].handle == handle:
+                idx = i
+                break
+            if idx < 0:
+              return -3'i32
+            subs.delete(idx)
+            if subs.len == 0:
+              `subsTableIdent`.del(key)
+            else:
+              `subsTableIdent`[key] = subs
+            return 0'i32
+
+  )
+
+  # ------------------------------------------------------------------
+  # Processing thread proc (one per ctx). Runs setupProviders then loops
+  # on a chronos event loop until shutdownFlag is set.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `procThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
+        setThreadBrokerContext(arg.ctx)
+
+        when compiles(setupProviders(arg.ctx).isErr()):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            arg.processingErrorMessage =
+              allocCStringCopy("setupProviders raised: " & setupCatchRes.error.msg)
+            arg.processingReady.store(-1, moRelease)
+            return
+          let setupRes = setupCatchRes.get()
+          if setupRes.isErr():
+            arg.processingErrorMessage = allocCStringCopy(setupRes.error())
+            arg.processingReady.store(-1, moRelease)
+            return
+        elif compiles(setupProviders(arg.ctx)):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            arg.processingErrorMessage =
+              allocCStringCopy("setupProviders raised: " & setupCatchRes.error.msg)
+            arg.processingReady.store(-1, moRelease)
+            return
+
+        # Install event listeners so subscriptions arriving any time after
+        # createContext returns will receive emitted events.
+        let installCatchRes = catch:
+          `installAllListenersIdent`(arg.ctx)
+        if installCatchRes.isErr():
+          arg.processingErrorMessage = allocCStringCopy(
+            "event listener install raised: " & installCatchRes.error.msg
+          )
+          arg.processingReady.store(-1, moRelease)
+          return
+        let installRes = installCatchRes.get()
+        if installRes.isErr():
+          arg.processingErrorMessage =
+            allocCStringCopy("event listener install failed: " & installRes.error())
+          arg.processingReady.store(-1, moRelease)
+          return
+
+        arg.processingReady.store(1, moRelease)
+
+        proc awaitShutdown(flag: ptr Atomic[int]) {.async: (raises: []).} =
+          while flag[].load(moAcquire) != 1:
+            let s = catch:
+              await sleepAsync(milliseconds(5))
+            if s.isErr():
+              discard
+
+        waitFor awaitShutdown(addr arg.shutdownFlag)
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_createContext` — spawn ctx + processing thread, await ready.
+  # `<lib>_shutdown` — signal, join, free.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `createContextFuncIdent`*(
+          errOut: ptr cstring
+      ): uint32 {.exportc: `createContextFuncNameLit`, cdecl, dynlib.} =
+        `initFuncIdent`()
+        ensureForeignThreadGc()
+
+        # Skip BrokerContext value 0 — `<lib>_createContext` reserves 0
+        # as the failure return code visible to foreign callers.
+        var bctx = NewBrokerContext()
+        while uint32(bctx) == 0'u32:
+          bctx = NewBrokerContext()
+        let arg =
+          cast[ptr `procThreadArgIdent`](allocShared0(sizeof(`procThreadArgIdent`)))
+        arg.ctx = bctx
+        arg.shutdownFlag.store(0, moRelaxed)
+        arg.processingReady.store(0, moRelaxed)
+        arg.processingErrorMessage = nil
+
+        let entry = cast[ptr `ctxEntryIdent`](allocShared0(sizeof(`ctxEntryIdent`)))
+        entry.ctx = bctx
+        entry.arg = arg
+        entry.active = true
+
+        let createRes = catch:
+          createThread(entry.procThread, `procThreadProcIdent`, arg)
+        if createRes.isErr():
+          if not errOut.isNil:
+            errOut[] = allocCStringCopy(
+              "Failed to spawn processing thread: " & createRes.error.msg
+            )
+          deallocShared(arg)
+          deallocShared(entry)
+          return 0'u32
+
+        # Poll for processingReady (or failure).
+        var waitedMs = 0
+        const timeoutMs = 5000
+        var status = 0
+        while waitedMs < timeoutMs:
+          status = arg.processingReady.load(moAcquire).int
+          if status != 0:
+            break
+          sleep(1)
+          inc waitedMs
+
+        if status != 1:
+          arg.shutdownFlag.store(1, moRelease)
+          joinThread(entry.procThread)
+          if not errOut.isNil:
+            if not arg.processingErrorMessage.isNil:
+              errOut[] = arg.processingErrorMessage
+              arg.processingErrorMessage = nil
+            else:
+              errOut[] = allocCStringCopy("processing thread did not become ready")
+          deallocShared(arg)
+          deallocShared(entry)
+          return 0'u32
+
+        withLock `ctxsLockIdent`:
+          `ctxsIdent`.add(entry)
+        return uint32(bctx)
+
+      proc `shutdownFuncIdent`*(
+          ctx: uint32
+      ): int32 {.exportc: `shutdownFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        var entryToShutdown: ptr `ctxEntryIdent` = nil
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            let e = `ctxsIdent`[i]
+            if uint32(e.ctx) == ctx and e.active:
+              e.active = false
+              entryToShutdown = e
+              break
+        if entryToShutdown.isNil:
+          return -1'i32
+
+        entryToShutdown.arg.shutdownFlag.store(1, moRelease)
+        joinThread(entryToShutdown.procThread)
+        if not entryToShutdown.arg.processingErrorMessage.isNil:
+          freeCString(entryToShutdown.arg.processingErrorMessage)
+        deallocShared(entryToShutdown.arg)
+
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            if `ctxsIdent`[i] == entryToShutdown:
+              `ctxsIdent`.del(i)
+              break
+        deallocShared(entryToShutdown)
+        return 0'i32
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_call` — string dispatch over the generated case statement.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `callFuncIdent`*(
+          ctx: uint32,
+          apiNameC: cstring,
+          reqBuf: pointer,
+          reqLen: int32,
+          respBufOut: ptr pointer,
+          respLenOut: ptr int32,
+      ): int32 {.exportc: `callFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        if apiNameC.isNil:
+          return -2'i32
+        if reqLen < 0 or reqLen.int > `bufSizeCap`:
+          return -3'i32
+
+        let apiName = $apiNameC
+
+        # Copy the inbound buffer into a Nim seq[byte] so the bytes outlive
+        # the C buffer (which we free unconditionally before returning).
+        var nimReq = newSeq[byte](reqLen.int)
+        if reqLen > 0 and not reqBuf.isNil:
+          copyMem(addr nimReq[0], reqBuf, reqLen.int)
+        if not reqBuf.isNil:
+          deallocShared(reqBuf)
+
+        let bctx = BrokerContext(ctx)
+
+        if not `knownNamePredIdent`(apiName):
+          let msg = "unknown apiName: " & apiName
+          let buf = allocShared0(msg.len)
+          if msg.len > 0:
+            copyMem(buf, unsafeAddr msg[0], msg.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(msg.len)
+          return -4'i32
+
+        let dispRes = catch:
+          waitFor `dispatchProcIdent`(apiName, bctx, nimReq)
+        if dispRes.isErr():
+          # Should not happen (adapter is raises:[]), but be defensive.
+          return -10'i32
+
+        let respBytes = dispRes.get()
+        if respBytes.len > 0:
+          let buf = allocShared0(respBytes.len)
+          copyMem(buf, unsafeAddr respBytes[0], respBytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(respBytes.len)
+        return 0'i32
+
+  )
+
+  # ------------------------------------------------------------------
+  # Generated artifacts: write the C header + CDDL schema next to the
+  # build output so foreign-language wrappers can pick them up via `-I`.
+  # ------------------------------------------------------------------
+  let outDir =
+    detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
+  var requestNames: seq[string] = @[]
+  for e in entries:
+    requestNames.add(e.apiName)
+  var eventNames: seq[string] = @[]
+  for e in eventEntries:
+    eventNames.add(e.apiName)
+  generateCborCHeaderFile(outDir, libName, requestNames, eventNames)
+  generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
+  when defined(BrokerFfiApiGenPy):
+    generateCborPyFile(outDir, libName, entries, eventEntries)
+
+  # Emit the CDDL schema and capture its text for the runtime descriptor.
+  let cddlText =
+    generateCborCddlFile(outDir, libName, entries, eventEntries, gApiTypeRegistry)
+
+  # ------------------------------------------------------------------
+  # Discovery API (Phase 6): runtime descriptor + `<lib>_listApis` /
+  # `<lib>_getSchema` C exports. The descriptor is built lazily on the
+  # first call; subsequent calls re-use the cached value.
+  # ------------------------------------------------------------------
+  let descriptorOnceIdent = ident("g" & libName & "CborDescriptorOnce")
+  let apiListOnceIdent = ident("g" & libName & "CborApiListOnce")
+
+  # Build the descriptor population body as a Nim source string. Doing it
+  # this way keeps every string / int literal in straight Nim code rather
+  # than having to splice deeply nested AST through `quote do:`.
+  var buildSrc = "proc " & libName & "CborBuildDescriptor(): LibraryDescriptor =\n"
+  buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.cddl = " & escape(cddlText) & "\n")
+  buildSrc.add("  result.requests = @[\n")
+  for r in entries:
+    buildSrc.add("    ApiRequestInfo(apiName: " & escape(r.apiName) & ",\n")
+    let argsTypeRepr =
+      if r.argFields.len > 0:
+        upperCamel(r.apiName) & "Args"
+      else:
+        ""
+    buildSrc.add("      argsType: " & escape(argsTypeRepr) & ",\n")
+    buildSrc.add("      argFields: @[\n")
+    for (fname, ftype) in r.argFields:
+      buildSrc.add(
+        "        ApiFieldInfo(name: " & escape(fname) & ", nimType: " & escape(ftype) &
+          "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      responseType: " & escape(r.responseTypeName) & "),\n")
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.events = @[\n")
+  for e in eventEntries:
+    buildSrc.add(
+      "    ApiEventInfo(apiName: " & escape(e.apiName) & ", payloadType: " &
+        escape(e.typeName) & "),\n"
+    )
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.types = @[\n")
+  for t in gApiTypeRegistry:
+    if t.name.endsWith("CborArgs"):
+      continue
+    let kindStr =
+      case t.kind
+      of atkObject: "object"
+      of atkEnum: "enum"
+      of atkAlias: "alias"
+      of atkDistinct: "distinct"
+    buildSrc.add(
+      "    ApiTypeInfo(name: " & escape(t.name) & ", kind: " & escape(kindStr) & ",\n"
+    )
+    buildSrc.add("      fields: @[\n")
+    for f in t.fields:
+      buildSrc.add(
+        "        ApiFieldInfo(name: " & escape(f.name) & ", nimType: " &
+          escape(f.nimType) & "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      enumValues: @[\n")
+    for v in t.enumValues:
+      buildSrc.add(
+        "        ApiEnumValueInfo(name: " & escape(v.name) & ", ordinal: " & $v.ordinal &
+          "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      underlyingType: " & escape(t.underlyingType) & "),\n")
+  buildSrc.add("  ]\n")
+
+  # Build the lightweight ApiList in the same fashion.
+  buildSrc.add("\nproc " & libName & "CborBuildApiList(): ApiList =\n")
+  buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.requests = @[\n")
+  for r in entries:
+    buildSrc.add("    " & escape(r.apiName) & ",\n")
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.events = @[\n")
+  for e in eventEntries:
+    buildSrc.add("    " & escape(e.apiName) & ",\n")
+  buildSrc.add("  ]\n")
+
+  try:
+    result.add(parseStmt(buildSrc))
+  except ValueError as e:
+    error("CBOR FFI: failed to parse generated descriptor builder: " & e.msg)
+
+  let ensureDescriptorIdent = ident(libName & "CborEnsureDescriptor")
+  let ensureApiListIdent = ident(libName & "CborEnsureApiList")
+
+  # Cached singletons + lazy initialisers.
+  result.add(
+    quote do:
+      var `descriptorOnceIdent`: bool
+      var `descriptorIdent`: LibraryDescriptor
+      var `apiListOnceIdent`: bool
+      var `apiListIdent`: ApiList
+
+      proc `ensureDescriptorIdent`() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if not `descriptorOnceIdent`:
+            `descriptorIdent` = `descriptorBuildIdent`()
+            `descriptorOnceIdent` = true
+
+      proc `ensureApiListIdent`() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if not `apiListOnceIdent`:
+            `apiListIdent` = `apiListBuildIdent`()
+            `apiListOnceIdent` = true
+
+  )
+
+  # `<lib>_listApis` — returns a CBOR-encoded `ApiList`.
+  result.add(
+    quote do:
+      proc `listApisFuncIdent`*(
+          respBufOut: ptr pointer, respLenOut: ptr int32
+      ): int32 {.exportc: `listApisFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        `ensureApiListIdent`()
+        let enc = cborEncode(`apiListIdent`)
+        if enc.isErr():
+          return -10'i32
+        let bytes = enc.get()
+        if bytes.len > 0:
+          let buf = allocShared0(bytes.len)
+          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(bytes.len)
+        return 0'i32
+
+  )
+
+  # `<lib>_getSchema` — returns a CBOR-encoded `LibraryDescriptor`.
+  result.add(
+    quote do:
+      proc `getSchemaFuncIdent`*(
+          respBufOut: ptr pointer, respLenOut: ptr int32
+      ): int32 {.exportc: `getSchemaFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        `ensureDescriptorIdent`()
+        let enc = cborEncode(`descriptorIdent`)
+        if enc.isErr():
+          return -10'i32
+        let bytes = enc.get()
+        if bytes.len > 0:
+          let buf = allocShared0(bytes.len)
+          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(bytes.len)
+        return 0'i32
+
+  )
+
+  when defined(brokerDebug):
+    echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
+      "' with " & $entries.len & " request adapters and " & $eventEntries.len &
+      " event entries"
     echo result.repr
 
 {.pop.}

@@ -96,6 +96,9 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_event_broker
   export api_event_broker
 
+  import ./internal/api_event_broker_cbor
+  export api_event_broker_cbor
+
 export chronicles, results, chronos, broker_context
 
 type EventBrokerMode = enum
@@ -532,7 +535,10 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
       .}
     else:
       when defined(BrokerFfiApi):
-        generateApiEventBroker(body)
+        when brokerFfiMode == mfCbor:
+          generateApiCborEventBroker(body)
+        else:
+          generateApiEventBroker(body)
       else:
         generateMtEventBroker(body)
   of ebDefault:

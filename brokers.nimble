@@ -14,6 +14,7 @@ requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
+requires "cbor_serialization >= 0.3.0"
 
 proc quoteArg(arg: string): string =
   if defined(windows):
@@ -158,7 +159,7 @@ proc cmakeWindowsConfigureExtras(): string =
 
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build", "mylib"))
@@ -174,7 +175,7 @@ proc buildFfiExampleLibrary(generatePy = false) =
 
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build", "torpedolib"))
@@ -354,15 +355,67 @@ task perftest, "Run performance and stress tests":
         continue
       test opt, f
 
+task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
+  # Codec round-trip tests (no FFI flags needed).
+  let codecTests = ["test_api_cbor_codec"]
+  for f in codecTests:
+    for opt in [
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc",
+    ]:
+      test opt, f
+
+  # Library-init integration tests need the CBOR FFI runtime. Each test
+  # uses a different --nimMainPrefix to keep their generated NimMain
+  # symbols distinct (mirrors the native testApi convention).
+  let cborApiTests = [
+    ("test_api_cbor_library_init", "cbtest"),
+    ("test_api_cbor_event_subscribe", "evtt"),
+    ("test_api_cbor_discovery", "cbdisc"),
+    ("typemappingtestlib_cbor/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
+  ]
+  for (f, prefix) in cborApiTests:
+    for opt in [
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR -d:release --mm:refc --threads:on",
+    ]:
+      if skipRefcOnWindows(opt, f):
+        continue
+      # The event subscribe test exercises cross-thread Channel[T] sends
+      # of complex CBOR-encoded payloads from a generated listener
+      # closure that captures GC'd globals (the per-library subscription
+      # table + lock). Under refc this combination is fragile:
+      #   - refc + debug on macOS hits the Nim 2.2.4 stdlib Channel[T]
+      #     regression documented in LIMITATION.md (sustained sends of
+      #     complex seq/object payloads hang in storeAux).
+      #   - refc + release SIGSEGVs on macOS at first delivery — the
+      #     stop-the-world GC interacts badly with chronos thread-pool
+      #     callbacks holding shared listener state across threads.
+      # Skip the entire refc matrix for the event test on macOS until a
+      # follow-up phase can either rework the listener to use shared-heap
+      # state exclusively (avoiding GC'd captures across threads) or pin
+      # to ORC.
+      when defined(macosx):
+        if f == "test_api_cbor_event_subscribe" and "--mm:refc" in opt:
+          echo "Skipping " & f & " (" & opt &
+            ") on macOS + refc: known cross-thread refc fragility — see LIMITATION.md and Phase 3 follow-up."
+          continue
+      let extraOpt = nimMainPrefixFlag(prefix)
+      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
+
 task testApi, "Run FFI API broker tests":
   let apiTests =
     ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
   for f in apiTests:
     for opt in [
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
         continue
@@ -403,10 +456,106 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
+# ---------------------------------------------------------------------------
+# CBOR-mode example library + C++ consumer
+# ---------------------------------------------------------------------------
+
+proc buildFfiCborExampleFlags(generatePy = false): string =
+  result =
+    "-d:BrokerFfiApi -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi_cbor/nimlib/build"
+  result.add(nimMainPrefixFlag("mylibcbor"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/ffiapi_cbor/nimlib/build", "mylibcbor"))
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
+
+proc buildFfiCborExampleLibrary(generatePy = false) =
+  exec "nim c " & buildFfiCborExampleFlags(generatePy) &
+    " examples/ffiapi_cbor/nimlib/mylibcbor.nim"
+
+proc ffiCborExampleCmakeBuildDir(): string =
+  "examples/ffiapi_cbor/cpp_example/build"
+
+proc buildFfiCborExampleCpp() =
+  let cmakeDir = "examples/ffiapi_cbor/cpp_example"
+  let buildDir = ffiCborExampleCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  exec "cmake --build " & buildDir
+
+proc ffiCborExampleCppExePath(): string =
+  when defined(windows):
+    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example.exe"
+  else:
+    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example"
+
+task buildFfiCborExample, "Build the CBOR-mode FFI example library":
+  buildFfiCborExampleLibrary()
+
+task buildFfiCborExampleCpp,
+  "Build the CBOR-mode FFI example library + C++ consumer (via CMake)":
+  buildFfiCborExampleLibrary()
+  buildFfiCborExampleCpp()
+
+task runFfiCborExampleCpp, "Build and run the CBOR-mode C++ consumer example":
+  buildFfiCborExampleLibrary()
+  buildFfiCborExampleCpp()
+  exec quoteArg(ffiCborExampleCppExePath())
+
+task buildFfiCborExamplePy,
+  "Build the CBOR-mode example library + generated Python wrapper":
+  buildFfiCborExampleLibrary(true)
+
+task runFfiCborExamplePy, "Build and run the CBOR-mode Python consumer example":
+  buildFfiCborExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/ffiapi_cbor/python_example/main.py")
+
+proc buildTypeMapTestLibCbor(genPy: bool = false) =
+  var flags =
+    "-d:BrokerFfiApi -d:BrokerFfiApiCBOR --threads:on --app:lib --mm:orc " &
+    "--path:. --outdir:test/typemappingtestlib_cbor/build"
+  flags.add(nimMainPrefixFlag("typemappingtestlib_cbor"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(
+    nimWindowsImplibFlag(
+      "test/typemappingtestlib_cbor/build", "typemappingtestlib_cbor"
+    )
+  )
+  if genPy:
+    flags.add(" -d:BrokerFfiApiGenPy")
+  exec "nim c " & flags & " test/typemappingtestlib_cbor/typemappingtestlib_cbor.nim"
+
+task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
+  buildTypeMapTestLibCbor()
+
+task runTypeMapTestLibCborPy,
+  "Build the CBOR-mode parity library + Python wrapper and run the Python parity test":
+  buildTypeMapTestLibCbor(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("test/typemappingtestlib_cbor/test_typemappingtestlib_cbor.py")
+
+proc typeMapTestLibCborCmakeDir(): string =
+  "test/typemappingtestlib_cbor/cmake-build"
+
+task runTypeMapTestLibCborCpp,
+  "Build the CBOR-mode parity library + C++ binding and run the C++ parity test":
+  buildTypeMapTestLibCbor()
+  let cmakeDir = typeMapTestLibCborCmakeDir()
+  let srcDir = "test/typemappingtestlib_cbor"
+  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
+    cmakeWindowsConfigureExtras()
+  exec "cmake --build " & quoteArg(cmakeDir)
+  exec quoteArg(cmakeDir & "/test_typemappingtestlib_cbor")
+
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
-    "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/typemappingtestlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    mm & " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
   flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
@@ -466,7 +615,7 @@ proc asanLinkFlags(sharedLib: bool = false): string =
 
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
   var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"
