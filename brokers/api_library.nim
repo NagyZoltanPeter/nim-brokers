@@ -27,6 +27,7 @@ import std/[atomics, locks, macros, os, strutils, tables]
 import chronos, chronicles
 import results
 import ./broker_context, ./internal/api_common
+import ./internal/api_codegen_cbor_h
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -1934,9 +1935,24 @@ proc registerBrokerLibraryCborImpl(
 
   )
 
+  # ------------------------------------------------------------------
+  # Generated artifacts: write the C header next to the build output so
+  # foreign-language wrappers can pick it up via `-I`.
+  # ------------------------------------------------------------------
+  let outDir =
+    detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
+  var requestNames: seq[string] = @[]
+  for e in entries:
+    requestNames.add(e.apiName)
+  var eventNames: seq[string] = @[]
+  for e in eventEntries:
+    eventNames.add(e.apiName)
+  generateCborCHeaderFile(outDir, libName, requestNames, eventNames)
+
   when defined(brokerDebug):
     echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
-      "' with " & $entries.len & " request adapters"
+      "' with " & $entries.len & " request adapters and " & $eventEntries.len &
+      " event entries"
     echo result.repr
 
 {.pop.}
