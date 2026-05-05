@@ -84,6 +84,31 @@ var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
   ## per-library `Table[string, CborApiAdapter]` and the `<lib>_call`
   ## dispatch.
 
+type CborEventEntry* = object
+  apiName*: string ## Wire eventName foreign callers pass to `<lib>_subscribe`.
+  typeName*: string ## Nim type identifier for the event payload.
+
+var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
+  ## Accumulated by `EventBroker(API)` expansions when `brokerFfiMode` is
+  ## `mfCbor`. `registerBrokerLibrary` reads this list to generate
+  ## per-event listener installers and the `<lib>CborIsKnownEvent`
+  ## predicate. As with `gApiCborRequestEntries`, this list is read but
+  ## not reset — Nim's compile-time VM aliases `let` copies of seqs back
+  ## to the source.
+
+proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
+  ## Register an event for the next library's CBOR-mode subscribe surface.
+  for entry in gApiCborEventEntries:
+    if entry.apiName == apiName:
+      error(
+        "CBOR FFI: duplicate event apiName '" & apiName &
+          "' (already registered by '" & entry.typeName & "'). " &
+          "Each EventBroker(API) must have a unique event type name."
+      )
+  gApiCborEventEntries.add(
+    CborEventEntry(apiName: apiName, typeName: typeName)
+  )
+
 proc registerCborRequestEntry*(apiName, adapterProc: string) {.compileTime.} =
   ## Register a CBOR request adapter for the next library that calls
   ## `registerBrokerLibrary`. Detects duplicate apiNames at compile time
