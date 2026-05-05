@@ -25,9 +25,10 @@
 
 {.push raises: [].}
 
-import std/[options]
+import std/[options, typetraits]
 import results
 import cbor_serialization
+import cbor_serialization/[reader_impl, writer]
 import cbor_serialization/std/options as cbor_options
 
 export results, cbor_serialization, cbor_options
@@ -49,6 +50,32 @@ createCborFlavor(
     # library — unknown fields are dropped on decode rather than failing.
   skipNullFields = false,
 )
+
+# ---------------------------------------------------------------------------
+# Distinct-type bridging
+#
+# nim-cbor-serialization 0.3.0 ships a generic writer for distinct types
+# (`proc write*[T: distinct]` in writer.nim) but the matching reader is
+# commented out upstream. We provide both halves here:
+# - a generic `read[T: distinct]` that decodes into the underlying type
+#   and casts back, mirroring the writer's behaviour.
+# - the flavor-level `defaultReader(distinct)` / `defaultWriter(distinct)`
+#   bindings so user-defined distinct types work out of the box on the
+#   `BrokerCbor` flavor without per-type registration boilerplate.
+# ---------------------------------------------------------------------------
+
+proc read*[T: distinct](
+    r: var CborReader, value: var T
+) {.raises: [SerializationError, IOError].} =
+  mixin readValue
+  var underlying: distinctBase(T, recursive = false)
+  readValue(r, underlying)
+  value = T(underlying)
+
+BrokerCbor.defaultReader(distinct)
+  # Writer side is already bound by `defaultPrimitiveWriter` (see
+  # cbor_serialization/format.nim:99). Re-binding here causes
+  # `ambiguous call writeValue` at user call sites.
 
 # ---------------------------------------------------------------------------
 # Wire types

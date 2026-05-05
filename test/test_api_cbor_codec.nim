@@ -24,6 +24,26 @@ type
     favorite: Color
     pos: Point
 
+  JobId = distinct int32
+  Timestamp = distinct int64
+
+  DistObj = object
+    id: JobId
+    ts: Timestamp
+
+  ArrayObj = object
+    values: array[4, int32]
+
+  TaggedItem = object
+    key: string
+    value: string
+
+  SeqObjBag = object
+    items: seq[TaggedItem]
+
+proc `==`(a, b: JobId): bool {.borrow.}
+proc `==`(a, b: Timestamp): bool {.borrow.}
+
 # Round-trip helpers are written as standalone procs (one per concrete type)
 # rather than a generic template. testutils' `test` macro re-introduces a
 # generic context that mishandles nested template expansions of generic
@@ -99,6 +119,34 @@ proc rtOptInt32(v: Option[int32]): Option[int32] =
   doAssert dec.isOk(), dec.error
   dec.value
 
+proc rtJobId(v: JobId): JobId =
+  let enc = cborEncode(v)
+  doAssert enc.isOk(), enc.error
+  let dec = cborDecode(enc.value, JobId)
+  doAssert dec.isOk(), dec.error
+  dec.value
+
+proc rtDistObj(v: DistObj): DistObj =
+  let enc = cborEncode(v)
+  doAssert enc.isOk(), enc.error
+  let dec = cborDecode(enc.value, DistObj)
+  doAssert dec.isOk(), dec.error
+  dec.value
+
+proc rtArrayObj(v: ArrayObj): ArrayObj =
+  let enc = cborEncode(v)
+  doAssert enc.isOk(), enc.error
+  let dec = cborDecode(enc.value, ArrayObj)
+  doAssert dec.isOk(), dec.error
+  dec.value
+
+proc rtSeqObjBag(v: SeqObjBag): SeqObjBag =
+  let enc = cborEncode(v)
+  doAssert enc.isOk(), enc.error
+  let dec = cborDecode(enc.value, SeqObjBag)
+  doAssert dec.isOk(), dec.error
+  dec.value
+
 suite "api_cbor_codec":
   test "round-trip primitives":
     check rtInt32(42) == 42
@@ -133,6 +181,27 @@ suite "api_cbor_codec":
     check rtOptInt32(some42) == some42
     let noneI: Option[int32] = none(int32)
     check rtOptInt32(noneI) == noneI
+
+  test "round-trip distinct types":
+    check rtJobId(JobId(7)) == JobId(7)
+    let d = DistObj(id: JobId(99), ts: Timestamp(1234567890))
+    let r = rtDistObj(d)
+    check r.id == d.id
+    check r.ts == d.ts
+
+  test "round-trip array[N, T] inside object":
+    let v = ArrayObj(values: [10'i32, 20, 30, 40])
+    let r = rtArrayObj(v)
+    check r.values == v.values
+
+  test "round-trip seq[object]":
+    let bag = SeqObjBag(
+      items: @[TaggedItem(key: "a", value: "1"), TaggedItem(key: "b", value: "2")]
+    )
+    let r = rtSeqObjBag(bag)
+    check r.items.len == 2
+    check r.items[0].key == "a"
+    check r.items[1].value == "2"
 
   test "Result envelope - ok with payload":
     let r = Result[int32, string].ok(7)
