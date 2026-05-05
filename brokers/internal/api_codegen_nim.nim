@@ -14,8 +14,10 @@
 
 import std/[macros, strutils]
 import ./api_codegen_c
+import ./api_schema
 
 export api_codegen_c
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Nim → C-compatible Nim type mapping
@@ -33,9 +35,15 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
   ## Returns the Nim type to use in the C-compatible struct.
   ## string → cstring, int → cint, etc.
   ## seq[T] → pointer (raw pointer to array; paired with a _count field).
+  ## array[N, T] → array[N, cCompatType]
   if nimType.kind == nnkBracketExpr:
     if isSeqType(nimType):
       return ident("pointer")
+    elif isArrayTypeNode(nimType):
+      let n = arrayNodeSize(nimType)
+      let elemName = arrayNodeElemName(nimType)
+      let cElem = toCFieldType(ident(elemName))
+      return newTree(nnkBracketExpr, ident("array"), newLit(n), cElem)
     else:
       return copyNimTree(nimType)
   if nimType.kind == nnkIdent:
@@ -69,8 +77,17 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
       ident("uint32")
     of "pointer":
       ident("pointer")
+    of "byte":
+      ident("uint8")
     else:
-      copyNimTree(nimType)
+      # Enum types map to cint (ABI is int32)
+      if isEnumRegistered($nimType):
+        ident("cint")
+      elif isAliasOrDistinctRegistered($nimType):
+        # Resolve to underlying primitive
+        toCFieldType(ident(resolveUnderlyingType($nimType)))
+      else:
+        copyNimTree(nimType)
   else:
     copyNimTree(nimType)
 

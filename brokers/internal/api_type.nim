@@ -191,18 +191,4 @@ proc generateApiType*(
   when defined(brokerDebug):
     echo result.repr
 
-macro ApiType*(body: untyped): untyped =
-  ## **Deprecated**: Types are now auto-registered when used in
-  ## `RequestBroker(API)` / `EventBroker(API)` macros. Define types as plain
-  ## Nim objects before the broker macro and reference them directly.
-  ##
-  ## This macro remains for backward compatibility and will be removed in a
-  ## future release.
-  {.
-    warning:
-      "ApiType is deprecated. Define types as plain Nim objects and " &
-      "reference them directly in RequestBroker(API)/EventBroker(API)."
-  .}
-  generateApiType(body)
-
 {.pop.}

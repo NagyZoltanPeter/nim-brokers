@@ -3,7 +3,8 @@ import std/[os, strutils]
 # Package
 version = "0.1.0"
 author = "Status Research & Development GmbH"
-description = "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
+description =
+  "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
 license = "MIT"
 skipDirs = @["tests", "examples", "tools"]
 
@@ -13,7 +14,6 @@ requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
-requires "https://github.com/status-im/nim-async-channels"
 
 proc quoteArg(arg: string): string =
   if defined(windows):
@@ -56,10 +56,112 @@ proc nimMainPrefixFlag(prefix: string): string =
   else:
     result = " --nimMainPrefix:" & prefix
 
+proc nimWindowsCcFlag(): string =
+  ## On Windows we standardize FFI builds on clang. Nim's default cc on
+  ## Windows is MinGW gcc (msvcrt.dll), but the C/C++ side is built by
+  ## cmake via Visual Studio + MSVC by default (ucrt.dll). Mixing two CRTs
+  ## across the DLL boundary causes heap/stdio/TLS mismatches that surface
+  ## as random crashes at process teardown. Forcing clang on the Nim side
+  ## keeps both halves on a single CRT (MinGW msvcrt or release UCRT,
+  ## depending on which clang the runner ships).
+  when defined(windows): " --cc:clang" else: ""
+
+proc nimWindowsImplibFlag(outDir, libName: string): string =
+  ## Force lld to emit an import library at a known path next to the DLL.
+  ##
+  ## clang in gnu-driver mode (the only mode available when the runner
+  ## ships MinGW-bundled clang under external/mingw-amd64/bin) defaults
+  ## to ld.lld in gnu-mode, which does NOT auto-emit any import library.
+  ## The cmake consumer then fails with "ninja: error: '<libName>.lib'
+  ## missing and no known rule to make it" because our IMPORTED_IMPLIB
+  ## cmake property points at that path.
+  ##
+  ## Passing `-Wl,--out-implib=<path>` makes lld write a gnu-format
+  ## import library at the requested path. The file extension is purely
+  ## conventional — we keep `.lib` so that the cmake IMPORTED_IMPLIB
+  ## paths stay uniform across asan (MSVC-format .lib) and non-asan
+  ## (gnu-format .lib) builds. Both formats are accepted by clang+lld
+  ## consumers in gnu-driver mode.
+  when defined(windows):
+    " --passL:-Wl,--out-implib=" & outDir & "/" & libName & ".lib"
+  else:
+    ""
+
+proc isNim224MacosRefcDebug(mm: string, release: bool): bool =
+  ## True for the one combo with a known upstream Nim 2.2.4 stdlib
+  ## regression:  macOS + Nim 2.2.4 + --mm:refc + debug build.
+  ##
+  ## Sustained Channel[T].send of complex seq/object payloads triggers
+  ## heap corruption in refc through stdlib system/channels_builtin.nim
+  ## storeAux deep-copy. Fixed in Nim 2.2.10. See LIMITATION.md for the
+  ## full analysis. Linux + 2.2.4 + refc debug is unaffected; refc
+  ## release on macOS + 2.2.4 is unaffected.
+  when defined(macosx) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
+    return mm == "refc" and not release
+  false
+
+proc isNim224MacosRefcDebugFromOpt(opt: string): bool =
+  ## Same as isNim224MacosRefcDebug but parses --mm:refc / -d:release
+  ## from a full Nim option string used by the iteration loops.
+  let mm = if "--mm:refc" in opt: "refc" else: "orc"
+  let release = "-d:release" in opt
+  isNim224MacosRefcDebug(mm, release)
+
+proc fragileTestsNimDefine(mm: string, release: bool): string =
+  ## On the affected combo, emit the Nim define that gates fragile
+  ## stress tests at compile time. See LIMITATION.md for what's gated.
+  if isNim224MacosRefcDebug(mm, release): " -d:brokerTestsSkipFragileRefcBursts" else: ""
+
+proc fragileTestsNimDefineFromOpt(opt: string): string =
+  if isNim224MacosRefcDebugFromOpt(opt): " -d:brokerTestsSkipFragileRefcBursts" else: ""
+
+proc fragileTestsCmakeFlag(mm: string, release: bool): string =
+  ## Emit the cmake variable that translates to a compile definition the
+  ## C++ test uses to skip fragile RUN(...) calls. Always emit an
+  ## explicit ON/OFF — cmake's CMakeCache.txt persists across iteration
+  ## reconfigures, so omitting the flag would leave the previous
+  ## iteration's value in place.
+  if isNim224MacosRefcDebug(mm, release):
+    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=ON"
+  else:
+    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=OFF"
+
+proc skipRefcOnWindows(opt, label: string): bool =
+  ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
+  ## Windows. See README → "Platform Support" + "Known Limitations" for the
+  ## reasoning: chronos' Win32 RegisterWaitForSingleObject path fires its
+  ## completion on a thread-pool thread that the refc stop-the-world GC
+  ## cannot suspend, leading to use-after-free on
+  ## ThreadSignalPtr/Channel-driven workloads. This affects every layer that
+  ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
+  ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
+  ## phase, so the same code is safe under --mm:orc.
+  when defined(windows):
+    if "--mm:refc" in opt or "refc" == opt:
+      echo "Skipping " & label & " (" & opt &
+        ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
+      return true
+  false
+
+proc cmakeWindowsConfigureExtras(): string =
+  ## On Windows we drive cmake with Ninja + clang/clang++ + lld, pin the
+  ## release UCRT and select RelWithDebInfo. The default Visual Studio
+  ## generator ignores CMAKE_*_COMPILER for the toolset and pulls in MSVC
+  ## link.exe + the debug UCRT for Debug configs — both incompatible with
+  ## the clang-built Nim DLLs.
+  when defined(windows):
+    " -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++" &
+      " -DCMAKE_LINKER_TYPE=LLD -DCMAKE_BUILD_TYPE=RelWithDebInfo" &
+      " -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"
+  else:
+    ""
+
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build", "mylib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -74,6 +176,8 @@ proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build", "torpedolib"))
   if existsEnv("MM"):
     result.add(" --mm:" & getEnv("MM"))
   else:
@@ -92,7 +196,7 @@ proc buildFfiCmakeTarget(target = "") =
   let cmakeDir = "examples/ffiapi"
   let buildDir = ffiExamplesBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -111,7 +215,7 @@ proc buildTorpedoCmakeTarget(target = "") =
   let cmakeDir = "examples/torpedo"
   let buildDir = torpedoCmakeBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -124,17 +228,18 @@ proc torpedoExecutablePath(): string =
     joinPath("examples", "torpedo", "cpp_example", "build", "torpedo")
 
 proc test(env, path: string) =
-  let outputPath = joinPath("build", path & "_" & compileVariantSuffix(env))
+  let outputPath =
+    joinPath("build", path & "_" & compileVariantSuffix(env)).addFileExt(ExeExt)
   let label = path & " [" & env & "]"
   exec "nim c " & env & " --path:. --out:" & quoteArg(outputPath) & " test/" & path &
     ".nim"
   echo "=== RUN  " & label & " ==="
-  let (output, exitCode) = gorgeEx(outputPath)
-  if output.len > 0:
-    echo output
-  if exitCode != 0:
-    echo "=== FAIL " & label & " (exit " & $exitCode & ") ==="
-    quit(1)
+  # Use exec (live stdout+stderr) instead of gorgeEx so a SIGSEGV / runtime
+  # abort that fires before the buffered output is flushed still surfaces
+  # its Nim stack trace to the CI log. gorgeEx captured stdout only and
+  # printed it after the binary exited, which loses any backtrace the Nim
+  # runtime writes to stderr at crash time.
+  exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
 
 proc isExcludedNimPath(path: string): bool =
@@ -205,7 +310,7 @@ proc runNph(files: seq[string], emptyMessage: string) =
     for file in files:
       exec "nph " & quoteArg(file)
 
-task test, "Run all tests":
+task test, "Run all single and multi-threaded broker tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:
     for opt in [
@@ -224,9 +329,14 @@ task test, "Run all tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      test opt, f
+      if skipRefcOnWindows(opt, f):
+        continue
+      test opt & fragileTestsNimDefineFromOpt(opt), f
 
 task perftest, "Run performance and stress tests":
+  # perf_test_* are stress-by-design and would tear up the affected
+  # Nim 2.2.4 macOS refc debug freelist almost immediately; gate the
+  # whole task on this combo rather than carving out individual tests.
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
@@ -236,6 +346,12 @@ task perftest, "Run performance and stress tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
+      if skipRefcOnWindows(opt, f):
+        continue
+      if isNim224MacosRefcDebugFromOpt(opt):
+        echo "Skipping " & f & " (" & opt &
+          ") on macOS + Nim 2.2.4: see LIMITATION.md (perf tests are stress-by-design)."
+        continue
       test opt, f
 
 task testApi, "Run FFI API broker tests":
@@ -248,23 +364,14 @@ task testApi, "Run FFI API broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-        if "--mm:refc" in opt:
-          echo "Skipping " & f & " (" & opt & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
+      if skipRefcOnWindows(opt, f):
+        continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
         else:
           ""
-      test opt & extraOpt, f
+      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
 
 task buildFfiExample, "Build FFI API example library":
   buildFfiExampleLibrary()
@@ -296,14 +403,102 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
-proc buildPyTestLibrary(mm: string = "orc", release: bool = false) =
+proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/pytestlib/build"
-  flags.add(nimMainPrefixFlag("pytestlib"))
+    " --path:. --outdir:test/typemappingtestlib/build"
+  flags.add(nimMainPrefixFlag("typemappingtestlib"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
+  flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
-  exec "nim c " & flags & " test/pytestlib/pytestlib.nim"
+  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
+
+proc typeMapTestCmakeBuildDir(): string =
+  "test/typemappingtestlib/cmake-build"
+
+proc buildTypeMapTestCmakeTarget(target = "", fragileFlag: string = "") =
+  let cmakeDir = "test/typemappingtestlib"
+  let buildDir = typeMapTestCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras() &
+    fragileFlag
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc typeMapTestCppExecutablePath(): string =
+  when defined(windows):
+    "test/typemappingtestlib/build/test_typemappingtestlib.exe"
+  else:
+    "test/typemappingtestlib/build/test_typemappingtestlib"
+
+proc typeMapTestAsanBuildDir(): string =
+  "test/typemappingtestlib/cmake-build-asan"
+
+proc setAsanEnv() =
+  putEnv("MallocNanoZone", "0")
+  putEnv(
+    "ASAN_OPTIONS",
+    "detect_leaks=0:symbolize=1:print_stacktrace=1:halt_on_error=1:abort_on_error=0:strict_string_checks=1",
+  )
+  if not existsEnv("ASAN_SYMBOLIZER_PATH"):
+    let llvmSym = findExe("llvm-symbolizer")
+    if llvmSym.len > 0:
+      putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
+
+proc asanCompileFlags(): string =
+  result = "-fsanitize=address -fno-omit-frame-pointer -g"
+  when defined(windows):
+    # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
+    result.add(" -gcodeview")
+
+proc asanLinkFlags(sharedLib: bool = false): string =
+  result = "-fsanitize=address -g"
+  when defined(linux):
+    if sharedLib:
+      result.add(" -shared-libasan")
+  when defined(windows):
+    # Tell lld to emit a PDB so ASAN frames carry function/line info.
+    result.add(" -Wl,/debug")
+
+proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
+  var flags =
+    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
+    quoteArg(asanLinkFlags(sharedLib = true)) &
+    " --path:. --outdir:test/typemappingtestlib/build-asan"
+  flags.add(nimMainPrefixFlag("typemappingtestlib"))
+  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
+
+proc buildTypeMapTestCmakeTargetAsan(target = "") =
+  let cmakeDir = "test/typemappingtestlib"
+  let buildDir = typeMapTestAsanBuildDir()
+  let outDir = getCurrentDir() / "test/typemappingtestlib/build-asan"
+  mkDir(buildDir)
+  # On non-Windows, the asan build pins clang/clang++ directly. On Windows,
+  # cmakeWindowsConfigureExtras() supplies Ninja+clang+lld+RelWithDebInfo+UCRT
+  # — the same toolchain we use for the non-asan path, so heap/CRT match.
+  var configure =
+    "cmake -S " & cmakeDir & " -B " & buildDir & " -DASAN=ON -DTYPEMAPTEST_DIR=" &
+    quoteArg(outDir)
+  when defined(windows):
+    configure.add(cmakeWindowsConfigureExtras())
+  else:
+    configure.add(" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++")
+  exec configure
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+proc typeMapTestCppAsanExecutablePath(): string =
+  when defined(windows):
+    "test/typemappingtestlib/build-asan/test_typemappingtestlib.exe"
+  else:
+    "test/typemappingtestlib/build-asan/test_typemappingtestlib"
 
 proc soElfBits(soPath: string): int =
   ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
@@ -346,8 +541,8 @@ proc findPythonForBits(wantBits: int): string =
       return c
   return ""
 
-task buildPyTestLib, "Build the Python binding test library":
-  buildPyTestLibrary()
+task buildTypeMapTestLib, "Build the type mapping test library (C/C++/Python)":
+  buildTypeMapTestLibrary()
 
 task testFfiApi,
   "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
@@ -355,19 +550,10 @@ task testFfiApi,
     for release in [false, true]:
       let mode = if release: "release" else: "debug"
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      when defined(windows):
-        # On Windows, chronos' waitForSingleObject fires its completion callback
-        # on a Win32 thread-pool thread (via RegisterWaitForSingleObject), which
-        # is not a Nim thread.  With --mm:refc the stop-the-world GC only
-        # suspends known Nim threads, so it can collect futures/handles still
-        # referenced by the unsuspended thread-pool callback → crash.
-        # --mm:orc has no STW phase so it is safe.  Skip refc on Windows.
-        if "refc" in mm:
-          echo "Skipping (" & mm & ") on Windows: " &
-            "refc STW GC is incompatible with chronos thread-pool callbacks."
-          continue
-      buildPyTestLibrary(mm, release)
-      let bits = soElfBits("test/pytestlib/build/libpytestlib.so")
+      if skipRefcOnWindows(mm, "testFfiApi (" & mode & ")"):
+        continue
+      buildTypeMapTestLibrary(mm, release)
+      let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
       # Python and let ctypes report any mismatch itself.
       let python =
@@ -379,8 +565,74 @@ task testFfiApi,
         echo "Skipping Python tests: no " & $bits &
           "-bit Python interpreter found to match the compiled .so."
         continue
-      exec quoteArg(python) & " -m unittest discover -s test/pytestlib -p " &
+      exec quoteArg(python) & " -m unittest discover -s test/typemappingtestlib -p " &
         quoteArg("test_*.py") & " -v"
+
+task testFfiApiCpp,
+  "Build and run the C++ FFI API binding tests (orc/refc × debug/release)":
+  for mm in ["orc", "refc"]:
+    for release in [false, true]:
+      let mode = if release: "release" else: "debug"
+      echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
+      if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
+        continue
+      buildTypeMapTestLibrary(mm, release)
+      buildTypeMapTestCmakeTarget(
+        "test_typemappingtestlib", fragileTestsCmakeFlag(mm, release)
+      )
+      exec quoteArg(typeMapTestCppExecutablePath())
+
+proc testAsan(mm: string, path: string) =
+  let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
+  let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
+  let flags =
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" &
+    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
+    quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
+  exec "nim c " & flags & " test/" & path & ".nim"
+  setAsanEnv()
+  echo "=== RUN  " & label & " ==="
+  exec quoteArg(outputPath)
+  echo "=== PASS " & label & " ==="
+
+task testFfiApiCppAsanOrc,
+  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, orc, debug)":
+  echo "\n=== testFfiApiCppAsanOrc (clang, mm:orc, debug) ==="
+  buildTypeMapTestLibraryAsan("orc")
+  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+  setAsanEnv()
+  exec quoteArg(typeMapTestCppAsanExecutablePath())
+
+task testFfiApiCppAsanRefc,
+  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testFfiApiCppAsanRefc"):
+    return
+  echo "\n=== testFfiApiCppAsanRefc (clang, mm:refc, debug) ==="
+  buildTypeMapTestLibraryAsan("refc")
+  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
+  setAsanEnv()
+  exec quoteArg(typeMapTestCppAsanExecutablePath())
+
+task testMtEventBrokerAsanOrc,
+  "Run multi-thread event broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_event_broker")
+
+task testMtEventBrokerAsanRefc,
+  "Run multi-thread event broker tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtEventBrokerAsanRefc"):
+    return
+  testAsan("refc", "test_multi_thread_event_broker")
+
+task testMtRequestBrokerAsanOrc,
+  "Run multi-thread request broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_request_broker")
+
+task testMtRequestBrokerAsanRefc,
+  "Run multi-thread request broker tests under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtRequestBrokerAsanRefc"):
+    return
+  testAsan("refc", "test_multi_thread_request_broker")
+
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
 
@@ -407,3 +659,21 @@ task nph, "Install nph if needed and format modified Nim files":
 
 task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
+
+task alltests,
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC":
+  exec "nimble test"
+  exec "nimble testApi"
+  exec "nimble testFfiApi"
+  exec "nimble testFfiApiCpp"
+  exec "nimble runFfiExamplePy"
+  exec "nimble runFfiExampleCpp"
+  exec "nimble runFfiExampleC"
+
+task allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
+  exec "nimble testFfiApiCppAsanOrc"
+  exec "nimble testFfiApiCppAsanRefc"
+  exec "nimble testMtEventBrokerAsanOrc"
+  exec "nimble testMtEventBrokerAsanRefc"
+  exec "nimble testMtRequestBrokerAsanOrc"
+  exec "nimble testMtRequestBrokerAsanRefc"

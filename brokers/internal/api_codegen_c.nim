@@ -13,7 +13,10 @@
 
 {.push raises: [].}
 
-import std/[compilesettings, macros, os, strutils]
+import std/[compilesettings, macros, os, strutils, tables]
+import ./api_schema
+
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Forward imports — shared helpers from api_common
@@ -36,50 +39,146 @@ proc seqItemTypeName*(nimType: NimNode): string {.compileTime.} =
   assert isSeqType(nimType)
   $nimType[1]
 
-proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
-  ## Returns the C type suffix for struct field declarations.
-  case nimType.kind
-  of nnkIdent:
-    let name = ($nimType).toLowerAscii()
-    case name
-    of "int", "int32":
-      "int32_t"
-    of "int8":
-      "int8_t"
-    of "int16":
-      "int16_t"
-    of "int64":
-      "int64_t"
-    of "uint", "uint32":
-      "uint32_t"
-    of "uint8":
-      "uint8_t"
-    of "uint16":
-      "uint16_t"
-    of "uint64":
-      "uint64_t"
-    of "float", "float64":
-      "double"
-    of "float32":
-      "float"
-    of "bool":
-      "bool"
-    of "string":
-      "const char*"
-    of "cstring":
-      "const char*"
-    of "brokercontext":
-      "uint32_t"
-    of "pointer":
-      "void*"
-    else:
-      $nimType
-  of nnkBracketExpr:
-    if isSeqType(nimType):
-      seqItemTypeName(nimType) & "CItem*"
+proc isArrayTypeNode*(nimType: NimNode): bool {.compileTime.} =
+  ## Returns true if the type node represents `array[N, T]`.
+  nimType.kind == nnkBracketExpr and nimType.len == 3 and
+    ($nimType[0]).toLowerAscii() == "array"
+
+proc constNodeIntValue(impl: NimNode): (bool, int) {.compileTime.} =
+  ## Returns (true, value) if `impl` is (or wraps) an integer literal const value.
+  if impl.kind == nnkIntLit:
+    (true, int(impl.intVal))
+  elif impl.kind == nnkConstDef and impl[2].kind == nnkIntLit:
+    (true, int(impl[2].intVal))
+  else:
+    (false, 0)
+
+# Compile-time registry for user-defined int consts used as array sizes.
+# Populated in a typed pre-pass (`registerArraySizeConst`) so the deferred
+# untyped codegen can resolve `array[ConstName, T]` to a literal length.
+var gArraySizeConsts* {.compileTime.}: Table[string, int]
+
+proc registerArraySizeValue*(name: string, value: int) {.compileTime.} =
+  gArraySizeConsts[name] = value
+
+proc lookupArraySizeConst*(name: string): (bool, int) {.compileTime.} =
+  if gArraySizeConsts.hasKey(name):
+    (true, gArraySizeConsts.getOrDefault(name, 0))
+  else:
+    (false, 0)
+
+proc arrayNodeSize*(nimType: NimNode): int {.compileTime.} =
+  ## Extracts N from an `array[N, T]` node, supporting integer literals,
+  ## resolved const symbols, and pre-registered const identifiers.
+  assert isArrayTypeNode(nimType)
+  let sizeNode = nimType[1]
+  case sizeNode.kind
+  of nnkIntLit:
+    int(sizeNode.intVal)
+  of nnkSym:
+    let (ok, value) = constNodeIntValue(sizeNode.getImpl())
+    if ok:
+      value
     else:
       error(
-        "Generic types other than seq[T] are not yet supported in API broker FFI",
+        "array size const must resolve to an integer literal for FFI codegen", sizeNode
+      )
+  of nnkIdent:
+    # Untyped ident — for `array[ConstName, T]` the broker macro pre-pass
+    # registers the const value via `registerArraySizeConst`. Look it up.
+    let (ok, value) = lookupArraySizeConst(sizeNode.strVal)
+    if ok:
+      value
+    else:
+      error(
+        "array size '" & sizeNode.strVal &
+          "' is not a registered int const. The broker pre-pass should have " &
+          "resolved it — ensure the const is in scope where the broker is " &
+          "declared.",
+        sizeNode,
+      )
+  else:
+    error(
+      "array size must be an integer literal or const for FFI codegen (got " &
+        $sizeNode.kind & ": " & sizeNode.repr & ")",
+      sizeNode,
+    )
+
+proc arrayNodeElemName*(nimType: NimNode): string {.compileTime.} =
+  ## Extracts the element type name from an `array[N, T]` node.
+  assert isArrayTypeNode(nimType)
+  $nimType[2]
+
+proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.}
+
+proc nimTypeToCSuffixIdent(name: string): string {.compileTime.} =
+  ## Internal: map a plain identifier name to its C type suffix.
+  ## Checks the schema registry for enums, aliases, and distinct types.
+  case name.toLowerAscii()
+  of "int", "int32":
+    "int32_t"
+  of "int8":
+    "int8_t"
+  of "int16":
+    "int16_t"
+  of "int64":
+    "int64_t"
+  of "uint", "uint32":
+    "uint32_t"
+  of "uint8":
+    "uint8_t"
+  of "uint16":
+    "uint16_t"
+  of "uint64":
+    "uint64_t"
+  of "float", "float64":
+    "double"
+  of "float32":
+    "float"
+  of "bool":
+    "bool"
+  of "string":
+    "const char*"
+  of "cstring":
+    "const char*"
+  of "brokercontext":
+    "uint32_t"
+  of "pointer":
+    "void*"
+  of "byte":
+    "uint8_t"
+  else:
+    # Check schema registry for aliases/distinct types
+    if isEnumRegistered(name):
+      name # enum typedef name is used directly
+    elif isAliasOrDistinctRegistered(name):
+      # Recurse on the underlying type
+      nimTypeToCSuffix(ident(resolveUnderlyingType(name)))
+    else:
+      name # user-defined struct name
+
+proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
+  ## Returns the C type suffix for struct field declarations.
+  ## For array[N,T] returns "elemType[N]" — caller must detect "[" suffix
+  ## and use `baseType fieldName[N]` syntax in struct generation.
+  case nimType.kind
+  of nnkIdent:
+    nimTypeToCSuffixIdent($nimType)
+  of nnkBracketExpr:
+    if isSeqType(nimType):
+      let elemName = seqItemTypeName(nimType)
+      if isNimPrimitive(elemName):
+        # seq[primitive] → direct pointer to primitive type
+        nimTypeToCSuffixIdent(elemName) & "*"
+      else:
+        elemName & "CItem*"
+    elif isArrayTypeNode(nimType):
+      let n = arrayNodeSize(nimType)
+      let elemName = arrayNodeElemName(nimType)
+      nimTypeToCSuffixIdent(elemName) & "[" & $n & "]"
+    else:
+      error(
+        "Generic types other than seq[T] and array[N,T] are not yet supported in API broker FFI",
         nimType,
       )
   else:
@@ -135,10 +234,15 @@ proc generateCStruct*(
     structName: string, fields: seq[(string, string)]
 ): string {.compileTime.} =
   ## Generates a C struct definition string.
+  ## Handles array fields encoded as "elemType[N]" in fieldType.
   result = "typedef struct {\n"
   for (fieldName, fieldType) in fields:
-    if fieldType.endsWith("*"):
-      result.add("    " & fieldType & " " & fieldName & ";\n")
+    let bracketPos = fieldType.find('[')
+    if bracketPos >= 0:
+      # Array type: "int32_t[3]" → "int32_t fieldName[3]"
+      let baseType = fieldType[0 ..< bracketPos]
+      let arraySuffix = fieldType[bracketPos .. ^1]
+      result.add("    " & baseType & " " & fieldName & arraySuffix & ";\n")
     else:
       result.add("    " & fieldType & " " & fieldName & ";\n")
   result.add("} " & structName & ";\n")
@@ -156,10 +260,7 @@ proc generateCFuncProto*(
       if not first:
         result.add(", ")
       first = false
-      if paramType.endsWith("*"):
-        result.add(paramType & " " & paramName)
-      else:
-        result.add(paramType & " " & paramName)
+      result.add(paramType & " " & paramName)
   result.add(");\n")
 
 # ---------------------------------------------------------------------------
@@ -179,6 +280,21 @@ proc toSnakeCase*(name: string): string {.compileTime.} =
       result.add(chr(ord(ch) + 32))
     else:
       result.add(ch)
+
+proc generateCEnum*(
+    enumName: string, values: seq[tuple[name: string, ordinal: int]]
+): string {.compileTime.} =
+  ## Generates a C typedef enum definition.
+  ## Values are prefixed with SCREAMING_SNAKE_CASE enum name to avoid
+  ## global namespace collisions in C.
+  let prefix = toSnakeCase(enumName).toUpperAscii()
+  result = "typedef enum {\n"
+  for v in values:
+    result.add(
+      "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
+        ",\n"
+    )
+  result.add("} " & enumName & ";\n")
 
 # ---------------------------------------------------------------------------
 # Output directory helpers

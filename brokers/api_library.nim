@@ -26,10 +26,9 @@
 import std/[atomics, locks, macros, os, strutils]
 import chronos, chronicles
 import results
-import asyncchannels
 import ./broker_context, ./internal/api_common
 
-export results, chronos, chronicles, broker_context, api_common, asyncchannels
+export results, chronos, chronicles, broker_context, api_common
 
 # ---------------------------------------------------------------------------
 # Macro helpers
@@ -151,6 +150,10 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let waitForStartupProcIdent = ident("waitFor" & libName & "Startup")
 
   result = newStmtList()
+
+  # Emit foreign thread GC helper (once per compilation unit — safe if already
+  # emitted by a broker macro, the flag in api_common prevents duplicates).
+  result.add(emitEnsureForeignThreadGc())
 
   # Compile-time validation: ensure InitializeRequest and ShutdownRequest types exist
   result.add(
@@ -290,6 +293,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `freeCreateContextResultFuncIdent`(
           r: ptr `createContextResultIdent`
       ) {.exportc: `freeCreateContextResultFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         if r.isNil:
           return
         if not r.error_message.isNil:
@@ -526,6 +530,43 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
     )
     result.add(cleanupProc)
 
+  # Generate aggregate processLoop shutdown proc (async — awaits per-type procs)
+  let shutdownAllProcessLoopsIdent = ident("shutdownAllApiEventProcessLoops")
+  block:
+    let shutdownCtxIdent = genSym(nskParam, "ctx")
+    var shutdownBody = newStmtList()
+    for procName in gApiEventProcessLoopShutdownProcNames:
+      shutdownBody.add(
+        newCall(ident("await"), newCall(ident(procName), shutdownCtxIdent))
+      )
+    let shutdownFormalParams = newTree(
+      nnkFormalParams,
+      newEmptyNode(),
+      newTree(nnkIdentDefs, shutdownCtxIdent, ident("BrokerContext"), newEmptyNode()),
+    )
+    let asyncPragma = newTree(
+      nnkPragma,
+      newTree(
+        nnkExprColonExpr,
+        ident("async"),
+        newTree(
+          nnkTupleConstr,
+          newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+        ),
+      ),
+    )
+    let shutdownProc = newTree(
+      nnkProcDef,
+      shutdownAllProcessLoopsIdent,
+      newEmptyNode(),
+      newEmptyNode(),
+      shutdownFormalParams,
+      asyncPragma,
+      newEmptyNode(),
+      shutdownBody,
+    )
+    result.add(shutdownProc)
+
   # Processing thread proc
   result.add(
     quote do:
@@ -633,9 +674,14 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
           # Cleanup: drop all registered event listeners
           `cleanupAllIdent`(arg.ctx)
-          # Remove the RegisterEventListenerResult provider so its global
-          # bucket entry is freed and does not accumulate across context lifetimes.
+          # Remove the RegisterEventListenerResult provider before entering the
+          # processLoop shutdown so that any in-flight on<Event>() requests processed
+          # during the shutdown waitFor return an error instead of calling listen()
+          # on a partially-torn-down bucket registry.
           RegisterEventListenerResult.clearProvider(arg.ctx)
+          # Terminate all processLoop coroutines on this thread and await them before
+          # the thread exits to prevent use-after-free on thread-local allocators.
+          waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
 
     )
   elif hasEventHandlers:
@@ -664,9 +710,8 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
           waitFor awaitShutdown(addr arg.shutdownFlag)
 
-          # Remove the RegisterEventListenerResult provider so its global
-          # bucket entry is freed and does not accumulate across context lifetimes.
           RegisterEventListenerResult.clearProvider(arg.ctx)
+          waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
 
     )
   else:
@@ -694,6 +739,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `createContextFuncIdent`(): `createContextResultIdent` {.
           exportc: `createContextFuncNameLit`, cdecl, dynlib
       .} =
+        ensureForeignThreadGc()
         result.ctx = 0'u32
         result.error_message = nil
 
@@ -921,6 +967,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `shutdownFuncIdent`(
           ctx: uint32
       ) {.exportc: `shutdownFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         let initRes = ensureLibCtxInit()
         if initRes.isErr():
           error "Library shutdown skipped because initialization failed",
@@ -947,6 +994,19 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
         if shutdownRes.isErr():
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
+
+        # Drain residual callSoon callbacks left pending on the calling thread.
+        # Under --mm:refc, each waitFor leaves callbacks after the poll sentinel;
+        # without draining, the ZCT grows across context lifecycles and eventually
+        # triggers collectZCT on a freed cell (cell.typ == nil → SIGSEGV).
+        block:
+          proc drainCallerCallbacks() {.async: (raises: []).} =
+            let sleepRes = catch:
+              await sleepAsync(milliseconds(1))
+            if sleepRes.isErr():
+              discard
+
+          waitFor drainCallerCallbacks()
 
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
@@ -980,6 +1040,7 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
       proc `freeStringFuncIdent`(
           s: cstring
       ) {.exportc: `freeStringFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
         freeCString(s)
 
   )

@@ -16,11 +16,10 @@ on:
         description: "Nim compiler version (semver, accepted by jiro4989/setup-nim-action)"
         required: true
         type: choice
-        default: "2.2.4"
+        default: "2.2.10"
         options:
+          - "2.2.10"
           - "2.2.4"
-          - "2.2.0"
-          - "2.0.0"
           - "devel"
       tasks:
         description: "ASAN task(s) to run"
@@ -67,6 +66,25 @@ jobs:
             Write-Host "LLVM not found, installing via choco..."
             choco install llvm -y --no-progress
             echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
+
+      - name: Locate ASAN runtime DLL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # clang's -fsanitize=address links the .exe against
+          # clang_rt.asan_dynamic-x86_64.dll which lives under
+          # LLVM\lib\clang\<ver>\lib\windows, not LLVM\bin. Without it on
+          # PATH the test binary fails STATUS_DLL_NOT_FOUND on launch and
+          # produces no stderr — nimble only sees a non-zero exit.
+          $asan = Get-ChildItem "C:\Program Files\LLVM\lib\clang" `
+            -Filter "clang_rt.asan_dynamic-x86_64.dll" `
+            -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($asan) {
+            Write-Host "ASAN runtime: $($asan.FullName)"
+            echo $asan.DirectoryName >> $env:GITHUB_PATH
+          } else {
+            Write-Host "::warning::clang_rt.asan_dynamic-x86_64.dll not found under C:\Program Files\LLVM\lib\clang"
           }
 
       - name: Show tool versions

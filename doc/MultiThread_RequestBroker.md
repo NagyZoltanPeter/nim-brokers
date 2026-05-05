@@ -29,8 +29,8 @@ This generates:
 | `Weather.setProvider(ctx, handler)` | Register a provider on the current thread (keyed context) |
 | `Weather.request(city)` | Issue a request (default context) |
 | `Weather.request(ctx, city)` | Issue a request (keyed context) |
-| `Weather.clearProvider()` | Unregister provider + shut down process loop (default context) |
-| `Weather.clearProvider(ctx)` | Unregister provider + shut down process loop (keyed context) |
+| `Weather.clearProvider()` | Unregister provider + send shutdown to dispatch poller (default context) |
+| `Weather.clearProvider(ctx)` | Unregister provider + send shutdown to dispatch poller (keyed context) |
 | `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 5 seconds) |
 | `Weather.requestTimeout()` | Get current cross-thread request timeout |
 
@@ -108,10 +108,7 @@ let de = await Greeting.request(ctxDE, "Bob")  # "Hallo, Bob!"
 
 ### 1. The provider thread must keep its chronos event loop running
 
-`setProvider` uses `asyncSpawn` to start the internal process loop on the
-**current thread's chronos event loop**. If the event loop stops (e.g.
-`waitFor` returns), the process loop can no longer receive cross-thread
-requests.
+`setProvider` registers a poll fn in the **current thread's shared broker dispatcher** (`brokerDispatchLoop`). If the event loop stops (e.g. `waitFor` returns), the dispatcher can no longer receive cross-thread requests.
 
 When writing tests or applications, keep the event loop alive:
 
@@ -154,7 +151,7 @@ proc worker() {.thread.} =
 
 **Provider handlers** are not affected by this restriction. The handler
 closure passed to `setProvider` is stored in a `threadvar` on the provider
-thread and called locally by `processLoop` — it never crosses a thread
+thread and called locally by the dispatch handler — it never crosses a thread
 boundary. Capturing variables from the provider thread's scope is safe:
 
 ```nim
@@ -220,9 +217,9 @@ both `threadId` and `threadGen`.
 
 **`clearProvider` on a dead provider thread:** If the provider thread exits
 without calling `clearProvider`, a cross-thread `clearProvider` call sends a
-shutdown message into the orphaned request channel. Because `AsyncChannel` is
-unbounded, `sendSync` returns immediately — the message sits unread. This is a
-small harmless leak (~200 bytes + signal handle), not a hang.
+shutdown message into the orphaned request `Channel[T]`. `send` returns
+immediately (unbounded channel) — the message sits unread. This is a small
+harmless memory leak (~80 bytes, no OS resources), not a hang.
 
 ### 7. Cross-thread request timeout
 
@@ -250,16 +247,13 @@ if res.isErr() and "timed out" in res.error():
   the provider directly and are not affected by the timeout setting.
 - The timeout variable is per-type, module-level — it is shared across all threads
   and all `BrokerContext` instances for that broker type.
-- When a timeout occurs, the one-shot response channel is **left open and not
-  deallocated** — this is an intentional leak. `AsyncChannel.close()` destroys the
-  inner `Channel` (calls `deallocShared` on it and nils the pointer), so a later
-  provider `sendSync` would dereference nil and crash. By leaving the channel open,
-  the provider's eventual `sendSync` succeeds harmlessly — it writes into a channel
-  nobody reads. The leak is ~200 bytes + one OS signal handle per timed-out request.
-  A future upstream fix in `nim-asyncchannels` (e.g. a `trySendSync` that returns
-  bool on closed channel, or a `close` that defers inner dealloc) would allow safe
-  cleanup. The same intentional-leak strategy is used for request channels at
-  teardown.
+- When a timeout occurs, the one-shot response `Channel[T]` is **left allocated and not
+  deallocated** — this is an intentional, safe leak. The one-shot poller on the
+  requester thread is removed (returns 2), but the channel pointer stays alive so the
+  provider's eventual `send` writes into it harmlessly — nothing reads it, nothing
+  crashes. Because `Channel[T]` holds no OS file descriptors, this is a pure memory
+  leak of ~80 bytes per timed-out request. The same intentional-leak strategy is used
+  for request channels at teardown.
 
 ### 8. Compile with `--threads:on`
 
@@ -273,70 +267,66 @@ Multi-thread mode requires the Nim compiler flag `--threads:on`.
 
 ```mermaid
 sequenceDiagram
-    box Provider Thread (owns event loop)
+  box Provider Thread owns event loop
         participant PT as Provider Thread
-        participant PL as processLoop
-        participant H as handler(args)
+        participant DL as brokerDispatchLoop
+    participant H as handler args
     end
-    box Requester Thread ({.thread.} proc)
+  box Requester Thread thread proc
         participant RT as Requester Thread
+        participant RDL as requester dispatchLoop
     end
-    participant RC as requestChan<br/>(AsyncChannel)
-    participant RSP as responseChan<br/>(one-shot)
+  participant RC as requestChan<br/>Channel T
+  participant RSP as responseChan<br/>one shot Channel T
 
-    Note over PT: setProvider(handler) already called.<br/>processLoop is asyncSpawn'ed<br/>on the provider's event loop.
+  Note over PT: setProvider handler already called<br/>Poll fn registered in provider thread<br/>brokerDispatchLoop
 
-    PL ->> RC: await recv()
-    activate PL
-    Note right of PL: NON-BLOCKING<br/>yields to event loop
+  DL ->> RC: tryRecv no message yet returns 0
+  Note right of DL: Yields and waits for shared signal
 
-    RT ->> RT: Lock → find bucket → Unlock
-    RT ->> RSP: createShared + open()
+  RT ->> RT: Lock find bucket unlock
+  RT ->> RSP: createShared Channel T
     activate RSP
-    Note right of RSP: ad-hoc response channel
+  Note right of RSP: ad hoc response channel<br/>0 OS fds
 
-    RT ->> RC: sendSync(requestMsg)
-    activate RT
-    Note left of RT: BLOCKS briefly<br/>(channel has room)
-    RC -->> PL: msg received
-    deactivate PL
-    deactivate RT
+  RT ->> RDL: register one shot response poller
+  RT ->> RC: send requestMsg
+  RT ->> PT: fireBrokerSignal providerSignal
 
-    PL ->> PL: look up handler from threadvar
-    PL ->> H: await handler(args)
+  DL ->> RC: tryRecv msg received
+    DL ->> DL: look up handler from threadvar
+  DL ->> H: asyncSpawn handleMsg
     activate H
-    Note over H: NON-BLOCKING<br/>runs on provider's<br/>event loop
+  Note over H: NON BLOCKING<br/>runs on provider thread<br/>event loop
 
-    RT ->> RSP: waitFor withTimeout(recv(), timeout)
+  RT ->> RSP: waitFor withTimeout responseFut timeout
     activate RT
-    Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout (default 5s)
+  Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout default 5s
 
-    H -->> PL: Result[T, string]
+  H -->> DL: Result T string
     deactivate H
 
-    PL ->> RSP: sendSync(result)
-    Note right of PL: BLOCKS briefly
+  DL ->> RSP: send result
+  DL ->> RT: fireBrokerSignal requesterSignal
 
-    RSP -->> RT: result received
-    deactivate RT
-    RT ->> RSP: close() + deallocShared (success path only)
+  RDL ->> RSP: tryRecv result received
+  RDL ->> RDL: complete responseFut and deallocShared RSP
     deactivate RSP
 
-    RT ->> RT: return Result[T, string]
-
-    PL ->> RC: await recv() (loop)
-    Note right of PL: back to waiting
+  RT -->> RT: return Result T string
+    deactivate RT
 ```
 
 **Blocking points summary:**
 
 | Operation | Thread | Blocking? | Duration |
 |-----------|--------|-----------|----------|
-| `sendSync(requestMsg)` | Requester | **Blocks** | Near-instant (channel has capacity) |
-| `waitFor recv(responseChan)` | Requester | **Blocks** | Until provider responds or timeout (default 5s) |
-| `await recv(requestChan)` | Provider | Non-blocking | Yields to event loop |
-| `await handler(...)` | Provider | Non-blocking | Yields to event loop |
-| `sendSync(result)` | Provider | **Blocks** | Near-instant (channel has capacity) |
+| `send(requestMsg)` | Requester | Near-instant | Channel[T] is unbounded, send never blocks |
+| `fireBrokerSignal(providerSignal)` | Requester | Near-instant | Fires OS fd |
+| `waitFor withTimeout(responseFut, timeout)` | Requester | **Blocks** | Until provider responds or timeout (default 5s) |
+| `tryRecv(requestChan)` | Provider | Non-blocking | Returns 0 if empty; called from dispatchLoop |
+| `asyncSpawn handleMsg(...)` | Provider | Non-blocking | Dispatched on provider's event loop |
+| `send(result)` | Provider | Near-instant | Channel[T] unbounded |
 
 
 ### Same-Thread Request (fast path)
@@ -360,7 +350,7 @@ sequenceDiagram
 
     T ->> T: return Result[T, string]
 
-    Note over T: Zero channel allocations.<br/>Zero sendSync.<br/>Zero additional threads.
+    Note over T: Zero channel allocations.<br/>Zero signal fires.<br/>Zero additional threads.
 ```
 
 
@@ -372,7 +362,7 @@ sequenceDiagram
     participant TV as threadvar seqs
     participant GL as globalLock
     participant B as Shared Buckets
-    participant CH as AsyncChannel<br/>(new)
+    participant CH as Channel[T]<br/>(request, 0 fds)
     participant EL as Event Loop
 
     CT ->> CT: ensureInit()
@@ -402,18 +392,16 @@ sequenceDiagram
         CT ->> GL: unlock
         CT ->> CT: return err("already set from another thread")
     else not found
-        CT ->> CH: createShared(AsyncChannel)
-        activate CH
-        CT ->> CH: open()
-        CT ->> B: store bucket {brokerCtx, chan, threadId, threadGen}
+        CT ->> B: createShared Channel[T] (request channel, 0 OS fds)
+        CT ->> B: store bucket {brokerCtx, chan, providerSignal, threadId, threadGen}
         CT ->> B: bucketCount += 1
-        CT ->> EL: asyncSpawn processLoop(chan, brokerCtx)
-        Note over EL: process loop begins on<br/>THIS thread's event loop
+        CT ->> EL: registerBrokerPoller(makePollFn(chan, brokerCtx))
+        CT ->> EL: ensureBrokerDispatchStarted()
+        Note over EL: shared brokerDispatchLoop<br/>already running or just started
         CT ->> GL: unlock
         CT ->> CT: return ok()
     end
     deactivate GL
-    deactivate CH
 ```
 
 
@@ -425,7 +413,7 @@ sequenceDiagram
     participant TV as threadvar seqs
     participant GL as globalLock
     participant B as Shared Buckets
-    participant PL as processLoop
+    participant PL as pollFn (brokerDispatchLoop)
 
     PT ->> TV: scan + remove matching brokerCtx entry
     Note right of TV: safe: called from<br/>provider thread
@@ -439,12 +427,11 @@ sequenceDiagram
     PT ->> GL: unlock
     deactivate GL
 
-    PT ->> PL: sendSync(shutdownMsg) via requestChan
-    Note right of PT: BLOCKS briefly
+    PT ->> PT: send(shutdownMsg) via requestChan
+    PT ->> PT: fireBrokerSignal(providerSignal)
+    Note right of PT: non-blocking
 
-    PL ->> PL: recv() returns shutdownMsg
-    PL ->> PL: break out of while loop
-    PL ->> PL: async proc completes
+    Note over PT: brokerDispatchLoop's poll fn receives<br/>shutdownMsg → returns 2 (removes itself)
 
     Note over PT: done
 ```
@@ -532,15 +519,17 @@ same requestChan. Each context has its own handler in the threadvar seqs.
 | Global bucket array | `4 * sizeof(MtBucket)` initially (~128 bytes), doubles on growth | Process lifetime |
 | `Lock` (OS mutex) | ~40-64 bytes (platform-dependent) | Process lifetime |
 | Init + count + cap vars | 3 `int` + 1 `bool` = ~25 bytes | Process lifetime |
-| `AsyncChannel[RequestMsg]` per context | ~200 bytes (`createShared`) | Intentionally leaked (see below) |
+| `Channel[RequestMsg]` per context | ~80 bytes (`createShared`, 0 OS fds) | Intentionally leaked on clearProvider (no OS resource cost) |
+| `ThreadSignalPtr` (providerSignal) | ~2 OS fds (macOS), shared by all broker types on the thread | Thread lifetime |
 | Threadvar seqs (per provider thread) | 2 `seq` headers (~32 bytes) + entries | Thread lifetime |
-| Process loop coroutine | One `Future` on the event loop (~128 bytes) | Until `clearProvider` |
+| Poll fn closure | Registered in `gBrokerThreadPollers` (~32 bytes) | Until `clearProvider` (returns 2 → removed) |
+| `brokerDispatchLoop` coroutine | One shared `Future` per thread (~128 bytes) | Thread lifetime (shared by all broker types) |
 
-**Total per-context registration: ~400-500 bytes.**
+**Total per-context registration: ~280-320 bytes.**
 
-Contexts on the same thread share a single `requestChan` and process loop,
+Contexts on the same thread share the `brokerDispatchLoop` and `ThreadSignalPtr`,
 so the marginal cost of a second context on the same thread is only the
-threadvar seq entry (~16 bytes for ctx + pointer).
+`Channel[T]` + poll fn + threadvar seq entry (~120 bytes total).
 
 ### Per-Request Overhead
 
@@ -561,19 +550,22 @@ No channel allocations. No data copying beyond normal parameter passing.
 | Operation | Cost |
 |-----------|------|
 | Lock acquire + bucket scan + unlock | ~50-200 ns |
-| `createShared(AsyncChannel[Result])` | ~200 bytes allocation (OS allocator, not GC) |
-| `open(responseChan)` | Channel initialization |
-| `sendSync(requestMsg)` to requestChan | Copies the `RequestMsg` struct into channel buffer. **Blocks briefly** (channel has capacity 1, provider drains it). Under `--mm:refc`, string fields are deep-copied. |
-| `await responseChan.recv()` on requester | Requester blocks (via `waitFor` spinning a temporary event loop) |
-| `sendSync(result)` from provider | Copies the `Result[T, string]` into response channel. Under `--mm:refc`, result type fields are deep-copied. |
-| `close(responseChan)` + `deallocShared` | Channel teardown + OS dealloc (success path; on timeout the channel is intentionally leaked open) |
+| `createShared(Channel[Result])` | ~80 bytes allocation, 0 OS fds |
+| `open(responseChan)` | Channel initialization (mutex+condvar init only) |
+| `send(requestMsg)` to requestChan | Copies the `RequestMsg` struct into channel buffer. Near-instant (unbounded). Under `--mm:refc`, string fields are deep-copied. |
+| `fireBrokerSignal(providerSignal)` | Wakes provider's `brokerDispatchLoop` |
+| `register one-shot response poller` | Appends closure to requester's `gBrokerThreadPollers` |
+| `await withTimeout(responseFut, timeout)` | Requester blocks (via `waitFor` spinning a temporary event loop) |
+| `send(result)` from provider | Copies the `Result[T, string]` into response channel. Under `--mm:refc`, result type fields are deep-copied. |
+| `fireBrokerSignal(requesterSignal)` | Wakes requester's `brokerDispatchLoop` |
+| `deallocShared(responseChan)` | Done by one-shot poller on success; leaked on timeout (no OS resource cost) |
 
 **Total: ~2-5 us per cross-thread request** (dominated by channel alloc/dealloc and
 context switches).
 
 ### Deep-Copy Cost under `--mm:refc`
 
-Under `refc`, `sendSync` performs a **deep copy** of the message. If your
+Under `refc`, `Channel[T].send` performs a **deep copy** of the message. If your
 request type contains large strings, sequences, or ref objects, each
 cross-thread request copies that data twice (request message + response
 message).
@@ -598,12 +590,13 @@ negligible. The lock acquisition is the standard OS mutex fast path
 
 ### Channel Allocation Strategy
 
-Each cross-thread request allocates a one-shot `AsyncChannel` for the
+Each cross-thread request allocates a one-shot `Channel[T]` for the
 response. This is a deliberate tradeoff:
 
 - **Pro:** Simple, no response routing needed, no shared response queue
 - **Pro:** No risk of response mismatch between concurrent requesters
-- **Con:** `createShared` + `deallocShared` per request (~200 bytes)
+- **Pro:** `Channel[T]` uses zero OS file descriptors — no fd exhaustion risk
+- **Con:** `createShared` + `deallocShared` per request (~80 bytes)
 
 For high-throughput scenarios (>10,000 requests/sec), we may consider pooling
 response channels or batching requests at the application level.
@@ -616,7 +609,7 @@ This is certainly an optimization point, as we can expect requests from one thre
 | Number of contexts | Linear bucket scan under lock. Practical limit: ~100 contexts (scan is ~microseconds) |
 | Number of concurrent requesters | Each gets its own response channel. Provider serves sequentially via event loop. Throughput limited by handler execution time. |
 | Number of provider threads | Each owns independent contexts. No cross-provider contention. |
-| Message size | Linear with `sendSync` copy cost. Affects refc more than ORC. |
+| Message size | Linear with `Channel[T].send` copy cost. Affects refc more than ORC. |
 
 ### Comparison with Single-Thread RequestBroker
 
