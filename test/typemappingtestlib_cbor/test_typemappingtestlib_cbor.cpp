@@ -698,6 +698,324 @@ int main() {
     lm.unsubscribeStringSeqEvent(hst);
   }
 
+  // ============================================================================
+  // Foreign-thread stress (Phase 9E) — port of the eight native
+  // foreign-thread tests that hammer the CBOR runtime from multiple
+  // threads concurrently. Each shares a single Lib so the cross-thread
+  // dispatcher (Channel[T] + ThreadSignalPtr) is exercised end-to-end.
+  //
+  // Wrapped in BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS so the macOS +
+  // Nim 2.2.4 + refc + debug combo (Channel[T] storeAux regression —
+  // see LIMITATION.md) and Windows + refc combo (chronos thread-pool
+  // STW interaction) can opt out cleanly. Wired by 9G.
+  // ============================================================================
+#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+  {
+    // 1) concurrent echo (string params + responses)
+    {
+      tmlib::Lib lib;
+      lib.initializeRequest("gc-test");
+      constexpr int kThreads = 8, kIters = 20;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            auto msg =
+                "thread-" + std::to_string(t) + "-msg-" + std::to_string(i);
+            auto r = lib.echoRequest(msg);
+            if (!r.isOk() || r.value().reply.find("gc-test:") != 0) {
+              failures.fetch_add(1);
+              return;
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_echo.failures", 0, failures.load());
+    }
+
+    // 2) concurrent seq[string] result
+    {
+      tmlib::Lib lib;
+      lib.initializeRequest("seq-str");
+      constexpr int kThreads = 6, kIters = 10;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            std::string prefix = "t" + std::to_string(t) + "i" + std::to_string(i);
+            int n = 5 + (t % 3);
+            auto r = lib.stringSeqRequest(prefix, n);
+            if (!r.isOk() || r.value().items.size() != static_cast<size_t>(n)) {
+              failures.fetch_add(1);
+              return;
+            }
+            for (int j = 0; j < n; ++j) {
+              if (r.value().items[j] != prefix + "-" + std::to_string(j)) {
+                failures.fetch_add(1);
+                return;
+              }
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_seq_string.failures", 0, failures.load());
+    }
+
+    // 3) concurrent seq[int64] result
+    {
+      tmlib::Lib lib;
+      constexpr int kThreads = 6, kIters = 15;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            int n = 3 + (t % 4);
+            auto r = lib.primSeqRequest(n);
+            if (!r.isOk() || r.value().values.size() != static_cast<size_t>(n)) {
+              failures.fetch_add(1);
+              return;
+            }
+            for (size_t j = 0; j < r.value().values.size(); ++j) {
+              if (r.value().values[j] != static_cast<int64_t>(j) * 10LL) {
+                failures.fetch_add(1);
+                return;
+              }
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_seq_prim.failures", 0, failures.load());
+    }
+
+    // 4) concurrent seq[Tag] result
+    {
+      tmlib::Lib lib;
+      constexpr int kThreads = 4, kIters = 10;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            int n = 3 + (t % 5);
+            auto r = lib.objSeqResultRequest(n);
+            if (!r.isOk() || r.value().tags.size() != static_cast<size_t>(n)) {
+              failures.fetch_add(1);
+              return;
+            }
+            for (int j = 0; j < n; ++j) {
+              if (r.value().tags[j].key != "key-" + std::to_string(j) ||
+                  r.value().tags[j].value != "val-" + std::to_string(j)) {
+                failures.fetch_add(1);
+                return;
+              }
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_seq_object.failures", 0, failures.load());
+    }
+
+    // 5) concurrent seq[Tag] INPUT param
+    {
+      tmlib::Lib lib;
+      constexpr int kThreads = 4, kIters = 8;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            int n = 2 + (t % 3);
+            std::vector<tmlib::Tag> tags;
+            for (int j = 0; j < n; ++j) {
+              tmlib::Tag tg;
+              tg.key = "thread" + std::to_string(t) + "-key" + std::to_string(j);
+              tg.value = "thread" + std::to_string(t) + "-val" + std::to_string(j);
+              tags.push_back(std::move(tg));
+            }
+            auto r = lib.objSeqParamRequest(tags);
+            if (!r.isOk() || r.value().count != n ||
+                r.value().first !=
+                    "thread" + std::to_string(t) + "-key0") {
+              failures.fetch_add(1);
+              return;
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_seq_object_param.failures", 0, failures.load());
+    }
+
+    // 6) concurrent lifecycle — each thread spins its own Lib up & down.
+    {
+      constexpr int kThreads = 4;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          tmlib::Lib lib;
+          if (!lib.isOk()) {
+            failures.fetch_add(1);
+            return;
+          }
+          auto ir = lib.initializeRequest("lifecycle-t" + std::to_string(t));
+          if (!ir.isOk()) {
+            failures.fetch_add(1);
+            return;
+          }
+          auto r = lib.echoRequest("test");
+          if (!r.isOk() ||
+              r.value().reply !=
+                  "lifecycle-t" + std::to_string(t) + ":test") {
+            failures.fetch_add(1);
+            return;
+          }
+          // RAII shutdown
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.concurrent_lifecycle.failures", 0, failures.load());
+    }
+
+    // 7) mixed request types
+    {
+      tmlib::Lib lib;
+      lib.initializeRequest("mixed");
+      constexpr int kThreads = 6, kIters = 10;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            switch (i % 5) {
+              case 0: {
+                auto r = lib.echoRequest("t" + std::to_string(t));
+                if (!r.isOk()) { failures.fetch_add(1); return; }
+                break;
+              }
+              case 1: {
+                auto r = lib.counterRequest();
+                if (!r.isOk() || r.value().value <= 0) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 2: {
+                auto r = lib.primScalarRequest(true, 42, 1000, 3.14);
+                if (!r.isOk() || r.value().flag != true || r.value().i32 != 42) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 3: {
+                auto r = lib.stringSeqRequest("x", 3);
+                if (!r.isOk() || r.value().items.size() != 3) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 4: {
+                auto r = lib.fixedArrayRequest(7);
+                if (!r.isOk() || r.value().values[0] != 7) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.mixed_request_types.failures", 0, failures.load());
+    }
+
+    // 8) stress all types
+    {
+      tmlib::Lib lib;
+      lib.initializeRequest("stress");
+      constexpr int kThreads = 8, kIters = 30;
+      std::atomic<int> failures{0};
+      std::vector<std::thread> ths;
+      for (int t = 0; t < kThreads; ++t) {
+        ths.emplace_back([&, t]() {
+          for (int i = 0; i < kIters; ++i) {
+            switch (i % 8) {
+              case 0: {
+                auto r = lib.echoRequest("stress-" + std::to_string(t));
+                if (!r.isOk()) { failures.fetch_add(1); return; }
+                break;
+              }
+              case 1: {
+                auto r = lib.counterRequest();
+                if (!r.isOk()) { failures.fetch_add(1); return; }
+                break;
+              }
+              case 2: {
+                auto r = lib.primScalarRequest(false, -100, -999999, -1.5);
+                if (!r.isOk()) { failures.fetch_add(1); return; }
+                break;
+              }
+              case 3: {
+                auto r = lib.stringSeqRequest("s", 10);
+                if (!r.isOk() || r.value().items.size() != 10) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 4: {
+                auto r = lib.primSeqRequest(20);
+                if (!r.isOk() || r.value().values.size() != 20) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 5: {
+                auto r = lib.objSeqResultRequest(5);
+                if (!r.isOk() || r.value().tags.size() != 5) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 6: {
+                std::vector<tmlib::Tag> tags;
+                for (int j = 0; j < 3; ++j) {
+                  tmlib::Tag tg;
+                  tg.key = "k" + std::to_string(j);
+                  tg.value = "v" + std::to_string(j);
+                  tags.push_back(std::move(tg));
+                }
+                auto r = lib.objSeqParamRequest(tags);
+                if (!r.isOk() || r.value().count != 3) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+              case 7: {
+                auto r = lib.seqStringParamRequest({"a", "b", "c"});
+                if (!r.isOk() || r.value().count != 3) {
+                  failures.fetch_add(1); return;
+                }
+                break;
+              }
+            }
+          }
+        });
+      }
+      for (auto& th : ths) th.join();
+      check("ft.stress_all_types.failures", 0, failures.load());
+    }
+  }
+#else
+  std::cout << "SKIP foreign-thread stress (BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)\n";
+#endif
+
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {
     std::cerr << "FAILED: " << g_fails << " check(s) did not match\n";

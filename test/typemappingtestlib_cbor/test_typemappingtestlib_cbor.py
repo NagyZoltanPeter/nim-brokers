@@ -520,6 +520,100 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         lm.unsubscribe_fixed_array_event(ha)
         lm.unsubscribe_string_seq_event(ht)
 
+    # ========================================================================
+    # Foreign-thread stress (Phase 9E) — representative cases only.
+    # The Python GIL serialises ctypes callbacks, so deep stress matrices
+    # add little signal beyond the C++ side. We keep:
+    #   1) mixed-request stress (echo/counter/scalar/seq fan-out)
+    #   2) seq[Tag] result correctness from many threads (encode/decode
+    #      stress for object members through the GIL handoff)
+    #   3) concurrent lifecycle (per-thread Lib creation/teardown)
+    # Skipped under SKIP_FRAGILE if the env opts out.
+    # ========================================================================
+    skip_fragile = os.environ.get("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS") == "1"
+    if skip_fragile:
+        print("SKIP foreign-thread stress (BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=1)")
+    else:
+        # 1) mixed-request stress
+        with mod.Lib() as lib:
+            lib.initialize_request(label="mixed")
+            failures: list = []
+            lock = threading.Lock()
+
+            def worker_mixed(tid: int) -> None:
+                try:
+                    for i in range(8):
+                        op = i % 4
+                        if op == 0:
+                            r = lib.echo_request(message=f"t{tid}")
+                            if not r.is_ok():
+                                with lock: failures.append(("echo", tid))
+                        elif op == 1:
+                            r = lib.counter_request()
+                            if not r.is_ok() or r.value.value <= 0:
+                                with lock: failures.append(("counter", tid))
+                        elif op == 2:
+                            r = lib.prim_scalar_request(
+                                flag=True, i32=42, i64=1000, f64=3.14
+                            )
+                            if not r.is_ok() or r.value.i32 != 42:
+                                with lock: failures.append(("scalar", tid))
+                        else:
+                            r = lib.string_seq_request(prefix="x", n=3)
+                            if not r.is_ok() or len(r.value.items) != 3:
+                                with lock: failures.append(("strseq", tid))
+                except Exception as e:
+                    with lock: failures.append(("exc", tid, str(e)))
+
+            ths = [threading.Thread(target=worker_mixed, args=(t,)) for t in range(4)]
+            for th in ths: th.start()
+            for th in ths: th.join()
+            check("ft.py.mixed.failures", 0, len(failures))
+
+        # 2) concurrent seq[Tag] result correctness
+        with mod.Lib() as lib:
+            failures = []
+            lock = threading.Lock()
+
+            def worker_tag(tid: int) -> None:
+                try:
+                    for i in range(6):
+                        n = 3 + (tid % 3)
+                        r = lib.obj_seq_result_request(n=n)
+                        if not r.is_ok() or len(r.value.tags) != n:
+                            with lock: failures.append(("size", tid))
+                            return
+                        for j, tg in enumerate(r.value.tags):
+                            if tg.key != f"key-{j}" or tg.value != f"val-{j}":
+                                with lock: failures.append(("vals", tid, j))
+                                return
+                except Exception as e:
+                    with lock: failures.append(("exc", tid, str(e)))
+
+            ths = [threading.Thread(target=worker_tag, args=(t,)) for t in range(3)]
+            for th in ths: th.start()
+            for th in ths: th.join()
+            check("ft.py.seq_object_result.failures", 0, len(failures))
+
+        # 3) concurrent lifecycle — each thread creates and destroys its own Lib
+        failures = []
+        lock = threading.Lock()
+
+        def worker_lifecycle(tid: int) -> None:
+            try:
+                with mod.Lib() as l:
+                    l.initialize_request(label=f"lt{tid}")
+                    r = l.echo_request(message="x")
+                    if not r.is_ok() or r.value.reply != f"lt{tid}:x":
+                        with lock: failures.append(("echo", tid))
+            except Exception as e:
+                with lock: failures.append(("exc", tid, str(e)))
+
+        ths = [threading.Thread(target=worker_lifecycle, args=(t,)) for t in range(3)]
+        for th in ths: th.start()
+        for th in ths: th.join()
+        check("ft.py.concurrent_lifecycle.failures", 0, len(failures))
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)
