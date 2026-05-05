@@ -393,3 +393,249 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.value == 1'i32
     discard typemappingtestlib_cbor_shutdown(ctx)
+
+  # ===========================================================================
+  # Round-trip matrix expansion (Phase 9A) — boundary / edge values
+  # ===========================================================================
+
+  test "rt.bool_false + int32/int64 boundaries":
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      flag*: bool
+      i32*: int32
+      i64*: int64
+      f64*: float64
+
+    template roundtrip(args: Args, label: string): PrimScalarRequest =
+      let (st, resp) = callApi(ctx, "prim_scalar_request", cborEncode(args).value)
+      check st == 0'i32
+      let dec = cborDecodeResultEnvelope(resp, PrimScalarRequest)
+      check dec.isOk()
+      dec.value
+
+    let rFalse = roundtrip(Args(flag: false, i32: 0, i64: 0, f64: 0.0), "bool_false")
+    check rFalse.flag == false
+    let rI32Min =
+      roundtrip(Args(flag: false, i32: int32.low, i64: 0, f64: 0.0), "int32_min")
+    check rI32Min.i32 == int32.low
+    let rI32Max =
+      roundtrip(Args(flag: false, i32: int32.high, i64: 0, f64: 0.0), "int32_max")
+    check rI32Max.i32 == int32.high
+    let rI64Min =
+      roundtrip(Args(flag: false, i32: 0, i64: int64.low, f64: 0.0), "int64_min")
+    check rI64Min.i64 == int64.low
+    let rI64Max =
+      roundtrip(Args(flag: false, i32: 0, i64: int64.high, f64: 0.0), "int64_max")
+    check rI64Max.i64 == int64.high
+    let rPi = roundtrip(Args(flag: false, i32: 0, i64: 0, f64: 3.141592653589793), "pi")
+    check rPi.f64 == 3.141592653589793
+
+    discard typemappingtestlib_cbor_shutdown(ctx)
+
+  test "rt.priority all values + jobId boundaries":
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      priority*: Priority
+      jobId*: JobId
+
+    for p in [pLow, pMedium, pHigh, pCritical]:
+      let (st, resp) = callApi(
+        ctx,
+        "typed_scalar_request",
+        cborEncode(Args(priority: p, jobId: JobId(1))).value,
+      )
+      check st == 0'i32
+      let dec = cborDecodeResultEnvelope(resp, TypedScalarRequest)
+      check dec.isOk()
+      check dec.value.priority == p
+
+    let (st0, resp0) = callApi(
+      ctx,
+      "typed_scalar_request",
+      cborEncode(Args(priority: pLow, jobId: JobId(0))).value,
+    )
+    check st0 == 0'i32
+    let dec0 = cborDecodeResultEnvelope(resp0, TypedScalarRequest)
+    check dec0.isOk()
+    check int32(dec0.value.jobId) == 0'i32
+    check int32(dec0.value.nextId) == 1'i32
+
+    let (stB, respB) = callApi(
+      ctx,
+      "typed_scalar_request",
+      cborEncode(Args(priority: pLow, jobId: JobId(int32.high - 1'i32))).value,
+    )
+    check stB == 0'i32
+    let decB = cborDecodeResultEnvelope(respB, TypedScalarRequest)
+    check decB.isOk()
+    check int32(decB.value.nextId) == int32.high
+
+    discard typemappingtestlib_cbor_shutdown(ctx)
+
+  test "rt.byte_seq empty / single / wrap-around":
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      size*: int32
+
+    let (s0, r0) = callApi(ctx, "byte_seq_request", cborEncode(Args(size: 0)).value)
+    check s0 == 0'i32
+    let d0 = cborDecodeResultEnvelope(r0, ByteSeqRequest)
+    check d0.isOk()
+    check d0.value.data.len == 0
+
+    let (s1, r1) = callApi(ctx, "byte_seq_request", cborEncode(Args(size: 1)).value)
+    check s1 == 0'i32
+    let d1 = cborDecodeResultEnvelope(r1, ByteSeqRequest)
+    check d1.isOk()
+    check d1.value.data == @[0'u8]
+
+    let (sW, rW) = callApi(ctx, "byte_seq_request", cborEncode(Args(size: 260)).value)
+    check sW == 0'i32
+    let dW = cborDecodeResultEnvelope(rW, ByteSeqRequest)
+    check dW.isOk()
+    check dW.value.data.len == 260
+    check dW.value.data[0] == 0'u8
+    check dW.value.data[255] == 255'u8
+    check dW.value.data[256] == 0'u8
+
+    discard typemappingtestlib_cbor_shutdown(ctx)
+
+  test "rt.string/seq result empty + special chars":
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      prefix*: string
+      n*: int32
+
+    let (s0, r0) =
+      callApi(ctx, "string_seq_request", cborEncode(Args(prefix: "x", n: 0)).value)
+    check s0 == 0'i32
+    let d0 = cborDecodeResultEnvelope(r0, StringSeqRequest)
+    check d0.isOk()
+    check d0.value.items.len == 0
+
+    let (sS, rS) =
+      callApi(ctx, "string_seq_request", cborEncode(Args(prefix: "a/b:c", n: 2)).value)
+    check sS == 0'i32
+    let dS = cborDecodeResultEnvelope(rS, StringSeqRequest)
+    check dS.isOk()
+    check dS.value.items == @["a/b:c-0", "a/b:c-1"]
+
+    discard typemappingtestlib_cbor_shutdown(ctx)
+
+  test "rt.fixed/const array seed=0/negative":
+    resetSlots()
+    let ctx = setupCtx()
+    type FAArgs = object
+      seed*: int32
+
+    let (s0, r0) =
+      callApi(ctx, "fixed_array_request", cborEncode(FAArgs(seed: 0)).value)
+    check s0 == 0'i32
+    let d0 = cborDecodeResultEnvelope(r0, FixedArrayRequest)
+    check d0.isOk()
+    check d0.value.values == [0'i32, 0, 0, 0]
+    check int64(d0.value.ts) == 0'i64
+
+    let (sN, rN) =
+      callApi(ctx, "fixed_array_request", cborEncode(FAArgs(seed: -3)).value)
+    check sN == 0'i32
+    let dN = cborDecodeResultEnvelope(rN, FixedArrayRequest)
+    check dN.isOk()
+    check dN.value.values == [-3'i32, -6, -9, -12]
+
+    let (sC, rC) =
+      callApi(ctx, "const_array_request", cborEncode(FAArgs(seed: 0)).value)
+    check sC == 0'i32
+    let dC = cborDecodeResultEnvelope(rC, ConstArrayRequest)
+    check dC.isOk()
+    check dC.value.values == [0'i32, 0, 0, 0, 0, 0]
+
+    discard typemappingtestlib_cbor_shutdown(ctx)
+
+  test "rt.empty seq[] params and results":
+    resetSlots()
+    let ctx = setupCtx()
+    # obj seq result empty
+    type ObjArgs = object
+      n*: int32
+
+    let (sR, rR) =
+      callApi(ctx, "obj_seq_result_request", cborEncode(ObjArgs(n: 0)).value)
+    check sR == 0'i32
+    let dR = cborDecodeResultEnvelope(rR, ObjSeqResultRequest)
+    check dR.isOk()
+    check dR.value.tags.len == 0
+
+    # obj seq param empty
+    type TagArgs = object
+      tags*: seq[Tag]
+
+    let (sT, rT) =
+      callApi(ctx, "obj_seq_param_request", cborEncode(TagArgs(tags: @[])).value)
+    check sT == 0'i32
+    let dT = cborDecodeResultEnvelope(rT, ObjSeqParamRequest)
+    check dT.isOk()
+    check dT.value.count == 0
+    check dT.value.first == ""
+
+    # string seq param empty
+    type StrArgs = object
+      items*: seq[string]
+
+    let (sS, rS) =
+      callApi(ctx, "seq_string_param_request", cborEncode(StrArgs(items: @[])).value)
+    check sS == 0'i32
+    let dS = cborDecodeResultEnvelope(rS, SeqStringParamRequest)
+    check dS.isOk()
+    check dS.value.count == 0
+
+    # prim seq param empty + single + large
+    type PrmArgs = object
+      values*: seq[int64]
+
+    let (sE, rE) =
+      callApi(ctx, "prim_seq_param_request", cborEncode(PrmArgs(values: @[])).value)
+    check sE == 0'i32
+    let dE = cborDecodeResultEnvelope(rE, PrimSeqParamRequest)
+    check dE.isOk()
+    check dE.value.count == 0
+    check dE.value.total == 0'i64
+
+    let (sP, rP) = callApi(
+      ctx, "prim_seq_param_request", cborEncode(PrmArgs(values: @[42'i64])).value
+    )
+    check sP == 0'i32
+    let dP = cborDecodeResultEnvelope(rP, PrimSeqParamRequest)
+    check dP.isOk()
+    check dP.value.total == 42'i64
+
+    var big = newSeq[int64](100)
+    var expected: int64 = 0
+    for i in 0 ..< 100:
+      big[i] = int64(i)
+      expected += int64(i)
+    let (sB, rB) =
+      callApi(ctx, "prim_seq_param_request", cborEncode(PrmArgs(values: big)).value)
+    check sB == 0'i32
+    let dB = cborDecodeResultEnvelope(rB, PrimSeqParamRequest)
+    check dB.isOk()
+    check dB.value.count == 100'i32
+    check dB.value.total == expected
+
+    # string seq param unicode
+    let (sU, rU) = callApi(
+      ctx,
+      "seq_string_param_request",
+      cborEncode(StrArgs(items: @["héllo", "wörld"])).value,
+    )
+    check sU == 0'i32
+    let dU = cborDecodeResultEnvelope(rU, SeqStringParamRequest)
+    check dU.isOk()
+    check dU.value.count == 2'i32
+    check dU.value.joined == "héllo,wörld"
+
+    discard typemappingtestlib_cbor_shutdown(ctx)

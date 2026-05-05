@@ -183,6 +183,111 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         check("counter_changed.value", r.value.value, cc_evt["v"].value)
         lib.unsubscribe_counter_changed(h)
 
+        # ====================================================================
+        # Round-trip matrix expansion (Phase 9A) — boundary / edge values
+        # ====================================================================
+
+        # bool false
+        r = lib.prim_scalar_request(flag=False, i32=0, i64=0, f64=0.0)
+        check("rt.bool_false.flag", False, r.value.flag)
+
+        # int32 boundaries
+        INT32_MIN, INT32_MAX = -(2 ** 31), (2 ** 31) - 1
+        r = lib.prim_scalar_request(flag=False, i32=INT32_MIN, i64=0, f64=0.0)
+        check("rt.int32_min.i32", INT32_MIN, r.value.i32)
+        r = lib.prim_scalar_request(flag=False, i32=INT32_MAX, i64=0, f64=0.0)
+        check("rt.int32_max.i32", INT32_MAX, r.value.i32)
+
+        # int64 boundaries
+        INT64_MIN, INT64_MAX = -(2 ** 63), (2 ** 63) - 1
+        r = lib.prim_scalar_request(flag=False, i32=0, i64=INT64_MIN, f64=0.0)
+        check("rt.int64_min.i64", INT64_MIN, r.value.i64)
+        r = lib.prim_scalar_request(flag=False, i32=0, i64=INT64_MAX, f64=0.0)
+        check("rt.int64_max.i64", INT64_MAX, r.value.i64)
+        r = lib.prim_scalar_request(flag=False, i32=0, i64=-9_000_000_000_000, f64=0.0)
+        check("rt.int64_neg.i64", -9_000_000_000_000, r.value.i64)
+
+        # float64 fidelity
+        pi = 3.141592653589793
+        r = lib.prim_scalar_request(flag=False, i32=0, i64=0, f64=pi)
+        check("rt.float64_pi.f64", pi, r.value.f64)
+
+        # enum: every Priority value
+        for p in (mod.Priority.pLow, mod.Priority.pMedium,
+                  mod.Priority.pHigh, mod.Priority.pCritical):
+            r = lib.typed_scalar_request(priority=p, jobId=1)
+            check("rt.priority_roundtrip", int(p), int(r.value.priority))
+
+        # distinct JobId boundaries
+        r = lib.typed_scalar_request(priority=mod.Priority.pLow, jobId=0)
+        check("rt.jobid_zero.jobId", 0, r.value.jobId)
+        check("rt.jobid_zero.nextId", 1, r.value.nextId)
+        r = lib.typed_scalar_request(priority=mod.Priority.pLow, jobId=INT32_MAX - 1)
+        check("rt.jobid_big.nextId", INT32_MAX, r.value.nextId)
+
+        # byte seq: empty, single, wrap-around
+        r = lib.byte_seq_request(size=0)
+        check("rt.byte_seq_empty.size", 0, len(r.value.data))
+        r = lib.byte_seq_request(size=1)
+        check("rt.byte_seq_single.value", 0, r.value.data[0])
+        r = lib.byte_seq_request(size=260)
+        check("rt.byte_seq_wrap.size", 260, len(r.value.data))
+        check("rt.byte_seq_wrap[255]", 255, r.value.data[255])
+        check("rt.byte_seq_wrap[256]", 0, r.value.data[256])
+
+        # string seq result: empty, special chars
+        r = lib.string_seq_request(prefix="x", n=0)
+        check("rt.string_seq_empty.size", 0, len(r.value.items))
+        r = lib.string_seq_request(prefix="a/b:c", n=2)
+        check("rt.string_seq_special[0]", "a/b:c-0", r.value.items[0])
+
+        # prim seq result: empty, single
+        r = lib.prim_seq_request(n=0)
+        check("rt.prim_seq_empty.size", 0, len(r.value.values))
+        r = lib.prim_seq_request(n=1)
+        check("rt.prim_seq_single.values", [0], r.value.values)
+
+        # fixed array: seed=0, negative
+        r = lib.fixed_array_request(seed=0)
+        check("rt.fixed_array_zero.values", [0, 0, 0, 0], r.value.values)
+        check("rt.fixed_array_zero.ts", 0, r.value.ts)
+        r = lib.fixed_array_request(seed=-3)
+        check("rt.fixed_array_neg.values", [-3, -6, -9, -12], r.value.values)
+
+        # const array: seed=0, seed=1
+        r = lib.const_array_request(seed=0)
+        check("rt.const_array_zero.values", [0, 0, 0, 0, 0, 0], r.value.values)
+        r = lib.const_array_request(seed=1)
+        check("rt.const_array_one.values", [1, 2, 3, 4, 5, 6], r.value.values)
+
+        # obj seq result: empty
+        r = lib.obj_seq_result_request(n=0)
+        check("rt.obj_seq_result_empty.size", 0, len(r.value.tags))
+
+        # obj seq param: empty
+        r = lib.obj_seq_param_request(tags=[])
+        check("rt.obj_seq_param_empty.count", 0, r.value.count)
+        check("rt.obj_seq_param_empty.first", "", r.value.first)
+
+        # string seq param: empty, single, unicode
+        r = lib.seq_string_param_request(items=[])
+        check("rt.seq_string_param_empty.count", 0, r.value.count)
+        r = lib.seq_string_param_request(items=["hello"])
+        check("rt.seq_string_param_single.joined", "hello", r.value.joined)
+        r = lib.seq_string_param_request(items=["héllo", "wörld"])
+        check("rt.seq_string_param_unicode.joined", "héllo,wörld", r.value.joined)
+
+        # prim seq param: empty, single, large
+        r = lib.prim_seq_param_request(values=[])
+        check("rt.prim_seq_param_empty.count", 0, r.value.count)
+        check("rt.prim_seq_param_empty.total", 0, r.value.total)
+        r = lib.prim_seq_param_request(values=[42])
+        check("rt.prim_seq_param_single.total", 42, r.value.total)
+        big = list(range(100))
+        r = lib.prim_seq_param_request(values=big)
+        check("rt.prim_seq_param_large.count", 100, r.value.count)
+        check("rt.prim_seq_param_large.total", sum(big), r.value.total)
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)

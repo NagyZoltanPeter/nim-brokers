@@ -9,8 +9,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -211,6 +214,165 @@ int main() {
       ++g_fails;
     }
     lib.unsubscribeCounterChanged(h);
+  }
+
+  // ============================================================================
+  // Round-trip matrix expansion (Phase 9A) — boundary / edge values per type
+  // ============================================================================
+
+  // ----- bool false -----
+  {
+    auto r = lib.primScalarRequest(false, 0, 0, 0.0);
+    check("rt.bool_false.is_ok", true, r.isOk());
+    check("rt.bool_false.flag", false, r.value().flag);
+  }
+
+  // ----- int32 boundaries -----
+  {
+    auto rmin = lib.primScalarRequest(false, std::numeric_limits<int32_t>::min(), 0, 0.0);
+    check("rt.int32_min.i32", std::numeric_limits<int32_t>::min(), rmin.value().i32);
+    auto rmax = lib.primScalarRequest(false, std::numeric_limits<int32_t>::max(), 0, 0.0);
+    check("rt.int32_max.i32", std::numeric_limits<int32_t>::max(), rmax.value().i32);
+  }
+
+  // ----- int64 boundaries -----
+  {
+    auto rmin = lib.primScalarRequest(false, 0, std::numeric_limits<int64_t>::min(), 0.0);
+    check("rt.int64_min.i64", std::numeric_limits<int64_t>::min(), rmin.value().i64);
+    auto rmax = lib.primScalarRequest(false, 0, std::numeric_limits<int64_t>::max(), 0.0);
+    check("rt.int64_max.i64", std::numeric_limits<int64_t>::max(), rmax.value().i64);
+    auto rneg = lib.primScalarRequest(false, 0, -9'000'000'000'000LL, 0.0);
+    check("rt.int64_neg.i64", static_cast<int64_t>(-9'000'000'000'000LL), rneg.value().i64);
+  }
+
+  // ----- float64 fidelity (pi-like value, exact bit equality through CBOR) -----
+  {
+    const double pi = 3.141592653589793;
+    auto r = lib.primScalarRequest(false, 0, 0, pi);
+    check("rt.float64_pi.bits_equal", true, std::abs(r.value().f64 - pi) < 1e-15);
+  }
+
+  // ----- enum: every Priority value -----
+  {
+    const tmlib::Priority all[] = {tmlib::Priority::pLow, tmlib::Priority::pMedium,
+                                   tmlib::Priority::pHigh, tmlib::Priority::pCritical};
+    for (auto p : all) {
+      auto r = lib.typedScalarRequest(p, 1);
+      check("rt.priority_roundtrip", static_cast<int>(p),
+            static_cast<int>(r.value().priority));
+    }
+  }
+
+  // ----- distinct JobId: zero, large -----
+  {
+    auto r0 = lib.typedScalarRequest(tmlib::Priority::pLow, 0);
+    check("rt.jobid_zero.jobId", 0, r0.value().jobId);
+    check("rt.jobid_zero.nextId", 1, r0.value().nextId);
+    auto rbig = lib.typedScalarRequest(tmlib::Priority::pLow,
+                                       std::numeric_limits<int32_t>::max() - 1);
+    check("rt.jobid_big.nextId", std::numeric_limits<int32_t>::max(),
+          rbig.value().nextId);
+  }
+
+  // ----- byte seq: empty, single, wrap-around at 256 -----
+  {
+    auto r0 = lib.byteSeqRequest(0);
+    check("rt.byte_seq_empty.size", static_cast<size_t>(0), r0.value().data.size());
+    auto r1 = lib.byteSeqRequest(1);
+    check("rt.byte_seq_single.size", static_cast<size_t>(1), r1.value().data.size());
+    check("rt.byte_seq_single.value", static_cast<uint8_t>(0), r1.value().data[0]);
+    auto rWrap = lib.byteSeqRequest(260);
+    check("rt.byte_seq_wrap.size", static_cast<size_t>(260), rWrap.value().data.size());
+    if (rWrap.value().data.size() == 260) {
+      check("rt.byte_seq_wrap[0]", static_cast<uint8_t>(0), rWrap.value().data[0]);
+      check("rt.byte_seq_wrap[255]", static_cast<uint8_t>(255), rWrap.value().data[255]);
+      check("rt.byte_seq_wrap[256]", static_cast<uint8_t>(0), rWrap.value().data[256]);
+    }
+  }
+
+  // ----- string seq result: empty, special chars in prefix -----
+  {
+    auto r0 = lib.stringSeqRequest("x", 0);
+    check("rt.string_seq_empty.size", static_cast<size_t>(0), r0.value().items.size());
+    auto rSpec = lib.stringSeqRequest("a/b:c", 2);
+    check("rt.string_seq_special[0]", std::string("a/b:c-0"), rSpec.value().items[0]);
+    check("rt.string_seq_special[1]", std::string("a/b:c-1"), rSpec.value().items[1]);
+  }
+
+  // ----- prim seq result: empty, single -----
+  {
+    auto r0 = lib.primSeqRequest(0);
+    check("rt.prim_seq_empty.size", static_cast<size_t>(0), r0.value().values.size());
+    auto r1 = lib.primSeqRequest(1);
+    check("rt.prim_seq_single.values", std::vector<int64_t>{0}, r1.value().values);
+  }
+
+  // ----- fixed array: seed=0 and negative -----
+  {
+    auto r0 = lib.fixedArrayRequest(0);
+    check("rt.fixed_array_zero.values", std::vector<int32_t>{0, 0, 0, 0},
+          r0.value().values);
+    check("rt.fixed_array_zero.ts", static_cast<int64_t>(0), r0.value().ts);
+    auto rNeg = lib.fixedArrayRequest(-3);
+    check("rt.fixed_array_neg.values", std::vector<int32_t>{-3, -6, -9, -12},
+          rNeg.value().values);
+  }
+
+  // ----- const array: seed=0, seed=1 -----
+  {
+    auto r0 = lib.constArrayRequest(0);
+    check("rt.const_array_zero.values",
+          std::vector<int32_t>{0, 0, 0, 0, 0, 0}, r0.value().values);
+    auto r1 = lib.constArrayRequest(1);
+    check("rt.const_array_one.values",
+          std::vector<int32_t>{1, 2, 3, 4, 5, 6}, r1.value().values);
+  }
+
+  // ----- obj seq result: empty -----
+  {
+    auto r = lib.objSeqResultRequest(0);
+    check("rt.obj_seq_result_empty.size", static_cast<size_t>(0),
+          r.value().tags.size());
+  }
+
+  // ----- obj seq param: empty -----
+  {
+    auto r = lib.objSeqParamRequest({});
+    check("rt.obj_seq_param_empty.count", 0, r.value().count);
+    check("rt.obj_seq_param_empty.first", std::string(""), r.value().first);
+  }
+
+  // ----- string seq param: empty, single, unicode (utf-8) -----
+  {
+    auto r0 = lib.seqStringParamRequest({});
+    check("rt.seq_string_param_empty.count", 0, r0.value().count);
+    auto r1 = lib.seqStringParamRequest({"hello"});
+    check("rt.seq_string_param_single.joined", std::string("hello"),
+          r1.value().joined);
+    auto rU = lib.seqStringParamRequest({"héllo", "wörld"});
+    check("rt.seq_string_param_unicode.count", 2, rU.value().count);
+    check("rt.seq_string_param_unicode.joined", std::string("héllo,wörld"),
+          rU.value().joined);
+  }
+
+  // ----- prim seq param: empty, single, large -----
+  {
+    auto r0 = lib.primSeqParamRequest({});
+    check("rt.prim_seq_param_empty.count", 0, r0.value().count);
+    check("rt.prim_seq_param_empty.total", static_cast<int64_t>(0),
+          r0.value().total);
+    auto r1 = lib.primSeqParamRequest({42});
+    check("rt.prim_seq_param_single.total", static_cast<int64_t>(42),
+          r1.value().total);
+    std::vector<int64_t> big;
+    int64_t expected = 0;
+    for (int i = 0; i < 100; ++i) {
+      big.push_back(i);
+      expected += i;
+    }
+    auto rBig = lib.primSeqParamRequest(big);
+    check("rt.prim_seq_param_large.count", 100, rBig.value().count);
+    check("rt.prim_seq_param_large.total", expected, rBig.value().total);
   }
 
   std::cout << "--------------------------------------------------\n";
