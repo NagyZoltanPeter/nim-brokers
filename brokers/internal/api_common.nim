@@ -71,6 +71,35 @@ var gApiForeignGcHelperEmitted* {.compileTime.}: bool = false
   ## to avoid duplicate definitions.
 
 # ---------------------------------------------------------------------------
+# CBOR-mode dispatch table accumulator
+# ---------------------------------------------------------------------------
+
+type CborRequestEntry* = object
+  apiName*: string ## Wire name foreign callers pass to `<lib>_call`.
+  adapterProc*: string ## Identifier of the generated adapter proc.
+
+var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
+  ## Accumulated by `RequestBroker(API)` expansions when `brokerFfiMode` is
+  ## `mfCbor`. `registerBrokerLibrary` drains this list to emit the
+  ## per-library `Table[string, CborApiAdapter]` and the `<lib>_call`
+  ## dispatch.
+
+proc registerCborRequestEntry*(apiName, adapterProc: string) {.compileTime.} =
+  ## Register a CBOR request adapter for the next library that calls
+  ## `registerBrokerLibrary`. Detects duplicate apiNames at compile time
+  ## so two requests can't shadow each other on the wire.
+  for entry in gApiCborRequestEntries:
+    if entry.apiName == apiName:
+      error(
+        "CBOR FFI: duplicate request apiName '" & apiName & "' (already registered by '" &
+          entry.adapterProc & "'). " &
+          "Each RequestBroker(API) must have a unique response type name."
+      )
+  gApiCborRequestEntries.add(
+    CborRequestEntry(apiName: apiName, adapterProc: adapterProc)
+  )
+
+# ---------------------------------------------------------------------------
 # Legacy FFI struct registry bridge
 # ---------------------------------------------------------------------------
 

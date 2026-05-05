@@ -170,6 +170,9 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_request_broker, ./internal/api_type
   export api_request_broker, api_type
 
+  import ./internal/api_request_broker_cbor
+  export api_request_broker_cbor
+
 export results, chronos, keepItIf, broker_context
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
@@ -875,7 +878,10 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
       .}
     else:
       when defined(BrokerFfiApi):
-        generateApiRequestBroker(body)
+        when brokerFfiMode == mfCbor:
+          generateApiCborRequestBroker(body)
+        else:
+          generateApiRequestBroker(body)
       else:
         generateMtRequestBroker(body)
   of rbAsync, rbSync:
