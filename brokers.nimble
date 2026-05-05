@@ -453,6 +453,54 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
+# ---------------------------------------------------------------------------
+# CBOR-mode example library + C++ consumer
+# ---------------------------------------------------------------------------
+
+proc buildFfiCborExampleFlags(): string =
+  result =
+    "-d:BrokerFfiApi -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi_cbor/nimlib/build"
+  result.add(nimMainPrefixFlag("mylibcbor"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/ffiapi_cbor/nimlib/build", "mylibcbor"))
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
+
+proc buildFfiCborExampleLibrary() =
+  exec "nim c " & buildFfiCborExampleFlags() &
+    " examples/ffiapi_cbor/nimlib/mylibcbor.nim"
+
+proc ffiCborExampleCmakeBuildDir(): string =
+  "examples/ffiapi_cbor/cpp_example/build"
+
+proc buildFfiCborExampleCpp() =
+  let cmakeDir = "examples/ffiapi_cbor/cpp_example"
+  let buildDir = ffiCborExampleCmakeBuildDir()
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  exec "cmake --build " & buildDir
+
+proc ffiCborExampleCppExePath(): string =
+  when defined(windows):
+    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example.exe"
+  else:
+    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example"
+
+task buildFfiCborExample, "Build the CBOR-mode FFI example library":
+  buildFfiCborExampleLibrary()
+
+task buildFfiCborExampleCpp,
+  "Build the CBOR-mode FFI example library + C++ consumer (via CMake)":
+  buildFfiCborExampleLibrary()
+  buildFfiCborExampleCpp()
+
+task runFfiCborExampleCpp, "Build and run the CBOR-mode C++ consumer example":
+  buildFfiCborExampleLibrary()
+  buildFfiCborExampleCpp()
+  exec quoteArg(ffiCborExampleCppExePath())
+
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &

@@ -36,9 +36,40 @@
 {.push raises: [].}
 
 import std/[macros, strutils]
-import ./helper/broker_utils, ./mt_request_broker, ./api_common, ./api_cbor_codec
+import
+  ./helper/broker_utils,
+  ./mt_request_broker,
+  ./api_common,
+  ./api_cbor_codec,
+  ./api_schema
 
 export mt_request_broker, api_common, api_cbor_codec
+
+# ---------------------------------------------------------------------------
+# Schema registration
+# ---------------------------------------------------------------------------
+
+proc registerCborObjectType*(
+    typeName: string, fieldNames, fieldTypes: seq[NimNode]
+) {.compileTime.} =
+  ## Register a parsed object type in `gApiTypeRegistry` so the C++ /
+  ## Python / etc. wrapper codegen can emit typed structs for it.
+  ## Idempotent — subsequent calls for the same type are a no-op so a
+  ## type that ends up registered through both the auto-resolver and a
+  ## broker macro doesn't double-list.
+  if isTypeRegistered(typeName):
+    return
+  var entry = ApiTypeEntry(name: typeName, kind: atkObject)
+  for i in 0 ..< fieldNames.len:
+    var fname = $fieldNames[i]
+    # `fieldNames` from parseSingleTypeDef carry the original AST,
+    # which for inline `object` types is a plain Ident (export marker
+    # already lifted by the parser). Strip a trailing '*' defensively.
+    if fname.endsWith("*"):
+      fname.setLen(fname.len - 1)
+    let ftype = fieldTypes[i].repr.strip()
+    entry.fields.add(ApiFieldDef(name: fname, nimType: ftype))
+  registerTypeEntry(entry)
 
 # ---------------------------------------------------------------------------
 # Adapter proc type — exposed so registerBrokerLibrary (CBOR mode) can
@@ -227,21 +258,47 @@ proc generateApiCborRequestBroker*(body: NimNode): NimNode {.raises: [ValueError
   #    processing thread, identical to the native path).
   result.add(generateMtRequestBroker(copyNimTree(body)))
 
-  # 2. Parse the response type identifier.
-  let parsed = parseSingleTypeDef(body, "RequestBroker", allowRefToNonObject = true)
+  # 2. Parse the response type identifier and register its fields in the
+  #    schema so wrapper codegen can emit typed structs for it.
+  let parsed = parseSingleTypeDef(
+    body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
+  )
   let typeIdent = parsed.typeIdent
   let typeName = sanitizeIdentName(typeIdent)
   let apiName = snakeApiName(typeIdent)
+  if parsed.hasInlineFields:
+    registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
 
   # 3. Collect zero-arg and arg-based signatures.
   let sigs = collectSignatures(body)
+
+  # Materialise (paramName, nimType) pairs from the arg-based signature so
+  # foreign-language wrapper codegen can emit a typed call signature.
+  proc paramFields(argParams: seq[NimNode]): seq[(string, string)] {.compileTime.} =
+    for paramDefs in argParams:
+      let lastIdx = paramDefs.len - 1
+      let typeNode = paramDefs[lastIdx - 1]
+      let typeStr = typeNode.repr.strip()
+      for nameIdx in 0 ..< lastIdx - 1:
+        let nameNode = paramDefs[nameIdx]
+        let nameStr =
+          case nameNode.kind
+          of nnkIdent, nnkSym:
+            $nameNode
+          of nnkPostfix:
+            $nameNode[1]
+          of nnkPragmaExpr:
+            $nameNode[0]
+          else:
+            $nameNode
+        result.add((nameStr, typeStr))
 
   if sigs.zeroArg.isNil and sigs.argSig.isNil:
     # No explicit signature — treat as zero-arg, matching the native
     # macro's defaulting.
     let adapterIdent = ident(typeName & "CborAdapter")
     result.add(emitZeroArgAdapter(typeIdent, adapterIdent))
-    registerCborRequestEntry(apiName, $adapterIdent)
+    registerCborRequestEntry(apiName, $adapterIdent, typeName, @[])
     return
 
   # Zero-arg adapter (suffixed when both signatures coexist on this broker).
@@ -250,7 +307,7 @@ proc generateApiCborRequestBroker*(body: NimNode): NimNode {.raises: [ValueError
     let zeroApiSuffix = if not sigs.argSig.isNil: "_zero" else: ""
     let adapterIdent = ident(typeName & "CborAdapter" & zeroSuffix)
     result.add(emitZeroArgAdapter(typeIdent, adapterIdent))
-    registerCborRequestEntry(apiName & zeroApiSuffix, $adapterIdent)
+    registerCborRequestEntry(apiName & zeroApiSuffix, $adapterIdent, typeName, @[])
 
   # Arg-based adapter (suffixed when zero-arg also exists).
   if not sigs.argSig.isNil:
@@ -260,7 +317,8 @@ proc generateApiCborRequestBroker*(body: NimNode): NimNode {.raises: [ValueError
     let argsTypeIdent = ident(typeName & "CborArgs" & argSuffix)
     result.add(emitArgsType(argsTypeIdent, sigs.argParams))
     result.add(emitArgAdapter(typeIdent, adapterIdent, argsTypeIdent, sigs.argParams))
-    registerCborRequestEntry(apiName & argApiSuffix, $adapterIdent)
+    let fields = paramFields(sigs.argParams)
+    registerCborRequestEntry(apiName & argApiSuffix, $adapterIdent, typeName, fields)
 
   when defined(brokerDebug):
     echo "[brokers/cbor] RequestBroker(API) for '" & typeName & "' (apiName='" & apiName &

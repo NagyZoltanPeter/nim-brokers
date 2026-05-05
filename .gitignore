@@ -5,3 +5,10 @@ build/
 **/build*/*
 **/cmake-build*/*
 .gitnexus
+
+# Vendored dependencies (use git submodules or fetch on demand)
+vendor/jsoncons/
+
+# CBOR example build outputs
+examples/ffiapi_cbor/nimlib/build/
+examples/ffiapi_cbor/cpp_example/build/

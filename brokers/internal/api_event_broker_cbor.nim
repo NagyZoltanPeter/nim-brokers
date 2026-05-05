@@ -25,7 +25,8 @@
 {.push raises: [].}
 
 import std/[macros, strutils]
-import ./helper/broker_utils, ./mt_event_broker, ./api_common
+import ./helper/broker_utils, ./mt_event_broker, ./api_common, ./api_schema
+import ./api_request_broker_cbor # for registerCborObjectType
 
 export mt_event_broker, api_common
 
@@ -36,17 +37,22 @@ proc generateApiCborEventBroker*(body: NimNode): NimNode =
   #    visible to user code, MT-aware cross-thread dispatch under the hood).
   result.add(generateMtEventBroker(copyNimTree(body)))
 
-  # 2. Parse the event type identifier and register the entry.
-  let parsed =
-    parseSingleTypeDef(body, "EventBroker", allowRefToNonObject = true)
+  # 2. Parse the event type identifier and register the entry. Capture
+  #    field info so wrapper codegen can emit typed structs for the
+  #    payload.
+  let parsed = parseSingleTypeDef(
+    body, "EventBroker", allowRefToNonObject = true, collectFieldInfo = true
+  )
   let typeIdent = parsed.typeIdent
   let typeName = sanitizeIdentName(typeIdent)
   let apiName = toSnakeCase(typeName)
+  if parsed.hasInlineFields:
+    registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
   registerCborEventEntry(apiName, typeName)
 
   when defined(brokerDebug):
-    echo "[brokers/cbor] EventBroker(API) for '" & typeName & "' (eventName='" &
-      apiName & "')"
+    echo "[brokers/cbor] EventBroker(API) for '" & typeName & "' (eventName='" & apiName &
+      "')"
     echo result.repr
 
 {.pop.}

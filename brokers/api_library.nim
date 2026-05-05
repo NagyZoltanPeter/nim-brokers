@@ -1949,7 +1949,7 @@ proc registerBrokerLibraryCborImpl(
   for e in eventEntries:
     eventNames.add(e.apiName)
   generateCborCHeaderFile(outDir, libName, requestNames, eventNames)
-  generateCborCppHeaderFile(outDir, libName, requestNames, eventNames)
+  generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
 
   when defined(brokerDebug):
     echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
