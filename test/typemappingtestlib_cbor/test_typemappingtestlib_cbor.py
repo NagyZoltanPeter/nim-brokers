@@ -348,6 +348,80 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         raw.typemappingtestlib_cbor_freeBuffer(resp_buf)
     check("lc.call_with_zero_ctx.does_not_succeed", True, not_ok)
 
+    # ========================================================================
+    # Multi-context parity (Phase 9C)
+    # ========================================================================
+
+    # 1) independent counters
+    with mod.Lib() as a, mod.Lib() as b:
+        check("mc.counters.distinct_ctx", True, a.context != b.context)
+        a.initialize_request(label="alpha")
+        b.initialize_request(label="beta")
+        for i in range(1, 4):
+            check("mc.counters.a_increment", i, a.counter_request().value.value)
+        for i in range(1, 3):
+            check("mc.counters.b_increment", i, b.counter_request().value.value)
+        check("mc.counters.a_continues", 4, a.counter_request().value.value)
+
+    # 2) independent echo
+    with mod.Lib() as a, mod.Lib() as b:
+        a.initialize_request(label="one")
+        b.initialize_request(label="two")
+        check("mc.echo.a", "one:x", a.echo_request(message="x").value.reply)
+        check("mc.echo.b", "two:x", b.echo_request(message="x").value.reply)
+
+    # 3) independent events (no cross-delivery)
+    with mod.Lib() as a, mod.Lib() as b:
+        a_evts: list = []
+        b_evts: list = []
+        a_lock = threading.Lock()
+        b_lock = threading.Lock()
+        a_done = threading.Event()
+        b_done = threading.Event()
+
+        def on_a(e: mod.CounterChanged) -> None:
+            with a_lock:
+                a_evts.append(e.value)
+                if len(a_evts) >= 2:
+                    a_done.set()
+
+        def on_b(e: mod.CounterChanged) -> None:
+            with b_lock:
+                b_evts.append(e.value)
+                if len(b_evts) >= 1:
+                    b_done.set()
+
+        hA = a.subscribe_counter_changed(on_a)
+        hB = b.subscribe_counter_changed(on_b)
+        a.counter_request()
+        a.counter_request()
+        b.counter_request()
+        assert _wait(a_done, 1.0)
+        assert _wait(b_done, 1.0)
+        with a_lock:
+            check("mc.events.a_size", 2, len(a_evts))
+            check("mc.events.a", [1, 2], a_evts)
+        with b_lock:
+            check("mc.events.b_size", 1, len(b_evts))
+            check("mc.events.b", [1], b_evts)
+        a.unsubscribe_counter_changed(hA)
+        b.unsubscribe_counter_changed(hB)
+
+    # 4) shutdown_one_does_not_affect_other
+    b = mod.Lib()
+    try:
+        b.initialize_request(label="second")
+        with mod.Lib() as a:
+            a.initialize_request(label="first")
+            check("mc.shutdown_one.a_works", "first:hello",
+                  a.echo_request(message="hello").value.reply)
+        # a is closed; b still works
+        r = b.echo_request(message="still-alive")
+        check("mc.shutdown_one.b_still_works", True, r.is_ok())
+        check("mc.shutdown_one.b_reply", "second:still-alive", r.value.reply)
+    finally:
+        b.close()
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)

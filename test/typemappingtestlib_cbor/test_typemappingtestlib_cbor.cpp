@@ -454,6 +454,109 @@ int main() {
     }
   }
 
+  // ============================================================================
+  // Multi-context parity (Phase 9C) — independent Lib instances must
+  // each carry their own counter / label / event listener bucket.
+  // ============================================================================
+  {
+    // 1) independent counters
+    {
+      tmlib::Lib a;
+      tmlib::Lib b;
+      check("mc.counters.distinct_ctx", true, a.context() != b.context());
+      a.initializeRequest("alpha");
+      b.initializeRequest("beta");
+      for (int32_t i = 1; i <= 3; ++i) {
+        check("mc.counters.a_increment", i, a.counterRequest().value().value);
+      }
+      for (int32_t i = 1; i <= 2; ++i) {
+        check("mc.counters.b_increment", i, b.counterRequest().value().value);
+      }
+      check("mc.counters.a_continues", static_cast<int32_t>(4),
+            a.counterRequest().value().value);
+    }
+
+    // 2) independent echo (label is per-context state)
+    {
+      tmlib::Lib a;
+      tmlib::Lib b;
+      a.initializeRequest("one");
+      b.initializeRequest("two");
+      check("mc.echo.a", std::string("one:x"), a.echoRequest("x").value().reply);
+      check("mc.echo.b", std::string("two:x"), b.echoRequest("x").value().reply);
+    }
+
+    // 3) independent events (per-Lib subscription, no cross-talk)
+    {
+      tmlib::Lib a;
+      tmlib::Lib b;
+
+      std::mutex mA, mB;
+      std::vector<int32_t> evtA, evtB;
+      auto hA = a.subscribeCounterChanged(
+          [&](const tmlib::CounterChanged& e) {
+            std::lock_guard<std::mutex> lk(mA);
+            evtA.push_back(e.value);
+          });
+      auto hB = b.subscribeCounterChanged(
+          [&](const tmlib::CounterChanged& e) {
+            std::lock_guard<std::mutex> lk(mB);
+            evtB.push_back(e.value);
+          });
+
+      a.counterRequest();
+      a.counterRequest();
+      b.counterRequest();
+
+      // Wait up to 1s for both to settle.
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+      while (std::chrono::steady_clock::now() < deadline) {
+        std::lock_guard<std::mutex> lkA(mA);
+        std::lock_guard<std::mutex> lkB(mB);
+        if (evtA.size() >= 2 && evtB.size() >= 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+
+      {
+        std::lock_guard<std::mutex> lkA(mA);
+        std::lock_guard<std::mutex> lkB(mB);
+        check("mc.events.a_size", static_cast<size_t>(2), evtA.size());
+        check("mc.events.b_size", static_cast<size_t>(1), evtB.size());
+        if (evtA.size() == 2) {
+          check("mc.events.a[0]", static_cast<int32_t>(1), evtA[0]);
+          check("mc.events.a[1]", static_cast<int32_t>(2), evtA[1]);
+        }
+        if (evtB.size() == 1) {
+          check("mc.events.b[0]", static_cast<int32_t>(1), evtB[0]);
+        }
+      }
+
+      a.unsubscribeCounterChanged(hA);
+      b.unsubscribeCounterChanged(hB);
+    }
+
+    // 4) shutdown_one_does_not_affect_other — Lib RAII makes the
+    //    "explicit shutdown" hard to express, so we use scoped Lib for
+    //    `a` and a longer-lived Lib for `b`. When `a`'s scope ends, `b`
+    //    must still serve requests against its own ctx.
+    {
+      tmlib::Lib b;
+      b.initializeRequest("second");
+      {
+        tmlib::Lib a;
+        a.initializeRequest("first");
+        check("mc.shutdown_one.a_works",
+              std::string("first:hello"), a.echoRequest("hello").value().reply);
+        // a goes out of scope here; its ctx is shut down
+      }
+      auto r = b.echoRequest("still-alive");
+      check("mc.shutdown_one.b_still_works", true, r.isOk());
+      check("mc.shutdown_one.b_reply",
+            std::string("second:still-alive"), r.value().reply);
+    }
+  }
+
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {
     std::cerr << "FAILED: " << g_fails << " check(s) did not match\n";
