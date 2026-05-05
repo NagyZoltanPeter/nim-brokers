@@ -28,6 +28,7 @@ import chronos, chronicles
 import results
 import ./broker_context, ./internal/api_common
 import ./internal/api_codegen_cbor_h
+import ./internal/api_codegen_cbor_hpp
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -1948,6 +1949,7 @@ proc registerBrokerLibraryCborImpl(
   for e in eventEntries:
     eventNames.add(e.apiName)
   generateCborCHeaderFile(outDir, libName, requestNames, eventNames)
+  generateCborCppHeaderFile(outDir, libName, requestNames, eventNames)
 
   when defined(brokerDebug):
     echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
