@@ -23,7 +23,7 @@
 
 {.push raises: [].}
 
-import std/[atomics, locks, macros, os, strutils]
+import std/[atomics, locks, macros, os, strutils, tables]
 import chronos, chronicles
 import results
 import ./broker_context, ./internal/api_common
@@ -1267,6 +1267,23 @@ proc registerBrokerLibraryCborImpl(
   let dispatchProcIdent = ident(libName & "CborDispatch")
   let libNameLit = newLit(libName)
 
+  # Event subscription identifiers (used by the per-event installers and the
+  # subscribe / unsubscribe C exports).
+  let eventCallbackTypeIdent = ident(libName & "CborEventCallback")
+  let subscriptionTypeIdent = ident(libName & "CborSubscription")
+  let subsKeyTypeIdent = ident(libName & "CborSubsKey")
+  let subsTableIdent = ident("g" & libName & "CborSubs")
+  let subsLockIdent = ident("g" & libName & "CborSubsLock")
+  let subsHandleIdent = ident("g" & libName & "CborNextSubHandle")
+  let subscribeFuncName = libName & "_subscribe"
+  let subscribeFuncNameLit = newLit(subscribeFuncName)
+  let subscribeFuncIdent = ident(subscribeFuncName)
+  let unsubscribeFuncName = libName & "_unsubscribe"
+  let unsubscribeFuncNameLit = newLit(unsubscribeFuncName)
+  let unsubscribeFuncIdent = ident(unsubscribeFuncName)
+  let knownEventPredIdent = ident(libName & "CborIsKnownEvent")
+  let installAllListenersIdent = ident(libName & "CborInstallAllListeners")
+
   # Hard cap on a single buffer to detect runaway encodes.
   let bufSizeCap = newLit(64 * 1024 * 1024)
 
@@ -1309,13 +1326,14 @@ proc registerBrokerLibraryCborImpl(
   # Snapshot and clear the accumulator so a second registerBrokerLibrary in
   # the same compilation unit (a future multi-library scenario) starts fresh.
   # ------------------------------------------------------------------
-  # Snapshot the registered request adapters. We deliberately do NOT clear
-  # `gApiCborRequestEntries` here — Nim's compile-time VM aliases `let`
-  # copies of seqs back to the source, so resetting this list before
-  # reading `entries` would leave us with an empty list. A future
+  # Snapshot the registered request adapters and event entries. We
+  # deliberately do NOT clear the global accumulators here — Nim's
+  # compile-time VM aliases `let` copies of seqs back to the source, so
+  # resetting before reading would leave us with an empty list. A future
   # multi-library-per-compilation scenario would need a different pattern
-  # (e.g., snapshot length and slice from there next time).
+  # (e.g., snapshot a length and slice from there next time).
   let entries = gApiCborRequestEntries
+  let eventEntries = gApiCborEventEntries
 
   # The dispatch proc is async and returns just `seq[byte]`. To signal
   # "unknown apiName" without raising or capturing a `var bool`, the
@@ -1388,6 +1406,31 @@ proc registerBrokerLibraryCborImpl(
   result.add(knownProc)
 
   # ------------------------------------------------------------------
+  # Event known-name predicate (companion to request side).
+  # ------------------------------------------------------------------
+  block:
+    var eventCase = nnkCaseStmt.newTree(ident("eventName"))
+    for e in eventEntries:
+      eventCase.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName), newStmtList(nnkReturnStmt.newTree(ident("true")))
+        )
+      )
+    eventCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+    let eventKnownProc = nnkProcDef.newTree(
+      postfix(knownEventPredIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(
+        ident("bool"), newIdentDefs(ident("eventName"), ident("string"))
+      ),
+      nnkPragma.newTree(ident("gcsafe")),
+      newEmptyNode(),
+      newStmtList(eventCase),
+    )
+    result.add(eventKnownProc)
+
+  # ------------------------------------------------------------------
   # Per-library types and globals.
   # ------------------------------------------------------------------
   result.add(
@@ -1405,9 +1448,28 @@ proc registerBrokerLibraryCborImpl(
           arg: ptr `procThreadArgIdent`
           active: bool
 
+        `eventCallbackTypeIdent`* = proc(
+          ctx: uint32,
+          eventName: cstring,
+          payloadBuf: pointer,
+          payloadLen: int32,
+          userData: pointer,
+        ) {.cdecl, gcsafe, raises: [].}
+
+        `subscriptionTypeIdent` = object
+          handle: uint64
+          cb: `eventCallbackTypeIdent`
+          userData: pointer
+
+        `subsKeyTypeIdent` = tuple[ctx: uint32, eventName: string]
+
       var `ctxsIdent`: seq[ptr `ctxEntryIdent`]
       var `ctxsLockIdent`: Lock
       var `ctxsInitIdent`: Atomic[int]
+
+      var `subsTableIdent`: Table[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]
+      var `subsLockIdent`: Lock
+      var `subsHandleIdent`: Atomic[uint64]
 
       var `nimInitFlagIdent`: Atomic[int]
       var `gcRegFlagIdent` {.threadvar.}: bool
@@ -1453,10 +1515,13 @@ proc registerBrokerLibraryCborImpl(
             locals = addr(locals)
             nimGC_setStackBottom(locals)
 
-        # Step 3: lazy-init the global ctx registry.
+        # Step 3: lazy-init the global ctx registry and the subs map/lock.
         var ctxsExpected = 0
         if `ctxsInitIdent`.compareExchange(ctxsExpected, 1, moAcquire, moRelaxed):
           initLock(`ctxsLockIdent`)
+          initLock(`subsLockIdent`)
+          `subsTableIdent` =
+            initTable[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]()
           `ctxsInitIdent`.store(2, moRelease)
         else:
           while `ctxsInitIdent`.load(moAcquire) != 2:
@@ -1483,6 +1548,169 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if not buf.isNil:
           deallocShared(buf)
+
+  )
+
+  # ------------------------------------------------------------------
+  # Per-event listener installers.
+  #
+  # Each installer registers an MT-broker listener whose body:
+  #   1. Snapshots the subscription list for (ctx, eventName) under the
+  #      subs lock (so concurrent subscribe/unsubscribe doesn't iterate
+  #      while we mutate).
+  #   2. CBOR-encodes the event payload once (callback fan-out reuses the
+  #      buffer for all subscribers).
+  #   3. Allocates a shared-heap buffer, copies the bytes in, invokes each
+  #      subscriber's C callback synchronously, frees the buffer.
+  #
+  # The listener captures the per-library globals — they live for the
+  # lifetime of the library, so closure capture is safe.
+  # ------------------------------------------------------------------
+  var installerNames: seq[string] = @[]
+  for e in eventEntries:
+    let eventTypeIdent = ident(e.typeName)
+    let installerIdent = ident(libName & "Cbor" & e.typeName & "Installer")
+    let eventNameLit = newLit(e.apiName)
+    installerNames.add($installerIdent)
+    result.add(
+      quote do:
+        proc `installerIdent`*(ctx: BrokerContext): Result[void, string] =
+          proc handler(
+              evt: `eventTypeIdent`
+          ): Future[void] {.async: (raises: []), gcsafe.} =
+            let key: `subsKeyTypeIdent` = (uint32(ctx), `eventNameLit`)
+            var subs: seq[`subscriptionTypeIdent`]
+            {.cast(gcsafe).}:
+              withLock `subsLockIdent`:
+                subs = `subsTableIdent`.getOrDefault(key)
+            if subs.len == 0:
+              return
+            let encRes = cborEncode(evt)
+            if encRes.isErr:
+              return
+            let bytes = encRes.value
+            var buf: pointer = nil
+            if bytes.len > 0:
+              buf = allocShared0(bytes.len)
+              copyMem(buf, unsafeAddr bytes[0], bytes.len)
+            for sub in subs:
+              if sub.cb.isNil:
+                continue
+              sub.cb(
+                uint32(ctx), `eventNameLit`.cstring, buf, int32(bytes.len), sub.userData
+              )
+            if not buf.isNil:
+              deallocShared(buf)
+
+          let listenRes = `eventTypeIdent`.listen(ctx, handler)
+          if listenRes.isErr:
+            return Result[void, string].err(listenRes.error)
+          return Result[void, string].ok()
+
+    )
+
+  # ------------------------------------------------------------------
+  # Umbrella installer: called from the processing thread after
+  # setupProviders so listeners are live before any foreign caller can
+  # subscribe.
+  # ------------------------------------------------------------------
+  var installerCalls = newStmtList()
+  for installerName in installerNames:
+    let installerIdent = ident(installerName)
+    installerCalls.add(
+      newTree(nnkPrefix, ident("?"), newCall(installerIdent, ident("ctx")))
+    )
+  installerCalls.add(
+    nnkReturnStmt.newTree(
+      newCall(
+        newDotExpr(
+          nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("string")),
+          ident("ok"),
+        )
+      )
+    )
+  )
+  let installAllProc = nnkProcDef.newTree(
+    postfix(installAllListenersIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("string")),
+      newIdentDefs(ident("ctx"), ident("BrokerContext")),
+    ),
+    newEmptyNode(),
+    newEmptyNode(),
+    installerCalls,
+  )
+  result.add(installAllProc)
+
+  # ------------------------------------------------------------------
+  # `<lib>_subscribe` / `<lib>_unsubscribe`.
+  #
+  # Subscribe handle convention: 0 == failure (unknown event, allocation
+  # error, nil callback for non-probe paths). 1 is reserved as the
+  # "supported" sentinel returned for probe calls (cb == nil). Real
+  # subscriptions start at 2 to avoid colliding with these reserved
+  # values.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `subscribeFuncIdent`*(
+          ctx: uint32,
+          eventNameC: cstring,
+          cb: `eventCallbackTypeIdent`,
+          userData: pointer,
+      ): uint64 {.exportc: `subscribeFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if eventNameC.isNil:
+          return 0'u64
+        let name = $eventNameC
+        if not `knownEventPredIdent`(name):
+          return 0'u64
+        if cb.isNil:
+          # Probe mode: caller wants to know whether the eventName is
+          # supported by this library version. 1 is a sentinel never
+          # returned for real subscriptions.
+          return 1'u64
+        # Real subscription handle: skip 0 (failure) and 1 (probe).
+        let h = `subsHandleIdent`.fetchAdd(1, moRelaxed) + 2'u64
+        {.cast(gcsafe).}:
+          withLock `subsLockIdent`:
+            let key: `subsKeyTypeIdent` = (ctx, name)
+            var current = `subsTableIdent`.getOrDefault(key)
+            current.add(`subscriptionTypeIdent`(handle: h, cb: cb, userData: userData))
+            `subsTableIdent`[key] = current
+        return h
+
+      proc `unsubscribeFuncIdent`*(
+          ctx: uint32, eventNameC: cstring, handle: uint64
+      ): int32 {.exportc: `unsubscribeFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if eventNameC.isNil:
+          return -1'i32
+        let name = $eventNameC
+        {.cast(gcsafe).}:
+          withLock `subsLockIdent`:
+            let key: `subsKeyTypeIdent` = (ctx, name)
+            var subs = `subsTableIdent`.getOrDefault(key)
+            if subs.len == 0:
+              return -2'i32
+            if handle == 0'u64:
+              `subsTableIdent`.del(key)
+              return 0'i32
+            var idx = -1
+            for i in 0 ..< subs.len:
+              if subs[i].handle == handle:
+                idx = i
+                break
+            if idx < 0:
+              return -3'i32
+            subs.delete(idx)
+            if subs.len == 0:
+              `subsTableIdent`.del(key)
+            else:
+              `subsTableIdent`[key] = subs
+            return 0'i32
 
   )
 
@@ -1516,6 +1744,23 @@ proc registerBrokerLibraryCborImpl(
               allocCStringCopy("setupProviders raised: " & setupCatchRes.error.msg)
             arg.processingReady.store(-1, moRelease)
             return
+
+        # Install event listeners so subscriptions arriving any time after
+        # createContext returns will receive emitted events.
+        let installCatchRes = catch:
+          `installAllListenersIdent`(arg.ctx)
+        if installCatchRes.isErr():
+          arg.processingErrorMessage = allocCStringCopy(
+            "event listener install raised: " & installCatchRes.error.msg
+          )
+          arg.processingReady.store(-1, moRelease)
+          return
+        let installRes = installCatchRes.get()
+        if installRes.isErr():
+          arg.processingErrorMessage =
+            allocCStringCopy("event listener install failed: " & installRes.error())
+          arg.processingReady.store(-1, moRelease)
+          return
 
         arg.processingReady.store(1, moRelease)
 
