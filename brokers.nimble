@@ -158,7 +158,7 @@ proc cmakeWindowsConfigureExtras(): string =
 
 proc buildFfiExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build", "mylib"))
@@ -174,7 +174,7 @@ proc buildFfiExampleLibrary(generatePy = false) =
 
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
-    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build", "torpedolib"))
@@ -359,10 +359,10 @@ task testApi, "Run FFI API broker tests":
     ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
   for f in apiTests:
     for opt in [
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiNative -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
         continue
@@ -405,8 +405,8 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
 
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
-    "-d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/typemappingtestlib/build"
+    "-d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    mm & " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
   flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
@@ -466,7 +466,7 @@ proc asanLinkFlags(sharedLib: bool = false): string =
 
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
   var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    "--cc:clang --debugger:native -d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"

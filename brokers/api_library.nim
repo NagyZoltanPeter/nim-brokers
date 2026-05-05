@@ -37,12 +37,19 @@ export results, chronos, chronicles, broker_context, api_common
 proc parseLibraryConfig(
     body: NimNode
 ): tuple[
-  name: string, initializeRequest: NimNode, shutdownRequest: NimNode, refType: NimNode
+  name: string,
+  initializeRequest: NimNode,
+  shutdownRequest: NimNode,
+  refType: NimNode,
+  ffiMode: BrokerFfiMode,
+  ffiModeExplicit: bool,
 ] {.compileTime.} =
   var name = ""
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
+  var ffiMode = mfCbor
+  var ffiModeExplicit = false
 
   for stmt in body:
     if stmt.kind == nnkCall and stmt.len == 2:
@@ -71,6 +78,23 @@ proc parseLibraryConfig(
           refTy = value[0]
         else:
           refTy = value
+      of "ffimode":
+        var modeNode = value
+        if modeNode.kind == nnkStmtList and modeNode.len == 1:
+          modeNode = modeNode[0]
+        var modeText = ""
+        case modeNode.kind
+        of nnkStrLit:
+          modeText = modeNode.strVal
+        of nnkIdent, nnkSym:
+          modeText = $modeNode
+        else:
+          error(
+            "ffiMode must be the identifier or string literal `cbor` or `native`",
+            modeNode,
+          )
+        ffiMode = parseFfiModeLiteral(modeText)
+        ffiModeExplicit = true
       else:
         error("Unknown registerBrokerLibrary key: " & key, stmt)
     else:
@@ -91,6 +115,8 @@ proc parseLibraryConfig(
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
+    ffiMode: ffiMode,
+    ffiModeExplicit: ffiModeExplicit,
   )
 
 proc parseTypeExpr(
@@ -114,6 +140,19 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let libNameLit = newLit(libName)
   let initializeReqIdent = config.initializeRequest
   let shutdownReqIdent = config.shutdownRequest
+
+  # Resolve FFI mode (compile flag wins, then config field, then default).
+  let resolvedMode = resolveFfiMode(config.ffiMode, config.ffiModeExplicit, libName)
+
+  # Phase 0 plumbing only: CBOR codegen lands in later phases (see cbor-ffi
+  # branch). Until then, selecting CBOR mode is a hard compile-time error so
+  # users are not silently dropped onto an unimplemented path.
+  if resolvedMode == mfCbor:
+    macros.error(
+      "registerBrokerLibrary: CBOR FFI mode is not yet implemented on this " &
+        "branch. Use `-d:BrokerFfiApiNative` (or `ffiMode: native`) to opt " &
+        "into the native strategy explicitly while CBOR codegen lands."
+    )
 
   # Set library name for header generation
   gApiLibraryName = libName
