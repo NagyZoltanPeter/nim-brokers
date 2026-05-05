@@ -352,31 +352,34 @@ suite "RequestBroker macro (multi-thread mode)":
 
   # ── Concurrency ──
 
-  asyncTest "concurrent requests from multiple threads":
-    check MTReq
-      .setProvider(
-        proc(input: string): Future[Result[MTReq, string]] {.async.} =
-          ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
-      )
-      .isOk()
+  when not defined(brokerTestsSkipFragileRefcBursts):
+    # Multiple requester threads racing on the same provider channel hits
+    # the Nim 2.2.4 macOS refc debug stdlib regression. See LIMITATION.md.
+    asyncTest "concurrent requests from multiple threads":
+      check MTReq
+        .setProvider(
+          proc(input: string): Future[Result[MTReq, string]] {.async.} =
+            ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
+        )
+        .isOk()
 
-    gThreadRes1.store(false)
-    gThreadRes2.store(false)
-    gThreadRes3.store(false)
+      gThreadRes1.store(false)
+      gThreadRes2.store(false)
+      gThreadRes3.store(false)
 
-    var t1, t2, t3: Thread[void]
-    t1.createThread(concurrentRequester1)
-    t2.createThread(concurrentRequester2)
-    t3.createThread(concurrentRequester3)
+      var t1, t2, t3: Thread[void]
+      t1.createThread(concurrentRequester1)
+      t2.createThread(concurrentRequester2)
+      t3.createThread(concurrentRequester3)
 
-    while not (gThreadRes1.load() and gThreadRes2.load() and gThreadRes3.load()):
-      await sleepAsync(10.milliseconds)
+      while not (gThreadRes1.load() and gThreadRes2.load() and gThreadRes3.load()):
+        await sleepAsync(10.milliseconds)
 
-    t1.joinThread()
-    t2.joinThread()
-    t3.joinThread()
+      t1.joinThread()
+      t2.joinThread()
+      t3.joinThread()
 
-    MTReq.clearProvider()
+      MTReq.clearProvider()
 
   asyncTest "zero-arg request returns error (no zero-arg signature)":
     check MTReq

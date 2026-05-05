@@ -548,189 +548,32 @@ Total baseline: ~400 bytes for 1 provider, 1 context.
 | Baseline per context | ~100 bytes | ~16 bytes | ~300 bytes (bucket + Channel[T] + poll fn) | ~300 bytes (bucket + Channel[T] + poll fn) |
 | Intentional leaks | None | None | Channel[T] on shutdown (no OS fds — safe) | Response Channel[T] on timeout (no OS fds — safe) |
 
-## Platform Support
+## Platform & Nim Version Support
 
-The single-thread brokers (`EventBroker`, `RequestBroker`, `MultiRequestBroker`)
-are pure threadvar code with no chronos cross-thread machinery — every memory
-manager works on every platform. The multi-thread (`(mt)`) brokers and the
-Broker FFI API both use chronos' `ThreadSignalPtr` for cross-thread wakeup; on
-Windows that primitive routes through `RegisterWaitForSingleObject`, which
-fires its completion callback on a Win32 thread-pool thread the refc GC
-cannot suspend (see [Known Limitations](#known-limitations) for the full
-reasoning). As a result, **`--mm:refc` is unsupported on Windows for the
-multi-thread brokers and the Broker FFI API** — use `--mm:orc` (Nim's default
-since 2.0).
+Single-thread brokers run on every supported platform under both `--mm:orc`
+and `--mm:refc`. Multi-thread (`(mt)`) brokers and the Broker FFI API have
+narrow, documented carve-outs — refc on Windows is unsupported, refc on
+macOS + Nim 2.2.4 + debug skips a defined set of stress tests, and Nim
+versions older than 2.2.0 are unsupported.
 
-| Layer | Linux orc | Linux refc | macOS orc | macOS refc | Windows orc | Windows refc |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| `EventBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `RequestBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `MultiRequestBroker` (single-thread) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `EventBroker(mt)` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `RequestBroker(mt)` | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `EventBroker(API)` (Broker FFI) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `RequestBroker(API)` (Broker FFI) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `registerBrokerLibrary` (FFI runtime) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`**. ORC has no known
+limitations on any supported platform.
 
-The `nimble` test tasks reflect this matrix: refc combinations for `(mt)` and
-`(API)` brokers are **automatically skipped on Windows** with a clear log
-message. CI does not enforce them, and consuming projects should build
-Windows binaries with `--mm:orc`.
+See [LIMITATION.md](LIMITATION.md) for the full support matrix, the
+per-platform issue analysis (Windows refc + chronos thread-pool callback,
+macOS + 2.2.4 stdlib `Channel[T].send` regression, devel allocator
+regression, etc.), and the compile-time test-exclusion mechanism used to
+keep CI green on the known-fragile combos.
 
-## Supported Nim Versions
+### Windows toolchain requirements
 
-| Nim version | CI status | Notes |
-|---|---|---|
-| **2.2.x** (current head of `version-2-2` branch — 2.2.10 at time of writing) | ✅ blocking | Recommended. The minimum supported stable release. |
-| **devel** (currently 2.3.x) | ⚠️ manual | Not part of the blocking PR matrix. GitHub Actions does not allow `continue-on-error` on reusable-workflow callers, and `nimbus-common-workflow` exposes no informational-version flag. Devel coverage is on-demand via the **`memcheck_ci.yml` → "Run workflow" → `nim-version: devel`** dispatch (or by running the same `nimble` tasks locally). The current 2.3.x regression is documented under [Known Limitations](#known-limitations). |
-| **2.0.x** and earlier | ❌ unsupported | Dropped on 2026-05-04. Refc + foreign-thread allocator on macOS deterministically SIGSEGVs in `genericSeqAssign`/`rawAlloc` for `seq[object]` and `array[N,T]` payloads crossing the FFI boundary. 2.2 fixes that path. |
-
-If you build an FFI API library on top of nim-brokers, pin `requires "nim >= 2.2.0"` in your `.nimble` file. Single-thread brokers compile fine on older Nim too, but the multi-thread and FFI paths assume 2.2's runtime fixes.
-
-## Windows Support
-
-The Broker FFI API is supported on Windows, but with stricter toolchain
-requirements than Linux/macOS. The reason is the Windows C runtime split: a
-Nim-built DLL and a C/C++/Python consumer **must share the same C runtime**,
-otherwise pointers allocated on one heap and freed on the other (or
-unmatched stdio/TLS/exception state) produce intermittent crashes — typically
-at process teardown, occasionally earlier.
-
-### Required toolchain on Windows
-
-- **LLVM 19+ (clang, clang++, lld, llvm-symbolizer) on `PATH`.** The
-  `nimble` tasks for FFI builds force `--cc:clang` on Windows so the Nim
-  DLL links against the release UCRT (`ucrtbase.dll`, `MSVCP140.dll`).
-  The default Nim toolchain shipped by `setup-nim-action` is MinGW gcc
-  (`msvcrt.dll`), which is **not compatible** with MSVC- or clang-built
-  consumers across a DLL boundary.
-- **Ninja on `PATH`.** All `nimble` cmake tasks switch to
-  `-G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_LINKER_TYPE=LLD`
-  on Windows. The default Visual Studio + MSVC generator silently ignores
-  the requested compiler for the toolset, links the C++ side against the
-  debug UCRT (`ucrtbased.dll`) for Debug configurations, and link.exe
-  cannot consume clang's `-fsanitize=address` output.
-- **Release UCRT pinning.** All Windows cmake configurations are driven
-  with `-DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL`
-  so consumer binaries match the release UCRT used by the Nim DLL.
-- **AddressSanitizer.** When running the `*Asan*` tasks on Windows
-  (`testFfiApiCppAsan*`, `testMt*Asan*`), the workflow additionally
-  prepends the directory of `clang_rt.asan_dynamic-x86_64.dll`
-  (typically under `C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\`)
-  to `PATH`. Without it the test executable fails `STATUS_DLL_NOT_FOUND`
-  on launch with no diagnostic output.
-
-### Limitations on Windows
-
-- **`--mm:refc` is unsupported for FFI API tests.** See the dedicated
-  note under [Known Limitations](#known-limitations) — a Windows
-  thread-pool callback used by chronos' async wait is invisible to the
-  refc stop-the-world GC. Use `--mm:orc` (the default since Nim 2.0).
-- **`--nimMainPrefix` is unused on Windows.** See [Known
-  Limitations](#known-limitations) for the rationale.
-- **CRT-mixing with MinGW-built consumers is not supported.** The Nim
-  DLLs produced by these tasks expect MSVC-compatible consumers built
-  with clang or clang-cl on the release UCRT. Pure-MinGW consumer
-  builds are out of scope.
-- **C/C++/Python consumers must use a single CRT.** When linking against
-  the generated `<libname>.lib` import library, build with the same
-  release UCRT (`/MD`) settings used here. Mixing `/MDd` with the
-  Nim-built DLL produces the cross-heap bad-free symptom.
-
-### Verifying on Windows locally
-
-From a shell with LLVM and Ninja on `PATH`:
-
-```
-nimble testApi
-nimble testFfiApi
-nimble testFfiApiCpp
-nimble runFfiExampleC
-nimble runFfiExampleCpp
-nimble runFfiExamplePy
-```
-
-The `Memcheck CI` GitHub Actions workflow (`memcheck_ci.yml`) covers the
-same tasks plus the AddressSanitizer variants.
-
-## Known Limitations
-
-### `--mm:refc` is unsupported on Windows for the multi-thread and FFI API brokers
-
-`nimble test`, `nimble perftest`, `nimble testApi`, `nimble testFfiApi`,
-`nimble testFfiApiCpp`, `testFfiApiCppAsanRefc`, `testMtEventBrokerAsanRefc`
-and `testMtRequestBrokerAsanRefc` automatically skip `--mm:refc` variants on
-Windows. ORC (`--mm:orc`) is fully supported on every platform and is the
-recommended memory manager for nim-brokers code that crosses thread
-boundaries on Windows.
-
-**Root cause.** Both the `(mt)` brokers and the Broker FFI API runtime use
-chronos' `ThreadSignalPtr.wait()` to receive cross-thread wakeups. On Windows
-the chronos implementation registers a completion callback through the
-Win32 `RegisterWaitForSingleObject` API, and the OS fires that callback on a
-**Windows thread-pool thread** — a thread that is not a Nim thread and is
-therefore invisible to the garbage collector.
-
-Refc's garbage collector is stop-the-world: it pauses every *known* Nim
-thread before scanning the heap. Because the thread-pool thread is unknown,
-refc can free futures and wait-handles that the callback is still
-referencing, producing access violations and use-after-free bugs. ORC has no
-stop-the-world phase — its reference counting is fully atomic and its cycle
-collector runs in-thread — so the same thread-pool callback is safe.
-
-**Why `(mt)` brokers are also affected on Windows.** Earlier documentation
-said `(mt)` refc tests pass on Windows because their workloads tend to keep
-the broker signal pre-fired by the time the dispatcher polls, sometimes
-short-circuiting the `RegisterWaitForSingleObject` slow path. That is true
-for the existing test suite under light load, but it is a property of the
-test patterns — not a guarantee. Sustained idle periods, foreign-thread
-attaches, and stress workloads such as ASAN's
-`test_foreign_thread_concurrent_lifecycle` all reach the slow path and
-expose the same use-after-free deterministically. Treat `(mt)` refc on
-Windows the same as FFI API refc: unsupported.
-
-**Why the FFI API cannot work around it.** The FFI API runtime spawns
-dedicated processing and delivery threads that block on
-`ThreadSignalPtr.wait()` by design, and foreign threads (C / C++ / Python)
-drive that wait through requests, event registrations and lifecycle
-operations. The thread-pool callback path is therefore part of the steady
-state, not a corner case. A workaround would require either an upstream
-chronos rewrite of the Windows wait primitive, or replacing
-`ThreadSignalPtr` in `mt_broker_common.nim` with a Nim-thread-only
-blocking-receive design — both substantial efforts that would still leave
-foreign-thread attach/detach hazards for refc unresolved. Given that ORC is
-Nim's default since 2.0 and refc is legacy, neither workaround is
-worthwhile.
-
-**Recommendation.** Build any nim-brokers code that uses `(mt)` brokers or
-the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers remain
-fully refc-compatible on every platform.
-
-### Nim 2.2.4 stdlib `Channel[T].send` regression on macOS (refc + debug only)
-
-Tracked, narrow scope. CI's nimble tasks (`test`, `perftest`, `testApi`, `testFfiApi`, `testFfiApiCpp`) automatically skip the **macOS + Nim 2.2.4 + `--mm:refc` + debug** iteration with a clear log message; every other combination of `mm × build mode × OS` on Nim 2.2.4 passes.
-
-The crash signature is sustained `Channel[T].send` deep-copy of complex `seq[object]` payloads through `system/channels_builtin.nim:storeAux`, recursing into refc's `newObjNoInit` / `gc_common.prepareDealloc` and reading from a freed cell. Reproducible with the rapid-fire `(mt)` event broadcast pattern in `test/typemappingtestlib/test_typemappingtestlib.cpp:test_seq_object_event_rapid_fire_no_leak` (100 iterations, 10 tags each). Linux-amd64 + 2.2.4 + refc debug is **unaffected**, and refc release on macOS + 2.2.4 is **unaffected** — only the four-way intersection trips.
-
-The bug is in Nim's stdlib and was fixed by 2.2.10. If you build production code on macOS with Nim 2.2.4 and `--mm:refc`, prefer release mode or upgrade to Nim ≥ 2.2.10.
-
-### Nim devel (2.3.x) refc release-mode FFI crash
-
-Tracked, not blocking. CI runs Nim devel as `continue-on-error: true` (`build-devel` job in `ci.yml`). Locally reproducible on macOS arm64 with `--mm:refc -d:release` and Nim 2.3.1: after roughly four `createContext` / `shutdown` lifecycle iterations, the next allocation crashes inside the refc allocator at `system/alloc.nim:942` (`c.freeList = c.freeList.next` reading address `0x8`). The same code passes on Nim 2.0.16, 2.2.10 and on devel under refc *debug*; only refc + release + devel crashes.
-
-The crash signature is heap corruption — `c.freeList` is non-nil at line 939 but stale by line 942 — consistent with a release-mode codegen / GC regression on the cross-thread allocator path that ships in 2.3.x. Workarounds inside nim-brokers would be brittle; the right fix is upstream. We refresh devel coverage on every CI run so that once the regression clears, the informational job will go green again.
-
-If you hit this locally, switch to `--mm:orc` or pin to Nim 2.2.x stable.
-
-### `--nimMainPrefix` is not needed on Windows, and cannot be used there
-
-`--nimMainPrefix` exists to avoid `NimMain` symbol collisions when multiple Nim `.so` files are loaded in the same POSIX process. On Linux/macOS, `dlopen` with `RTLD_GLOBAL` merges all shared-object exports into a single flat namespace, so two Nim libraries that both define `NimMain` clash. The prefix renames them (e.g. `fooNimMain`, `barNimMain`) to prevent that.
-
-On Windows the PE loader works differently: every import is resolved as `DLL!Symbol`, so `foo.dll!NimMain` and `bar.dll!NimMain` are entirely separate entries that never interfere with each other. Any number of Nim DLLs can be loaded into the same process without a prefix.
-
-Attempting to use `--nimMainPrefix` on Windows also triggers a Nim codegen bug: the C generator forward-declares the prefixed `NimMain` without `__declspec(dllexport)` and then defines it with `N_LIB_EXPORT`, which both clang and GCC reject as a hard error (`err_attribute_dll_redeclaration`).
-
-The `nimble testFfiApi` task therefore omits `--nimMainPrefix` on Windows, which is the correct behaviour — not a workaround.
+The Broker FFI API requires LLVM clang and Ninja on `PATH` for FFI builds
+on Windows (the bundled MinGW `gcc` mismatches the cmake-side MSVC CRT and
+produces cross-heap crashes). When running the AddressSanitizer tasks,
+`clang_rt.asan_dynamic-x86_64.dll` from
+`C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\` must also be on
+`PATH`; the `memcheck_ci.yml` workflow handles this for CI. See
+LIMITATION.md → §2.1 for the toolchain rationale.
 
 ## Testing
 

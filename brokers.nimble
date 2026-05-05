@@ -87,33 +87,44 @@ proc nimWindowsImplibFlag(outDir, libName: string): string =
   else:
     ""
 
-proc skipNim224MacosRefcDebug(mm: string, release: bool, label: string): bool =
-  ## Returns true (and prints a skip notice) for the one specific combo
-  ## with a known upstream Nim 2.2.4 stdlib regression:
-  ##
-  ##   macOS + Nim 2.2.4 + --mm:refc + debug build
+proc isNim224MacosRefcDebug(mm: string, release: bool): bool =
+  ## True for the one combo with a known upstream Nim 2.2.4 stdlib
+  ## regression:  macOS + Nim 2.2.4 + --mm:refc + debug build.
   ##
   ## Sustained Channel[T].send of complex seq/object payloads triggers
   ## heap corruption in refc through stdlib system/channels_builtin.nim
-  ## storeAux deep-copy. Fixed in Nim 2.2.10. Affects MT brokers and the
-  ## Broker FFI API (which both rely on Channel[T] for cross-thread
-  ## delivery). Linux-amd64 + 2.2.4 + refc debug is unaffected; refc
-  ## release on the same Nim/OS is unaffected. See README → Known
-  ## Limitations for the full reasoning.
+  ## storeAux deep-copy. Fixed in Nim 2.2.10. See LIMITATION.md for the
+  ## full analysis. Linux + 2.2.4 + refc debug is unaffected; refc
+  ## release on macOS + 2.2.4 is unaffected.
   when defined(macosx) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
-    if mm == "refc" and not release:
-      echo "Skipping " & label & " (mm:refc debug) on macOS + Nim 2.2.4: known stdlib " &
-        "Channel[T].send deep-copy regression (fixed in 2.2.10)."
-      return true
+    return mm == "refc" and not release
   false
 
-proc skipNim224MacosRefcDebugFromOpt(opt, label: string): bool =
-  ## Wrapper for the iteration loops that pass full Nim option strings
-  ## (e.g. "-d:release --mm:refc --threads:on") rather than discrete
-  ## (mm, release) values.
+proc isNim224MacosRefcDebugFromOpt(opt: string): bool =
+  ## Same as isNim224MacosRefcDebug but parses --mm:refc / -d:release
+  ## from a full Nim option string used by the iteration loops.
   let mm = if "--mm:refc" in opt: "refc" else: "orc"
   let release = "-d:release" in opt
-  skipNim224MacosRefcDebug(mm, release, label)
+  isNim224MacosRefcDebug(mm, release)
+
+proc fragileTestsNimDefine(mm: string, release: bool): string =
+  ## On the affected combo, emit the Nim define that gates fragile
+  ## stress tests at compile time. See LIMITATION.md for what's gated.
+  if isNim224MacosRefcDebug(mm, release): " -d:brokerTestsSkipFragileRefcBursts" else: ""
+
+proc fragileTestsNimDefineFromOpt(opt: string): string =
+  if isNim224MacosRefcDebugFromOpt(opt): " -d:brokerTestsSkipFragileRefcBursts" else: ""
+
+proc fragileTestsCmakeFlag(mm: string, release: bool): string =
+  ## Emit the cmake variable that translates to a compile definition the
+  ## C++ test uses to skip fragile RUN(...) calls. Always emit an
+  ## explicit ON/OFF — cmake's CMakeCache.txt persists across iteration
+  ## reconfigures, so omitting the flag would leave the previous
+  ## iteration's value in place.
+  if isNim224MacosRefcDebug(mm, release):
+    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=ON"
+  else:
+    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=OFF"
 
 proc skipRefcOnWindows(opt, label: string): bool =
   ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
@@ -320,11 +331,12 @@ task test, "Run all single and multi-threaded broker tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      if skipNim224MacosRefcDebugFromOpt(opt, f):
-        continue
-      test opt, f
+      test opt & fragileTestsNimDefineFromOpt(opt), f
 
 task perftest, "Run performance and stress tests":
+  # perf_test_* are stress-by-design and would tear up the affected
+  # Nim 2.2.4 macOS refc debug freelist almost immediately; gate the
+  # whole task on this combo rather than carving out individual tests.
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
@@ -336,7 +348,9 @@ task perftest, "Run performance and stress tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      if skipNim224MacosRefcDebugFromOpt(opt, f):
+      if isNim224MacosRefcDebugFromOpt(opt):
+        echo "Skipping " & f & " (" & opt &
+          ") on macOS + Nim 2.2.4: see LIMITATION.md (perf tests are stress-by-design)."
         continue
       test opt, f
 
@@ -352,14 +366,12 @@ task testApi, "Run FFI API broker tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      if skipNim224MacosRefcDebugFromOpt(opt, f):
-        continue
       let extraOpt =
         if f == "test_api_library_init":
           nimMainPrefixFlag("apitestlib")
         else:
           ""
-      test opt & extraOpt, f
+      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
 
 task buildFfiExample, "Build FFI API example library":
   buildFfiExampleLibrary()
@@ -398,6 +410,7 @@ proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
   flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
+  flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
@@ -405,11 +418,12 @@ proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
 proc typeMapTestCmakeBuildDir(): string =
   "test/typemappingtestlib/cmake-build"
 
-proc buildTypeMapTestCmakeTarget(target = "") =
+proc buildTypeMapTestCmakeTarget(target = "", fragileFlag: string = "") =
   let cmakeDir = "test/typemappingtestlib"
   let buildDir = typeMapTestCmakeBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras() &
+    fragileFlag
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -538,8 +552,6 @@ task testFfiApi,
       echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
       if skipRefcOnWindows(mm, "testFfiApi (" & mode & ")"):
         continue
-      if skipNim224MacosRefcDebug(mm, release, "testFfiApi"):
-        continue
       buildTypeMapTestLibrary(mm, release)
       let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
       # When ELF inspection is unavailable (bits == 0) fall back to the default
@@ -564,10 +576,10 @@ task testFfiApiCpp,
       echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
       if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
         continue
-      if skipNim224MacosRefcDebug(mm, release, "testFfiApiCpp"):
-        continue
       buildTypeMapTestLibrary(mm, release)
-      buildTypeMapTestCmakeTarget("test_typemappingtestlib")
+      buildTypeMapTestCmakeTarget(
+        "test_typemappingtestlib", fragileTestsCmakeFlag(mm, release)
+      )
       exec quoteArg(typeMapTestCppExecutablePath())
 
 proc testAsan(mm: string, path: string) =

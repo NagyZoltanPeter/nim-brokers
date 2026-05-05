@@ -3,6 +3,12 @@ project(typemappingtestlib_cpp_test CXX)
 
 option(ASAN "Enable AddressSanitizer (requires clang)" OFF)
 
+# Set by brokers.nimble on the macOS + Nim 2.2.4 + refc + debug combo to
+# compile-time-skip stress tests that would otherwise trip the upstream
+# stdlib Channel[T].send regression. See LIMITATION.md.
+option(BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+       "Skip cross-thread stress tests known to trip Nim 2.2.4 macOS refc debug" OFF)
+
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
@@ -44,6 +50,10 @@ endif()
 # C++ test binary
 # ---------------------------------------------------------------------------
 add_executable(test_typemappingtestlib test_typemappingtestlib.cpp)
+if(BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)
+    target_compile_definitions(test_typemappingtestlib PRIVATE
+        BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=1)
+endif()
 set_target_properties(test_typemappingtestlib PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON

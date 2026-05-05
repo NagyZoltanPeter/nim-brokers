@@ -2139,9 +2139,16 @@ int main() {
     printf("\n--- TestMultipleEventListeners ---\n");
     RUN(test_two_scalar_event_listeners);
     RUN(test_remove_one_listener_keeps_other);
+#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
     RUN(test_concurrent_event_types);
+#endif
 
     printf("\n--- TestForeignThreadGcSafety ---\n");
+#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+    // The foreign-thread concurrent and stress tests sustain >50 Channel[T].send
+    // calls per second across multiple threads with complex seq/object payloads,
+    // which trips the Nim 2.2.4 macOS refc-debug stdlib regression. See
+    // LIMITATION.md → "macOS + Nim 2.2.4 + refc + debug" for details.
     RUN(test_foreign_thread_concurrent_requests);
     RUN(test_foreign_thread_concurrent_seq_string_requests);
     RUN(test_foreign_thread_concurrent_seq_prim_requests);
@@ -2150,11 +2157,14 @@ int main() {
     RUN(test_foreign_thread_concurrent_lifecycle);
     RUN(test_foreign_thread_mixed_request_types);
     RUN(test_foreign_thread_stress_all_types);
+#endif
 
     printf("\n--- TestSeqObjectEventMemorySafety ---\n");
     RUN(test_seq_object_event_callback_data_correctness);
+#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
     RUN(test_seq_object_event_rapid_fire_no_leak);
     RUN(test_seq_object_event_concurrent_listeners_and_requesters);
+#endif
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);
