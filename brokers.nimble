@@ -539,6 +539,19 @@ task runTypeMapTestLibCborPy,
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("test/typemappingtestlib_cbor/test_typemappingtestlib_cbor.py")
 
+proc typeMapTestLibCborCmakeDir(): string =
+  "test/typemappingtestlib_cbor/cmake-build"
+
+task runTypeMapTestLibCborCpp,
+  "Build the CBOR-mode parity library + C++ binding and run the C++ parity test":
+  buildTypeMapTestLibCbor()
+  let cmakeDir = typeMapTestLibCborCmakeDir()
+  let srcDir = "test/typemappingtestlib_cbor"
+  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
+    cmakeWindowsConfigureExtras()
+  exec "cmake --build " & quoteArg(cmakeDir)
+  exec quoteArg(cmakeDir & "/test_typemappingtestlib_cbor")
+
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
