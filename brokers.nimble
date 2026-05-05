@@ -374,6 +374,7 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
     ("test_api_cbor_library_init", "cbtest"),
     ("test_api_cbor_event_subscribe", "evtt"),
     ("test_api_cbor_discovery", "cbdisc"),
+    ("typemappingtestlib_cbor/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
   ]
   for (f, prefix) in cborApiTests:
     for opt in [
