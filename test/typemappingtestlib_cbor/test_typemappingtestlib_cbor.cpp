@@ -557,6 +557,147 @@ int main() {
     }
   }
 
+  // ============================================================================
+  // Listener mgmt parity (Phase 9D) — fan-out, individual unsubscribe,
+  // concurrent event types over a single Lib.
+  // ============================================================================
+
+  // Helper: collect i32 from PrimScalarEvent under a mutex.
+  struct I32Sink {
+    std::mutex m;
+    std::vector<int32_t> v;
+    void push(int32_t x) {
+      std::lock_guard<std::mutex> lk(m);
+      v.push_back(x);
+    }
+    size_t size() {
+      std::lock_guard<std::mutex> lk(m);
+      return v.size();
+    }
+    std::vector<int32_t> snapshot() {
+      std::lock_guard<std::mutex> lk(m);
+      return v;
+    }
+  };
+
+  auto waitUntil = [](auto pred,
+                      std::chrono::milliseconds timeout =
+                          std::chrono::milliseconds(1000)) -> bool {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (pred()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return pred();
+  };
+
+  // 1) two_scalar_event_listeners — both receive the same event
+  {
+    tmlib::Lib lm;
+    I32Sink s1, s2;
+    auto h1 = lm.subscribePrimScalarEvent(
+        [&](const tmlib::PrimScalarEvent& e) { s1.push(e.i32); });
+    auto h2 = lm.subscribePrimScalarEvent(
+        [&](const tmlib::PrimScalarEvent& e) { s2.push(e.i32); });
+
+    lm.primScalarRequest(false, 99, 0, 0.0);
+    waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
+
+    auto v1 = s1.snapshot();
+    auto v2 = s2.snapshot();
+    check("lst.two.s1_size", static_cast<size_t>(1), v1.size());
+    check("lst.two.s2_size", static_cast<size_t>(1), v2.size());
+    if (!v1.empty()) check("lst.two.s1[0]", static_cast<int32_t>(99), v1[0]);
+    if (!v2.empty()) check("lst.two.s2[0]", static_cast<int32_t>(99), v2[0]);
+
+    lm.unsubscribePrimScalarEvent(h1);
+    lm.unsubscribePrimScalarEvent(h2);
+  }
+
+  // 2) remove_one_listener_keeps_other — after off(h1), only h2 receives.
+  {
+    tmlib::Lib lm;
+    I32Sink s1, s2;
+    auto h1 = lm.subscribePrimScalarEvent(
+        [&](const tmlib::PrimScalarEvent& e) { s1.push(e.i32); });
+    auto h2 = lm.subscribePrimScalarEvent(
+        [&](const tmlib::PrimScalarEvent& e) { s2.push(e.i32); });
+
+    lm.primScalarRequest(false, 1, 0, 0.0);
+    waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
+
+    lm.unsubscribePrimScalarEvent(h1);
+
+    lm.primScalarRequest(false, 2, 0, 0.0);
+    waitUntil([&] { return s2.size() >= 2; });
+    // Give any in-flight delivery to s1 a chance to land — must not.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    check("lst.remove_one.s1_size", static_cast<size_t>(1), s1.size());
+    check("lst.remove_one.s2_size", static_cast<size_t>(2), s2.size());
+    auto v2 = s2.snapshot();
+    if (v2.size() == 2) check("lst.remove_one.s2[1]", static_cast<int32_t>(2), v2[1]);
+
+    lm.unsubscribePrimScalarEvent(h2);
+  }
+
+  // 3) concurrent_event_types — three different event subscriptions on
+  //    the same Lib, each fired by a distinct request.
+  {
+    tmlib::Lib lm;
+    I32Sink scalarSink;
+    std::mutex mArr, mStr;
+    std::vector<std::vector<int32_t>> arrSink;
+    std::vector<std::vector<std::string>> strSink;
+
+    auto hs = lm.subscribePrimScalarEvent(
+        [&](const tmlib::PrimScalarEvent& e) { scalarSink.push(e.i32); });
+    auto ha = lm.subscribeFixedArrayEvent(
+        [&](const tmlib::FixedArrayEvent& e) {
+          std::lock_guard<std::mutex> lk(mArr);
+          arrSink.push_back(e.values);
+        });
+    auto hst = lm.subscribeStringSeqEvent(
+        [&](const tmlib::StringSeqEvent& e) {
+          std::lock_guard<std::mutex> lk(mStr);
+          strSink.push_back(e.items);
+        });
+
+    lm.primScalarRequest(false, 55, 0, 0.0);
+    lm.fixedArrayRequest(4);
+    lm.stringSeqRequest("z", 2);
+
+    waitUntil([&] {
+      std::lock_guard<std::mutex> lkA(mArr);
+      std::lock_guard<std::mutex> lkS(mStr);
+      return scalarSink.size() >= 1 && arrSink.size() >= 1 && strSink.size() >= 1;
+    });
+
+    auto vs = scalarSink.snapshot();
+    check("lst.concurrent.scalar_size", static_cast<size_t>(1), vs.size());
+    if (!vs.empty()) check("lst.concurrent.scalar[0]", static_cast<int32_t>(55), vs[0]);
+    {
+      std::lock_guard<std::mutex> lk(mArr);
+      check("lst.concurrent.arr_size", static_cast<size_t>(1), arrSink.size());
+      if (!arrSink.empty() && arrSink[0].size() == 4) {
+        check("lst.concurrent.arr[0]", static_cast<int32_t>(4), arrSink[0][0]);
+        check("lst.concurrent.arr[3]", static_cast<int32_t>(16), arrSink[0][3]);
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lk(mStr);
+      check("lst.concurrent.str_size", static_cast<size_t>(1), strSink.size());
+      if (!strSink.empty() && strSink[0].size() == 2) {
+        check("lst.concurrent.str[0]", std::string("z-0"), strSink[0][0]);
+        check("lst.concurrent.str[1]", std::string("z-1"), strSink[0][1]);
+      }
+    }
+
+    lm.unsubscribePrimScalarEvent(hs);
+    lm.unsubscribeFixedArrayEvent(ha);
+    lm.unsubscribeStringSeqEvent(hst);
+  }
+
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {
     std::cerr << "FAILED: " << g_fails << " check(s) did not match\n";

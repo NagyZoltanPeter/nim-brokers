@@ -422,6 +422,104 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
     finally:
         b.close()
 
+    # ========================================================================
+    # Listener mgmt parity (Phase 9D)
+    # ========================================================================
+
+    def _wait_until(pred, timeout=1.0):
+        import time as _t
+        deadline = _t.monotonic() + timeout
+        while _t.monotonic() < deadline:
+            if pred():
+                return True
+            _t.sleep(0.01)
+        return pred()
+
+    # 1) two_scalar_event_listeners — both receive the same event
+    with mod.Lib() as lm:
+        s1: list = []
+        s2: list = []
+        l1 = threading.Lock()
+        l2 = threading.Lock()
+
+        def on1(e: mod.PrimScalarEvent) -> None:
+            with l1:
+                s1.append(e.i32)
+
+        def on2(e: mod.PrimScalarEvent) -> None:
+            with l2:
+                s2.append(e.i32)
+
+        h1 = lm.subscribe_prim_scalar_event(on1)
+        h2 = lm.subscribe_prim_scalar_event(on2)
+        lm.prim_scalar_request(flag=False, i32=99, i64=0, f64=0.0)
+        _wait_until(lambda: len(s1) >= 1 and len(s2) >= 1)
+        check("lst.two.s1_size", 1, len(s1))
+        check("lst.two.s2_size", 1, len(s2))
+        check("lst.two.s1[0]", 99, s1[0])
+        check("lst.two.s2[0]", 99, s2[0])
+        lm.unsubscribe_prim_scalar_event(h1)
+        lm.unsubscribe_prim_scalar_event(h2)
+
+    # 2) remove_one_listener_keeps_other
+    with mod.Lib() as lm:
+        s1, s2 = [], []
+        l1 = threading.Lock()
+        l2 = threading.Lock()
+
+        def on1(e: mod.PrimScalarEvent) -> None:
+            with l1:
+                s1.append(e.i32)
+
+        def on2(e: mod.PrimScalarEvent) -> None:
+            with l2:
+                s2.append(e.i32)
+
+        h1 = lm.subscribe_prim_scalar_event(on1)
+        h2 = lm.subscribe_prim_scalar_event(on2)
+        lm.prim_scalar_request(flag=False, i32=1, i64=0, f64=0.0)
+        _wait_until(lambda: len(s1) >= 1 and len(s2) >= 1)
+        lm.unsubscribe_prim_scalar_event(h1)
+        lm.prim_scalar_request(flag=False, i32=2, i64=0, f64=0.0)
+        _wait_until(lambda: len(s2) >= 2)
+        import time
+        time.sleep(0.15)  # let stragglers (none expected for s1) land
+        check("lst.remove_one.s1_size", 1, len(s1))
+        check("lst.remove_one.s2_size", 2, len(s2))
+        check("lst.remove_one.s2[1]", 2, s2[1])
+        lm.unsubscribe_prim_scalar_event(h2)
+
+    # 3) concurrent_event_types — three subscribers, three request types
+    with mod.Lib() as lm:
+        sc, ar, st = [], [], []
+        ls, la, lt = threading.Lock(), threading.Lock(), threading.Lock()
+
+        def onSc(e: mod.PrimScalarEvent) -> None:
+            with ls:
+                sc.append(e.i32)
+
+        def onAr(e: mod.FixedArrayEvent) -> None:
+            with la:
+                ar.append(list(e.values))
+
+        def onSt(e: mod.StringSeqEvent) -> None:
+            with lt:
+                st.append(list(e.items))
+
+        hs = lm.subscribe_prim_scalar_event(onSc)
+        ha = lm.subscribe_fixed_array_event(onAr)
+        ht = lm.subscribe_string_seq_event(onSt)
+        lm.prim_scalar_request(flag=False, i32=55, i64=0, f64=0.0)
+        lm.fixed_array_request(seed=4)
+        lm.string_seq_request(prefix="z", n=2)
+        _wait_until(lambda: len(sc) >= 1 and len(ar) >= 1 and len(st) >= 1)
+        check("lst.concurrent.scalar", [55], sc)
+        check("lst.concurrent.arr", [[4, 8, 12, 16]], ar)
+        check("lst.concurrent.str", [["z-0", "z-1"]], st)
+        lm.unsubscribe_prim_scalar_event(hs)
+        lm.unsubscribe_fixed_array_event(ha)
+        lm.unsubscribe_string_seq_event(ht)
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)
