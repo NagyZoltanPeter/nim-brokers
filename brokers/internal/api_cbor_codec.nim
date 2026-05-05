@@ -51,6 +51,13 @@ createCborFlavor(
   skipNullFields = false,
 )
 
+# Encode enums as numeric ordinals so the wire format matches what
+# Python's IntEnum and C++'s underlying enum class produce naturally.
+# Without this override the upstream default is `EnumAsString`, which
+# decodes fine on the Nim side but diverges from foreign-language
+# wrappers that send enum values as ints.
+enumRep(Cbor, BrokerCbor, EnumRepresentation.EnumAsNumber)
+
 # ---------------------------------------------------------------------------
 # Distinct-type bridging
 #
@@ -76,6 +83,27 @@ BrokerCbor.defaultReader(distinct)
   # Writer side is already bound by `defaultPrimitiveWriter` (see
   # cbor_serialization/format.nim:99). Re-binding here causes
   # `ambiguous call writeValue` at user call sites.
+
+# Enum reader override.
+#
+# With `enumRep = EnumAsNumber` (set above) the writer emits enum values
+# as CBOR Unsigned ints, matching what Python's `IntEnum` and C++'s
+# `enum class` underlying values produce on the wire. The upstream
+# `read[T: enum]` only accepts CBOR strings (its private `parseEnum`
+# helper hard-codes `allowNumericRepr = false`), so we provide a
+# numeric-aware override at the flavor level: read an int via the
+# already-bound `read[T: SomeInteger]`, range-check against the enum's
+# low/high ordinals, then cast.
+proc readValue*[T: enum](
+    r: var (BrokerCbor.Reader), value: var T
+) {.raises: [IOError, SerializationError].} =
+  mixin read
+  var i: int
+  read(r, i)
+  if i < ord(T.low) or i > ord(T.high):
+    raise
+      newException(CborReaderError, "CBOR enum value " & $i & " out of range for " & $T)
+  value = T(i)
 
 # ---------------------------------------------------------------------------
 # Wire types

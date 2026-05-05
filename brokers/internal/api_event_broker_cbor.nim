@@ -27,10 +27,11 @@
 import std/[macros, strutils]
 import ./helper/broker_utils, ./mt_event_broker, ./api_common, ./api_schema
 import ./api_request_broker_cbor # for registerCborObjectType
+import ./api_type_resolver
 
 export mt_event_broker, api_common
 
-proc generateApiCborEventBroker*(body: NimNode): NimNode =
+proc generateApiCborEventBrokerImpl(body: NimNode): NimNode =
   result = newStmtList()
 
   # 1. Emit the underlying MT event broker (single-thread emit/listen API
@@ -54,5 +55,26 @@ proc generateApiCborEventBroker*(body: NimNode): NimNode =
     echo "[brokers/cbor] EventBroker(API) for '" & typeName & "' (eventName='" & apiName &
       "')"
     echo result.repr
+
+{.pop.}
+
+macro generateApiCborEventBrokerDeferred*(body: untyped): untyped =
+  ## Typed-phase deferred entry point; populates the registry first.
+  generateApiCborEventBrokerImpl(body)
+
+{.push raises: [].}
+
+proc generateApiCborEventBroker*(body: NimNode): NimNode =
+  result = newStmtList()
+
+  let externalIdents = discoverExternalTypes(body)
+  if externalIdents.len > 0:
+    result.add(emitAutoRegistrations(externalIdents))
+
+  let sizeIdents = discoverArraySizeIdents(body)
+  if sizeIdents.len > 0:
+    result.add(emitArraySizeRegistrations(sizeIdents))
+
+  result.add(newCall(ident("generateApiCborEventBrokerDeferred"), copyNimTree(body)))
 
 {.pop.}

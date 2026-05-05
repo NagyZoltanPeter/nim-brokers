@@ -14,56 +14,218 @@
 ## trampoline kept alive in a per-event handler map (mirroring the C++
 ## shared_ptr layout from phase 4).
 ##
-## Currently supported field/parameter Nim types: bool, int/int8..int64,
-## uint8..uint64, float32/float64, string. Everything else emits a TODO
-## comment and the typed method is skipped — Phase 7 will exercise the
-## full type-mapping matrix.
+## Type-matrix coverage (Phase 7D):
+##   - Primitives: bool, int/intN, uint/uintN/byte, float/floatN, string,
+##     char.
+##   - Enums (atkEnum) → Python IntEnum classes.
+##   - Distinct/Alias (atkDistinct/atkAlias) → Python type alias of the
+##     resolved underlying type (typing.NewType-style: simple `=` alias).
+##   - Registered objects → @dataclass with typed fields and a paired
+##     `_decode_<T>` / `_encode_<T>` helper.
+##   - Composite types: seq[T], array[N, T] (typed as List[<inner>]),
+##     including seq[byte] and seq[<object>]; nested objects.
+## Unmappable types still produce a TODO stub so the wrapper compiles.
 
 {.push raises: [].}
 
-import std/[macros, strutils]
+import std/[macros, strutils, tables]
 import ./api_codegen_c, ./api_common, ./api_schema
 
 # ---------------------------------------------------------------------------
-# Nim → Python type mapping (for type hints; cbor2 itself is dynamic)
+# Nim → Python type mapping (registry-aware)
 # ---------------------------------------------------------------------------
 
+const pyPrimMap = {
+  "bool": "bool",
+  "string": "str",
+  "char": "str",
+  "int": "int",
+  "int8": "int",
+  "int16": "int",
+  "int32": "int",
+  "int64": "int",
+  "uint": "int",
+  "uint8": "int",
+  "uint16": "int",
+  "uint32": "int",
+  "uint64": "int",
+  "byte": "int",
+  "float": "float",
+  "float32": "float",
+  "float64": "float",
+}.toTable
+
+proc isPrimitive(nimType: string): bool {.compileTime.} =
+  nimType.strip() in pyPrimMap
+
+proc primPyHint(nimType: string): string {.compileTime.} =
+  pyPrimMap.getOrDefault(nimType.strip(), "")
+
+proc unwrapBracket(s, head: string): string {.compileTime.} =
+  ## "seq[X]" + "seq" -> "X"
+  let t = s.strip()
+  t[head.len + 1 .. ^2].strip()
+
+proc parseArrayInner(s: string): string {.compileTime.} =
+  ## "array[N, T]" -> "T"
+  let inner = s.strip()[6 ..^ 2]
+  let comma = inner.find(',')
+  if comma < 0:
+    return ""
+  inner[comma + 1 .. ^1].strip()
+
 proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
-  ## Map a Nim type to a Python type-hint string. Only primitive types
-  ## are supported in this phase.
-  case nimType.strip()
-  of "bool":
-    "bool"
-  of "string":
-    "str"
-  of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte", "uint16",
-      "uint32", "uint64":
-    "int"
-  of "float32", "float", "float64":
-    "float"
-  of "char":
-    "str"
-  else:
-    ""
+  ## Recursive Nim → Python type hint. Falls back to "" for types we
+  ## don't yet know how to map (the caller emits a TODO).
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if isPrimitive(t):
+    return primPyHint(t)
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = nimTypeToPyHint(unwrapBracket(t, "seq"))
+    return
+      if inner.len > 0:
+        "List[" & inner & "]"
+      else:
+        "List[Any]"
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    let inner = nimTypeToPyHint(elem)
+    return
+      if inner.len > 0:
+        "List[" & inner & "]"
+      else:
+        "List[Any]"
+  if lower.startsWith("option[") and lower.endsWith("]"):
+    let inner = nimTypeToPyHint(unwrapBracket(t, "option"))
+    return
+      if inner.len > 0:
+        "Optional[" & inner & "]"
+      else:
+        "Optional[Any]"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return t
+    of atkEnum:
+      return t
+    of atkAlias, atkDistinct:
+      return primPyHint(resolveUnderlyingType(t))
+  ""
 
 proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
-  ## Default value literal for a dataclass field, matching the Python
-  ## type hint produced by `nimTypeToPyHint`.
-  case nimType.strip()
+  ## Default value literal for a dataclass field. Collections use
+  ## `field(default_factory=list)`; objects/enums use `None` (callers
+  ## construct lazily — dataclass init still needs a callable default).
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  case t
   of "bool":
-    "False"
+    return "False"
   of "string", "char":
-    "\"\""
+    return "\"\""
   of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte", "uint16",
       "uint32", "uint64":
-    "0"
+    return "0"
   of "float32", "float", "float64":
-    "0.0"
+    return "0.0"
   else:
-    "None"
+    discard
+  if lower.startsWith("seq[") or lower.startsWith("array["):
+    return "field(default_factory=list)"
+  if lower.startsWith("option["):
+    return "None"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return "field(default_factory=" & t & ")"
+    of atkEnum:
+      return t & "(0)"
+    of atkAlias, atkDistinct:
+      return nimTypeToPyDefault(resolveUnderlyingType(t))
+  "None"
 
 proc isPyMappable*(nimType: string): bool {.compileTime.} =
   nimTypeToPyHint(nimType).len > 0
+
+# ---------------------------------------------------------------------------
+# Per-type encoder / decoder expression builders.
+#
+# These produce the Python source for the `_encode_<T>` / `_decode_<T>`
+# helpers (called from request method bodies and from event trampolines).
+# Returning a string keeps the codegen flat; the wrapper file is plain
+# Python anyway.
+# ---------------------------------------------------------------------------
+
+proc pyDecodeExpr(nimType, src: string): string {.compileTime.} =
+  ## Python expression that decodes the value at `src` (a Python
+  ## expression yielding the raw cbor2 result) into the in-memory
+  ## representation of `nimType`.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if t == "bool":
+    return "bool(" & src & ") if isinstance(" & src & ", bool) else False"
+  if t == "string" or t == "char":
+    return "(" & src & " if isinstance(" & src & ", str) else \"\")"
+  if t in [
+    "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+    "uint64", "byte",
+  ]:
+    return "(int(" & src & ") if isinstance(" & src & ", int) else 0)"
+  if t in ["float", "float32", "float64"]:
+    return "(float(" & src & ") if isinstance(" & src & ", (int, float)) else 0.0)"
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = unwrapBracket(t, "seq")
+    let raw = "(" & src & " or [])"
+    return "[" & pyDecodeExpr(inner, "_x") & " for _x in " & raw & "]"
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    let raw = "(" & src & " or [])"
+    return "[" & pyDecodeExpr(elem, "_x") & " for _x in " & raw & "]"
+  if lower.startsWith("option[") and lower.endsWith("]"):
+    let inner = unwrapBracket(t, "option")
+    return "(None if " & src & " is None else " & pyDecodeExpr(inner, src) & ")"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return "_decode_" & t & "(" & src & ")"
+    of atkEnum:
+      return "_decode_" & t & "(" & src & ")"
+    of atkAlias, atkDistinct:
+      return pyDecodeExpr(resolveUnderlyingType(t), src)
+  # Unknown — pass through; cbor2 already gave us something.
+  src
+
+proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
+  ## Python expression that encodes the value at `src` into the
+  ## CBOR-friendly representation expected by the Nim provider for
+  ## `nimType`.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if isPrimitive(t):
+    return src
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = unwrapBracket(t, "seq")
+    return "[" & pyEncodeExpr(inner, "_x") & " for _x in (" & src & " or [])]"
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    return "[" & pyEncodeExpr(elem, "_x") & " for _x in (" & src & " or [])]"
+  if lower.startsWith("option[") and lower.endsWith("]"):
+    let inner = unwrapBracket(t, "option")
+    return "(None if " & src & " is None else " & pyEncodeExpr(inner, src) & ")"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return "_encode_" & t & "(" & src & ")"
+    of atkEnum:
+      return "int(" & src & ")"
+    of atkAlias, atkDistinct:
+      return pyEncodeExpr(resolveUnderlyingType(t), src)
+  src
 
 proc snakeToLowerCamel(s: string): string {.compileTime.} =
   result = ""
@@ -104,21 +266,10 @@ proc generateCborPyFile*(
       libName & ".py"
   let p = libName & "_"
 
-  # Emittable payload types (registered in the schema as object kinds).
-  var payloadTypeNames: seq[string] = @[]
-  for e in requestEntries:
-    if e.responseTypeName.len > 0 and e.responseTypeName notin payloadTypeNames:
-      payloadTypeNames.add(e.responseTypeName)
-  for e in eventEntries:
-    if e.typeName.len > 0 and e.typeName notin payloadTypeNames:
-      payloadTypeNames.add(e.typeName)
-  var emittablePayloads: seq[string] = @[]
-  for name in payloadTypeNames:
-    if not isTypeRegistered(name):
-      continue
-    let entry = lookupTypeEntry(name)
-    if entry.kind == atkObject:
-      emittablePayloads.add(name)
+  # Note: type emission below walks `gApiTypeRegistry` directly so we
+  # cover every referenced object/enum/distinct, not just request
+  # response or event payload types. The objectNames seq populated
+  # later is what request/event method emission filters against.
 
   var py =
     "# Generated by nim-brokers CBOR FFI codegen — do not edit.\n" & "#\n" &
@@ -126,7 +277,8 @@ proc generateCborPyFile*(
     "# Requires Python 3.8+ and the `cbor2` package (pip install cbor2).\n" & "\n" &
     "from __future__ import annotations\n" & "\n" & "import ctypes\n" & "import os\n" &
     "import platform\n" & "from dataclasses import dataclass, field\n" &
-    "from typing import Any, Callable, Dict, Generic, Optional, TypeVar\n" & "\n" &
+    "from enum import IntEnum\n" &
+    "from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar\n" & "\n" &
     "import cbor2\n" & "\n\n"
 
   # Library loading.
@@ -239,42 +391,117 @@ proc generateCborPyFile*(
   py.add("    def is_err(self) -> bool:\n")
   py.add("        return not self._ok\n\n")
 
-  # Typed payload dataclasses.
-  if emittablePayloads.len > 0:
+  # ----- Enums (atkEnum) -------------------------------------------------
+  var enumNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind == atkEnum:
+      enumNames.add(entry.name)
+
+  # ----- Distinct / alias (atkDistinct, atkAlias) ------------------------
+  var aliasNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind in {atkDistinct, atkAlias}:
+      aliasNames.add(entry.name)
+
+  # ----- Object types (atkObject) — emit all registered, not just
+  # response/event payload types, so seq[Tag] etc. resolve. -------------
+  var objectNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
+      objectNames.add(entry.name)
+
+  if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     py.add(
       "# ---------------------------------------------------------------------------\n"
     )
-    py.add("# Payload dataclasses\n")
+    py.add("# Generated payload types\n")
     py.add(
       "# ---------------------------------------------------------------------------\n\n"
     )
-  for name in emittablePayloads:
+
+  # Enums.
+  for name in enumNames:
+    let entry = lookupTypeEntry(name)
+    py.add("class " & name & "(IntEnum):\n")
+    if entry.enumValues.len == 0:
+      py.add("    pass\n")
+    else:
+      for v in entry.enumValues:
+        py.add("    " & v.name & " = " & $v.ordinal & "\n")
+    py.add("\n")
+    py.add("def _decode_" & name & "(data: Any) -> " & name & ":\n")
+    py.add("    if isinstance(data, int):\n")
+    py.add("        try:\n")
+    py.add("            return " & name & "(data)\n")
+    py.add("        except ValueError:\n")
+    py.add("            return " & name & "(0)\n")
+    py.add("    return " & name & "(0)\n\n")
+
+  # Distinct / alias — Python alias of the underlying primitive plus
+  # passthrough decode/encode helpers (so callers can freely use the
+  # alias name in type hints).
+  for name in aliasNames:
+    let underlying = resolveUnderlyingType(name)
+    let pyU = primPyHint(underlying)
+    if pyU.len == 0:
+      py.add(
+        "# TODO: alias '" & name & "' resolves to '" & underlying &
+          "' which has no Python primitive mapping\n\n"
+      )
+      continue
+    py.add(name & " = " & pyU & "\n")
+    py.add("def _decode_" & name & "(data: Any) -> " & pyU & ":\n")
+    py.add("    return " & pyDecodeExpr(underlying, "data") & "\n\n")
+    py.add("def _encode_" & name & "(v: Any) -> " & pyU & ":\n")
+    py.add("    return " & pyEncodeExpr(underlying, "v") & "\n\n")
+
+  # Objects: forward-declare names so per-type _decode/_encode helpers
+  # can reference each other regardless of declaration order. Python
+  # is lenient with forward refs inside def bodies, so emitting in
+  # registry order is enough.
+  for name in objectNames:
     let entry = lookupTypeEntry(name)
     py.add("@dataclass\n")
     py.add("class " & name & ":\n")
-    var anyMapped = false
+    var anyField = false
     for f in entry.fields:
-      let pyHint = nimTypeToPyHint(f.nimType)
-      if pyHint.len == 0:
-        py.add("    # TODO: Nim type '" & f.nimType & "' not yet mappable to Python\n")
-      else:
-        py.add(
-          "    " & f.name & ": " & pyHint & " = " & nimTypeToPyDefault(f.nimType) & "\n"
-        )
-        anyMapped = true
-    if not anyMapped:
+      let hint = nimTypeToPyHint(f.nimType)
+      if hint.len == 0:
+        py.add("    # TODO: Nim type '" & f.nimType & "' not yet mappable\n")
+        continue
+      py.add(
+        "    " & f.name & ": " & hint & " = " & nimTypeToPyDefault(f.nimType) & "\n"
+      )
+      anyField = true
+    if not anyField:
       py.add("    pass\n")
     py.add("\n")
 
-  # Helper: build a dataclass instance from a CBOR map (only the
-  # recognised keys; extras are dropped — matches the BrokerCbor
-  # `allowUnknownFields = true` flavor on the Nim side).
-  py.add("def _from_dict(cls: type, data: Optional[Dict[str, Any]]):\n")
-  py.add("    if not isinstance(data, dict):\n")
-  py.add("        return cls()\n")
-  py.add("    fields = {f.name for f in cls.__dataclass_fields__.values()}\n")
-  py.add("    kwargs = {k: v for k, v in data.items() if k in fields}\n")
-  py.add("    return cls(**kwargs)\n\n")
+  # Per-object _decode and _encode helpers.
+  for name in objectNames:
+    let entry = lookupTypeEntry(name)
+    py.add("def _decode_" & name & "(data: Any) -> " & name & ":\n")
+    py.add("    if not isinstance(data, dict):\n")
+    py.add("        return " & name & "()\n")
+    py.add("    return " & name & "(\n")
+    for f in entry.fields:
+      if not isPyMappable(f.nimType):
+        continue
+      let raw = "data.get(\"" & f.name & "\")"
+      py.add("        " & f.name & "=" & pyDecodeExpr(f.nimType, raw) & ",\n")
+    py.add("    )\n\n")
+
+    py.add("def _encode_" & name & "(v: Any) -> Dict[str, Any]:\n")
+    py.add("    if isinstance(v, dict):\n")
+    py.add("        return v\n")
+    py.add("    return {\n")
+    for f in entry.fields:
+      if not isPyMappable(f.nimType):
+        continue
+      py.add(
+        "        \"" & f.name & "\": " & pyEncodeExpr(f.nimType, "v." & f.name) & ",\n"
+      )
+    py.add("    }\n\n")
 
   # Lib class.
   py.add(
@@ -304,7 +531,7 @@ proc generateCborPyFile*(
 
   # Per-event handler maps, initialised in __init__.
   for ev in eventEntries:
-    if ev.typeName notin emittablePayloads:
+    if ev.typeName notin objectNames:
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
@@ -396,10 +623,10 @@ proc generateCborPyFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin emittablePayloads:
+    if e.responseTypeName notin objectNames:
       py.add(
         "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
-          "' is not yet emitted as a typed dataclass.\n\n"
+          "' is not a registered object type.\n\n"
       )
       continue
     var argsMappable = true
@@ -414,7 +641,7 @@ proc generateCborPyFile*(
       )
       continue
 
-    let methodName = e.apiName # snake_case is idiomatic in Python
+    let methodName = e.apiName
     var sigParams = "self"
     var argsDictBuilder = "{}"
     if e.argFields.len > 0:
@@ -423,7 +650,7 @@ proc generateCborPyFile*(
         sigParams.add(", " & n & ": " & nimTypeToPyHint(t))
         if i > 0:
           dictParts.add(", ")
-        dictParts.add("\"" & n & "\": " & n)
+        dictParts.add("\"" & n & "\": " & pyEncodeExpr(t, n))
       argsDictBuilder = "{" & dictParts & "}"
 
     py.add(
@@ -444,17 +671,16 @@ proc generateCborPyFile*(
         "            return Result.err(\"empty or malformed response envelope\")\n" &
         "        if envelope.get(\"err\") is not None:\n" &
         "            return Result.err(str(envelope[\"err\"]))\n" &
-        "        ok_payload = envelope.get(\"ok\")\n" &
-        "        return Result.ok(_from_dict(" & e.responseTypeName &
-        ", ok_payload))\n\n"
+        "        return Result.ok(_decode_" & e.responseTypeName &
+        "(envelope.get(\"ok\")))\n\n"
     )
 
   # Per-event subscribe / unsubscribe.
   for ev in eventEntries:
-    if ev.typeName notin emittablePayloads:
+    if ev.typeName notin objectNames:
       py.add(
         "    # TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
-          "' is not yet emitted as a typed dataclass.\n\n"
+          "' is not a registered object type.\n\n"
       )
       continue
     let mapName = "_" & ev.apiName & "_handlers"
@@ -480,7 +706,7 @@ proc generateCborPyFile*(
     py.add("            try:\n")
     py.add("                payload = ctypes.string_at(buf, buf_len)\n")
     py.add("                data = cbor2.loads(payload)\n")
-    py.add("                evt = _from_dict(" & ev.typeName & ", data)\n")
+    py.add("                evt = _decode_" & ev.typeName & "(data)\n")
     py.add("                handler(evt)\n")
     py.add("            except Exception:\n")
     py.add("                # Swallow handler errors so they don't escape\n")

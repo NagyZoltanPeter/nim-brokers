@@ -41,7 +41,8 @@ import
   ./mt_request_broker,
   ./api_common,
   ./api_cbor_codec,
-  ./api_schema
+  ./api_schema,
+  ./api_type_resolver
 
 export mt_request_broker, api_common, api_cbor_codec
 
@@ -250,8 +251,13 @@ proc emitArgAdapter(
 # Public entry point
 # ---------------------------------------------------------------------------
 
-proc generateApiCborRequestBroker*(body: NimNode): NimNode {.raises: [ValueError].} =
-  ## Top-level codegen for `RequestBroker(API)` under CBOR mode.
+proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError].} =
+  ## Deferred-phase codegen for `RequestBroker(API)` under CBOR mode.
+  ## Runs after the typed-phase `autoRegisterApiType` calls have populated
+  ## `gApiTypeRegistry` for any external types referenced in the broker
+  ## response object or signature parameters (enums, distinct types,
+  ## nested objects). Wrapper codegen consumes that registry to emit
+  ## typed dataclasses / encoders / decoders.
   result = newStmtList()
 
   # 1. Emit the underlying MT broker (typed Nim<->Nim dispatch on the
@@ -324,5 +330,31 @@ proc generateApiCborRequestBroker*(body: NimNode): NimNode {.raises: [ValueError
     echo "[brokers/cbor] RequestBroker(API) for '" & typeName & "' (apiName='" & apiName &
       "')"
     echo result.repr
+
+{.pop.}
+
+macro generateApiCborRequestBrokerDeferred*(body: untyped): untyped =
+  ## Typed-phase deferred codegen entry point. By the time this expands,
+  ## any preceding `autoRegisterApiType` calls have already populated
+  ## `gApiTypeRegistry`, so wrapper codegen can introspect external
+  ## enum / distinct / object types without falling back to TODO stubs.
+  generateApiCborRequestBrokerImpl(body)
+
+{.push raises: [].}
+
+proc generateApiCborRequestBroker*(body: NimNode): NimNode =
+  ## Two-phase entry point — mirrors the native
+  ## `generateApiRequestBroker` pattern.
+  result = newStmtList()
+
+  let externalIdents = discoverExternalTypes(body)
+  if externalIdents.len > 0:
+    result.add(emitAutoRegistrations(externalIdents))
+
+  let sizeIdents = discoverArraySizeIdents(body)
+  if sizeIdents.len > 0:
+    result.add(emitArraySizeRegistrations(sizeIdents))
+
+  result.add(newCall(ident("generateApiCborRequestBrokerDeferred"), copyNimTree(body)))
 
 {.pop.}

@@ -515,6 +515,30 @@ task runFfiCborExamplePy, "Build and run the CBOR-mode Python consumer example":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi_cbor/python_example/main.py")
 
+proc buildTypeMapTestLibCbor(genPy: bool = false) =
+  var flags =
+    "-d:BrokerFfiApi -d:BrokerFfiApiCBOR --threads:on --app:lib --mm:orc " &
+    "--path:. --outdir:test/typemappingtestlib_cbor/build"
+  flags.add(nimMainPrefixFlag("typemappingtestlib_cbor"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(
+    nimWindowsImplibFlag(
+      "test/typemappingtestlib_cbor/build", "typemappingtestlib_cbor"
+    )
+  )
+  if genPy:
+    flags.add(" -d:BrokerFfiApiGenPy")
+  exec "nim c " & flags & " test/typemappingtestlib_cbor/typemappingtestlib_cbor.nim"
+
+task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
+  buildTypeMapTestLibCbor()
+
+task runTypeMapTestLibCborPy,
+  "Build the CBOR-mode parity library + Python wrapper and run the Python parity test":
+  buildTypeMapTestLibCbor(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("test/typemappingtestlib_cbor/test_typemappingtestlib_cbor.py")
+
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
     "-d:BrokerFfiApi -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
