@@ -9,7 +9,7 @@ import brokers/request_broker
 ## ---------------------------------------------------------------------------
 ## API-mode RequestBroker tests
 ## ---------------------------------------------------------------------------
-## These tests compile with -d:BrokerFfiApi --threads:on.
+## These tests compile with -d:BrokerFfiApiNative --threads:on.
 ## NOTE: We use `suite` / `test` (not `asyncTest`) because the API test's main
 ## thread must NOT have a chronos event loop — the exported C functions create
 ## their own transient event loop via `waitFor`, and having a pre-existing

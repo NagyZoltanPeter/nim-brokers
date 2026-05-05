@@ -20,8 +20,11 @@
 ## Setting both `-d:BrokerFfiApiNative` and `-d:BrokerFfiApiCBOR` is a fatal
 ## compile-time error.
 ##
-## The plain `-d:BrokerFfiApi` flag still gates whether any FFI codegen runs at
-## all; without it `registerBrokerLibrary` is a no-op (existing behaviour).
+## Any of `-d:BrokerFfiApi`, `-d:BrokerFfiApiCBOR`, or `-d:BrokerFfiApiNative`
+## enables FFI codegen on its own — passing the strategy flag alone is
+## sufficient and there is no need to also pass `-d:BrokerFfiApi`. Without any
+## of them `registerBrokerLibrary` is a no-op. `-d:BrokerFfiApi` by itself
+## defaults to the CBOR strategy.
 
 {.push raises: [].}
 

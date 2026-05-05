@@ -9,7 +9,7 @@ import brokers/event_broker
 ## ---------------------------------------------------------------------------
 ## API-mode EventBroker tests (delivery thread design)
 ## ---------------------------------------------------------------------------
-## These tests compile with -d:BrokerFfiApi --threads:on.
+## These tests compile with -d:BrokerFfiApiNative --threads:on.
 ## They define API event brokers and test the generated C-callable
 ## registration functions with the delivery-thread-based event system.
 ##

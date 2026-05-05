@@ -304,15 +304,20 @@ See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior
 
 ### CBOR FFI strategy
 
-The default FFI strategy emits a per-request typed C ABI (struct + free
-helper per type). The CBOR strategy — selected with
-`-d:BrokerFfiApiCBOR` — collapses every library to the same fixed
-10-function ABI plus a single event-callback typedef, with CBOR as the
-on-wire format. Wrappers carry the typed surface (typed `Lib::*`
-methods on C++, `IntEnum` + `dataclass` on Python) and decode/encode
-through `jsoncons::cbor` (C++) or `cbor2` (Python). Buffer ownership
-rule: every `void*` crossing the ABI is allocated by Nim and freed by
-Nim.
+The CBOR strategy is the **default** FFI surface. It collapses every
+library to the same fixed 10-function C ABI plus a single
+event-callback typedef, with CBOR as the on-wire format. Wrappers
+carry the typed surface (typed `Lib::*` methods on C++, `IntEnum` +
+`dataclass` on Python) and decode/encode through `jsoncons::cbor`
+(C++) or `cbor2` (Python). Buffer ownership rule: every `void*`
+crossing the ABI is allocated by Nim and freed by Nim.
+
+The alternative **native** strategy emits a per-request typed C ABI
+(struct + free helper per type) and is selected with
+`-d:BrokerFfiApiNative`. To be explicit you can also select CBOR with
+`-d:BrokerFfiApiCBOR`. Either strategy flag enables FFI codegen on its
+own — there is no need to combine it with `-d:BrokerFfiApi` (which by
+itself enables FFI codegen and defaults to CBOR).
 
 Each library also emits a `<lib>.cddl` schema next to its `.h`/`.hpp`
 and exposes a runtime discovery API (`<lib>_listApis`,
@@ -339,7 +344,7 @@ The Python wrapper requires `cbor2` on the active interpreter
 | Wire format | Native C structs (per-language conversion) | CBOR everywhere (`jsoncons` / `cbor2`) |
 | Buffer ownership | Mixed (per-helper) | Uniform (Nim allocates, Nim frees) |
 | Discovery API | Static headers | Static `<lib>.cddl` + runtime `_listApis` / `_getSchema` |
-| Compile flag | `-d:BrokerFfiApiNative` (default) | `-d:BrokerFfiApiCBOR` |
+| Compile flag | `-d:BrokerFfiApiNative` | `-d:BrokerFfiApiCBOR` (default; also picked by bare `-d:BrokerFfiApi`) |
 
 ### Torpedo Duel — a richer FFI API example
 

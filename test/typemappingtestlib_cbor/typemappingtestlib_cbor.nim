@@ -1,7 +1,7 @@
 ## typemappingtestlib_cbor — CBOR FFI mirror of typemappingtestlib
 ## ===============================================================
 ## Same Nim type matrix as the native counterpart, exercised through
-## the CBOR FFI strategy (-d:BrokerFfiApi -d:BrokerFfiApiCBOR). The
+## the CBOR FFI strategy (-d:BrokerFfiApiCBOR). The
 ## tests in test_typemappingtestlib_cbor*.{nim,py,cpp} drive this
 ## library via `<lib>_call` / `<lib>_subscribe` and assert the round
 ## trips match the native lib's behaviour byte-for-byte at the

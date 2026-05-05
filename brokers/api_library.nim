@@ -2145,9 +2145,13 @@ proc registerBrokerLibraryCborImpl(
 
 macro registerBrokerLibrary*(body: untyped): untyped =
   ## Generates the full shared-library surface for a broker FFI library.
-  ## When compiled without `-d:BrokerFfiApi` this is a no-op, so client
-  ## code never needs a `when defined(BrokerFfiApi):` guard around it.
-  when defined(BrokerFfiApi):
+  ## A no-op unless one of `-d:BrokerFfiApi`, `-d:BrokerFfiApiCBOR`, or
+  ## `-d:BrokerFfiApiNative` is set, so client code never needs a
+  ## `when defined(...)` guard around it. `-d:BrokerFfiApiCBOR` and
+  ## `-d:BrokerFfiApiNative` each enable FFI codegen on their own and
+  ## additionally select the strategy; `-d:BrokerFfiApi` enables FFI
+  ## codegen and defaults to the CBOR strategy.
+  when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative):
     registerBrokerLibraryImpl(body)
   else:
     newStmtList()
