@@ -12,3 +12,7 @@ vendor/jsoncons/
 # CBOR example build outputs
 examples/ffiapi_cbor/nimlib/build/
 examples/ffiapi_cbor/cpp_example/build/
+
+# Python __pycache__ from running the generated wrapper
+__pycache__/
+*.pyc

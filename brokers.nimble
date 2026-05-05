@@ -457,7 +457,7 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
 # CBOR-mode example library + C++ consumer
 # ---------------------------------------------------------------------------
 
-proc buildFfiCborExampleFlags(): string =
+proc buildFfiCborExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApi -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi_cbor/nimlib/build"
   result.add(nimMainPrefixFlag("mylibcbor"))
@@ -467,9 +467,11 @@ proc buildFfiCborExampleFlags(): string =
     result.add(" --mm:" & getEnv("MM"))
   else:
     result.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
 
-proc buildFfiCborExampleLibrary() =
-  exec "nim c " & buildFfiCborExampleFlags() &
+proc buildFfiCborExampleLibrary(generatePy = false) =
+  exec "nim c " & buildFfiCborExampleFlags(generatePy) &
     " examples/ffiapi_cbor/nimlib/mylibcbor.nim"
 
 proc ffiCborExampleCmakeBuildDir(): string =
@@ -500,6 +502,15 @@ task runFfiCborExampleCpp, "Build and run the CBOR-mode C++ consumer example":
   buildFfiCborExampleLibrary()
   buildFfiCborExampleCpp()
   exec quoteArg(ffiCborExampleCppExePath())
+
+task buildFfiCborExamplePy,
+  "Build the CBOR-mode example library + generated Python wrapper":
+  buildFfiCborExampleLibrary(true)
+
+task runFfiCborExamplePy, "Build and run the CBOR-mode Python consumer example":
+  buildFfiCborExampleLibrary(true)
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/ffiapi_cbor/python_example/main.py")
 
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =
