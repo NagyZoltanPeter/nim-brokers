@@ -1016,6 +1016,144 @@ int main() {
   std::cout << "SKIP foreign-thread stress (BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)\n";
 #endif
 
+  // ============================================================================
+  // Listener-correctness stress (Phase 9F) — three native cases ported.
+  // - callback_data_correctness: not gated (the basic correctness should
+  //   work everywhere)
+  // - rapid_fire_no_leak / concurrent_listeners_and_requesters: gated by
+  //   BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS (sustained Channel[T] sends
+  //   from chronos delivery thread under macOS+refc+debug regression).
+  // ============================================================================
+
+  // 1) callback_data_correctness — every emitted TagSeqEvent's tag fields
+  //    must arrive intact and complete (no truncation, no leaks, no
+  //    use-after-free).
+  {
+    tmlib::Lib lib;
+    struct TagData {
+      std::string key;
+      std::string value;
+    };
+    std::mutex mtx;
+    std::vector<std::vector<TagData>> received;
+
+    auto h = lib.subscribeTagSeqEvent([&](const tmlib::TagSeqEvent& evt) {
+      std::vector<TagData> snap;
+      snap.reserve(evt.tags.size());
+      for (const auto& t : evt.tags) {
+        snap.push_back({t.key, t.value});
+      }
+      std::lock_guard<std::mutex> lk(mtx);
+      received.push_back(std::move(snap));
+    });
+    check("lc.callback_correctness.handle_nonzero", true, h != 0);
+
+    // Trigger 3 events with 3, 5, 0 tags.
+    lib.objSeqResultRequest(3);
+    lib.objSeqResultRequest(5);
+    lib.objSeqResultRequest(0);
+
+    waitUntil([&] {
+      std::lock_guard<std::mutex> lk(mtx);
+      return received.size() >= 3;
+    });
+
+    {
+      std::lock_guard<std::mutex> lk(mtx);
+      check("lc.callback_correctness.received_count",
+            static_cast<size_t>(3), received.size());
+      if (received.size() == 3) {
+        check("lc.callback_correctness.snap0_size",
+              static_cast<size_t>(3), received[0].size());
+        if (received[0].size() == 3) {
+          check("lc.callback_correctness.snap0[0].key",
+                std::string("key-0"), received[0][0].key);
+          check("lc.callback_correctness.snap0[2].value",
+                std::string("val-2"), received[0][2].value);
+        }
+        check("lc.callback_correctness.snap1_size",
+              static_cast<size_t>(5), received[1].size());
+        if (received[1].size() == 5) {
+          check("lc.callback_correctness.snap1[4].value",
+                std::string("val-4"), received[1][4].value);
+        }
+        check("lc.callback_correctness.snap2_empty",
+              true, received[2].empty());
+      }
+    }
+
+    lib.unsubscribeTagSeqEvent(h);
+  }
+
+#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+  // 2) rapid_fire_no_leak — emit kIterations events back-to-back and
+  //    verify every callback fired. (Native test asserts no leak via
+  //    ASAN; here we just count to ensure the dispatcher doesn't drop
+  //    deliveries under sustained pressure.)
+  {
+    tmlib::Lib lib;
+    std::atomic<int> count{0};
+    auto h = lib.subscribeTagSeqEvent(
+        [&](const tmlib::TagSeqEvent&) { count.fetch_add(1); });
+
+    constexpr int kIterations = 100;
+    for (int i = 0; i < kIterations; ++i) {
+      lib.objSeqResultRequest(10);
+    }
+    waitUntil([&] { return count.load() >= kIterations; },
+              std::chrono::milliseconds(10000));
+    check("lc.rapid_fire.events_received", kIterations, count.load());
+
+    lib.unsubscribeTagSeqEvent(h);
+  }
+
+  // 3) concurrent_listeners_and_requesters — multiple threads firing
+  //    tag-emitting requests while the delivery thread runs the
+  //    listener; every emit must produce exactly one delivered event,
+  //    every payload must have valid string content.
+  {
+    tmlib::Lib lib;
+    std::atomic<int> eventCount{0};
+    auto h = lib.subscribeTagSeqEvent([&](const tmlib::TagSeqEvent& evt) {
+      // Touch every string to force a read — catches use-after-free.
+      for (const auto& tg : evt.tags) {
+        volatile size_t kl = tg.key.size();
+        volatile size_t vl = tg.value.size();
+        (void)kl;
+        (void)vl;
+      }
+      eventCount.fetch_add(1);
+    });
+
+    constexpr int kRequesters = 4;
+    constexpr int kIters = 20;
+    std::atomic<int> requestFailures{0};
+    std::vector<std::thread> ths;
+    for (int t = 0; t < kRequesters; ++t) {
+      ths.emplace_back([&, t]() {
+        for (int i = 0; i < kIters; ++i) {
+          auto r = lib.objSeqResultRequest(5 + (t % 3));
+          if (!r.isOk() || r.value().tags.size() < 5) {
+            requestFailures.fetch_add(1);
+            return;
+          }
+        }
+      });
+    }
+    for (auto& th : ths) th.join();
+
+    const int expected = kRequesters * kIters;
+    waitUntil([&] { return eventCount.load() >= expected; },
+              std::chrono::milliseconds(5000));
+    check("lc.concurrent_l_r.request_failures", 0, requestFailures.load());
+    check("lc.concurrent_l_r.events_received", expected, eventCount.load());
+
+    lib.unsubscribeTagSeqEvent(h);
+  }
+#else
+  std::cout << "SKIP listener-correctness stress (BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)\n";
+#endif
+
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {
     std::cerr << "FAILED: " << g_fails << " check(s) did not match\n";

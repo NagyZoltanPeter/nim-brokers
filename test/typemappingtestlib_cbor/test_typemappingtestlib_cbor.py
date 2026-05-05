@@ -614,6 +614,92 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         for th in ths: th.join()
         check("ft.py.concurrent_lifecycle.failures", 0, len(failures))
 
+    # ========================================================================
+    # Listener-correctness stress (Phase 9F)
+    # ========================================================================
+
+    # 1) callback_data_correctness — 3 events with 3, 5, 0 tags arrive
+    #    intact in order.
+    with mod.Lib() as lib:
+        received: list = []
+        rlock = threading.Lock()
+        rdone = threading.Event()
+
+        def on_tag(evt: mod.TagSeqEvent) -> None:
+            with rlock:
+                received.append([(t.key, t.value) for t in evt.tags])
+                if len(received) >= 3:
+                    rdone.set()
+
+        h = lib.subscribe_tag_seq_event(on_tag)
+        lib.obj_seq_result_request(n=3)
+        lib.obj_seq_result_request(n=5)
+        lib.obj_seq_result_request(n=0)
+        assert _wait(rdone, 2.0), "callback_correctness: events not delivered"
+        with rlock:
+            check("lc.py.callback_correctness.count", 3, len(received))
+            check("lc.py.callback_correctness.snap0[0].key",
+                  "key-0", received[0][0][0])
+            check("lc.py.callback_correctness.snap1[4].value",
+                  "val-4", received[1][4][1])
+            check("lc.py.callback_correctness.snap2_empty", [], received[2])
+        lib.unsubscribe_tag_seq_event(h)
+
+    if not skip_fragile:
+        # 2) rapid_fire — sustained event delivery
+        with mod.Lib() as lib:
+            count = [0]
+            clock = threading.Lock()
+
+            def onfast(_evt: mod.TagSeqEvent) -> None:
+                with clock:
+                    count[0] += 1
+
+            h = lib.subscribe_tag_seq_event(onfast)
+            ITER = 50  # smaller than C++ 100 — Python ctypes callback path is slower
+            for _ in range(ITER):
+                lib.obj_seq_result_request(n=10)
+            _wait_until(lambda: count[0] >= ITER, timeout=10.0)
+            check("lc.py.rapid_fire.events_received", ITER, count[0])
+            lib.unsubscribe_tag_seq_event(h)
+
+        # 3) concurrent_listeners_and_requesters
+        with mod.Lib() as lib:
+            count = [0]
+            clock = threading.Lock()
+
+            def ondbg(evt: mod.TagSeqEvent) -> None:
+                # Touch each string to force read — would crash if UAF
+                _ = sum(len(t.key) + len(t.value) for t in evt.tags)
+                with clock:
+                    count[0] += 1
+
+            h = lib.subscribe_tag_seq_event(ondbg)
+
+            REQ_THREADS = 3
+            ITERS = 10
+            failures = []
+            flock = threading.Lock()
+
+            def requester(tid: int) -> None:
+                for _ in range(ITERS):
+                    r = lib.obj_seq_result_request(n=5 + (tid % 3))
+                    if not r.is_ok() or len(r.value.tags) < 5:
+                        with flock:
+                            failures.append(tid)
+                        return
+
+            ths = [threading.Thread(target=requester, args=(t,))
+                   for t in range(REQ_THREADS)]
+            for th in ths: th.start()
+            for th in ths: th.join()
+
+            expected = REQ_THREADS * ITERS
+            _wait_until(lambda: count[0] >= expected, timeout=5.0)
+            check("lc.py.concurrent_l_r.failures", 0, len(failures))
+            check("lc.py.concurrent_l_r.events_received", expected, count[0])
+            lib.unsubscribe_tag_seq_event(h)
+
     print(f"\n{'-' * 50}")
     if fail:
         print(f"FAILED: {fail} check(s) did not match", file=sys.stderr)
