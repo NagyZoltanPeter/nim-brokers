@@ -355,9 +355,10 @@ task perftest, "Run performance and stress tests":
         continue
       test opt, f
 
-task testApiCbor, "Run CBOR codec unit tests (orc/refc x debug/release)":
-  let cborTests = ["test_api_cbor_codec"]
-  for f in cborTests:
+task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
+  # Codec round-trip tests (no FFI flags needed).
+  let codecTests = ["test_api_cbor_codec"]
+  for f in codecTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
       "-d:nimUnittestOutputLevel:VERBOSE --mm:refc",
@@ -365,6 +366,20 @@ task testApiCbor, "Run CBOR codec unit tests (orc/refc x debug/release)":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc",
     ]:
       test opt, f
+
+  # Library-init integration tests need the CBOR FFI runtime.
+  let cborApiTests = ["test_api_cbor_library_init"]
+  for f in cborApiTests:
+    for opt in [
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:BrokerFfiApiCBOR -d:release --mm:refc --threads:on",
+    ]:
+      if skipRefcOnWindows(opt, f):
+        continue
+      let extraOpt = nimMainPrefixFlag("cbtest")
+      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
 
 task testApi, "Run FFI API broker tests":
   let apiTests =

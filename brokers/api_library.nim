@@ -1203,12 +1203,18 @@ proc registerBrokerLibraryNativeImpl(
     echo result.repr
 
 # ---------------------------------------------------------------------------
-# CBOR-mode library codegen (Phase 2 entry point).
+# CBOR-mode library codegen.
 #
-# Empty stub for now; actual emission lands incrementally in the next sub-
-# phases. The stub keeps the macro acceptable as a no-op so users can verify
-# their existing libraries compile cleanly under `-d:BrokerFfiApiCBOR`
-# before request/event/lifecycle exports come online.
+# Emits the small fixed C ABI surface (initialize / createContext / shutdown
+# / allocBuffer / freeBuffer / call) plus a per-library dispatch case
+# statement that routes apiName strings to the adapter procs registered by
+# `RequestBroker(API)` expansions. Buffer ownership: every void* crossing
+# the ABI is allocated by Nim and freed by Nim. Threading: a dedicated
+# processing thread runs `setupProviders(ctx)` and the chronos event loop
+# that drives the request providers; foreign threads invoke `<lib>_call`
+# and use `waitFor` to drive a momentary chronos loop on the calling
+# thread, which dispatches across the MT broker channel to the processing
+# thread. Events are not yet wired (Phase 3).
 # ---------------------------------------------------------------------------
 
 proc registerBrokerLibraryCborImpl(
@@ -1226,11 +1232,47 @@ proc registerBrokerLibraryCborImpl(
   let libName = config.name
   gApiLibraryName = libName
 
-  # Compile-time validation of the mandatory request types — same checks as
-  # the native path so misnamed types fail early in either mode.
   let initializeReqIdent = config.initializeRequest
   let shutdownReqIdent = config.shutdownRequest
+
+  # Identifiers
+  let initFuncName = libName & "_initialize"
+  let initFuncNameLit = newLit(initFuncName)
+  let initFuncIdent = ident(initFuncName)
+  let createContextFuncName = libName & "_createContext"
+  let createContextFuncNameLit = newLit(createContextFuncName)
+  let createContextFuncIdent = ident(createContextFuncName)
+  let shutdownFuncName = libName & "_shutdown"
+  let shutdownFuncNameLit = newLit(shutdownFuncName)
+  let shutdownFuncIdent = ident(shutdownFuncName)
+  let callFuncName = libName & "_call"
+  let callFuncNameLit = newLit(callFuncName)
+  let callFuncIdent = ident(callFuncName)
+  let allocBufFuncName = libName & "_allocBuffer"
+  let allocBufFuncNameLit = newLit(allocBufFuncName)
+  let allocBufFuncIdent = ident(allocBufFuncName)
+  let freeBufFuncName = libName & "_freeBuffer"
+  let freeBufFuncNameLit = newLit(freeBufFuncName)
+  let freeBufFuncIdent = ident(freeBufFuncName)
+
+  let nimMainIdent = ident(libName & "NimMain")
+  let nimInitFlagIdent = ident("g" & libName & "NimInit")
+  let gcRegFlagIdent = ident("g" & libName & "GcReg")
+  let ctxEntryIdent = ident(libName & "CborCtxEntry")
+  let procThreadArgIdent = ident(libName & "CborThreadArg")
+  let procThreadProcIdent = ident(libName & "CborProcessingThread")
+  let ctxsIdent = ident("g" & libName & "CborCtxs")
+  let ctxsLockIdent = ident("g" & libName & "CborCtxsLock")
+  let ctxsInitIdent = ident("g" & libName & "CborCtxsInit")
+  let dispatchProcIdent = ident(libName & "CborDispatch")
+  let libNameLit = newLit(libName)
+
+  # Hard cap on a single buffer to detect runaway encodes.
+  let bufSizeCap = newLit(64 * 1024 * 1024)
+
   result = newStmtList()
+
+  # Compile-time validation of the mandatory request types.
   result.add(
     quote do:
       when not compiles(typeof(`initializeReqIdent`)):
@@ -1251,8 +1293,406 @@ proc registerBrokerLibraryCborImpl(
         .}
   )
 
+  # Foreign-thread GC bootstrap (once per compilation unit).
+  result.add(emitEnsureForeignThreadGc())
+
+  # NimMain import on POSIX (Windows DllMain auto-runs it).
+  when not defined(windows):
+    let nimMainImportName = newLit(libName & "NimMain")
+    result.add(
+      quote do:
+        proc `nimMainIdent`() {.importc: `nimMainImportName`, cdecl.}
+    )
+
+  # ------------------------------------------------------------------
+  # Build the dispatch case statement from accumulated request entries.
+  # Snapshot and clear the accumulator so a second registerBrokerLibrary in
+  # the same compilation unit (a future multi-library scenario) starts fresh.
+  # ------------------------------------------------------------------
+  # Snapshot the registered request adapters. We deliberately do NOT clear
+  # `gApiCborRequestEntries` here — Nim's compile-time VM aliases `let`
+  # copies of seqs back to the source, so resetting this list before
+  # reading `entries` would leave us with an empty list. A future
+  # multi-library-per-compilation scenario would need a different pattern
+  # (e.g., snapshot length and slice from there next time).
+  let entries = gApiCborRequestEntries
+
+  # The dispatch proc is async and returns just `seq[byte]`. To signal
+  # "unknown apiName" without raising or capturing a `var bool`, the
+  # convention is: empty seq + the calling `<lib>_call` checks against the
+  # known-name set (a separate non-async predicate proc).
+  let knownNamePredIdent = ident(libName & "CborIsKnownApiName")
+
+  var caseStmt = nnkCaseStmt.newTree(ident("apiName"))
+  for entry in entries:
+    let nameLit = newLit(entry.apiName)
+    let adapterCall = newCall(ident(entry.adapterProc), ident("ctx"), ident("reqBuf"))
+    let branchBody = newStmtList(
+      nnkReturnStmt.newTree(nnkCommand.newTree(ident("await"), adapterCall))
+    )
+    caseStmt.add(nnkOfBranch.newTree(nameLit, branchBody))
+  caseStmt.add(
+    nnkElse.newTree(
+      newStmtList(nnkReturnStmt.newTree(prefix(nnkBracket.newTree(), "@")))
+    )
+  )
+
+  let dispatchProc = nnkProcDef.newTree(
+    postfix(dispatchProcIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      nnkBracketExpr.newTree(
+        ident("Future"), nnkBracketExpr.newTree(ident("seq"), ident("byte"))
+      ),
+      newIdentDefs(ident("apiName"), ident("string")),
+      newIdentDefs(ident("ctx"), ident("BrokerContext")),
+      newIdentDefs(ident("reqBuf"), nnkBracketExpr.newTree(ident("seq"), ident("byte"))),
+    ),
+    nnkPragma.newTree(
+      newColonExpr(
+        ident("async"),
+        nnkTupleConstr.newTree(newColonExpr(ident("raises"), nnkBracket.newTree())),
+      ),
+      ident("gcsafe"),
+    ),
+    newEmptyNode(),
+    newStmtList(caseStmt),
+  )
+  result.add(dispatchProc)
+
+  # Companion predicate: foreign caller dispatch needs to distinguish
+  # "unknown name" from "known name with empty response". Predicate is a
+  # plain non-async proc so `<lib>_call` can call it directly.
+  var nameSet = newStmtList()
+  var nameCase = nnkCaseStmt.newTree(ident("apiName"))
+  for entry in entries:
+    nameCase.add(
+      nnkOfBranch.newTree(
+        newLit(entry.apiName), newStmtList(nnkReturnStmt.newTree(ident("true")))
+      )
+    )
+  nameCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+  nameSet.add(nameCase)
+  let knownProc = nnkProcDef.newTree(
+    postfix(knownNamePredIdent, "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    nnkFormalParams.newTree(
+      ident("bool"), newIdentDefs(ident("apiName"), ident("string"))
+    ),
+    nnkPragma.newTree(ident("gcsafe")),
+    newEmptyNode(),
+    nameSet,
+  )
+  result.add(knownProc)
+
+  # ------------------------------------------------------------------
+  # Per-library types and globals.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      type
+        `procThreadArgIdent` = object
+          ctx: BrokerContext
+          shutdownFlag: Atomic[int]
+          processingReady: Atomic[int]
+          processingErrorMessage: cstring
+
+        `ctxEntryIdent` = object
+          ctx: BrokerContext
+          procThread: Thread[ptr `procThreadArgIdent`]
+          arg: ptr `procThreadArgIdent`
+          active: bool
+
+      var `ctxsIdent`: seq[ptr `ctxEntryIdent`]
+      var `ctxsLockIdent`: Lock
+      var `ctxsInitIdent`: Atomic[int]
+
+      var `nimInitFlagIdent`: Atomic[int]
+      var `gcRegFlagIdent` {.threadvar.}: bool
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_initialize` — Nim runtime + GC setup. Idempotent.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `initFuncIdent`*() {.exportc: `initFuncNameLit`, cdecl, dynlib.} =
+        # Step 1: one-time Nim runtime init.
+        while true:
+          case `nimInitFlagIdent`.load(moAcquire)
+          of 2:
+            break
+          of -1:
+            return
+          of 1:
+            sleep(1)
+          else:
+            var expected = 0
+            if `nimInitFlagIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
+              when compileOption("app", "lib") and not defined(windows):
+                let initRes = catch:
+                  `nimMainIdent`()
+                if initRes.isErr():
+                  error "Failed to initialize Nim runtime",
+                    library = `libNameLit`, detail = initRes.error.msg
+                  `nimInitFlagIdent`.store(-1, moRelease)
+                  return
+              `nimInitFlagIdent`.store(2, moRelease)
+              break
+
+        # Step 2: per-thread foreign GC registration.
+        when compileOption("app", "lib"):
+          if not `gcRegFlagIdent`:
+            when declared(setupForeignThreadGc):
+              setupForeignThreadGc()
+            `gcRegFlagIdent` = true
+          when declared(nimGC_setStackBottom):
+            var locals {.volatile, noinit.}: pointer
+            locals = addr(locals)
+            nimGC_setStackBottom(locals)
+
+        # Step 3: lazy-init the global ctx registry.
+        var ctxsExpected = 0
+        if `ctxsInitIdent`.compareExchange(ctxsExpected, 1, moAcquire, moRelaxed):
+          initLock(`ctxsLockIdent`)
+          `ctxsInitIdent`.store(2, moRelease)
+        else:
+          while `ctxsInitIdent`.load(moAcquire) != 2:
+            sleep(1)
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_allocBuffer` / `<lib>_freeBuffer`.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `allocBufFuncIdent`*(
+          size: int32
+      ): pointer {.exportc: `allocBufFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if size <= 0 or size.int > `bufSizeCap`:
+          return nil
+        allocShared0(size.int)
+
+      proc `freeBufFuncIdent`*(
+          buf: pointer
+      ) {.exportc: `freeBufFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if not buf.isNil:
+          deallocShared(buf)
+
+  )
+
+  # ------------------------------------------------------------------
+  # Processing thread proc (one per ctx). Runs setupProviders then loops
+  # on a chronos event loop until shutdownFlag is set.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `procThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
+        setThreadBrokerContext(arg.ctx)
+
+        when compiles(setupProviders(arg.ctx).isErr()):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            arg.processingErrorMessage =
+              allocCStringCopy("setupProviders raised: " & setupCatchRes.error.msg)
+            arg.processingReady.store(-1, moRelease)
+            return
+          let setupRes = setupCatchRes.get()
+          if setupRes.isErr():
+            arg.processingErrorMessage = allocCStringCopy(setupRes.error())
+            arg.processingReady.store(-1, moRelease)
+            return
+        elif compiles(setupProviders(arg.ctx)):
+          let setupCatchRes = catch:
+            setupProviders(arg.ctx)
+          if setupCatchRes.isErr():
+            arg.processingErrorMessage =
+              allocCStringCopy("setupProviders raised: " & setupCatchRes.error.msg)
+            arg.processingReady.store(-1, moRelease)
+            return
+
+        arg.processingReady.store(1, moRelease)
+
+        proc awaitShutdown(flag: ptr Atomic[int]) {.async: (raises: []).} =
+          while flag[].load(moAcquire) != 1:
+            let s = catch:
+              await sleepAsync(milliseconds(5))
+            if s.isErr():
+              discard
+
+        waitFor awaitShutdown(addr arg.shutdownFlag)
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_createContext` — spawn ctx + processing thread, await ready.
+  # `<lib>_shutdown` — signal, join, free.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `createContextFuncIdent`*(
+          errOut: ptr cstring
+      ): uint32 {.exportc: `createContextFuncNameLit`, cdecl, dynlib.} =
+        `initFuncIdent`()
+        ensureForeignThreadGc()
+
+        # Skip BrokerContext value 0 — `<lib>_createContext` reserves 0
+        # as the failure return code visible to foreign callers.
+        var bctx = NewBrokerContext()
+        while uint32(bctx) == 0'u32:
+          bctx = NewBrokerContext()
+        let arg =
+          cast[ptr `procThreadArgIdent`](allocShared0(sizeof(`procThreadArgIdent`)))
+        arg.ctx = bctx
+        arg.shutdownFlag.store(0, moRelaxed)
+        arg.processingReady.store(0, moRelaxed)
+        arg.processingErrorMessage = nil
+
+        let entry = cast[ptr `ctxEntryIdent`](allocShared0(sizeof(`ctxEntryIdent`)))
+        entry.ctx = bctx
+        entry.arg = arg
+        entry.active = true
+
+        let createRes = catch:
+          createThread(entry.procThread, `procThreadProcIdent`, arg)
+        if createRes.isErr():
+          if not errOut.isNil:
+            errOut[] = allocCStringCopy(
+              "Failed to spawn processing thread: " & createRes.error.msg
+            )
+          deallocShared(arg)
+          deallocShared(entry)
+          return 0'u32
+
+        # Poll for processingReady (or failure).
+        var waitedMs = 0
+        const timeoutMs = 5000
+        var status = 0
+        while waitedMs < timeoutMs:
+          status = arg.processingReady.load(moAcquire).int
+          if status != 0:
+            break
+          sleep(1)
+          inc waitedMs
+
+        if status != 1:
+          arg.shutdownFlag.store(1, moRelease)
+          joinThread(entry.procThread)
+          if not errOut.isNil:
+            if not arg.processingErrorMessage.isNil:
+              errOut[] = arg.processingErrorMessage
+              arg.processingErrorMessage = nil
+            else:
+              errOut[] = allocCStringCopy("processing thread did not become ready")
+          deallocShared(arg)
+          deallocShared(entry)
+          return 0'u32
+
+        withLock `ctxsLockIdent`:
+          `ctxsIdent`.add(entry)
+        return uint32(bctx)
+
+      proc `shutdownFuncIdent`*(
+          ctx: uint32
+      ): int32 {.exportc: `shutdownFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        var entryToShutdown: ptr `ctxEntryIdent` = nil
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            let e = `ctxsIdent`[i]
+            if uint32(e.ctx) == ctx and e.active:
+              e.active = false
+              entryToShutdown = e
+              break
+        if entryToShutdown.isNil:
+          return -1'i32
+
+        entryToShutdown.arg.shutdownFlag.store(1, moRelease)
+        joinThread(entryToShutdown.procThread)
+        if not entryToShutdown.arg.processingErrorMessage.isNil:
+          freeCString(entryToShutdown.arg.processingErrorMessage)
+        deallocShared(entryToShutdown.arg)
+
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            if `ctxsIdent`[i] == entryToShutdown:
+              `ctxsIdent`.del(i)
+              break
+        deallocShared(entryToShutdown)
+        return 0'i32
+
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_call` — string dispatch over the generated case statement.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `callFuncIdent`*(
+          ctx: uint32,
+          apiNameC: cstring,
+          reqBuf: pointer,
+          reqLen: int32,
+          respBufOut: ptr pointer,
+          respLenOut: ptr int32,
+      ): int32 {.exportc: `callFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        if apiNameC.isNil:
+          return -2'i32
+        if reqLen < 0 or reqLen.int > `bufSizeCap`:
+          return -3'i32
+
+        let apiName = $apiNameC
+
+        # Copy the inbound buffer into a Nim seq[byte] so the bytes outlive
+        # the C buffer (which we free unconditionally before returning).
+        var nimReq = newSeq[byte](reqLen.int)
+        if reqLen > 0 and not reqBuf.isNil:
+          copyMem(addr nimReq[0], reqBuf, reqLen.int)
+        if not reqBuf.isNil:
+          deallocShared(reqBuf)
+
+        let bctx = BrokerContext(ctx)
+
+        if not `knownNamePredIdent`(apiName):
+          let msg = "unknown apiName: " & apiName
+          let buf = allocShared0(msg.len)
+          if msg.len > 0:
+            copyMem(buf, unsafeAddr msg[0], msg.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(msg.len)
+          return -4'i32
+
+        let dispRes = catch:
+          waitFor `dispatchProcIdent`(apiName, bctx, nimReq)
+        if dispRes.isErr():
+          # Should not happen (adapter is raises:[]), but be defensive.
+          return -10'i32
+
+        let respBytes = dispRes.get()
+        if respBytes.len > 0:
+          let buf = allocShared0(respBytes.len)
+          copyMem(buf, unsafeAddr respBytes[0], respBytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(respBytes.len)
+        return 0'i32
+
+  )
+
   when defined(brokerDebug):
-    echo "[brokers/cbor] registerBrokerLibraryCborImpl stub for '" & libName & "'"
+    echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
+      "' with " & $entries.len & " request adapters"
+    echo result.repr
 
 {.pop.}
 
