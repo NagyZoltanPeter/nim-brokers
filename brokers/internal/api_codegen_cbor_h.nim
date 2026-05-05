@@ -136,6 +136,25 @@ proc generateCborCHeaderFile*(
       "                              uint64_t handle);\n\n"
   )
 
+  h.add("/* ----------------------------------------------------------------\n")
+  h.add(" * Discovery API\n")
+  h.add(" *\n")
+  h.add(" * Both functions allocate the response with " & p & "allocBuffer; the\n")
+  h.add(" * caller frees it via " & p & "freeBuffer.\n")
+  h.add(" *\n")
+  h.add(" * " & p & "listApis returns a CBOR-encoded ApiList:\n")
+  h.add(" *   {libName: tstr, requests: [* tstr], events: [* tstr]}\n")
+  h.add(" *\n")
+  h.add(" * " & p & "getSchema returns a CBOR-encoded LibraryDescriptor (full\n")
+  h.add(" * schema including the embedded CDDL text). See <" & libName & ".cddl>\n")
+  h.add(" * for the static schema.\n")
+  h.add(" *\n")
+  h.add(" * Returns 0 on success, -1 if any out-pointer is NULL,\n")
+  h.add(" * -10 on internal CBOR encode failure.\n")
+  h.add(" * ---------------------------------------------------------------- */\n\n")
+  h.add("int32_t " & p & "listApis(void** respBufOut, int32_t* respLenOut);\n\n")
+  h.add("int32_t " & p & "getSchema(void** respBufOut, int32_t* respLenOut);\n\n")
+
   if requestApiNames.len > 0 or eventApiNames.len > 0:
     h.add("/* ----------------------------------------------------------------\n")
     h.add(" * Documented apiNames\n")

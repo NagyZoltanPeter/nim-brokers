@@ -30,6 +30,10 @@ import ./broker_context, ./internal/api_common
 import ./internal/api_codegen_cbor_h
 import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
+import ./internal/api_codegen_cbor_cddl
+import ./internal/api_cbor_descriptor
+
+export api_cbor_descriptor
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -1287,6 +1291,18 @@ proc registerBrokerLibraryCborImpl(
   let knownEventPredIdent = ident(libName & "CborIsKnownEvent")
   let installAllListenersIdent = ident(libName & "CborInstallAllListeners")
 
+  # Discovery / introspection identifiers (Phase 6).
+  let listApisFuncName = libName & "_listApis"
+  let listApisFuncNameLit = newLit(listApisFuncName)
+  let listApisFuncIdent = ident(listApisFuncName)
+  let getSchemaFuncName = libName & "_getSchema"
+  let getSchemaFuncNameLit = newLit(getSchemaFuncName)
+  let getSchemaFuncIdent = ident(getSchemaFuncName)
+  let descriptorIdent = ident("g" & libName & "CborDescriptor")
+  let apiListIdent = ident("g" & libName & "CborApiList")
+  let descriptorBuildIdent = ident(libName & "CborBuildDescriptor")
+  let apiListBuildIdent = ident(libName & "CborBuildApiList")
+
   # Hard cap on a single buffer to detect runaway encodes.
   let bufSizeCap = newLit(64 * 1024 * 1024)
 
@@ -1938,8 +1954,8 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # ------------------------------------------------------------------
-  # Generated artifacts: write the C header next to the build output so
-  # foreign-language wrappers can pick it up via `-I`.
+  # Generated artifacts: write the C header + CDDL schema next to the
+  # build output so foreign-language wrappers can pick them up via `-I`.
   # ------------------------------------------------------------------
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
@@ -1953,6 +1969,171 @@ proc registerBrokerLibraryCborImpl(
   generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries)
+
+  # Emit the CDDL schema and capture its text for the runtime descriptor.
+  let cddlText =
+    generateCborCddlFile(outDir, libName, entries, eventEntries, gApiTypeRegistry)
+
+  # ------------------------------------------------------------------
+  # Discovery API (Phase 6): runtime descriptor + `<lib>_listApis` /
+  # `<lib>_getSchema` C exports. The descriptor is built lazily on the
+  # first call; subsequent calls re-use the cached value.
+  # ------------------------------------------------------------------
+  let descriptorOnceIdent = ident("g" & libName & "CborDescriptorOnce")
+  let apiListOnceIdent = ident("g" & libName & "CborApiListOnce")
+
+  # Build the descriptor population body as a Nim source string. Doing it
+  # this way keeps every string / int literal in straight Nim code rather
+  # than having to splice deeply nested AST through `quote do:`.
+  var buildSrc = "proc " & libName & "CborBuildDescriptor(): LibraryDescriptor =\n"
+  buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.cddl = " & escape(cddlText) & "\n")
+  buildSrc.add("  result.requests = @[\n")
+  for r in entries:
+    buildSrc.add("    ApiRequestInfo(apiName: " & escape(r.apiName) & ",\n")
+    let argsTypeRepr =
+      if r.argFields.len > 0:
+        upperCamel(r.apiName) & "Args"
+      else:
+        ""
+    buildSrc.add("      argsType: " & escape(argsTypeRepr) & ",\n")
+    buildSrc.add("      argFields: @[\n")
+    for (fname, ftype) in r.argFields:
+      buildSrc.add(
+        "        ApiFieldInfo(name: " & escape(fname) & ", nimType: " & escape(ftype) &
+          "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      responseType: " & escape(r.responseTypeName) & "),\n")
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.events = @[\n")
+  for e in eventEntries:
+    buildSrc.add(
+      "    ApiEventInfo(apiName: " & escape(e.apiName) & ", payloadType: " &
+        escape(e.typeName) & "),\n"
+    )
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.types = @[\n")
+  for t in gApiTypeRegistry:
+    if t.name.endsWith("CborArgs"):
+      continue
+    let kindStr =
+      case t.kind
+      of atkObject: "object"
+      of atkEnum: "enum"
+      of atkAlias: "alias"
+      of atkDistinct: "distinct"
+    buildSrc.add(
+      "    ApiTypeInfo(name: " & escape(t.name) & ", kind: " & escape(kindStr) & ",\n"
+    )
+    buildSrc.add("      fields: @[\n")
+    for f in t.fields:
+      buildSrc.add(
+        "        ApiFieldInfo(name: " & escape(f.name) & ", nimType: " &
+          escape(f.nimType) & "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      enumValues: @[\n")
+    for v in t.enumValues:
+      buildSrc.add(
+        "        ApiEnumValueInfo(name: " & escape(v.name) & ", ordinal: " & $v.ordinal &
+          "),\n"
+      )
+    buildSrc.add("      ],\n")
+    buildSrc.add("      underlyingType: " & escape(t.underlyingType) & "),\n")
+  buildSrc.add("  ]\n")
+
+  # Build the lightweight ApiList in the same fashion.
+  buildSrc.add("\nproc " & libName & "CborBuildApiList(): ApiList =\n")
+  buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.requests = @[\n")
+  for r in entries:
+    buildSrc.add("    " & escape(r.apiName) & ",\n")
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.events = @[\n")
+  for e in eventEntries:
+    buildSrc.add("    " & escape(e.apiName) & ",\n")
+  buildSrc.add("  ]\n")
+
+  try:
+    result.add(parseStmt(buildSrc))
+  except ValueError as e:
+    error("CBOR FFI: failed to parse generated descriptor builder: " & e.msg)
+
+  let ensureDescriptorIdent = ident(libName & "CborEnsureDescriptor")
+  let ensureApiListIdent = ident(libName & "CborEnsureApiList")
+
+  # Cached singletons + lazy initialisers.
+  result.add(
+    quote do:
+      var `descriptorOnceIdent`: bool
+      var `descriptorIdent`: LibraryDescriptor
+      var `apiListOnceIdent`: bool
+      var `apiListIdent`: ApiList
+
+      proc `ensureDescriptorIdent`() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if not `descriptorOnceIdent`:
+            `descriptorIdent` = `descriptorBuildIdent`()
+            `descriptorOnceIdent` = true
+
+      proc `ensureApiListIdent`() {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if not `apiListOnceIdent`:
+            `apiListIdent` = `apiListBuildIdent`()
+            `apiListOnceIdent` = true
+
+  )
+
+  # `<lib>_listApis` — returns a CBOR-encoded `ApiList`.
+  result.add(
+    quote do:
+      proc `listApisFuncIdent`*(
+          respBufOut: ptr pointer, respLenOut: ptr int32
+      ): int32 {.exportc: `listApisFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        `ensureApiListIdent`()
+        let enc = cborEncode(`apiListIdent`)
+        if enc.isErr():
+          return -10'i32
+        let bytes = enc.get()
+        if bytes.len > 0:
+          let buf = allocShared0(bytes.len)
+          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(bytes.len)
+        return 0'i32
+
+  )
+
+  # `<lib>_getSchema` — returns a CBOR-encoded `LibraryDescriptor`.
+  result.add(
+    quote do:
+      proc `getSchemaFuncIdent`*(
+          respBufOut: ptr pointer, respLenOut: ptr int32
+      ): int32 {.exportc: `getSchemaFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        if respBufOut.isNil or respLenOut.isNil:
+          return -1'i32
+        respBufOut[] = nil
+        respLenOut[] = 0
+        `ensureDescriptorIdent`()
+        let enc = cborEncode(`descriptorIdent`)
+        if enc.isErr():
+          return -10'i32
+        let bytes = enc.get()
+        if bytes.len > 0:
+          let buf = allocShared0(bytes.len)
+          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+          respBufOut[] = buf
+          respLenOut[] = int32(bytes.len)
+        return 0'i32
+
+  )
 
   when defined(brokerDebug):
     echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &

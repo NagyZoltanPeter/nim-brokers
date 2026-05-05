@@ -199,6 +199,17 @@ proc generateCborPyFile*(
   )
   py.add("_LIB." & p & "unsubscribe.restype = ctypes.c_int32\n\n")
 
+  py.add(
+    "_LIB." & p &
+      "listApis.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int32)]\n"
+  )
+  py.add("_LIB." & p & "listApis.restype = ctypes.c_int32\n\n")
+  py.add(
+    "_LIB." & p &
+      "getSchema.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int32)]\n"
+  )
+  py.add("_LIB." & p & "getSchema.restype = ctypes.c_int32\n\n")
+
   # Result helper.
   py.add(
     "# ---------------------------------------------------------------------------\n"
@@ -315,6 +326,34 @@ proc generateCborPyFile*(
   py.add("    @property\n")
   py.add("    def context(self) -> int:\n")
   py.add("        return self._ctx\n\n")
+
+  # Discovery API helpers (Phase 6).
+  py.add("    def list_apis(self) -> Dict[str, Any]:\n")
+  py.add("        \"\"\"Return the decoded ApiList describing the library surface.\n")
+  py.add("        Decodes via cbor2; raises RuntimeError on framework error.\n")
+  py.add("        \"\"\"\n")
+  py.add(
+    "        return self._fetch_descriptor(_LIB." & p & "listApis, \"listApis\")\n\n"
+  )
+  py.add("    def get_schema(self) -> Dict[str, Any]:\n")
+  py.add("        \"\"\"Return the decoded LibraryDescriptor (schema + CDDL text).\n")
+  py.add("        \"\"\"\n")
+  py.add(
+    "        return self._fetch_descriptor(_LIB." & p & "getSchema, \"getSchema\")\n\n"
+  )
+  py.add("    def _fetch_descriptor(self, fn, label: str) -> Dict[str, Any]:\n")
+  py.add("        resp_buf = ctypes.c_void_p()\n")
+  py.add("        resp_len = ctypes.c_int32()\n")
+  py.add("        status = fn(ctypes.byref(resp_buf), ctypes.byref(resp_len))\n")
+  py.add("        if status != 0:\n")
+  py.add("            raise RuntimeError(f\"{label} framework error: {status}\")\n")
+  py.add("        if not resp_buf or resp_len.value <= 0:\n")
+  py.add("            return {}\n")
+  py.add("        try:\n")
+  py.add("            payload = ctypes.string_at(resp_buf, resp_len.value)\n")
+  py.add("        finally:\n")
+  py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
+  py.add("        return cbor2.loads(payload)\n\n")
 
   # Helper: do a sync call.
   py.add(

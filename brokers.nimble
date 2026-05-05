@@ -371,7 +371,9 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
   # uses a different --nimMainPrefix to keep their generated NimMain
   # symbols distinct (mirrors the native testApi convention).
   let cborApiTests = [
-    ("test_api_cbor_library_init", "cbtest"), ("test_api_cbor_event_subscribe", "evtt")
+    ("test_api_cbor_library_init", "cbtest"),
+    ("test_api_cbor_event_subscribe", "evtt"),
+    ("test_api_cbor_discovery", "cbdisc"),
   ]
   for (f, prefix) in cborApiTests:
     for opt in [
