@@ -810,7 +810,7 @@ task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
 
 task alltests,
-  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC":
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, testApiCbor, runFfiCborExampleCpp, runFfiCborExamplePy, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
   exec "nimble test"
   exec "nimble testApi"
   exec "nimble testFfiApi"
@@ -818,6 +818,11 @@ task alltests,
   exec "nimble runFfiExamplePy"
   exec "nimble runFfiExampleCpp"
   exec "nimble runFfiExampleC"
+  exec "nimble testApiCbor"
+  exec "nimble runFfiCborExampleCpp"
+  exec "nimble runFfiCborExamplePy"
+  exec "nimble runTypeMapTestLibCborCpp"
+  exec "nimble runTypeMapTestLibCborPy"
 
 task allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
   exec "nimble testFfiApiCppAsanOrc"
