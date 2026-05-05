@@ -42,6 +42,18 @@ when brokerFfiApiCborForced and brokerFfiApiNativeForced:
       "Pick one (or neither and let `ffiMode:` decide)."
   .}
 
+# `brokerFfiMode` is the FFI mode visible to all FFI codegen sites. Driven
+# entirely by compile flags so it has a stable value before any macro
+# expansion runs: per-broker macros (`RequestBroker(API)`,
+# `EventBroker(API)`) expand *before* `registerBrokerLibrary` and therefore
+# cannot consult a per-library `ffiMode:` field — the flag is the only
+# persistent input across macro invocations. When neither force flag is set
+# the default is `mfCbor` (the new strategy is the documented default — see
+# plan §2). Setting `ffiMode:` on `registerBrokerLibrary` is then a
+# *consistency check* against this constant, not an override.
+const brokerFfiMode* {.used.}: BrokerFfiMode =
+  when brokerFfiApiNativeForced: mfNative else: mfCbor
+
 var gApiResolvedFfiMode* {.compileTime.}: BrokerFfiMode = mfCbor
   ## The resolved mode for the current library, set during
   ## `registerBrokerLibrary` expansion. Read by codegen modules to choose
@@ -65,15 +77,22 @@ proc parseFfiModeLiteral*(s: string): BrokerFfiMode {.compileTime.} =
 proc resolveFfiMode*(
     configMode: BrokerFfiMode, configModeExplicit: bool, libName: string
 ): BrokerFfiMode {.compileTime.} =
-  ## Resolve the effective FFI mode following the precedence rules in the
-  ## module docstring. `configModeExplicit` distinguishes "user wrote
-  ## ffiMode: cbor" from "user wrote nothing, the default applies".
-  when brokerFfiApiNativeForced:
-    result = mfNative
-  elif brokerFfiApiCborForced:
-    result = mfCbor
-  else:
-    result = if configModeExplicit: configMode else: mfCbor
+  ## Resolve the effective FFI mode and cross-check the optional `ffiMode:`
+  ## field against the compile-flag-driven `brokerFfiMode` constant. A
+  ## mismatch is rejected at compile time so users do not silently get the
+  ## wrong codegen path.
+  result = brokerFfiMode
+
+  if configModeExplicit and configMode != result:
+    let want =
+      case result
+      of mfCbor: "cbor (set -d:BrokerFfiApiCBOR or omit -d:BrokerFfiApiNative)"
+      of mfNative: "native (set -d:BrokerFfiApiNative)"
+    error(
+      "registerBrokerLibrary: ffiMode for '" & libName & "' is " & $configMode &
+        " but compile flags resolve to " & $result & ". Pick the matching switch: " &
+        want & "."
+    )
 
   gApiResolvedFfiMode = result
   gApiResolvedFfiModeSet = true

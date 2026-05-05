@@ -134,25 +134,60 @@ proc parseTypeExpr(
 # Macro
 # ---------------------------------------------------------------------------
 
+proc registerBrokerLibraryNativeImpl(
+  body: NimNode,
+  config:
+    tuple[
+      name: string,
+      initializeRequest: NimNode,
+      shutdownRequest: NimNode,
+      refType: NimNode,
+      ffiMode: BrokerFfiMode,
+      ffiModeExplicit: bool,
+    ],
+): NimNode
+
+proc registerBrokerLibraryCborImpl(
+  body: NimNode,
+  config:
+    tuple[
+      name: string,
+      initializeRequest: NimNode,
+      shutdownRequest: NimNode,
+      refType: NimNode,
+      ffiMode: BrokerFfiMode,
+      ffiModeExplicit: bool,
+    ],
+): NimNode
+
 proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let config = parseLibraryConfig(body)
+
+  # Resolve FFI mode (compile flag-driven; config field is a consistency check).
+  let resolvedMode = resolveFfiMode(config.ffiMode, config.ffiModeExplicit, config.name)
+
+  case resolvedMode
+  of mfNative:
+    registerBrokerLibraryNativeImpl(body, config)
+  of mfCbor:
+    registerBrokerLibraryCborImpl(body, config)
+
+proc registerBrokerLibraryNativeImpl(
+    body: NimNode,
+    config:
+      tuple[
+        name: string,
+        initializeRequest: NimNode,
+        shutdownRequest: NimNode,
+        refType: NimNode,
+        ffiMode: BrokerFfiMode,
+        ffiModeExplicit: bool,
+      ],
+): NimNode =
   let libName = config.name
   let libNameLit = newLit(libName)
   let initializeReqIdent = config.initializeRequest
   let shutdownReqIdent = config.shutdownRequest
-
-  # Resolve FFI mode (compile flag wins, then config field, then default).
-  let resolvedMode = resolveFfiMode(config.ffiMode, config.ffiModeExplicit, libName)
-
-  # Phase 0 plumbing only: CBOR codegen lands in later phases (see cbor-ffi
-  # branch). Until then, selecting CBOR mode is a hard compile-time error so
-  # users are not silently dropped onto an unimplemented path.
-  if resolvedMode == mfCbor:
-    macros.error(
-      "registerBrokerLibrary: CBOR FFI mode is not yet implemented on this " &
-        "branch. Use `-d:BrokerFfiApiNative` (or `ffiMode: native`) to opt " &
-        "into the native strategy explicitly while CBOR codegen lands."
-    )
 
   # Set library name for header generation
   gApiLibraryName = libName
@@ -1166,6 +1201,58 @@ proc registerBrokerLibraryImpl(body: NimNode): NimNode =
 
   when defined(brokerDebug):
     echo result.repr
+
+# ---------------------------------------------------------------------------
+# CBOR-mode library codegen (Phase 2 entry point).
+#
+# Empty stub for now; actual emission lands incrementally in the next sub-
+# phases. The stub keeps the macro acceptable as a no-op so users can verify
+# their existing libraries compile cleanly under `-d:BrokerFfiApiCBOR`
+# before request/event/lifecycle exports come online.
+# ---------------------------------------------------------------------------
+
+proc registerBrokerLibraryCborImpl(
+    body: NimNode,
+    config:
+      tuple[
+        name: string,
+        initializeRequest: NimNode,
+        shutdownRequest: NimNode,
+        refType: NimNode,
+        ffiMode: BrokerFfiMode,
+        ffiModeExplicit: bool,
+      ],
+): NimNode =
+  let libName = config.name
+  gApiLibraryName = libName
+
+  # Compile-time validation of the mandatory request types — same checks as
+  # the native path so misnamed types fail early in either mode.
+  let initializeReqIdent = config.initializeRequest
+  let shutdownReqIdent = config.shutdownRequest
+  result = newStmtList()
+  result.add(
+    quote do:
+      when not compiles(typeof(`initializeReqIdent`)):
+        {.
+          error:
+            "registerBrokerLibrary: initializeRequest type '" &
+            astToStr(`initializeReqIdent`) &
+            "' is not defined. Ensure a RequestBroker(API) declaring this type " &
+            "appears before registerBrokerLibrary."
+        .}
+      when not compiles(typeof(`shutdownReqIdent`)):
+        {.
+          error:
+            "registerBrokerLibrary: shutdownRequest type '" &
+            astToStr(`shutdownReqIdent`) &
+            "' is not defined. Ensure a RequestBroker(API) declaring this type " &
+            "appears before registerBrokerLibrary."
+        .}
+  )
+
+  when defined(brokerDebug):
+    echo "[brokers/cbor] registerBrokerLibraryCborImpl stub for '" & libName & "'"
 
 {.pop.}
 
