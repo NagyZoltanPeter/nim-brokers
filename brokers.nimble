@@ -14,6 +14,7 @@ requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
+requires "cbor_serialization >= 0.3.0"
 
 proc quoteArg(arg: string): string =
   if defined(windows):
@@ -352,6 +353,17 @@ task perftest, "Run performance and stress tests":
         echo "Skipping " & f & " (" & opt &
           ") on macOS + Nim 2.2.4: see LIMITATION.md (perf tests are stress-by-design)."
         continue
+      test opt, f
+
+task testApiCbor, "Run CBOR codec unit tests (orc/refc x debug/release)":
+  let cborTests = ["test_api_cbor_codec"]
+  for f in cborTests:
+    for opt in [
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE --mm:refc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc",
+    ]:
       test opt, f
 
 task testApi, "Run FFI API broker tests":
