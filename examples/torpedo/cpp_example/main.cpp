@@ -345,8 +345,8 @@ static void printSideBySide(
 // ---------------------------------------------------------------------------
 
 static void drawScreen(
-    const GetPublicBoardRequestResult& red,
-    const GetPublicBoardRequestResult& blue,
+    const GetPublicBoardRequest& red,
+    const GetPublicBoardRequest& blue,
     const EventLog& log,
     const std::string& banner,
     const Config& cfg)

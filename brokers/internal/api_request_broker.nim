@@ -986,20 +986,24 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       )
 
   # ---------------------------------------------------------------------------
-  # Step 6: Generate C++ result struct + modern class methods
+  # Step 6: Generate C++ payload struct + class methods (declarations + defs)
   # ---------------------------------------------------------------------------
   let freeFuncName = apiPublicCName("free_" & baseExportName & "_result")
-  let cppNs = "__CPP_NS__"
+  let cppCls = "__CPP_CLASS__"
 
   var camelName = typeDisplayName
   if camelName.len > 0:
     camelName[0] = chr(ord(camelName[0]) + 32 * ord(camelName[0] in {'A' .. 'Z'}))
 
-  # 6a: Generate C++ result struct with RAII constructor from C struct
+  # 6a: Plain payload struct (data only, no ctor) + forward decl + adopt()
   block:
     if not hideFromForeignSurface:
-      let cppResultName = typeDisplayName & "Result"
-      var cppStruct = "struct " & cppResultName & " {\n"
+      let cppName = typeDisplayName
+      let cResultName = typeDisplayName & "CResult"
+
+      gApiCppForwardDecls.add("struct " & cppName & ";")
+
+      var cppStruct = "struct " & cppName & " {\n"
       if hasInlineFields:
         for i in 0 ..< fieldNames.len:
           let fName = $fieldNames[i]
@@ -1014,117 +1018,98 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           ]:
             cppStruct.add(" = 0")
           cppStruct.add(";\n")
-      cppStruct.add("    " & cppResultName & "() = default;\n")
-      let cResultName = typeDisplayName & "CResult"
-      cppStruct.add("    explicit " & cppResultName & "(" & cResultName & "& c)")
+      cppStruct.add("};\n")
+      gApiCppStructs.add(cppStruct)
+
+      # detail::adopt<Name>(<Name>CResult& c) -> <Name>
+      var adopt =
+        "inline " & cppName & " adopt" & cppName & "(::" & cResultName & "& c) {\n"
+      adopt.add("    " & cppName & " r;\n")
       if hasInlineFields:
-        var ctorInits: seq[string] = @[]
         for i in 0 ..< fieldNames.len:
           let fName = $fieldNames[i]
           let fType = fieldTypes[i]
           if isCStringType(fType):
-            ctorInits.add(fName & "(c." & fName & " ? c." & fName & " : \"\")")
-          elif isSeqType(fType) or isArrayTypeNode(fType):
-            discard # handled in ctor body
-          elif isEnumNode(fType):
-            let enumTypeName = $fType
-            ctorInits.add(
-              fName & "(static_cast<" & enumTypeName & ">(c." & fName & "))"
+            adopt.add(
+              "    r." & fName & " = c." & fName & " ? c." & fName & " : \"\";\n"
             )
-          else:
-            ctorInits.add(fName & "(c." & fName & ")")
-        if ctorInits.len > 0:
-          cppStruct.add("\n        : " & ctorInits.join("\n        , "))
-      cppStruct.add(" {\n")
-      if hasInlineFields:
-        for i in 0 ..< fieldNames.len:
-          let fName = $fieldNames[i]
-          let fType = fieldTypes[i]
-          if isSeqOfStringNode(fType):
+          elif isSeqOfStringNode(fType):
             let countField = fName & "_count"
-            cppStruct.add(
-              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            adopt.add("    if (c." & fName & " && c." & countField & " > 0) {\n")
+            adopt.add("        auto* arr = static_cast<char**>(c." & fName & ");\n")
+            adopt.add("        r." & fName & ".reserve(c." & countField & ");\n")
+            adopt.add("        for (int32_t i = 0; i < c." & countField & "; ++i)\n")
+            adopt.add(
+              "            r." & fName & ".emplace_back(arr[i] ? arr[i] : \"\");\n"
             )
-            cppStruct.add(
-              "            auto* arr = static_cast<char**>(c." & fName & ");\n"
-            )
-            cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
-            cppStruct.add(
-              "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
-            )
-            cppStruct.add(
-              "                " & fName & ".emplace_back(arr[i] ? arr[i] : \"\");\n"
-            )
-            cppStruct.add("        }\n")
+            adopt.add("    }\n")
           elif isSeqOfPrimitiveNode(fType):
             let elemName = seqItemTypeName(fType)
             let cppElemType = nimTypeToCpp(ident(elemName))
             let countField = fName & "_count"
-            cppStruct.add(
-              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            adopt.add("    if (c." & fName & " && c." & countField & " > 0) {\n")
+            adopt.add(
+              "        auto* arr = static_cast<" & cppElemType & "*>(c." & fName & ");\n"
             )
-            cppStruct.add(
-              "            auto* arr = static_cast<" & cppElemType & "*>(c." & fName &
-                ");\n"
+            adopt.add(
+              "        r." & fName & ".assign(arr, arr + c." & countField & ");\n"
             )
-            cppStruct.add(
-              "            " & fName & ".assign(arr, arr + c." & countField & ");\n"
-            )
-            cppStruct.add("        }\n")
+            adopt.add("    }\n")
           elif isSeqOfObjectNode(fType):
             let itemTypeName = seqItemTypeName(fType)
             let countField = fName & "_count"
-            cppStruct.add(
-              "        if (c." & fName & " && c." & countField & " > 0) {\n"
+            adopt.add("    if (c." & fName & " && c." & countField & " > 0) {\n")
+            adopt.add(
+              "        auto* arr = static_cast<::" & itemTypeName & "CItem*>(c." & fName &
+                ");\n"
             )
-            cppStruct.add(
-              "            auto* arr = static_cast<" & itemTypeName & "CItem*>(c." &
-                fName & ");\n"
+            adopt.add("        r." & fName & ".reserve(c." & countField & ");\n")
+            adopt.add("        for (int32_t i = 0; i < c." & countField & "; ++i)\n")
+            adopt.add(
+              "            r." & fName & ".emplace_back(adopt" & itemTypeName &
+                "(arr[i]));\n"
             )
-            cppStruct.add("            " & fName & ".reserve(c." & countField & ");\n")
-            cppStruct.add(
-              "            for (int32_t i = 0; i < c." & countField & "; ++i)\n"
-            )
-            cppStruct.add("                " & fName & ".emplace_back(arr[i]);\n")
-            cppStruct.add("        }\n")
+            adopt.add("    }\n")
           elif isArrayTypeNode(fType):
             let n = arrayNodeSize(fType)
-            let elemName = arrayNodeElemName(fType)
-            let cppElemType = nimTypeToCpp(ident(elemName))
-            cppStruct.add(
-              "        std::copy(c." & fName & ", c." & fName & " + " & $n & ", " & fName &
+            adopt.add(
+              "    std::copy(c." & fName & ", c." & fName & " + " & $n & ", r." & fName &
                 ".begin());\n"
             )
-            discard cppElemType # silence unused
-      cppStruct.add("        " & freeFuncName & "(&c);\n")
-      cppStruct.add("    }\n")
-      cppStruct.add("};\n")
-      gApiCppStructs.add(cppStruct)
+          elif isEnumNode(fType):
+            let enumTypeName = $fType
+            adopt.add(
+              "    r." & fName & " = static_cast<" & enumTypeName & ">(c." & fName &
+                ");\n"
+            )
+          else:
+            adopt.add("    r." & fName & " = c." & fName & ";\n")
+      adopt.add("    " & freeFuncName & "(&c);\n")
+      adopt.add("    return r;\n")
+      adopt.add("}\n")
+      gApiCppDetailAdopters.add(adopt)
 
-  # 6b: Generate modern C++ class methods returning Result<CppStruct>
-  let cppResultType = cppNs & "::Result<" & cppNs & "::" & typeDisplayName & "Result>"
+  # 6b: Method declarations (inside class) + inline definitions (after class)
+  let cppRetTy = "Result<" & typeDisplayName & ">"
 
   if not hideFromForeignSurface and not zeroArgSig.isNil():
     let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
-    var cppMethod = "inline " & cppResultType & " " & camelName & "() {\n"
-    cppMethod.add("        auto c = " & funcName & "(ctx_);\n")
-    cppMethod.add("        if (c.error_message) {\n")
-    cppMethod.add("            std::string err(c.error_message);\n")
-    cppMethod.add("            " & freeFuncName & "(&c);\n")
-    cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
-    cppMethod.add("        }\n")
-    cppMethod.add(
-      "        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName &
-        "Result(c));\n"
-    )
-    cppMethod.add("    }")
-    gApiCppClassMethods.add(cppMethod)
-    gApiCppInterfaceSummary.add(camelName & "();")
+    gApiCppMethodDecls.add(cppRetTy & " " & camelName & "();")
+
+    var def = "inline " & cppRetTy & " " & cppCls & "::" & camelName & "() {\n"
+    def.add("    auto c = " & funcName & "(ctx_);\n")
+    def.add("    if (c.error_message) {\n")
+    def.add("        std::string err(c.error_message);\n")
+    def.add("        " & freeFuncName & "(&c);\n")
+    def.add("        return " & cppRetTy & "(std::move(err));\n")
+    def.add("    }\n")
+    def.add("    return " & cppRetTy & "(detail::adopt" & typeDisplayName & "(c));\n")
+    def.add("}")
+    gApiCppMethodDefs.add(def)
 
   if not hideFromForeignSurface and not argSig.isNil():
     let funcName = apiPublicCName(exportedFuncName(argSigName))
     var cppParams: seq[string] = @[]
-    var summaryParams: seq[string] = @[]
     var cppCallArgs = "ctx_"
     var cppPreCall = ""
     for paramDef in argParams:
@@ -1138,13 +1123,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             let elemName = seqItemTypeName(paramType)
             "const std::vector<" & nimTypeToCpp(ident(elemName)) & ">&"
           elif isSeqOfObjectNode(paramType):
-            "const std::vector<" & cppNs & "::" & seqItemTypeName(paramType) & ">&"
+            "const std::vector<" & seqItemTypeName(paramType) & ">&"
           elif isArrayTypeNode(paramType):
             "const " & nimTypeToCpp(paramType) & "&"
           else:
             nimTypeToCppParam(paramType)
         cppParams.add(cppParamType & " " & paramName)
-        summaryParams.add(paramName)
 
         if isSeqOfStringNode(paramType):
           cppPreCall.add(buildCppStringSeqParamSetup(paramName))
@@ -1153,7 +1137,6 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           )
           cppCallArgs.add(", static_cast<int32_t>(" & paramName & ".size())")
         elif isSeqOfPrimitiveNode(paramType):
-          # No pre-call setup; pass .data() and .size() directly
           cppCallArgs.add(
             ", " & paramName & ".empty() ? nullptr : " & paramName & ".data()"
           )
@@ -1171,29 +1154,30 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           )
           cppCallArgs.add(", static_cast<int32_t>(" & paramName & "CItems.size())")
         elif isArrayTypeNode(paramType):
-          # std::array is layout-compatible with C array; pass .data()
           cppCallArgs.add(", " & paramName & ".data()")
         elif isCStringType(paramType):
           cppCallArgs.add(", " & paramName & ".c_str()")
         else:
           cppCallArgs.add(", " & paramName)
 
-    var cppMethod =
-      "inline " & cppResultType & " " & camelName & "(" & cppParams.join(", ") & ") {\n"
-    cppMethod.add(cppPreCall)
-    cppMethod.add("        auto c = " & funcName & "(" & cppCallArgs & ");\n")
-    cppMethod.add("        if (c.error_message) {\n")
-    cppMethod.add("            std::string err(c.error_message);\n")
-    cppMethod.add("            " & freeFuncName & "(&c);\n")
-    cppMethod.add("            return " & cppResultType & "(std::move(err));\n")
-    cppMethod.add("        }\n")
-    cppMethod.add(
-      "        return " & cppResultType & "(" & cppNs & "::" & typeDisplayName &
-        "Result(c));\n"
+    gApiCppMethodDecls.add(
+      cppRetTy & " " & camelName & "(" & cppParams.join(", ") & ");"
     )
-    cppMethod.add("    }")
-    gApiCppClassMethods.add(cppMethod)
-    gApiCppInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ");")
+
+    var def =
+      "inline " & cppRetTy & " " & cppCls & "::" & camelName & "(" & cppParams.join(
+        ", "
+      ) & ") {\n"
+    def.add(cppPreCall)
+    def.add("    auto c = " & funcName & "(" & cppCallArgs & ");\n")
+    def.add("    if (c.error_message) {\n")
+    def.add("        std::string err(c.error_message);\n")
+    def.add("        " & freeFuncName & "(&c);\n")
+    def.add("        return " & cppRetTy & "(std::move(err));\n")
+    def.add("    }\n")
+    def.add("    return " & cppRetTy & "(detail::adopt" & typeDisplayName & "(c));\n")
+    def.add("}")
+    gApiCppMethodDefs.add(def)
 
   # Step 6c: Generate Python ctypes + dataclass + methods (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):

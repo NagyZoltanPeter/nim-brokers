@@ -2,13 +2,21 @@
 ## ----------------
 ## C++ wrapper code generation for the FFI API system.
 ##
-## Owns:
-## - C++ type mapping procs (Nim → C++ types)
-## - Compile-time accumulators for C++ structs, class methods, events
-## - `generateCppHeaderFile` — writes the `.hpp` file
+## Layout produced by `generateCppHeaderFile` mirrors the CBOR-mode wrapper:
 ##
-## The `.hpp` includes the `.h` (pure C) and adds the C++ namespace,
-## Result template, RAII structs, EventDispatcher, and wrapper class.
+##   1. Header guard + includes
+##   2. namespace <lib> { Result<T>, forward decls, plain payload structs }
+##   3. namespace <lib>::detail { forward decls — EventDispatcher template,
+##      per-event trait structs }
+##   4. namespace <lib> { class Lib { declarations only;
+##      private dispatcher type aliases + unique_ptr members } }
+##   5. namespace <lib>::detail { full EventDispatcher template, full trait
+##      definitions, adopt() functions }
+##   6. namespace <lib> { inline definitions of Lib::* }
+##
+## The class body is interface-only: every method is declared inside the class
+## and defined as a free `inline` definition below. Dispatcher implementation
+## machinery is fully hidden behind the class via PIMPL (unique_ptr).
 
 {.push raises: [].}
 
@@ -25,8 +33,6 @@ export api_schema
 
 proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to its C++ equivalent.
-  ## string → std::string, seq[T] → std::vector<T>, array[N,T] → std::array<T,N>,
-  ## primitives pass through.
   case nimType.kind
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
@@ -87,7 +93,6 @@ proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
 
 proc nimTypeToCppParam*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to a C++ method input parameter type.
-  ## string → const std::string&, vector/array → const T&, primitives pass through.
   let cppType = nimTypeToCpp(nimType)
   if cppType == "std::string":
     "const std::string&"
@@ -98,8 +103,6 @@ proc nimTypeToCppParam*(nimType: NimNode): string {.compileTime.} =
 
 proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
   ## Maps a Nim type to the C++ callback parameter type.
-  ## string → std::string_view, seq[T] → std::span<const T>,
-  ## array[N,T] → std::span<const T> (flattened for callbacks).
   case nimType.kind
   of nnkIdent:
     let name = ($nimType).toLowerAscii()
@@ -129,43 +132,171 @@ proc nimTypeToCppCallbackParam*(nimType: NimNode): string {.compileTime.} =
 # Compile-time accumulators
 # ---------------------------------------------------------------------------
 
-var gApiCppClassMethods* {.compileTime.}: seq[string] =
-  @[] ## C++ wrapper class method declarations.
-
-var gApiCppInterfaceSummary* {.compileTime.}: seq[string] =
-  @[] ## Dense, type-free C++ wrapper interface summary lines.
-
-var gApiCppPreamble* {.compileTime.}: seq[string] =
-  @[] ## Reusable C++ helper templates and event traits.
+var gApiCppForwardDecls* {.compileTime.}: seq[string] =
+  @[] ## Forward declarations of payload struct names (one line each).
 
 var gApiCppStructs* {.compileTime.}: seq[string] =
-  @[] ## C++ struct definitions (emitted before the class).
+  @[] ## Plain payload struct definitions (data members + defaults only).
+
+var gApiCppDetailForwardDecls* {.compileTime.}: seq[string] = @[]
+  ## Forward declarations emitted in detail:: BEFORE the class body
+  ## (trait struct forwards). The EventDispatcher template forward is
+  ## emitted automatically when gApiCppEventDispatcherEmitted is true.
+
+var gApiCppDetailTraits* {.compileTime.}: seq[string] = @[]
+  ## Full per-event trait struct definitions emitted in detail::
+  ## AFTER the class body.
+
+var gApiCppDetailAdopters* {.compileTime.}: seq[string] =
+  @[] ## inline detail::adopt<Name> function definitions.
+
+var gApiCppMethodDecls* {.compileTime.}: seq[string] =
+  @[] ## Method declarations inside the class (signature; only).
+
+var gApiCppMethodDefs* {.compileTime.}: seq[string] =
+  @[] ## inline method definitions emitted after the class.
 
 var gApiCppPrivateMembers* {.compileTime.}: seq[string] =
-  @[] ## C++ private members and aliases.
+  @[] ## Private member field declarations (dispatchers, etc.).
 
 var gApiCppConstructorInitializers* {.compileTime.}: seq[string] =
-  @[] ## C++ wrapper constructor initializer fragments.
+  @[] ## Initializer-list fragments for the ctor.
 
 var gApiCppShutdownStatements* {.compileTime.}: seq[string] =
-  @[] ## C++ wrapper shutdown cleanup statements.
+  @[] ## Cleanup statements for shutdown().
 
-var gApiCppEventSupportGenerated* {.compileTime.}: bool = false
-  ## Flag: has the shared C++ EventDispatcher template been emitted?
+var gApiCppEventDispatcherEmitted* {.compileTime.}: bool = false
+  ## Has the shared detail::EventDispatcher template already been emitted?
 
 # ---------------------------------------------------------------------------
 # C++ header file generation
 # ---------------------------------------------------------------------------
+
+const cppEventDispatcherTemplate = """
+template <typename Owner, typename Traits, typename... CArgs>
+class EventDispatcher {
+public:
+    using Callback = typename Traits::template Callback<Owner>;
+    using CCallback = typename Traits::CCallback;
+
+    explicit EventDispatcher(Owner& owner) noexcept
+        : owner_(&owner) {}
+
+    EventDispatcher(const EventDispatcher&) = delete;
+    EventDispatcher& operator=(const EventDispatcher&) = delete;
+    EventDispatcher(EventDispatcher&&) = delete;
+    EventDispatcher& operator=(EventDispatcher&&) = delete;
+
+    ~EventDispatcher() {
+        clear();
+    }
+
+    uint64_t add(Callback fn) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!owner_ || owner_->ctx() == 0 || !fn) {
+            return 0;
+        }
+
+        if (nativeHandle_ == 0) {
+            nativeHandle_ = Traits::registerWithC(
+                owner_->ctx(),
+                &EventDispatcher::trampoline,
+                static_cast<void*>(this)
+            );
+            if (nativeHandle_ == 0) {
+                return 0;
+            }
+        }
+
+        const uint64_t localHandle = nextLocalHandle_++;
+        try {
+            callbacks_.emplace(localHandle, std::move(fn));
+            return localHandle;
+        } catch (...) {
+            if (callbacks_.empty() && nativeHandle_ != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+                nativeHandle_ = 0;
+            }
+            return 0;
+        }
+    }
+
+    void remove(uint64_t localHandle) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        callbacks_.erase(localHandle);
+        if (callbacks_.empty() && nativeHandle_ != 0) {
+            if (owner_ && owner_->ctx() != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+            }
+            nativeHandle_ = 0;
+        }
+    }
+
+    void clear() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        callbacks_.clear();
+        if (nativeHandle_ != 0) {
+            if (owner_ && owner_->ctx() != 0) {
+                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
+            }
+            nativeHandle_ = 0;
+        }
+    }
+
+private:
+    static void trampoline(uint32_t ctx, void* userData, CArgs... args) noexcept {
+        auto* self = static_cast<EventDispatcher*>(userData);
+        if (!self) {
+            return;
+        }
+        self->deliver(ctx, args...);
+    }
+
+    void deliver(uint32_t ctx, CArgs... args) noexcept {
+        std::vector<Callback> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!owner_ || ctx != owner_->ctx()) {
+                return;
+            }
+
+            try {
+                snapshot.reserve(callbacks_.size());
+                for (const auto& [id, fn] : callbacks_) {
+                    if (fn) {
+                        snapshot.push_back(fn);
+                    }
+                }
+            } catch (...) {
+                return;
+            }
+        }
+
+        for (const auto& fn : snapshot) {
+            Traits::invoke(fn, *owner_, args...);
+        }
+    }
+
+    Owner* owner_ = nullptr;
+    std::mutex mutex_;
+    std::unordered_map<uint64_t, Callback> callbacks_;
+    uint64_t nativeHandle_ = 0;
+    uint64_t nextLocalHandle_ = 1;
+};
+"""
 
 {.pop.} # temporarily lift raises:[] for compile-time proc using writeFile
 
 proc generateCppHeaderFile*(
     outDir: string, libName: string
 ) {.compileTime, raises: [].} =
-  ## Writes the C++ wrapper header file (.hpp).
-  ## Includes the pure C .h and adds the C++ namespace, Result template,
-  ## RAII structs, EventDispatcher, and wrapper class.
-  if gApiCppClassMethods.len == 0:
+  ## Writes the C++ wrapper header file (.hpp) following the CBOR-mode layout:
+  ## payload structs first, detail:: second, class declarations next, inline
+  ## definitions last.
+  if gApiCppMethodDecls.len == 0:
     return # No C++ content to generate
 
   ensureGeneratedOutputDir(outDir)
@@ -176,7 +307,7 @@ proc generateCppHeaderFile*(
       libName & ".hpp"
   let apiPrefix = libName & "_"
 
-  # Derive class name from library name (e.g. "mylib" → "Mylib")
+  # Derive class name from library name (e.g. "mylib" -> "Mylib")
   var className = ""
   var capitalize = true
   for ch in libName:
@@ -189,41 +320,34 @@ proc generateCppHeaderFile*(
       className.add(ch)
 
   let nsName = libName.toLowerAscii().replace("-", "_")
-  let createContextResultName = className & "CreateContextResult"
+
+  proc subst(s: string): string =
+    s.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
+      ApiLibPrefixPlaceholder, apiPrefix
+    )
 
   var hpp = "#pragma once\n\n"
   hpp.add("#include \"" & libName & ".h\"\n\n")
 
-  hpp.add("// Quick C++ wrapper interface summary (names only)\n")
-  hpp.add("// class " & className & " {\n")
-  hpp.add("// public:\n")
-  for summaryLine in [
-    "createContext();", "validContext() const;", "operator bool() const;",
-    "shutdown();", "ctx() const;",
-  ]:
-    hpp.add("//   " & summaryLine & "\n")
-  for summaryLine in gApiCppInterfaceSummary:
-    hpp.add("//   " & summaryLine & "\n")
-  hpp.add("// };\n\n")
-
-  # C++ standard includes
+  # Standard library includes
+  hpp.add("#include <array>\n")
+  hpp.add("#include <atomic>\n")
+  hpp.add("#include <cstring>\n")
+  hpp.add("#include <functional>\n")
+  hpp.add("#include <memory>\n")
+  hpp.add("#include <mutex>\n")
+  hpp.add("#include <optional>\n")
+  hpp.add("#include <span>\n")
   hpp.add("#include <string>\n")
   hpp.add("#include <string_view>\n")
-  hpp.add("#include <vector>\n")
-  hpp.add("#include <array>\n")
-  hpp.add("#include <span>\n")
-  hpp.add("#include <functional>\n")
-  hpp.add("#include <optional>\n")
-  hpp.add("#include <mutex>\n")
   hpp.add("#include <unordered_map>\n")
   hpp.add("#include <utility>\n")
-  hpp.add("#include <cstring>\n")
-  hpp.add("#include <atomic>\n\n")
+  hpp.add("#include <vector>\n\n")
 
+  # ---- namespace <ns> { Result<T>, forwards, payload structs } ----
   hpp.add("namespace " & nsName & " {\n\n")
 
-  # Result<T> template
-  hpp.add("// Result<T> — mirrors Nim's Result[T, string]\n")
+  hpp.add("// Result<T> -- mirrors Nim's Result[T, string]\n")
   hpp.add("template <typename T>\n")
   hpp.add("class Result {\n")
   hpp.add("    std::optional<T> value_;\n")
@@ -252,102 +376,131 @@ proc generateCppHeaderFile*(
   hpp.add("    const std::string& error() const { return error_; }\n")
   hpp.add("};\n\n")
 
-  # C++ structs
-  for s in gApiCppStructs:
-    hpp.add(s.replace(ApiLibPrefixPlaceholder, apiPrefix))
-    hpp.add("\n")
+  # Forward declarations
+  hpp.add("// ---- Forward declarations ----\n")
+  hpp.add("class " & className & ";\n")
+  for fwd in gApiCppForwardDecls:
+    hpp.add(subst(fwd) & "\n")
+  hpp.add("\n")
 
-  hpp.add("struct " & createContextResultName & " {\n")
-  hpp.add("    uint32_t ctx = 0;\n")
-  hpp.add("    " & createContextResultName & "() = default;\n")
-  hpp.add(
-    "    explicit " & createContextResultName & "(" & libName &
-      "CreateContextResult& c)\n"
-  )
-  hpp.add("        : ctx(c.ctx) {\n")
-  hpp.add("        " & "free_" & libName & "_create_context_result(&c);\n")
-  hpp.add("    }\n")
-  hpp.add("};\n\n")
+  # Plain payload structs (data only)
+  hpp.add("// ---- Payload structs ----\n")
+  for s in gApiCppStructs:
+    hpp.add(subst(s))
+    hpp.add("\n")
 
   hpp.add("} // namespace " & nsName & "\n\n")
 
-  for p in gApiCppPreamble:
-    hpp.add(
-      p.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
-        ApiLibPrefixPlaceholder, apiPrefix
-      ) & "\n"
-    )
-  if gApiCppPreamble.len > 0:
+  # ---- namespace <ns>::detail { forward declarations } ----
+  hpp.add("namespace " & nsName & "::detail {\n\n")
+
+  if gApiCppEventDispatcherEmitted:
+    hpp.add("template <typename Owner, typename Traits, typename... CArgs>\n")
+    hpp.add("class EventDispatcher;\n\n")
+
+  for fwd in gApiCppDetailForwardDecls:
+    hpp.add(subst(fwd) & "\n")
+  if gApiCppDetailForwardDecls.len > 0:
     hpp.add("\n")
 
-  # Class definition (outside namespace)
+  hpp.add("} // namespace " & nsName & "::detail\n\n")
+
+  # ---- namespace <ns> { class Lib } ----
+  hpp.add("namespace " & nsName & " {\n\n")
+
   hpp.add("class " & className & " {\n")
-  hpp.add("protected:\n")
-  hpp.add("    uint32_t ctx_;\n\n")
-
-  hpp.add("private:\n")
-  if gApiCppPrivateMembers.len > 0:
-    for m in gApiCppPrivateMembers:
-      hpp.add(
-        m.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
-          ApiLibPrefixPlaceholder, apiPrefix
-        ) & "\n"
-      )
-    hpp.add("\n")
-
   hpp.add("public:\n")
-  var ctorInitializers = @["ctx_(0)"]
-  for init in gApiCppConstructorInitializers:
-    ctorInitializers.add(init)
-  hpp.add("    " & className & "() : " & ctorInitializers.join(", ") & " {}\n")
-  hpp.add("    virtual ~" & className & "() { shutdown(); }\n")
+  hpp.add("    " & className & "();\n")
+  hpp.add("    ~" & className & "();\n")
   hpp.add("    " & className & "(const " & className & "&) = delete;\n")
   hpp.add("    " & className & "& operator=(const " & className & "&) = delete;\n")
   hpp.add("    " & className & "(" & className & "&&) = delete;\n")
   hpp.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
-  hpp.add("    " & nsName & "::Result<void> createContext() {\n")
-  hpp.add("        if (ctx_)\n")
-  hpp.add(
-    "            return " & nsName &
-      "::Result<void>(std::string(\"Context already created\"));\n"
-  )
-  hpp.add("        auto c = " & libName & "_createContext();\n")
-  hpp.add("        if (c.error_message) {\n")
-  hpp.add("            std::string err(c.error_message);\n")
-  hpp.add("            " & "free_" & libName & "_create_context_result(&c);\n")
-  hpp.add("            return " & nsName & "::Result<void>(std::move(err));\n")
-  hpp.add("        }\n")
-  hpp.add("        ctx_ = c.ctx;\n")
-  hpp.add("        " & "free_" & libName & "_create_context_result(&c);\n")
-  hpp.add("        if (!ctx_)\n")
-  hpp.add(
-    "            return " & nsName &
-      "::Result<void>(std::string(\"createContext failed\"));\n"
-  )
-  hpp.add("        return " & nsName & "::Result<void>();\n")
-  hpp.add("    }\n")
-  hpp.add("    bool validContext() const noexcept { return ctx_ != 0; }\n")
-  hpp.add("    explicit operator bool() const noexcept { return validContext(); }\n")
-  hpp.add("    void shutdown() noexcept {\n")
-  for stmt in gApiCppShutdownStatements:
-    hpp.add(
-      "        " &
-        stmt.replace("__CPP_NS__", nsName).replace("__CPP_CLASS__", className).replace(
-          ApiLibPrefixPlaceholder, apiPrefix
-        ) & "\n"
-    )
-  hpp.add("        if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; }\n")
-  hpp.add("    }\n")
-  hpp.add("    uint32_t ctx() const noexcept { return ctx_; }\n\n")
-  for cppMethod in gApiCppClassMethods:
-    hpp.add(
-      "    " &
-        cppMethod
-        .replace("__CPP_NS__", nsName)
-        .replace("__CPP_CLASS__", className)
-        .replace(ApiLibPrefixPlaceholder, apiPrefix) & "\n"
-    )
+
+  hpp.add("    Result<void> createContext();\n")
+  hpp.add("    bool validContext() const noexcept;\n")
+  hpp.add("    explicit operator bool() const noexcept;\n")
+  hpp.add("    void shutdown() noexcept;\n")
+  hpp.add("    uint32_t ctx() const noexcept;\n\n")
+
+  for decl in gApiCppMethodDecls:
+    hpp.add("    " & subst(decl) & "\n")
+
+  hpp.add("\nprivate:\n")
+  hpp.add("    uint32_t ctx_ = 0;\n")
+  for m in gApiCppPrivateMembers:
+    hpp.add(subst(m) & "\n")
   hpp.add("};\n\n")
+
+  hpp.add("} // namespace " & nsName & "\n\n")
+
+  # ---- namespace <ns>::detail { full definitions } ----
+  hpp.add("namespace " & nsName & "::detail {\n\n")
+
+  if gApiCppEventDispatcherEmitted:
+    hpp.add(cppEventDispatcherTemplate)
+    hpp.add("\n")
+
+  for t in gApiCppDetailTraits:
+    hpp.add(subst(t))
+    hpp.add("\n")
+
+  for a in gApiCppDetailAdopters:
+    hpp.add(subst(a))
+    hpp.add("\n")
+
+  hpp.add("} // namespace " & nsName & "::detail\n\n")
+
+  # ---- inline definitions ----
+  hpp.add("namespace " & nsName & " {\n\n")
+  hpp.add("// ---- Inline definitions ----\n\n")
+
+  var ctorInitializers = @["ctx_(0)"]
+  for init in gApiCppConstructorInitializers:
+    ctorInitializers.add(subst(init))
+  hpp.add("inline " & className & "::" & className & "()\n")
+  hpp.add("    : " & ctorInitializers.join("\n    , ") & " {}\n\n")
+
+  hpp.add("inline " & className & "::~" & className & "() { shutdown(); }\n\n")
+
+  hpp.add("inline Result<void> " & className & "::createContext() {\n")
+  hpp.add("    if (ctx_)\n")
+  hpp.add("        return Result<void>(std::string(\"Context already created\"));\n")
+  hpp.add("    auto c = " & libName & "_createContext();\n")
+  hpp.add("    if (c.error_message) {\n")
+  hpp.add("        std::string err(c.error_message);\n")
+  hpp.add("        " & "free_" & libName & "_create_context_result(&c);\n")
+  hpp.add("        return Result<void>(std::move(err));\n")
+  hpp.add("    }\n")
+  hpp.add("    ctx_ = c.ctx;\n")
+  hpp.add("    " & "free_" & libName & "_create_context_result(&c);\n")
+  hpp.add("    if (!ctx_)\n")
+  hpp.add("        return Result<void>(std::string(\"createContext failed\"));\n")
+  hpp.add("    return Result<void>();\n")
+  hpp.add("}\n\n")
+
+  hpp.add(
+    "inline bool " & className &
+      "::validContext() const noexcept { return ctx_ != 0; }\n"
+  )
+  hpp.add(
+    "inline " & className &
+      "::operator bool() const noexcept { return validContext(); }\n"
+  )
+  hpp.add(
+    "inline uint32_t " & className & "::ctx() const noexcept { return ctx_; }\n\n"
+  )
+
+  hpp.add("inline void " & className & "::shutdown() noexcept {\n")
+  for stmt in gApiCppShutdownStatements:
+    hpp.add("    " & subst(stmt) & "\n")
+  hpp.add("    if (ctx_) { " & libName & "_shutdown(ctx_); ctx_ = 0; }\n")
+  hpp.add("}\n\n")
+
+  for d in gApiCppMethodDefs:
+    hpp.add(subst(d) & "\n\n")
+
+  hpp.add("} // namespace " & nsName & "\n")
 
   try:
     writeFile(hppPath, hpp)
