@@ -7,8 +7,8 @@
 ## threads via the C ABI). Under `--mm:orc` atomic refcounts make a plain
 ## `Table[(uint32, string), seq[Subscription]]` work; under `--mm:refc` the
 ## per-thread heaps + STW collector cannot safely see another thread's
-## refcounted pointers, which used to force a macOS+refc skip on
-## `test_api_cbor_event_subscribe` and gate the Phase 9F listener stress.
+## refcounted pointers, which used to gate the Phase 9F listener stress
+## under macOS+Nim 2.2.4+refc+debug.
 ##
 ## This module replaces that GC'd container with a hand-rolled shared-heap
 ## hash table:

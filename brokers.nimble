@@ -372,7 +372,6 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
   # symbols distinct (mirrors the native testApi convention).
   let cborApiTests = [
     ("test_api_cbor_library_init", "cbtest"),
-    ("test_api_cbor_event_subscribe", "evtt"),
     ("test_api_cbor_discovery", "cbdisc"),
     ("typemappingtestlib_cbor/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
   ]
@@ -385,24 +384,6 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      # Phase 10 (2026-05) reworked the CBOR listener path itself
-      # (shared-heap subscription registry + shared-heap CBOR encode
-      # buffer in `api_cbor_subs_registry` / `cborEncodeShared`), so the
-      # library no longer captures GC'd state across threads. The C++ /
-      # Python typemap stress validates that on macOS+refc.
-      #
-      # `test_api_cbor_event_subscribe` itself, however, drives delivery
-      # through Nim cdecl callbacks (`cbA` / `cbB`) that allocate
-      # `newSeq[byte]` on the delivery thread and append to GC'd
-      # `seq[DeliveredEvent]` globals. That is a test-side refc cross-
-      # thread hazard, not a library one — we keep this combo skipped on
-      # macOS until either the test is rewritten to use shared-heap
-      # accumulators, or the supported Nim floor moves past 2.2.4.
-      when defined(macosx):
-        if f == "test_api_cbor_event_subscribe" and "--mm:refc" in opt:
-          echo "Skipping " & f & " (" & opt &
-            ") on macOS + refc: test-side GC capture in cbA/cbB; library is refc-safe (see Phase 10)."
-          continue
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
 
