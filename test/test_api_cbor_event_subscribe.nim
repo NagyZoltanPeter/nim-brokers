@@ -216,119 +216,115 @@ suite "API library event subscribe (CBOR mode)":
 
     discard evtt_shutdown(ctx)
 
-  # Tests below exercise cross-thread Channel[T] traffic via the MT broker
-  # underlying the event delivery path. On macOS + Nim 2.2.4 + refc-debug
-  # this combo hits a stdlib regression that hangs sustained sends — the
-  # same one LIMITATION.md documents. The brokers.nimble task adds
-  # -d:brokerTestsSkipFragileRefcBursts on that exact platform, and we
-  # honour it here.
-  when not defined(brokerTestsSkipFragileRefcBursts):
-    test "single subscriber receives event":
-      resetDeliveries()
-      var err: cstring = nil
-      let ctx = evtt_createContext(addr err)
-      check ctx != 0'u32
+  # Phase 10: the listener path no longer captures GC'd state, so the
+  # macOS+refc+debug Channel[T] hazard documented previously no longer
+  # applies. The brokerTestsSkipFragileRefcBursts gate is gone.
+  test "single subscriber receives event":
+    resetDeliveries()
+    var err: cstring = nil
+    let ctx = evtt_createContext(addr err)
+    check ctx != 0'u32
 
-      let h = evtt_subscribe(ctx, "device_updated".cstring, cbA, cast[pointer](42))
-      check h >= 2'u64
+    let h = evtt_subscribe(ctx, "device_updated".cstring, cbA, cast[pointer](42))
+    check h >= 2'u64
 
-      let (status, _) = fireDevice(ctx, 7, true)
-      check status == 0'i32
+    let (status, _) = fireDevice(ctx, 7, true)
+    check status == 0'i32
 
-      let delivered = waitForDeliveries(takeDeliveriesA, 1)
-      check delivered.len == 1
-      check delivered[0].ctx == ctx
-      check delivered[0].eventName == "device_updated"
-      check delivered[0].userData == cast[pointer](42)
+    let delivered = waitForDeliveries(takeDeliveriesA, 1)
+    check delivered.len == 1
+    check delivered[0].ctx == ctx
+    check delivered[0].eventName == "device_updated"
+    check delivered[0].userData == cast[pointer](42)
 
-      let dec = cborDecode(delivered[0].payload, DeviceUpdated)
-      check dec.isOk()
-      check dec.value.deviceId == 7
-      check dec.value.online == true
+    let dec = cborDecode(delivered[0].payload, DeviceUpdated)
+    check dec.isOk()
+    check dec.value.deviceId == 7
+    check dec.value.online == true
 
-      discard evtt_shutdown(ctx)
+    discard evtt_shutdown(ctx)
 
-    test "multiple subscribers all receive event (fan-out)":
-      resetDeliveries()
-      var err: cstring = nil
-      let ctx = evtt_createContext(addr err)
-      check ctx != 0'u32
+  test "multiple subscribers all receive event (fan-out)":
+    resetDeliveries()
+    var err: cstring = nil
+    let ctx = evtt_createContext(addr err)
+    check ctx != 0'u32
 
-      let hA = evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
-      let hB = evtt_subscribe(ctx, "device_updated".cstring, cbB, nil)
-      check hA != hB
-      check hA >= 2'u64
-      check hB >= 2'u64
+    let hA = evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
+    let hB = evtt_subscribe(ctx, "device_updated".cstring, cbB, nil)
+    check hA != hB
+    check hA >= 2'u64
+    check hB >= 2'u64
 
-      let (status, _) = fireDevice(ctx, 11, false)
-      check status == 0'i32
+    let (status, _) = fireDevice(ctx, 11, false)
+    check status == 0'i32
 
-      # Wait until both sinks have at least one delivery, then drain.
-      var waited = 0
-      while waited < 1000:
-        var aLen = 0
-        var bLen = 0
-        withLock gDeliveryLock:
-          aLen = gDeliveriesA.len
-          bLen = gDeliveriesB.len
-        if aLen >= 1 and bLen >= 1:
-          break
-        sleep(2)
-        waited += 2
+    # Wait until both sinks have at least one delivery, then drain.
+    var waited = 0
+    while waited < 1000:
+      var aLen = 0
+      var bLen = 0
+      withLock gDeliveryLock:
+        aLen = gDeliveriesA.len
+        bLen = gDeliveriesB.len
+      if aLen >= 1 and bLen >= 1:
+        break
+      sleep(2)
+      waited += 2
 
-      let aSnap = takeDeliveriesA()
-      let bSnap = takeDeliveriesB()
-      check aSnap.len == 1
-      check bSnap.len == 1
-      let decA = cborDecode(aSnap[0].payload, DeviceUpdated)
-      let decB = cborDecode(bSnap[0].payload, DeviceUpdated)
-      check decA.isOk()
-      check decB.isOk()
-      check decA.value.deviceId == 11
-      check decB.value.deviceId == 11
+    let aSnap = takeDeliveriesA()
+    let bSnap = takeDeliveriesB()
+    check aSnap.len == 1
+    check bSnap.len == 1
+    let decA = cborDecode(aSnap[0].payload, DeviceUpdated)
+    let decB = cborDecode(bSnap[0].payload, DeviceUpdated)
+    check decA.isOk()
+    check decB.isOk()
+    check decA.value.deviceId == 11
+    check decB.value.deviceId == 11
 
-      discard evtt_shutdown(ctx)
+    discard evtt_shutdown(ctx)
 
-    test "unsubscribe by handle stops further delivery":
-      resetDeliveries()
-      var err: cstring = nil
-      let ctx = evtt_createContext(addr err)
-      check ctx != 0'u32
+  test "unsubscribe by handle stops further delivery":
+    resetDeliveries()
+    var err: cstring = nil
+    let ctx = evtt_createContext(addr err)
+    check ctx != 0'u32
 
-      let h = evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
-      check h >= 2'u64
+    let h = evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
+    check h >= 2'u64
 
-      discard fireDevice(ctx, 1, true)
-      discard waitForDeliveries(takeDeliveriesA, 1)
-      # First fire delivered exactly once.
+    discard fireDevice(ctx, 1, true)
+    discard waitForDeliveries(takeDeliveriesA, 1)
+    # First fire delivered exactly once.
 
-      let unsubRes = evtt_unsubscribe(ctx, "device_updated".cstring, h)
-      check unsubRes == 0'i32
+    let unsubRes = evtt_unsubscribe(ctx, "device_updated".cstring, h)
+    check unsubRes == 0'i32
 
-      discard fireDevice(ctx, 2, false)
-      sleep(50)
-      let post = takeDeliveriesA()
-      check post.len == 0
+    discard fireDevice(ctx, 2, false)
+    sleep(50)
+    let post = takeDeliveriesA()
+    check post.len == 0
 
-      discard evtt_shutdown(ctx)
+    discard evtt_shutdown(ctx)
 
-    test "unsubscribe with handle 0 removes all subscribers":
-      resetDeliveries()
-      var err: cstring = nil
-      let ctx = evtt_createContext(addr err)
-      check ctx != 0'u32
+  test "unsubscribe with handle 0 removes all subscribers":
+    resetDeliveries()
+    var err: cstring = nil
+    let ctx = evtt_createContext(addr err)
+    check ctx != 0'u32
 
-      discard evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
-      discard evtt_subscribe(ctx, "device_updated".cstring, cbB, nil)
+    discard evtt_subscribe(ctx, "device_updated".cstring, cbA, nil)
+    discard evtt_subscribe(ctx, "device_updated".cstring, cbB, nil)
 
-      check evtt_unsubscribe(ctx, "device_updated".cstring, 0'u64) == 0'i32
+    check evtt_unsubscribe(ctx, "device_updated".cstring, 0'u64) == 0'i32
 
-      discard fireDevice(ctx, 9, true)
-      sleep(50)
-      check takeDeliveriesA().len == 0
-      check takeDeliveriesB().len == 0
+    discard fireDevice(ctx, 9, true)
+    sleep(50)
+    check takeDeliveriesA().len == 0
+    check takeDeliveriesB().len == 0
 
-      discard evtt_shutdown(ctx)
+    discard evtt_shutdown(ctx)
 
   test "unsubscribe unknown eventName returns -2":
     var err: cstring = nil

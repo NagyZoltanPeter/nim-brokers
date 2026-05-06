@@ -288,6 +288,19 @@ int main() {
       check("rt.byte_seq_wrap[255]", static_cast<uint8_t>(255), rWrap.value().data[255]);
       check("rt.byte_seq_wrap[256]", static_cast<uint8_t>(0), rWrap.value().data[256]);
     }
+    // Phase 9 cleanup: large byte_seq (>1KB) — exercises CBOR's multi-byte
+    // length encoding and ensures we don't accidentally cap at 256-ish.
+    auto rLarge = lib.byteSeqRequest(4096);
+    check("rt.byte_seq_large.size", static_cast<size_t>(4096),
+          rLarge.value().data.size());
+    if (rLarge.value().data.size() == 4096) {
+      check("rt.byte_seq_large[0]", static_cast<uint8_t>(0),
+            rLarge.value().data[0]);
+      check("rt.byte_seq_large[1024]", static_cast<uint8_t>(0),
+            rLarge.value().data[1024]); // 1024 % 256 == 0
+      check("rt.byte_seq_large[4095]", static_cast<uint8_t>(4095 % 256),
+            rLarge.value().data[4095]);
+    }
   }
 
   // ----- string seq result: empty, special chars in prefix -----
@@ -318,7 +331,7 @@ int main() {
           rNeg.value().values);
   }
 
-  // ----- const array: seed=0, seed=1 -----
+  // ----- const array: seed=0, seed=1, plus negative-seed event capture -----
   {
     auto r0 = lib.constArrayRequest(0);
     check("rt.const_array_zero.values",
@@ -326,6 +339,30 @@ int main() {
     auto r1 = lib.constArrayRequest(1);
     check("rt.const_array_one.values",
           std::vector<int32_t>{1, 2, 3, 4, 5, 6}, r1.value().values);
+  }
+
+  // Phase 9 cleanup: const-array event capture with zero / negative seed.
+  // The native typemap suite has these as RUN(test_const_array_event_*); the
+  // CBOR side previously only covered request-side scalars.
+  {
+    EventSlot<tmlib::ConstArrayEvent> slot;
+    auto h = lib.subscribeConstArrayEvent(
+        [&](const tmlib::ConstArrayEvent& evt) { slot.set(evt); });
+    (void)lib.constArrayRequest(0);
+    slot.wait();
+    check("rt.const_array_event_zero.values",
+          std::vector<int32_t>{0, 0, 0, 0, 0, 0}, slot.value.values);
+    lib.unsubscribeConstArrayEvent(h);
+  }
+  {
+    EventSlot<tmlib::ConstArrayEvent> slot;
+    auto h = lib.subscribeConstArrayEvent(
+        [&](const tmlib::ConstArrayEvent& evt) { slot.set(evt); });
+    (void)lib.constArrayRequest(-2);
+    slot.wait();
+    check("rt.const_array_event_neg.values",
+          std::vector<int32_t>{-2, -4, -6, -8, -10, -12}, slot.value.values);
+    lib.unsubscribeConstArrayEvent(h);
   }
 
   // ----- obj seq result: empty -----
@@ -1085,7 +1122,11 @@ int main() {
     lib.unsubscribeTagSeqEvent(h);
   }
 
-#ifndef BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+  // Phase 10 (2026-05) made the CBOR listener path refc-safe (shared-heap
+  // subscription registry + shared-heap encode buffer in
+  // brokers/internal/api_cbor_subs_registry.nim and cborEncodeShared).
+  // The 9F-2 / 9F-3 listener-correctness bursts therefore run on every
+  // matrix entry, including macOS+refc+debug, with no skip.
   // 2) rapid_fire_no_leak — emit kIterations events back-to-back and
   //    verify every callback fired. (Native test asserts no leak via
   //    ASAN; here we just count to ensure the dispatcher doesn't drop
@@ -1150,9 +1191,6 @@ int main() {
 
     lib.unsubscribeTagSeqEvent(h);
   }
-#else
-  std::cout << "SKIP listener-correctness stress (BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)\n";
-#endif
 
   std::cout << "--------------------------------------------------\n";
   if (g_fails > 0) {

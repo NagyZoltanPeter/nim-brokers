@@ -32,8 +32,9 @@ import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
 import ./internal/api_codegen_cbor_cddl
 import ./internal/api_cbor_descriptor
+import ./internal/api_cbor_subs_registry
 
-export api_cbor_descriptor
+export api_cbor_descriptor, api_cbor_subs_registry
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -1277,10 +1278,12 @@ proc registerBrokerLibraryCborImpl(
   # Event subscription identifiers (used by the per-event installers and the
   # subscribe / unsubscribe C exports).
   let eventCallbackTypeIdent = ident(libName & "CborEventCallback")
-  let subscriptionTypeIdent = ident(libName & "CborSubscription")
-  let subsKeyTypeIdent = ident(libName & "CborSubsKey")
-  let subsTableIdent = ident("g" & libName & "CborSubs")
-  let subsLockIdent = ident("g" & libName & "CborSubsLock")
+  # Phase 10: subscription state lives in a hand-rolled shared-heap registry
+  # (`api_cbor_subs_registry`). The previous codegen kept a GC'd
+  # `Table[(uint32, string), seq[Subscription]]` plus `Lock` here; that broke
+  # `--mm:refc` cross-thread delivery because subscribe/unsubscribe run on
+  # foreign caller threads while the listener fires on the processing thread.
+  let subsRegIdent = ident("g" & libName & "CborSubsReg")
   let subsHandleIdent = ident("g" & libName & "CborNextSubHandle")
   let subscribeFuncName = libName & "_subscribe"
   let subscribeFuncNameLit = newLit(subscribeFuncName)
@@ -1475,19 +1478,13 @@ proc registerBrokerLibraryCborImpl(
           userData: pointer,
         ) {.cdecl, gcsafe, raises: [].}
 
-        `subscriptionTypeIdent` = object
-          handle: uint64
-          cb: `eventCallbackTypeIdent`
-          userData: pointer
-
-        `subsKeyTypeIdent` = tuple[ctx: uint32, eventName: string]
-
       var `ctxsIdent`: seq[ptr `ctxEntryIdent`]
       var `ctxsLockIdent`: Lock
       var `ctxsInitIdent`: Atomic[int]
 
-      var `subsTableIdent`: Table[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]
-      var `subsLockIdent`: Lock
+      # Subscription registry: shared-heap hash table from
+      # `api_cbor_subs_registry`. Lazily allocated in `_initialize`.
+      var `subsRegIdent`: ptr SubsRegistry
       var `subsHandleIdent`: Atomic[uint64]
 
       var `nimInitFlagIdent`: Atomic[int]
@@ -1538,9 +1535,7 @@ proc registerBrokerLibraryCborImpl(
         var ctxsExpected = 0
         if `ctxsInitIdent`.compareExchange(ctxsExpected, 1, moAcquire, moRelaxed):
           initLock(`ctxsLockIdent`)
-          initLock(`subsLockIdent`)
-          `subsTableIdent` =
-            initTable[`subsKeyTypeIdent`, seq[`subscriptionTypeIdent`]]()
+          `subsRegIdent` = subsRegistryNew()
           `ctxsInitIdent`.store(2, moRelease)
         else:
           while `ctxsInitIdent`.load(moAcquire) != 2:
@@ -1597,29 +1592,37 @@ proc registerBrokerLibraryCborImpl(
           proc handler(
               evt: `eventTypeIdent`
           ): Future[void] {.async: (raises: []), gcsafe.} =
-            let key: `subsKeyTypeIdent` = (uint32(ctx), `eventNameLit`)
-            var subs: seq[`subscriptionTypeIdent`]
-            {.cast(gcsafe).}:
-              withLock `subsLockIdent`:
-                subs = `subsTableIdent`.getOrDefault(key)
-            if subs.len == 0:
+            # Phase 10: shared-heap snapshot + shared-heap encode buffer.
+            # Nothing GC'd crosses the callback fan-out, so this path is
+            # safe under both --mm:orc and --mm:refc.
+            var snap: ptr UncheckedArray[SubSnapshot] = nil
+            var snapLen: int = 0
+            subsRegistrySnapshot(
+              `subsRegIdent`, uint32(ctx), `eventNameLit`.cstring, snap, snapLen
+            )
+            if snapLen == 0:
               return
-            let encRes = cborEncode(evt)
+            var payloadBuf: pointer = nil
+            var payloadLen: int = 0
+            let encRes = cborEncodeShared(evt, payloadBuf, payloadLen)
             if encRes.isErr:
+              subsRegistrySnapshotFree(snap)
               return
-            let bytes = encRes.value
-            var buf: pointer = nil
-            if bytes.len > 0:
-              buf = allocShared0(bytes.len)
-              copyMem(buf, unsafeAddr bytes[0], bytes.len)
-            for sub in subs:
-              if sub.cb.isNil:
+            for i in 0 ..< snapLen:
+              let cbPtr = snap[i].cb
+              if cbPtr.isNil:
                 continue
-              sub.cb(
-                uint32(ctx), `eventNameLit`.cstring, buf, int32(bytes.len), sub.userData
+              let cbTyped = cast[`eventCallbackTypeIdent`](cbPtr)
+              cbTyped(
+                uint32(ctx),
+                `eventNameLit`.cstring,
+                payloadBuf,
+                int32(payloadLen),
+                snap[i].userData,
               )
-            if not buf.isNil:
-              deallocShared(buf)
+            if not payloadBuf.isNil:
+              deallocShared(payloadBuf)
+            subsRegistrySnapshotFree(snap)
 
           let listenRes = `eventTypeIdent`.listen(ctx, handler)
           if listenRes.isErr:
@@ -1693,12 +1696,12 @@ proc registerBrokerLibraryCborImpl(
           return 1'u64
         # Real subscription handle: skip 0 (failure) and 1 (probe).
         let h = `subsHandleIdent`.fetchAdd(1, moRelaxed) + 2'u64
-        {.cast(gcsafe).}:
-          withLock `subsLockIdent`:
-            let key: `subsKeyTypeIdent` = (ctx, name)
-            var current = `subsTableIdent`.getOrDefault(key)
-            current.add(`subscriptionTypeIdent`(handle: h, cb: cb, userData: userData))
-            `subsTableIdent`[key] = current
+        # `eventNameC` is owned by the foreign caller; the registry copies it
+        # into shared heap on insertion, so we don't need to keep `name`
+        # alive past this call.
+        subsRegistryAdd(
+          `subsRegIdent`, ctx, eventNameC, h, cast[pointer](cb), userData
+        )
         return h
 
       proc `unsubscribeFuncIdent`*(
@@ -1707,29 +1710,10 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if eventNameC.isNil:
           return -1'i32
-        let name = $eventNameC
-        {.cast(gcsafe).}:
-          withLock `subsLockIdent`:
-            let key: `subsKeyTypeIdent` = (ctx, name)
-            var subs = `subsTableIdent`.getOrDefault(key)
-            if subs.len == 0:
-              return -2'i32
-            if handle == 0'u64:
-              `subsTableIdent`.del(key)
-              return 0'i32
-            var idx = -1
-            for i in 0 ..< subs.len:
-              if subs[i].handle == handle:
-                idx = i
-                break
-            if idx < 0:
-              return -3'i32
-            subs.delete(idx)
-            if subs.len == 0:
-              `subsTableIdent`.del(key)
-            else:
-              `subsTableIdent`[key] = subs
-            return 0'i32
+        if handle == 0'u64:
+          # Drop every subscription for this (ctx, name).
+          return subsRegistryRemoveAllForKey(`subsRegIdent`, ctx, eventNameC)
+        return subsRegistryRemoveOne(`subsRegIdent`, ctx, eventNameC, handle)
 
   )
 
@@ -1879,6 +1863,11 @@ proc registerBrokerLibraryCborImpl(
 
         entryToShutdown.arg.shutdownFlag.store(1, moRelease)
         joinThread(entryToShutdown.procThread)
+        # Phase 10: free this ctx's subscription state *after* the
+        # processing thread is joined. The processing thread is the
+        # delivery thread, so the join is the only barrier we need to
+        # guarantee no concurrent listener is mid-snapshot.
+        subsRegistryFreeForCtx(`subsRegIdent`, ctx)
         if not entryToShutdown.arg.processingErrorMessage.isNil:
           freeCString(entryToShutdown.arg.processingErrorMessage)
         deallocShared(entryToShutdown.arg)

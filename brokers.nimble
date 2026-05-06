@@ -385,24 +385,23 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      # The event subscribe test exercises cross-thread Channel[T] sends
-      # of complex CBOR-encoded payloads from a generated listener
-      # closure that captures GC'd globals (the per-library subscription
-      # table + lock). Under refc this combination is fragile:
-      #   - refc + debug on macOS hits the Nim 2.2.4 stdlib Channel[T]
-      #     regression documented in LIMITATION.md (sustained sends of
-      #     complex seq/object payloads hang in storeAux).
-      #   - refc + release SIGSEGVs on macOS at first delivery — the
-      #     stop-the-world GC interacts badly with chronos thread-pool
-      #     callbacks holding shared listener state across threads.
-      # Skip the entire refc matrix for the event test on macOS until a
-      # follow-up phase can either rework the listener to use shared-heap
-      # state exclusively (avoiding GC'd captures across threads) or pin
-      # to ORC.
+      # Phase 10 (2026-05) reworked the CBOR listener path itself
+      # (shared-heap subscription registry + shared-heap CBOR encode
+      # buffer in `api_cbor_subs_registry` / `cborEncodeShared`), so the
+      # library no longer captures GC'd state across threads. The C++ /
+      # Python typemap stress validates that on macOS+refc.
+      #
+      # `test_api_cbor_event_subscribe` itself, however, drives delivery
+      # through Nim cdecl callbacks (`cbA` / `cbB`) that allocate
+      # `newSeq[byte]` on the delivery thread and append to GC'd
+      # `seq[DeliveredEvent]` globals. That is a test-side refc cross-
+      # thread hazard, not a library one — we keep this combo skipped on
+      # macOS until either the test is rewritten to use shared-heap
+      # accumulators, or the supported Nim floor moves past 2.2.4.
       when defined(macosx):
         if f == "test_api_cbor_event_subscribe" and "--mm:refc" in opt:
           echo "Skipping " & f & " (" & opt &
-            ") on macOS + refc: known cross-thread refc fragility — see LIMITATION.md and Phase 3 follow-up."
+            ") on macOS + refc: test-side GC capture in cbA/cbB; library is refc-safe (see Phase 10)."
           continue
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f

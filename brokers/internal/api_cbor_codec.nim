@@ -171,6 +171,42 @@ template cborEncode*[T](value: T): Result[seq[byte], string] =
         Result[seq[byte], string].err("cbor encode unexpected failure: " & exc.msg)
     encRes
 
+template cborEncodeShared*[T](
+    value: T, bufOut: var pointer, lenOut: var int
+): Result[void, string] =
+  ## Refc-safe variant of `cborEncode`: produces an `allocShared0`-owned
+  ## buffer and never lets the intermediate `seq[byte]` escape across thread
+  ## boundaries.
+  ##
+  ## On `ok` the caller owns `bufOut` (size `lenOut` bytes) and must
+  ## `deallocShared(bufOut)` once done. On empty input `bufOut` is `nil` and
+  ## `lenOut` is 0. Used by the CBOR FFI listener path: under `--mm:refc` a
+  ## `seq[byte]` produced on the delivery thread cannot be safely shared with
+  ## subscriber callbacks invoked synchronously, so we copy the bytes into
+  ## shared heap immediately and drop the seq.
+  ##
+  ## Same template-vs-generic-proc rationale as `cborEncode`.
+  block:
+    bufOut = nil
+    lenOut = 0
+    var encShRes: Result[void, string]
+    try:
+      let buf = BrokerCbor.encode(value)
+      if buf.len > 0:
+        let p = allocShared0(buf.len)
+        copyMem(p, unsafeAddr buf[0], buf.len)
+        bufOut = p
+        lenOut = buf.len
+      encShRes = Result[void, string].ok()
+    except SerializationError as exc:
+      encShRes = Result[void, string].err("cbor encode failed: " & exc.msg)
+    except IOError as exc:
+      encShRes = Result[void, string].err("cbor encode IO failure: " & exc.msg)
+    except CatchableError as exc:
+      encShRes =
+        Result[void, string].err("cbor encode unexpected failure: " & exc.msg)
+    encShRes
+
 template cborDecode*[T](buf: openArray[byte], _: typedesc[T]): Result[T, string] =
   ## Decode a CBOR-encoded buffer into `T` using the BrokerCbor flavor.
   ## Wraps every decode failure as `Result.err`; never raises. Same

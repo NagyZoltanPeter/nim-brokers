@@ -234,6 +234,12 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         check("rt.byte_seq_wrap.size", 260, len(r.value.data))
         check("rt.byte_seq_wrap[255]", 255, r.value.data[255])
         check("rt.byte_seq_wrap[256]", 0, r.value.data[256])
+        # Phase 9 cleanup: large byte_seq (>1KB) — multi-byte CBOR length.
+        r = lib.byte_seq_request(size=4096)
+        check("rt.byte_seq_large.size", 4096, len(r.value.data))
+        check("rt.byte_seq_large[0]", 0, r.value.data[0])
+        check("rt.byte_seq_large[1024]", 1024 % 256, r.value.data[1024])
+        check("rt.byte_seq_large[4095]", 4095 % 256, r.value.data[4095])
 
         # string seq result: empty, special chars
         r = lib.string_seq_request(prefix="x", n=0)
@@ -259,6 +265,27 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         check("rt.const_array_zero.values", [0, 0, 0, 0, 0, 0], r.value.values)
         r = lib.const_array_request(seed=1)
         check("rt.const_array_one.values", [1, 2, 3, 4, 5, 6], r.value.values)
+
+        # Phase 9 cleanup: const-array event capture, zero / negative seed.
+        ca_box: dict = {}
+        ca_done = threading.Event()
+
+        def on_ca(evt: mod.ConstArrayEvent) -> None:
+            ca_box["values"] = list(evt.values)
+            ca_done.set()
+
+        h = lib.subscribe_const_array_event(on_ca)
+        r = lib.const_array_request(seed=0)
+        assert _wait(ca_done)
+        check("rt.const_array_event_zero.values",
+              [0, 0, 0, 0, 0, 0], ca_box["values"])
+        ca_done.clear()
+        ca_box.clear()
+        r = lib.const_array_request(seed=-2)
+        assert _wait(ca_done)
+        check("rt.const_array_event_neg.values",
+              [-2, -4, -6, -8, -10, -12], ca_box["values"])
+        lib.unsubscribe_const_array_event(h)
 
         # obj seq result: empty
         r = lib.obj_seq_result_request(n=0)
@@ -645,7 +672,10 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
             check("lc.py.callback_correctness.snap2_empty", [], received[2])
         lib.unsubscribe_tag_seq_event(h)
 
-    if not skip_fragile:
+    # Phase 10 (2026-05) made the CBOR listener path refc-safe; the
+    # rapid_fire and concurrent_listeners_and_requesters bursts now run
+    # on every matrix entry, including macOS+refc+debug.
+    if True:
         # 2) rapid_fire — sustained event delivery
         with mod.Lib() as lib:
             count = [0]
