@@ -205,32 +205,52 @@ proc generateCborCppHeaderFile*(
     "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
 
   # Result<T>
-  h.add("// Minimal Result<T> mirroring Nim's Result[T, string] envelope on\n")
-  h.add("// the wire. Constructors are private; use ok() / err() factories.\n")
   h.add("template <typename T>\n")
   h.add("class Result {\n")
-  h.add(" public:\n")
-  h.add("  static Result<T> ok(T value) {\n")
-  h.add("    Result<T> r;\n")
-  h.add("    r.ok_ = true;\n")
-  h.add("    r.value_ = std::move(value);\n")
-  h.add("    return r;\n")
-  h.add("  }\n")
-  h.add("  static Result<T> err(std::string message) {\n")
-  h.add("    Result<T> r;\n")
-  h.add("    r.ok_ = false;\n")
-  h.add("    r.error_ = std::move(message);\n")
-  h.add("    return r;\n")
-  h.add("  }\n")
-  h.add("  bool isOk() const { return ok_; }\n")
-  h.add("  bool isErr() const { return !ok_; }\n")
-  h.add("  const T& value() const { return value_; }\n")
-  h.add("  T&& take() { return std::move(value_); }\n")
-  h.add("  const std::string& error() const { return error_; }\n")
-  h.add(" private:\n")
-  h.add("  bool ok_ = false;\n")
-  h.add("  T value_{};\n")
-  h.add("  std::string error_;\n")
+  h.add("    std::optional<T> value_;\n")
+  h.add("    std::string error_;\n")
+  h.add("public:\n")
+  h.add("    static Result<T> ok(T value) {\n")
+  h.add("        Result<T> r;\n")
+  h.add("        r.value_ = std::move(value);\n")
+  h.add("        return r;\n")
+  h.add("    }\n")
+  h.add("    static Result<T> err(std::string message) {\n")
+  h.add("        Result<T> r;\n")
+  h.add("        r.error_ = std::move(message);\n")
+  h.add("        return r;\n")
+  h.add("    }\n")
+  h.add("    bool isOk() const { return value_.has_value(); }\n")
+  h.add("    bool isErr() const { return !value_.has_value(); }\n")
+  h.add("    explicit operator bool() const { return isOk(); }\n")
+  h.add("    const T& value() const { return *value_; }\n")
+  h.add("    T& value() { return *value_; }\n")
+  h.add("    const T& operator*() const { return *value_; }\n")
+  h.add("    const T* operator->() const { return &*value_; }\n")
+  h.add("    T&& take() { return std::move(*value_); }\n")
+  h.add("    const std::string& error() const { return error_; }\n")
+  h.add("};\n\n")
+  h.add("template <>\n")
+  h.add("class Result<void> {\n")
+  h.add("    bool ok_ = true;\n")
+  h.add("    std::string error_;\n")
+  h.add("public:\n")
+  h.add("    static Result<void> ok() {\n")
+  h.add("        Result<void> r;\n")
+  h.add("        r.ok_ = true;\n")
+  h.add("        return r;\n")
+  h.add("    }\n")
+  h.add("    static Result<void> err(std::string message) {\n")
+  h.add("        Result<void> r;\n")
+  h.add("        r.ok_ = false;\n")
+  h.add("        r.error_ = std::move(message);\n")
+  h.add("        return r;\n")
+  h.add("    }\n")
+  h.add("    Result() = default;\n")
+  h.add("    bool isOk() const { return ok_; }\n")
+  h.add("    bool isErr() const { return !ok_; }\n")
+  h.add("    explicit operator bool() const { return isOk(); }\n")
+  h.add("    const std::string& error() const { return error_; }\n")
   h.add("};\n\n")
 
   # ---- All registered enums + distinct/alias aliases + structs ----
@@ -374,11 +394,13 @@ proc generateCborCppHeaderFile*(
   h.add("  ~Lib();\n")
   h.add("  Lib(const Lib&) = delete;\n")
   h.add("  Lib& operator=(const Lib&) = delete;\n")
-  h.add("  Lib(Lib&& other) noexcept;\n")
-  h.add("  Lib& operator=(Lib&& other) noexcept;\n\n")
-  h.add("  bool isOk() const { return ctx_ != 0; }\n")
-  h.add("  const std::string& lastError() const { return lastError_; }\n")
-  h.add("  uint32_t context() const { return ctx_; }\n\n")
+  h.add("  Lib(Lib&&) = delete;\n")
+  h.add("  Lib& operator=(Lib&&) = delete;\n\n")
+  h.add("  Result<void> createContext();\n")
+  h.add("  bool validContext() const noexcept;\n")
+  h.add("  explicit operator bool() const noexcept;\n")
+  h.add("  void shutdown() noexcept;\n")
+  h.add("  uint32_t ctx() const noexcept;\n\n")
 
   # Per-request method declarations.
   for e in requestEntries:
@@ -427,13 +449,13 @@ proc generateCborCppHeaderFile*(
     let handlerAlias = ev.typeName & "Handler"
     let trampolineIdent = ev.typeName & "Trampoline"
     let mapIdent = ev.typeName & "Handlers_"
-    let subscribeName = "subscribe" & pascal
-    let unsubscribeName = "unsubscribe" & pascal
+    let onName = "on" & pascal
+    let offName = "off" & pascal
     h.add(
       "  using " & handlerAlias & " = std::function<void(const " & ev.typeName & "&)>;\n"
     )
-    h.add("  uint64_t " & subscribeName & "(" & handlerAlias & " handler);\n")
-    h.add("  int32_t " & unsubscribeName & "(uint64_t handle);\n\n")
+    h.add("  uint64_t " & onName & "(" & handlerAlias & " fn) noexcept;\n")
+    h.add("  void " & offName & "(uint64_t handle = 0) noexcept;\n\n")
     trampolineDecls.add(
       "  static void " & trampolineIdent &
         "(uint32_t, const char*, const void*, int32_t, void*) noexcept;\n"
@@ -675,36 +697,34 @@ proc generateCborCppHeaderFile*(
   # ==================================================================
 
   # ---- Lifecycle ----
-  h.add("inline Lib::Lib() {\n")
-  h.add("  " & p & "initialize();\n")
+  h.add("inline Lib::Lib() { " & p & "initialize(); }\n\n")
+  h.add("inline Lib::~Lib() { shutdown(); }\n\n")
+  h.add("inline Result<void> Lib::createContext() {\n")
+  h.add("  if (ctx_)\n")
+  h.add("    return Result<void>::err(\"Context already created\");\n")
   h.add("  char* err = nullptr;\n")
   h.add("  ctx_ = " & p & "createContext(&err);\n")
   h.add("  if (ctx_ == 0) {\n")
   h.add("    if (err != nullptr) {\n")
-  h.add("      lastError_ = err;\n")
+  h.add("      std::string msg(err);\n")
   h.add("      " & p & "freeBuffer(err);\n")
-  h.add("    } else {\n")
-  h.add("      lastError_ = \"createContext returned 0 with no error message\";\n")
+  h.add("      return Result<void>::err(std::move(msg));\n")
   h.add("    }\n")
+  h.add("    return Result<void>::err(\"createContext failed\");\n")
   h.add("  }\n")
+  h.add("  return Result<void>::ok();\n")
   h.add("}\n\n")
-  h.add("inline Lib::~Lib() {\n")
-  h.add("  if (ctx_ != 0) {\n")
-  h.add("    " & p & "shutdown(ctx_);\n")
-  h.add("  }\n")
-  h.add("}\n\n")
-  h.add("inline Lib::Lib(Lib&& other) noexcept\n")
-  h.add("    : ctx_(other.ctx_), lastError_(std::move(other.lastError_)) {\n")
-  h.add("  other.ctx_ = 0;\n")
-  h.add("}\n\n")
-  h.add("inline Lib& Lib::operator=(Lib&& other) noexcept {\n")
-  h.add("  if (this != &other) {\n")
-  h.add("    if (ctx_ != 0) " & p & "shutdown(ctx_);\n")
-  h.add("    ctx_ = other.ctx_;\n")
-  h.add("    lastError_ = std::move(other.lastError_);\n")
-  h.add("    other.ctx_ = 0;\n")
-  h.add("  }\n")
-  h.add("  return *this;\n")
+  h.add("inline bool Lib::validContext() const noexcept { return ctx_ != 0; }\n")
+  h.add("inline Lib::operator bool() const noexcept { return validContext(); }\n")
+  h.add("inline uint32_t Lib::ctx() const noexcept { return ctx_; }\n\n")
+  # shutdown clears all event handler maps before calling C shutdown
+  h.add("inline void Lib::shutdown() noexcept {\n")
+  for ev in eventEntries:
+    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
+      continue
+    let mapIdent = ev.typeName & "Handlers_"
+    h.add("  " & mapIdent & ".clear();\n")
+  h.add("  if (ctx_) { " & p & "shutdown(ctx_); ctx_ = 0; }\n")
   h.add("}\n\n")
 
   # ---- Per-request method implementations ----
@@ -808,13 +828,11 @@ proc generateCborCppHeaderFile*(
     let handlerAlias = ev.typeName & "Handler"
     let trampolineIdent = ev.typeName & "Trampoline"
     let mapIdent = ev.typeName & "Handlers_"
-    let subscribeName = "subscribe" & pascal
-    let unsubscribeName = "unsubscribe" & pascal
+    let onName = "on" & pascal
+    let offName = "off" & pascal
 
-    h.add(
-      "inline uint64_t Lib::" & subscribeName & "(" & handlerAlias & " handler) {\n"
-    )
-    h.add("  auto sp = std::make_shared<" & handlerAlias & ">(std::move(handler));\n")
+    h.add("inline uint64_t Lib::" & onName & "(" & handlerAlias & " fn) noexcept {\n")
+    h.add("  auto sp = std::make_shared<" & handlerAlias & ">(std::move(fn));\n")
     h.add(
       "  const uint64_t id = " & p & "subscribe(\n" & "      ctx_, \"" & ev.apiName &
         "\", &Lib::" & trampolineIdent & ", sp.get());\n"
@@ -824,16 +842,10 @@ proc generateCborCppHeaderFile*(
     h.add("  return id;\n")
     h.add("}\n\n")
 
-    h.add("inline int32_t Lib::" & unsubscribeName & "(uint64_t handle) {\n")
-    h.add(
-      "  const int32_t status = " & p & "unsubscribe(\n" & "      ctx_, \"" & ev.apiName &
-        "\", handle);\n"
-    )
-    h.add("  if (status == 0) {\n")
-    h.add("    if (handle == 0) " & mapIdent & ".clear();\n")
-    h.add("    else " & mapIdent & ".erase(handle);\n")
-    h.add("  }\n")
-    h.add("  return status;\n")
+    h.add("inline void Lib::" & offName & "(uint64_t handle) noexcept {\n")
+    h.add("  " & p & "unsubscribe(ctx_, \"" & ev.apiName & "\", handle);\n")
+    h.add("  if (handle == 0) " & mapIdent & ".clear();\n")
+    h.add("  else " & mapIdent & ".erase(handle);\n")
     h.add("}\n\n")
 
     h.add(

@@ -34,8 +34,9 @@ void waitForDeliveries(std::atomic<int>& counter, int target,
 
 int main() {
   mylibcbor::Lib lib;
-  if (!lib.isOk()) {
-    std::cerr << "createContext failed: " << lib.lastError() << std::endl;
+  auto initResult = lib.createContext();
+  if (!initResult) {
+    std::cerr << "createContext failed: " << initResult.error() << std::endl;
     return 1;
   }
 
@@ -62,17 +63,17 @@ int main() {
   int64_t lastDeviceId = 0;
   bool lastOnline = false;
 
-  uint64_t handle = lib.subscribeDeviceUpdated(
+  uint64_t handle = lib.onDeviceUpdated(
       [&](const mylibcbor::DeviceUpdated& evt) {
         lastDeviceId = evt.deviceId;
         lastOnline = evt.online;
         deliveryCount.fetch_add(1);
       });
   if (handle == 0) {
-    std::cerr << "subscribe failed: " << lib.lastError() << std::endl;
+    std::cerr << "onDeviceUpdated failed\n";
     return 4;
   }
-  std::cout << "[subscribe] device_updated handle=" << handle << "\n";
+  std::cout << "[on] device_updated handle=" << handle << "\n";
 
   auto fired = lib.fireDevice(0xC0FFEE, true);
   if (fired.isErr()) {
@@ -89,14 +90,11 @@ int main() {
     return 6;
   }
 
-  auto unsubStatus = lib.unsubscribeDeviceUpdated(handle);
-  std::cout << "[unsubscribe] status=" << unsubStatus << "\n";
-  if (unsubStatus != 0) {
-    return 7;
-  }
+  lib.offDeviceUpdated(handle);
+  std::cout << "[off] device_updated\n";
 
   uint64_t probe =
-      mylibcbor_subscribe(lib.context(), "no_such_event", nullptr, nullptr);
+      mylibcbor_subscribe(lib.ctx(), "no_such_event", nullptr, nullptr);
   std::cout << "[probe missing] no_such_event -> " << probe
             << " (expected 0)\n";
 
