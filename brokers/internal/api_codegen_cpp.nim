@@ -138,14 +138,14 @@ var gApiCppForwardDecls* {.compileTime.}: seq[string] =
 var gApiCppStructs* {.compileTime.}: seq[string] =
   @[] ## Plain payload struct definitions (data members + defaults only).
 
-var gApiCppDetailForwardDecls* {.compileTime.}: seq[string] =
-  @[] ## Forward declarations emitted in detail:: BEFORE the class body
-      ## (trait struct forwards). The EventDispatcher template forward is
-      ## emitted automatically when gApiCppEventDispatcherEmitted is true.
+var gApiCppDetailForwardDecls* {.compileTime.}: seq[string] = @[]
+  ## Forward declarations emitted in detail:: BEFORE the class body
+  ## (trait struct forwards). The EventDispatcher template forward is
+  ## emitted automatically when gApiCppEventDispatcherEmitted is true.
 
-var gApiCppDetailTraits* {.compileTime.}: seq[string] =
-  @[] ## Full per-event trait struct definitions emitted in detail::
-      ## AFTER the class body.
+var gApiCppDetailTraits* {.compileTime.}: seq[string] = @[]
+  ## Full per-event trait struct definitions emitted in detail::
+  ## AFTER the class body.
 
 var gApiCppDetailAdopters* {.compileTime.}: seq[string] =
   @[] ## inline detail::adopt<Name> function definitions.

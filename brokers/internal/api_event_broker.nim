@@ -864,8 +864,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
   # Class private members: dispatcher type alias + unique_ptr field.
   var aliasDecl =
-    "    using " & dispatcherAlias &
-      " = detail::EventDispatcher<__CPP_CLASS__, detail::" & traitName
+    "    using " & dispatcherAlias & " = detail::EventDispatcher<__CPP_CLASS__, detail::" &
+    traitName
   if cArgTypes.len > 0:
     aliasDecl.add(", " & cArgTypes.join(", "))
   aliasDecl.add(">;")
@@ -878,14 +878,12 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   gApiCppConstructorInitializers.add(
     dispField & "(std::make_unique<" & dispatcherAlias & ">(*this))"
   )
-  gApiCppShutdownStatements.add(
-    "if (" & dispField & ") " & dispField & "->clear();"
-  )
+  gApiCppShutdownStatements.add("if (" & dispField & ") " & dispField & "->clear();")
 
   # Public callback alias + on/off declarations inside the class.
   gApiCppMethodDecls.add(
-    "using " & callbackAlias & " = std::function<void(" &
-      publicCbParams.join(", ") & ")>;"
+    "using " & callbackAlias & " = std::function<void(" & publicCbParams.join(", ") &
+      ")>;"
   )
   gApiCppMethodDecls.add(
     "uint64_t on" & typeDisplayName & "(" & callbackAlias & " fn) noexcept;"
