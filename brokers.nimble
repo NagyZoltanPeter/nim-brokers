@@ -516,9 +516,15 @@ task runFfiCborExamplePy, "Build and run the CBOR-mode Python consumer example":
     quoteArg("examples/ffiapi_cbor/python_example/main.py")
 
 proc buildTypeMapTestLibCbor(genPy: bool = false) =
+  let mm =
+    if existsEnv("MM"):
+      getEnv("MM")
+    else:
+      "orc"
+  let release = existsEnv("RELEASE")
   var flags =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --mm:orc " &
-    "--path:. --outdir:test/typemappingtestlib_cbor/build"
+    "-d:BrokerFfiApiCBOR --threads:on --app:lib --mm:" & mm &
+    " --path:. --outdir:test/typemappingtestlib_cbor/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib_cbor"))
   flags.add(nimWindowsCcFlag())
   flags.add(
@@ -526,6 +532,9 @@ proc buildTypeMapTestLibCbor(genPy: bool = false) =
       "test/typemappingtestlib_cbor/build", "typemappingtestlib_cbor"
     )
   )
+  flags.add(fragileTestsNimDefine(mm, release))
+  if release:
+    flags.add(" -d:release")
   if genPy:
     flags.add(" -d:BrokerFfiApiGenPy")
   exec "nim c " & flags & " test/typemappingtestlib_cbor/typemappingtestlib_cbor.nim"
@@ -536,6 +545,14 @@ task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test libr
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the Python parity test":
   buildTypeMapTestLibCbor(true)
+  let mm =
+    if existsEnv("MM"):
+      getEnv("MM")
+    else:
+      "orc"
+  let release = existsEnv("RELEASE")
+  if isNim224MacosRefcDebug(mm, release):
+    putEnv("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS", "1")
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("test/typemappingtestlib_cbor/test_typemappingtestlib_cbor.py")
 
@@ -547,8 +564,14 @@ task runTypeMapTestLibCborCpp,
   buildTypeMapTestLibCbor()
   let cmakeDir = typeMapTestLibCborCmakeDir()
   let srcDir = "test/typemappingtestlib_cbor"
+  let mm =
+    if existsEnv("MM"):
+      getEnv("MM")
+    else:
+      "orc"
+  let release = existsEnv("RELEASE")
   exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
-    cmakeWindowsConfigureExtras()
+    cmakeWindowsConfigureExtras() & fragileTestsCmakeFlag(mm, release)
   exec "cmake --build " & quoteArg(cmakeDir)
   exec quoteArg(cmakeDir & "/test_typemappingtestlib_cbor")
 

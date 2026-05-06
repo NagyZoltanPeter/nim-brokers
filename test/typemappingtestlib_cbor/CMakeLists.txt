@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Set by brokers.nimble on the macOS + Nim 2.2.4 + refc + debug combo to
+# compile-time-skip stress tests that would otherwise trip the upstream
+# stdlib Channel[T].send regression. See LIMITATION.md.
+option(BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
+       "Skip cross-thread stress tests known to trip Nim 2.2.4 macOS refc debug" OFF)
+
 # The Nim build emits libtypemappingtestlib_cbor.* + .h + .hpp into
 # build/ — see brokers.nimble's buildTypeMapTestLibCbor task.
 set(NIMLIB_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/build")
@@ -26,6 +32,11 @@ add_executable(test_typemappingtestlib_cbor test_typemappingtestlib_cbor.cpp)
 target_include_directories(test_typemappingtestlib_cbor PRIVATE
   "${NIMLIB_BUILD}"
   "${JSONCONS_INCLUDE}")
+
+if(BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS)
+  target_compile_definitions(test_typemappingtestlib_cbor PRIVATE
+    BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=1)
+endif()
 
 add_library(typemappingtestlib_cbor SHARED IMPORTED)
 if(APPLE)
