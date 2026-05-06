@@ -33,8 +33,7 @@
 import std/locks
 
 type
-  SubSnapshot* = object
-    ## A POD copy of `(cb, userData)`. Callbacks fan out unlocked.
+  SubSnapshot* = object ## A POD copy of `(cb, userData)`. Callbacks fan out unlocked.
     cb*: pointer
     userData*: pointer
 
@@ -113,7 +112,9 @@ proc keyHash(ctx: uint32, name: cstring, nameLen: int): uint32 {.inline.} =
       h = h * 16777619'u32
   h
 
-proc bucketIndex(reg: ptr SubsRegistry, ctx: uint32, name: cstring, nameLen: int): uint32 {.inline.} =
+proc bucketIndex(
+    reg: ptr SubsRegistry, ctx: uint32, name: cstring, nameLen: int
+): uint32 {.inline.} =
   keyHash(ctx, name, nameLen) and (reg.bucketsLen - 1'u32)
 
 proc findBucket(
@@ -227,8 +228,7 @@ proc subsRegistryAdd*(
         bucket.next = reg.buckets[idx]
         reg.buckets[idx] = bucket
         inc reg.entryCount
-        if reg.entryCount * ResizeDenominator >
-            int(reg.bucketsLen) * ResizeNumerator:
+        if reg.entryCount * ResizeDenominator > int(reg.bucketsLen) * ResizeNumerator:
           resize(reg, reg.bucketsLen * 2'u32)
       else:
         var cur = bucket.subsHead

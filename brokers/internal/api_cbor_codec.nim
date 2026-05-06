@@ -203,8 +203,7 @@ template cborEncodeShared*[T](
     except IOError as exc:
       encShRes = Result[void, string].err("cbor encode IO failure: " & exc.msg)
     except CatchableError as exc:
-      encShRes =
-        Result[void, string].err("cbor encode unexpected failure: " & exc.msg)
+      encShRes = Result[void, string].err("cbor encode unexpected failure: " & exc.msg)
     encShRes
 
 template cborDecode*[T](buf: openArray[byte], _: typedesc[T]): Result[T, string] =

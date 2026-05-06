@@ -1699,9 +1699,7 @@ proc registerBrokerLibraryCborImpl(
         # `eventNameC` is owned by the foreign caller; the registry copies it
         # into shared heap on insertion, so we don't need to keep `name`
         # alive past this call.
-        subsRegistryAdd(
-          `subsRegIdent`, ctx, eventNameC, h, cast[pointer](cb), userData
-        )
+        subsRegistryAdd(`subsRegIdent`, ctx, eventNameC, h, cast[pointer](cb), userData)
         return h
 
       proc `unsubscribeFuncIdent`*(
