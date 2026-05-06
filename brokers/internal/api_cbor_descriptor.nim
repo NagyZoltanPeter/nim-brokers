@@ -1,6 +1,6 @@
 ## Runtime schema-descriptor types for the CBOR FFI discovery API.
 ##
-## `<lib>_listApis` and `<lib>_getSchema` return CBOR-encoded views of these
+## `<lib>_listApis` and `<lib>_getSchema` return JSON-encoded views of these
 ## records so dynamic clients can introspect a library's surface without
 ## referring to the build-time generated headers.
 ##
@@ -10,7 +10,7 @@
 
 {.push raises: [].}
 
-import std/[options]
+import std/[json, options]
 import ./api_cbor_codec
 
 export api_cbor_codec
@@ -56,3 +56,62 @@ type
     types*: seq[ApiTypeInfo]
 
 {.pop.}
+
+# JSON serialisation lives outside `{.push raises: [].}` because std/json
+# indexing can raise KeyError.
+
+proc toJson*(f: ApiFieldInfo): JsonNode =
+  %*{"name": f.name, "nimType": f.nimType}
+
+proc toJson*(v: ApiEnumValueInfo): JsonNode =
+  %*{"name": v.name, "ordinal": v.ordinal}
+
+proc toJson*(t: ApiTypeInfo): JsonNode =
+  result = %*{
+    "name": t.name,
+    "kind": t.kind,
+    "fields": newJArray(),
+    "enumValues": newJArray(),
+    "underlyingType": t.underlyingType,
+  }
+  for f in t.fields:
+    result["fields"].add(f.toJson())
+  for v in t.enumValues:
+    result["enumValues"].add(v.toJson())
+
+proc toJson*(r: ApiRequestInfo): JsonNode =
+  result = %*{
+    "apiName": r.apiName,
+    "argsType": r.argsType,
+    "argFields": newJArray(),
+    "responseType": r.responseType,
+  }
+  for f in r.argFields:
+    result["argFields"].add(f.toJson())
+
+proc toJson*(e: ApiEventInfo): JsonNode =
+  %*{"apiName": e.apiName, "payloadType": e.payloadType}
+
+proc toJson*(a: ApiList): JsonNode =
+  %*{"libName": a.libName, "requests": a.requests, "events": a.events}
+
+proc toJson*(d: LibraryDescriptor): JsonNode =
+  result = %*{
+    "libName": d.libName,
+    "cddl": d.cddl,
+    "requests": newJArray(),
+    "events": newJArray(),
+    "types": newJArray(),
+  }
+  for r in d.requests:
+    result["requests"].add(r.toJson())
+  for e in d.events:
+    result["events"].add(e.toJson())
+  for t in d.types:
+    result["types"].add(t.toJson())
+
+proc toJsonString*(a: ApiList): string =
+  $a.toJson()
+
+proc toJsonString*(d: LibraryDescriptor): string =
+  $d.toJson()

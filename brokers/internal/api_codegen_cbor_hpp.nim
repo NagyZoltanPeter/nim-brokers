@@ -444,8 +444,8 @@ proc generateCborCppHeaderFile*(
     )
 
   # Discovery declarations.
-  h.add("  std::vector<uint8_t> rawListApis();\n")
-  h.add("  std::vector<uint8_t> rawGetSchema();\n\n")
+  h.add("  std::string listApis();\n")
+  h.add("  std::string getSchema();\n\n")
 
   # Private section: trampolines, rawCall/rawCallOwned, members.
   h.add(" private:\n")
@@ -856,7 +856,7 @@ proc generateCborCppHeaderFile*(
     h.add("}\n\n")
 
   # ---- Discovery implementations ----
-  h.add("inline std::vector<uint8_t> Lib::rawListApis() {\n")
+  h.add("inline std::string Lib::listApis() {\n")
   h.add("  void* buf = nullptr;\n")
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "listApis(&buf, &len);\n")
@@ -868,9 +868,9 @@ proc generateCborCppHeaderFile*(
   h.add("  }\n")
   h.add("  if (nb.empty()) return {};\n")
   h.add("  auto v = nb.view();\n")
-  h.add("  return {v.begin(), v.end()};\n")
+  h.add("  return std::string(reinterpret_cast<const char*>(v.data()), v.size());\n")
   h.add("}\n\n")
-  h.add("inline std::vector<uint8_t> Lib::rawGetSchema() {\n")
+  h.add("inline std::string Lib::getSchema() {\n")
   h.add("  void* buf = nullptr;\n")
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "getSchema(&buf, &len);\n")
@@ -882,7 +882,7 @@ proc generateCborCppHeaderFile*(
   h.add("  }\n")
   h.add("  if (nb.empty()) return {};\n")
   h.add("  auto v = nb.view();\n")
-  h.add("  return {v.begin(), v.end()};\n")
+  h.add("  return std::string(reinterpret_cast<const char*>(v.data()), v.size());\n")
   h.add("}\n\n")
 
   h.add("} // namespace " & libName & "\n\n")

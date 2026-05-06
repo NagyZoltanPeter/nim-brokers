@@ -2072,7 +2072,7 @@ proc registerBrokerLibraryCborImpl(
 
   )
 
-  # `<lib>_listApis` — returns a CBOR-encoded `ApiList`.
+  # `<lib>_listApis` — returns a JSON-encoded `ApiList` string.
   result.add(
     quote do:
       proc `listApisFuncIdent`*(
@@ -2084,20 +2084,21 @@ proc registerBrokerLibraryCborImpl(
         respBufOut[] = nil
         respLenOut[] = 0
         `ensureApiListIdent`()
-        let enc = cborEncode(`apiListIdent`)
-        if enc.isErr():
+        var jsonStr: string
+        try:
+          jsonStr = toJsonString(`apiListIdent`)
+        except CatchableError:
           return -10'i32
-        let bytes = enc.get()
-        if bytes.len > 0:
-          let buf = allocShared0(bytes.len)
-          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+        if jsonStr.len > 0:
+          let buf = allocShared0(jsonStr.len)
+          copyMem(buf, addr jsonStr[0], jsonStr.len)
           respBufOut[] = buf
-          respLenOut[] = int32(bytes.len)
+          respLenOut[] = int32(jsonStr.len)
         return 0'i32
 
   )
 
-  # `<lib>_getSchema` — returns a CBOR-encoded `LibraryDescriptor`.
+  # `<lib>_getSchema` — returns a JSON-encoded `LibraryDescriptor` string.
   result.add(
     quote do:
       proc `getSchemaFuncIdent`*(
@@ -2109,15 +2110,16 @@ proc registerBrokerLibraryCborImpl(
         respBufOut[] = nil
         respLenOut[] = 0
         `ensureDescriptorIdent`()
-        let enc = cborEncode(`descriptorIdent`)
-        if enc.isErr():
+        var jsonStr: string
+        try:
+          jsonStr = toJsonString(`descriptorIdent`)
+        except CatchableError:
           return -10'i32
-        let bytes = enc.get()
-        if bytes.len > 0:
-          let buf = allocShared0(bytes.len)
-          copyMem(buf, unsafeAddr bytes[0], bytes.len)
+        if jsonStr.len > 0:
+          let buf = allocShared0(jsonStr.len)
+          copyMem(buf, addr jsonStr[0], jsonStr.len)
           respBufOut[] = buf
-          respLenOut[] = int32(bytes.len)
+          respLenOut[] = int32(jsonStr.len)
         return 0'i32
 
   )
