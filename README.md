@@ -687,3 +687,19 @@ LIMITATION.md → §2.1 for the toolchain rationale.
 ## License
 
 MIT
+
+## Credits
+
+`nim-brokers` builds on the work of two excellent open-source projects:
+
+- [**chronos**](https://github.com/status-im/nim-chronos) — the asynchronous
+  runtime that powers every broker. All async dispatch, `Future[T]`,
+  `ThreadSignalPtr`, and the cooperative scheduling model used by the
+  multi-thread brokers and the FFI API runtime come from chronos.
+- [**jsoncons**](https://github.com/danielaparker/jsoncons) — the header-only
+  C++ JSON / CBOR library used by the generated CBOR-mode C++ wrappers
+  (`*.hpp`) to encode and decode the wire format produced by the
+  CBOR FFI ABI. Vendored as a git submodule under `vendor/jsoncons` and
+  pinned to a tagged release; fetch it with `nimble fetchVendor`.
+
+Many thanks to the maintainers and contributors of both projects.

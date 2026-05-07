@@ -105,7 +105,10 @@ nimble runTypeMapTestLibCborCpp     # run the C++ parity matrix
 ```
 
 External dependencies for CBOR-mode wrappers:
-- C++: jsoncons (header-only) under `vendor/jsoncons/include`.
+- C++: jsoncons (header-only) under `vendor/jsoncons/include`. Vendored as a
+  git submodule pinned to a tagged release. After cloning the repo, run
+  `nimble fetchVendor` (or `git submodule update --init --recursive`) to
+  populate it before building any CBOR C++ target.
 - Python: the `cbor2` package on the active interpreter (`pip install --user cbor2`).
 
 #### Examine generated nim code

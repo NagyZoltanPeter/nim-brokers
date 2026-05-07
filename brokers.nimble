@@ -353,6 +353,13 @@ proc runNph(files: seq[string], emptyMessage: string) =
     for file in files:
       exec "nph " & quoteArg(file)
 
+task fetchVendor, "Initialize/update vendored third-party dependencies (git submodules)":
+  ## Fetches the third-party C/C++ dependencies required by the CBOR-mode FFI
+  ## builds (currently jsoncons under vendor/jsoncons). Safe to run repeatedly.
+  if not dirExists(".git"):
+    quit "fetchVendor must be run from a git checkout (no .git directory found)."
+  exec "git submodule update --init --recursive vendor"
+
 task test, "Run all single and multi-threaded broker tests":
   let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
   for f in tests:

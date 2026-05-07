@@ -6,9 +6,6 @@ build/
 **/cmake-build*/*
 .gitnexus
 
-# Vendored dependencies (use git submodules or fetch on demand)
-vendor/jsoncons/
-
 # Python __pycache__ from running the generated wrapper
 __pycache__/
 *.pyc
