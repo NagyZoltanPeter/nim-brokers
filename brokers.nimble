@@ -410,7 +410,7 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
   let cborApiTests = [
     ("test_api_cbor_library_init", "cbtest"),
     ("test_api_cbor_discovery", "cbdisc"),
-    ("typemappingtestlib_cbor/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
+    ("typemappingtestlib/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
   ]
   for (f, prefix) in cborApiTests:
     for opt in [
@@ -494,6 +494,11 @@ task runFfiExampleCborCpp,
   buildFfiCmakeTarget("example_cpp", useCbor = true)
   exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
+# CBOR-mode parity build of the typemapping test library: compiles the
+# SAME test/typemappingtestlib/typemappingtestlib.nim source with
+# -d:BrokerFfiApiCBOR into build_cbor/ and drives the SAME
+# test_typemappingtestlib.{cpp,py} test code against that build (via the
+# CMake project's USE_CBOR=ON toggle for C++).
 proc buildTypeMapTestLibCbor(genPy: bool = false) =
   let mm =
     if existsEnv("MM"):
@@ -503,23 +508,40 @@ proc buildTypeMapTestLibCbor(genPy: bool = false) =
   let release = existsEnv("RELEASE")
   var flags =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/typemappingtestlib_cbor/build"
-  flags.add(nimMainPrefixFlag("typemappingtestlib_cbor"))
+    " --path:. --outdir:test/typemappingtestlib/build_cbor"
+  flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
   flags.add(
-    nimWindowsImplibFlag(
-      "test/typemappingtestlib_cbor/build", "typemappingtestlib_cbor"
-    )
+    nimWindowsImplibFlag("test/typemappingtestlib/build_cbor", "typemappingtestlib")
   )
   flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
   if genPy:
     flags.add(" -d:BrokerFfiApiGenPy")
-  exec "nim c " & flags & " test/typemappingtestlib_cbor/typemappingtestlib_cbor.nim"
+  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
 task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
   buildTypeMapTestLibCbor()
+
+proc typeMapTestLibCborCmakeDir(): string =
+  "test/typemappingtestlib/cmake-build-cbor"
+
+task runTypeMapTestLibCborCpp,
+  "Build the CBOR-mode parity library + run the C++ parity test against it":
+  buildTypeMapTestLibCbor()
+  let cmakeDir = typeMapTestLibCborCmakeDir()
+  let srcDir = "test/typemappingtestlib"
+  let mm =
+    if existsEnv("MM"):
+      getEnv("MM")
+    else:
+      "orc"
+  let release = existsEnv("RELEASE")
+  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) & " -DUSE_CBOR=ON" &
+    cmakeWindowsConfigureExtras() & fragileTestsCmakeFlag(mm, release)
+  exec "cmake --build " & quoteArg(cmakeDir)
+  exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
 
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the Python parity test":
@@ -532,27 +554,10 @@ task runTypeMapTestLibCborPy,
   let release = existsEnv("RELEASE")
   if isNim224MacosRefcDebug(mm, release):
     putEnv("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS", "1")
+  # The Python parity test was originally written against the CBOR-only
+  # wrapper API and lives next to the CBOR build's generated .py file.
   exec quoteArg(findPythonExe()) & " " &
-    quoteArg("test/typemappingtestlib_cbor/test_typemappingtestlib_cbor.py")
-
-proc typeMapTestLibCborCmakeDir(): string =
-  "test/typemappingtestlib_cbor/cmake-build"
-
-task runTypeMapTestLibCborCpp,
-  "Build the CBOR-mode parity library + C++ binding and run the C++ parity test":
-  buildTypeMapTestLibCbor()
-  let cmakeDir = typeMapTestLibCborCmakeDir()
-  let srcDir = "test/typemappingtestlib_cbor"
-  let mm =
-    if existsEnv("MM"):
-      getEnv("MM")
-    else:
-      "orc"
-  let release = existsEnv("RELEASE")
-  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
-    cmakeWindowsConfigureExtras() & fragileTestsCmakeFlag(mm, release)
-  exec "cmake --build " & quoteArg(cmakeDir)
-  exec quoteArg(cmakeDir & "/test_typemappingtestlib_cbor")
+    quoteArg("test/typemappingtestlib/test_typemappingtestlib_cbor.py")
 
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =

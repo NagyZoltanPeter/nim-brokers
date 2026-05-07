@@ -19,10 +19,11 @@ import sys
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BUILD = os.path.join(HERE, "build")
+# CBOR-mode wrapper lands next to the CBOR-built shared object.
+BUILD = os.path.join(HERE, "build_cbor")
 sys.path.insert(0, BUILD)
 
-import typemappingtestlib_cbor as mod  # noqa: E402
+import typemappingtestlib as mod  # noqa: E402
 
 
 def _wait(event: threading.Event, timeout: float = 1.0) -> bool:
@@ -323,11 +324,11 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
     raw = mod._LIB
 
     # 1) create_and_shutdown — happy path via raw C ABI
-    raw.typemappingtestlib_cbor_initialize()
+    raw.typemappingtestlib_initialize()
     err_p = ctypes.c_char_p()
-    ctx = raw.typemappingtestlib_cbor_createContext(ctypes.byref(err_p))
+    ctx = raw.typemappingtestlib_createContext(ctypes.byref(err_p))
     check("lc.create_and_shutdown.ctx_nonzero", True, ctx != 0)
-    st = raw.typemappingtestlib_cbor_shutdown(ctx)
+    st = raw.typemappingtestlib_shutdown(ctx)
     check("lc.create_and_shutdown.shutdown_ok", 0, st)
 
     # 2) RAII via context manager — reusing Lib() after a previous Lib
@@ -345,14 +346,14 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
 
     # 3) double_shutdown_is_safe
     err_p = ctypes.c_char_p()
-    c = raw.typemappingtestlib_cbor_createContext(ctypes.byref(err_p))
-    s1 = raw.typemappingtestlib_cbor_shutdown(c)
-    s2 = raw.typemappingtestlib_cbor_shutdown(c)
+    c = raw.typemappingtestlib_createContext(ctypes.byref(err_p))
+    s1 = raw.typemappingtestlib_shutdown(c)
+    s2 = raw.typemappingtestlib_shutdown(c)
     check("lc.double_shutdown.first_ok", 0, s1)
     check("lc.double_shutdown.second_returns_neg1", -1, s2)
 
     # 4) shutdown_unknown_ctx_safe
-    s = raw.typemappingtestlib_cbor_shutdown(0xDEADBEEF)
+    s = raw.typemappingtestlib_shutdown(0xDEADBEEF)
     check("lc.shutdown_unknown.returns_neg1", -1, s)
 
     # 5) call_with_invalid_ctx — must not succeed (either non-zero
@@ -360,7 +361,7 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
     import cbor2  # noqa: E402
     resp_buf = ctypes.c_void_p()
     resp_len = ctypes.c_int32()
-    st = raw.typemappingtestlib_cbor_call(
+    st = raw.typemappingtestlib_call(
         0, b"echo_request", None, 0, ctypes.byref(resp_buf), ctypes.byref(resp_len)
     )
     not_ok = st != 0
@@ -372,7 +373,7 @@ def main() -> int:  # noqa: C901  — the matrix is the matrix
         except Exception:
             not_ok = True
     if resp_buf:
-        raw.typemappingtestlib_cbor_freeBuffer(resp_buf)
+        raw.typemappingtestlib_freeBuffer(resp_buf)
     check("lc.call_with_zero_ctx.does_not_succeed", True, not_ok)
 
     # ========================================================================

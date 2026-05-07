@@ -1157,6 +1157,13 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           cppCallArgs.add(", " & paramName & ".data()")
         elif isCStringType(paramType):
           cppCallArgs.add(", " & paramName & ".c_str()")
+        elif isEnumNode(paramType):
+          # The C++ wrapper exposes `enum class <Name>` (in namespace);
+          # the C ABI expects the typedef-enum `<Name>_C` at global
+          # scope (codegen-suffixed to avoid namespace collision). Cast
+          # at the boundary — both share int32_t underlying type so
+          # the cast is a runtime no-op.
+          cppCallArgs.add(", static_cast<::" & $paramType & "_C>(" & paramName & ")")
         else:
           cppCallArgs.add(", " & paramName)
 

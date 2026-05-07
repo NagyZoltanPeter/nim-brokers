@@ -508,9 +508,9 @@ static void test_scalar_prim_scalar_event_false_flag() {
 static void test_enum_roundtrip_low() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 10);
+    auto r = lib.typedScalarRequest(Priority::pLow, 10);
     CHECK(r.isOk());
-    CHECK_EQ(r->priority, PRIORITY_P_LOW);
+    CHECK_EQ(r->priority, Priority::pLow);
     CHECK_EQ(static_cast<int>(r->priority), 0);
     lib.shutdown();
 }
@@ -518,9 +518,9 @@ static void test_enum_roundtrip_low() {
 static void test_enum_roundtrip_high() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_HIGH, 1);
+    auto r = lib.typedScalarRequest(Priority::pHigh, 1);
     CHECK(r.isOk());
-    CHECK_EQ(r->priority, PRIORITY_P_HIGH);
+    CHECK_EQ(r->priority, Priority::pHigh);
     CHECK_EQ(static_cast<int>(r->priority), 2);
     lib.shutdown();
 }
@@ -528,7 +528,7 @@ static void test_enum_roundtrip_high() {
 static void test_enum_roundtrip_critical() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_CRITICAL, 1);
+    auto r = lib.typedScalarRequest(Priority::pCritical, 1);
     CHECK(r.isOk());
     CHECK_EQ(static_cast<int>(r->priority), 3);
     lib.shutdown();
@@ -537,7 +537,7 @@ static void test_enum_roundtrip_critical() {
 static void test_distinct_jobid_echoed() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
+    auto r = lib.typedScalarRequest(Priority::pLow, 5);
     CHECK(r.isOk());
     CHECK_EQ(r->jobId, 5);
     lib.shutdown();
@@ -546,7 +546,7 @@ static void test_distinct_jobid_echoed() {
 static void test_distinct_jobid_next() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
+    auto r = lib.typedScalarRequest(Priority::pLow, 5);
     CHECK(r.isOk());
     CHECK_EQ(r->nextId, 6); // nextId = jobId + 1
     lib.shutdown();
@@ -555,7 +555,7 @@ static void test_distinct_jobid_next() {
 static void test_distinct_jobid_zero() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_MEDIUM, 0);
+    auto r = lib.typedScalarRequest(Priority::pMedium, 0);
     CHECK(r.isOk());
     CHECK_EQ(r->jobId, 0);
     CHECK_EQ(r->nextId, 1);
@@ -566,7 +566,7 @@ static void test_all_priority_values() {
     Typemappingtestlib lib;
     lib.createContext();
     Priority priorities[] = {
-        PRIORITY_P_LOW, PRIORITY_P_MEDIUM, PRIORITY_P_HIGH, PRIORITY_P_CRITICAL
+        Priority::pLow, Priority::pMedium, Priority::pHigh, Priority::pCritical
     };
     for (auto p : priorities) {
         auto r = lib.typedScalarRequest(p, 1);
@@ -587,12 +587,12 @@ static void test_typed_scalar_event_enum() {
             evts.push({p, jid, ts});
         });
 
-    lib.typedScalarRequest(PRIORITY_P_HIGH, 7);
+    lib.typedScalarRequest(Priority::pHigh, 7);
     waitFor([&] { return evts.size() >= 1; });
 
     CHECK_EQ(evts.size(), 1u);
     auto e = evts.at(0);
-    CHECK_EQ(e.priority, PRIORITY_P_HIGH);
+    CHECK_EQ(e.priority, Priority::pHigh);
     CHECK_EQ(static_cast<int>(e.priority), 2);
     CHECK_EQ(e.jobId, 7);
     CHECK_EQ(e.ts, 70LL); // ts = jobId * 10
@@ -609,7 +609,7 @@ static void test_typed_scalar_event_distinct_timestamp() {
     auto h = lib.onTypedScalarEvent(
         [&evts](Typemappingtestlib&, Priority, int32_t, int64_t ts) { evts.push(ts); });
 
-    lib.typedScalarRequest(PRIORITY_P_LOW, 3);
+    lib.typedScalarRequest(Priority::pLow, 3);
     waitFor([&] { return evts.size() >= 1; });
 
     CHECK_EQ(evts.size(), 1u);
@@ -1308,6 +1308,40 @@ static void test_const_array_event_length() {
     lib.shutdown();
 }
 
+static void test_const_array_event_neg_seed() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<std::vector<int32_t>> evts;
+    auto h = lib.onConstArrayEvent(
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
+            evts.push(std::vector<int32_t>(values.begin(), values.end()));
+        });
+
+    lib.constArrayRequest(-2);
+    waitFor([&] { return evts.size() >= 1; });
+
+    CHECK_EQ(evts.size(), 1u);
+    auto snap = evts.at(0);
+    std::vector<int32_t> expected{-2, -4, -6, -8, -10, -12};
+    CHECK_EQ(snap.size(), expected.size());
+    for (size_t i = 0; i < snap.size() && i < expected.size(); ++i)
+        CHECK_EQ(snap[i], expected[i]);
+
+    lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+static void test_distinct_jobid_max_minus_one() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.typedScalarRequest(Priority::pLow, INT32_MAX - 1);
+    CHECK(r.isOk());
+    CHECK_EQ(r->jobId, INT32_MAX - 1);
+    CHECK_EQ(r->nextId, INT32_MAX);
+    lib.shutdown();
+}
+
 static void test_const_array_event_zero_seed() {
     Typemappingtestlib lib;
     lib.createContext();
@@ -1904,13 +1938,11 @@ static void test_seq_object_event_callback_data_correctness() {
     SafeList<std::vector<TagData>> received;
 
     auto h = lib.onTagSeqEvent(
-        [&received](Typemappingtestlib&, std::span<const TagCItem> tags) {
+        [&received](Typemappingtestlib&, std::span<const Tag> tags) {
             std::vector<TagData> snapshot;
+            snapshot.reserve(tags.size());
             for (const auto& t : tags) {
-                snapshot.push_back(TagData{
-                    t.key ? std::string(t.key) : "",
-                    t.value ? std::string(t.value) : ""
-                });
+                snapshot.push_back(TagData{t.key, t.value});
             }
             received.push(std::move(snapshot));
         });
@@ -1956,7 +1988,7 @@ static void test_seq_object_event_rapid_fire_no_leak() {
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Typemappingtestlib&, std::span<const TagCItem>) {
+        [&eventCount](Typemappingtestlib&, std::span<const Tag>) {
             eventCount.fetch_add(1, std::memory_order_relaxed);
         });
 
@@ -1981,13 +2013,14 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Typemappingtestlib&, std::span<const TagCItem> tags) {
-            // Read tag data to ensure the CItem pointers are valid
+        [&eventCount](Typemappingtestlib&, std::span<const Tag> tags) {
+            // Touch every string to force a read — catches use-after-free
+            // in the trampoline's view-array materialisation.
             for (const auto& t : tags) {
-                if (t.key) {
-                    volatile size_t len = std::strlen(t.key);
-                    (void)len;
-                }
+                volatile size_t kl = t.key.size();
+                volatile size_t vl = t.value.size();
+                (void)kl;
+                (void)vl;
             }
             eventCount.fetch_add(1, std::memory_order_relaxed);
         });
@@ -2075,6 +2108,7 @@ int main() {
     RUN(test_distinct_jobid_echoed);
     RUN(test_distinct_jobid_next);
     RUN(test_distinct_jobid_zero);
+    RUN(test_distinct_jobid_max_minus_one);
     RUN(test_all_priority_values);
     RUN(test_typed_scalar_event_enum);
     RUN(test_typed_scalar_event_distinct_timestamp);
@@ -2130,6 +2164,7 @@ int main() {
     RUN(test_const_array_event_values);
     RUN(test_const_array_event_length);
     RUN(test_const_array_event_zero_seed);
+    RUN(test_const_array_event_neg_seed);
 
     printf("\n--- TestSeqObjectTypes ---\n");
     RUN(test_obj_seq_param_empty);

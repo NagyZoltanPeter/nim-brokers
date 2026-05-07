@@ -45,7 +45,7 @@ Current test task coverage:
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
 - `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
 - `nimble testFfiApiCpp` — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
-- `nimble testApiCbor` — CBOR-mode FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the typemappingtestlib_cbor parity matrix (Nim side) across ORC/refc × debug/release
+- `nimble testApiCbor` — CBOR-mode FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the typemappingtestlib CBOR parity matrix (Nim side) across ORC/refc × debug/release
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:

@@ -11,14 +11,14 @@ import std/[atomics, monotimes, options, os, strutils, times]
 import results
 import testutils/unittests
 import brokers/internal/api_cbor_codec
-import ./typemappingtestlib_cbor
+import ./typemappingtestlib
 
 # ---------------------------------------------------------------------------
 # C-export wrappers (FFI gate)
 # ---------------------------------------------------------------------------
 
 proc copyToCBuffer(bytes: openArray[byte]): pointer =
-  result = typemappingtestlib_cbor_allocBuffer(int32(bytes.len))
+  result = typemappingtestlib_allocBuffer(int32(bytes.len))
   if bytes.len > 0:
     copyMem(result, unsafeAddr bytes[0], bytes.len)
 
@@ -27,7 +27,7 @@ proc takeBuf(buf: pointer, len: int32): seq[byte] =
     return @[]
   result = newSeq[byte](len.int)
   copyMem(addr result[0], buf, len.int)
-  typemappingtestlib_cbor_freeBuffer(buf)
+  typemappingtestlib_freeBuffer(buf)
 
 proc callApi(
     ctx: uint32, apiName: string, payload: openArray[byte] = []
@@ -39,7 +39,7 @@ proc callApi(
       nil
   var respBuf: pointer = nil
   var respLen: int32 = 0
-  let status = typemappingtestlib_cbor_call(
+  let status = typemappingtestlib_call(
     ctx, apiName.cstring, inBuf, int32(payload.len), addr respBuf, addr respLen
   )
   (status, takeBuf(respBuf, respLen))
@@ -121,12 +121,12 @@ proc waitForEvent(name: string, timeoutMs: int = 500): seq[byte] =
 
 template setupCtx(): uint32 =
   var err: cstring = nil
-  let c = typemappingtestlib_cbor_createContext(addr err)
+  let c = typemappingtestlib_createContext(addr err)
   check c != 0'u32
   c
 
 proc subscribe(ctx: uint32, eventName: string): uint64 =
-  typemappingtestlib_cbor_subscribe(ctx, eventName.cstring, captureCb, nil)
+  typemappingtestlib_subscribe(ctx, eventName.cstring, captureCb, nil)
 
 suite "typemappingtestlib_cbor parity":
   test "lifecycle + initialize round-trip (string param)":
@@ -146,7 +146,7 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.label == "mylabel"
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "echo round-trip (provider concatenates with stored label)":
     resetSlots()
@@ -168,7 +168,7 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.reply == "init:ping"
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "primitive-scalar request + matching event":
     resetSlots()
@@ -197,7 +197,7 @@ suite "typemappingtestlib_cbor parity":
     check evtDec.isOk()
     check evtDec.value.i64 == args.i64
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "enum + distinct round-trip":
     resetSlots()
@@ -223,7 +223,7 @@ suite "typemappingtestlib_cbor parity":
     check evtDec.isOk()
     check int64(evtDec.value.ts) == 410'i64
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[byte] result":
     resetSlots()
@@ -236,7 +236,7 @@ suite "typemappingtestlib_cbor parity":
     let dec = cborDecodeResultEnvelope(resp, ByteSeqRequest)
     check dec.isOk()
     check dec.value.data == @[0'u8, 1, 2, 3, 4]
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[string] result + matching event":
     resetSlots()
@@ -259,7 +259,7 @@ suite "typemappingtestlib_cbor parity":
     check evtDec.isOk()
     check evtDec.value.items.len == 3
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[int64] result + matching event":
     resetSlots()
@@ -277,7 +277,7 @@ suite "typemappingtestlib_cbor parity":
     let evt = waitForEvent("prim_seq_event")
     check evt.len > 0
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "array[4, int32] result + matching event":
     resetSlots()
@@ -297,7 +297,7 @@ suite "typemappingtestlib_cbor parity":
     let evt = waitForEvent("fixed_array_event")
     check evt.len > 0
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "array[ConstArrayLen, int32] result":
     resetSlots()
@@ -311,7 +311,7 @@ suite "typemappingtestlib_cbor parity":
     let dec = cborDecodeResultEnvelope(resp, ConstArrayRequest)
     check dec.isOk()
     check dec.value.values == [3'i32, 6, 9, 12, 15, 18]
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[Tag] result + tag_seq event":
     resetSlots()
@@ -331,7 +331,7 @@ suite "typemappingtestlib_cbor parity":
     let evt = waitForEvent("tag_seq_event")
     check evt.len > 0
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[Tag] INPUT param":
     resetSlots()
@@ -347,7 +347,7 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.count == 2
     check dec.value.first == "alpha"
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[string] INPUT param":
     resetSlots()
@@ -363,7 +363,7 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.count == 3
     check dec.value.joined == "a,b,c"
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "seq[int64] INPUT param":
     resetSlots()
@@ -379,7 +379,7 @@ suite "typemappingtestlib_cbor parity":
     check dec.isOk()
     check dec.value.count == 4
     check dec.value.total == 10
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "counter request emits counter_changed":
     resetSlots()
@@ -392,7 +392,7 @@ suite "typemappingtestlib_cbor parity":
     let dec = cborDecode(evt, CounterChanged)
     check dec.isOk()
     check dec.value.value == 1'i32
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   # ===========================================================================
   # Round-trip matrix expansion (Phase 9A) — boundary / edge values
@@ -431,7 +431,7 @@ suite "typemappingtestlib_cbor parity":
     let rPi = roundtrip(Args(flag: false, i32: 0, i64: 0, f64: 3.141592653589793), "pi")
     check rPi.f64 == 3.141592653589793
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "rt.priority all values + jobId boundaries":
     resetSlots()
@@ -472,7 +472,7 @@ suite "typemappingtestlib_cbor parity":
     check decB.isOk()
     check int32(decB.value.nextId) == int32.high
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "rt.byte_seq empty / single / wrap-around":
     resetSlots()
@@ -501,7 +501,7 @@ suite "typemappingtestlib_cbor parity":
     check dW.value.data[255] == 255'u8
     check dW.value.data[256] == 0'u8
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "rt.string/seq result empty + special chars":
     resetSlots()
@@ -524,7 +524,7 @@ suite "typemappingtestlib_cbor parity":
     check dS.isOk()
     check dS.value.items == @["a/b:c-0", "a/b:c-1"]
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "rt.fixed/const array seed=0/negative":
     resetSlots()
@@ -554,7 +554,7 @@ suite "typemappingtestlib_cbor parity":
     check dC.isOk()
     check dC.value.values == [0'i32, 0, 0, 0, 0, 0]
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)
 
   test "rt.empty seq[] params and results":
     resetSlots()
@@ -638,4 +638,4 @@ suite "typemappingtestlib_cbor parity":
     check dU.value.count == 2'i32
     check dU.value.joined == "héllo,wörld"
 
-    discard typemappingtestlib_cbor_shutdown(ctx)
+    discard typemappingtestlib_shutdown(ctx)

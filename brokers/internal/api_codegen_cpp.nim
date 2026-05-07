@@ -378,6 +378,24 @@ proc generateCppHeaderFile*(
   hpp.add("    const std::string& error() const { return error_; }\n")
   hpp.add("};\n\n")
 
+  # ---- Enum class declarations (parity with CBOR-mode wrapper) ----
+  # The C header emits a `typedef enum { PREFIX_VALUE = N, ... } Name;` at
+  # extern "C" / global scope (still required for C consumers). Inside the
+  # C++ namespace we emit a strongly-typed `enum class Name : int32_t`
+  # using the original Nim value names — shadowing the C enum within the
+  # namespace and matching the CBOR-wrapper shape so the same C++ test
+  # source compiles against either build.
+  for entry in gApiTypeRegistry:
+    if entry.kind != atkEnum:
+      continue
+    hpp.add("enum class " & entry.name & " : int32_t {\n")
+    if entry.enumValues.len == 0:
+      hpp.add("};\n\n")
+      continue
+    for v in entry.enumValues:
+      hpp.add("    " & v.name & " = " & $v.ordinal & ",\n")
+    hpp.add("};\n\n")
+
   # Forward declarations
   hpp.add("// ---- Forward declarations ----\n")
   hpp.add("class " & className & ";\n")
@@ -443,12 +461,15 @@ proc generateCppHeaderFile*(
     hpp.add(cppEventDispatcherTemplate)
     hpp.add("\n")
 
-  for t in gApiCppDetailTraits:
-    hpp.add(subst(t))
-    hpp.add("\n")
-
+  # Emit adopters BEFORE traits so the trait's `invoke()` body — which
+  # may call `adopt<Item>(CItem)` to materialise span<const Item> views
+  # for seq[object] event payloads — finds the adopter declared.
   for a in gApiCppDetailAdopters:
     hpp.add(subst(a))
+    hpp.add("\n")
+
+  for t in gApiCppDetailTraits:
+    hpp.add(subst(t))
     hpp.add("\n")
 
   hpp.add("} // namespace " & nsName & "::detail\n\n")

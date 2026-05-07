@@ -765,14 +765,27 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
         )
       elif isSeqType(fType):
+        # Public C++ callback receives `std::span<const Item>` (parity
+        # with CBOR-mode wrapper). Trampoline still receives the raw
+        # `ItemCItem* + count` C ABI; we materialise a temporary
+        # `std::vector<Item>` in the invoke preamble via the per-type
+        # `detail::adopt<Item>(CItem)` helper, then pass a span over
+        # it. Per-event O(N) string-copy cost (same as the CBOR
+        # decoded vector path); kept lifetime-bound to the callback.
         let itemTypeName = seqItemTypeName(fType)
-        cppCbParams.add("std::span<const " & itemTypeName & "CItem> " & fName)
+        cppCbParams.add("std::span<const " & itemTypeName & "> " & fName)
         cTrampolineParams.add(itemTypeName & "CItem* " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
-        traitInvokeArgs.add(
-          "std::span<const " & itemTypeName & "CItem>(" & fName & ", " & fName &
-            "_count)"
+        let viewVar = fName & "_view"
+        traitInvokePreamble.add(
+          "        std::vector<" & itemTypeName & "> " & viewVar & ";\n" & "        if (" &
+            fName & " && " & fName & "_count > 0) {\n" & "            " & viewVar &
+            ".reserve(" & fName & "_count);\n" & "            for (int32_t i = 0; i < " &
+            fName & "_count; ++i)\n" & "                " & viewVar &
+            ".emplace_back(adopt" & itemTypeName & "(" & fName & "[i]));\n" &
+            "        }\n"
         )
+        traitInvokeArgs.add("std::span<const " & itemTypeName & ">(" & viewVar & ")")
       elif isArrayTypeNode(fType):
         let elemName = arrayNodeElemName(fType)
         let cppElemType = nimTypeToCpp(ident(elemName))
@@ -784,10 +797,16 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
         )
       elif isEnumRegistered($fType):
+        # Public C++ callback receives the C++ `enum class <Name>` (in
+        # namespace). C trampoline signature uses `::<Name>_C` (the C
+        # typedef-enum at global scope, suffixed by codegen to avoid
+        # the namespace collision). `invoke` static_casts between the
+        # two — both have int32_t underlying so the cast is a no-op
+        # at runtime.
         let enumTypeName = $fType
         cppCbParams.add(enumTypeName & " " & fName)
-        cTrampolineParams.add(enumTypeName & " " & fName)
-        traitInvokeArgs.add(fName)
+        cTrampolineParams.add("::" & enumTypeName & "_C " & fName)
+        traitInvokeArgs.add("static_cast<" & enumTypeName & ">(" & fName & ")")
       else:
         let cbType = nimTypeToCppCallbackParam(fType)
         let cType = nimTypeToCInput(fType)
@@ -864,7 +883,11 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
         )
         cArgTypes.add("int32_t")
       elif isEnumRegistered($fType):
-        cArgTypes.add($fType)
+        # Qualify with `::` and the `_C` suffix so the EventDispatcher
+        # template instantiation uses the C typedef-enum (global scope,
+        # suffix-renamed to avoid namespace collision with the C++ enum
+        # class).
+        cArgTypes.add("::" & $fType & "_C")
       else:
         cArgTypes.add(nimTypeToCInput(fType))
 

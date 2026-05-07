@@ -260,7 +260,9 @@ macro autoRegisterApiType*(T: typed): untyped =
           "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
             ",\n"
         )
-      enumDecl.add("} " & typeName & ";\n")
+      # `_C` suffix on the typedef name so the C enum doesn't collide
+      # with the C++ `enum class <Name>` emitted by the .hpp wrapper.
+      enumDecl.add("} " & typeName & "_C;\n")
       appendHeaderDecl(enumDecl)
 
       # Generate C++ enum (inherits from .h include, but add to cpp structs
