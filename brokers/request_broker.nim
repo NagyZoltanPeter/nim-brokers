@@ -166,9 +166,13 @@ when compileOption("threads"):
   import ./internal/mt_request_broker
   export mt_request_broker
 
-when compileOption("threads") and defined(BrokerFfiApi):
+when compileOption("threads") and
+    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
   import ./internal/api_request_broker, ./internal/api_type
   export api_request_broker, api_type
+
+  import ./internal/api_request_broker_cbor
+  export api_request_broker_cbor
 
 export results, chronos, keepItIf, broker_context
 
@@ -874,8 +878,12 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
           "Compile with `--threads:on` to use API RequestBroker."
       .}
     else:
-      when defined(BrokerFfiApi):
-        generateApiRequestBroker(body)
+      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or
+          defined(BrokerFfiApiNative):
+        when brokerFfiMode == mfCbor:
+          generateApiCborRequestBroker(body)
+        else:
+          generateApiRequestBroker(body)
       else:
         generateMtRequestBroker(body)
   of rbAsync, rbSync:

@@ -5,3 +5,7 @@ build/
 **/build*/*
 **/cmake-build*/*
 .gitnexus
+
+# Python __pycache__ from running the generated wrapper
+__pycache__/
+*.pyc

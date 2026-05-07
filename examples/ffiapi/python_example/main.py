@@ -1,244 +1,227 @@
 #!/usr/bin/env python3
 """Device Monitor — Python wrapper example.
 
-Build from the repository root:
-  nimble buildFfiExamplePy
+Demonstrates the generated Python wrapper API on the mylib library:
 
-Run from the repository root:
-  nimble runFfiExamplePy
+    Lib lifecycle:   Mylib() / create_context() / shutdown() / context manager
+    Requests:        each returns Result[<TypeName>] — use .is_ok() / .value / .error
+    Events:          on_<name>(callback) -> handle, off_<name>(handle = 0)
+                     callback(lib, *unpacked_payload_fields)
+    Enums:           Priority.pLow / DeviceStatus.dsOnline (Nim names)
+
+The same shape works for native- and CBOR-mode builds of the library.
 """
 
-from __future__ import annotations
-
+import os
 import sys
 import time
 from pathlib import Path
 
-
+# MYLIB_BUILD_DIR=build (default) drives the native FFI build,
+# MYLIB_BUILD_DIR=build_cbor drives the CBOR FFI build of the same source.
+# Both produce a typemappingtestlib-shaped Python wrapper module so this
+# example runs unchanged against either.
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "nimlib" / "build"))
+_BUILD_DIR = os.environ.get("MYLIB_BUILD_DIR", "build")
+sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 
-from mylib import AddDeviceSpec, DeviceStatus, Mylib, MylibError
+from mylib import AddDeviceSpec, Mylib  # noqa: E402
+
+
+_EXPECTED_VERSION = "1.0.0"
 
 
 def main() -> int:
     print("=== Device Monitor — Python Wrapper Example ===\n")
 
+    actual_version = Mylib.version()
+    print(f"mylib version: {actual_version}")
+    assert actual_version == _EXPECTED_VERSION, (
+        f"Mylib.version() mismatch: got {actual_version!r}, "
+        f"expected {_EXPECTED_VERSION!r}"
+    )
+
     discovery_count = 0
     status_count = 0
+    alert_count = 0
     batch_count = 0
 
-    try:
-        with Mylib() as lib:
-            lib.createContext()
-            if not lib:
-                raise MylibError("createContext() returned success without a context")
+    with Mylib() as lib:
+        init = lib.create_context()
+        if not init.is_ok():
+            print(f"FATAL: create_context: {init.error}", file=sys.stderr)
+            return 1
+        print(f"Library context: 0x{lib.ctx:08X}\n")
 
-            print(f"Library context: 0x{lib.ctx:08X}\n")
+        print("--- Subscribing to events ---")
 
-            print("--- Subscribing to events ---")
-
-            def on_discovered(
-                owner: Mylib,
-                deviceId: int,
-                name: str,
-                deviceType: str,
-                address: str,
-            ) -> None:
-                nonlocal discovery_count
-                discovery_count += 1
-                print(
-                    f'  >>> DeviceDiscovered #{discovery_count}: '
-                    f'ctx=0x{owner.ctx:08X}  id={deviceId}  "{name}"  [{deviceType}]  {address}'
-                )
-
-            def on_status(
-                owner: Mylib,
-                deviceId: int,
-                name: str,
-                online: bool,
-                timestampMs: int,
-            ) -> None:
-                nonlocal status_count
-                status_count += 1
-                state = "ONLINE" if online else "OFFLINE"
-                print(
-                    f'  >>> DeviceStatusChanged #{status_count}: '
-                    f'ctx=0x{owner.ctx:08X}  id={deviceId}  "{name}"  {state}  (ts={timestampMs})'
-                )
-
-            def on_status_logger(
-                owner: Mylib, _: int, name: str, online: bool, __: int
-            ) -> None:
-                _ = owner
-                print(f'  >>> [Logger] {name} is now {"UP" if online else "DOWN"}')
-
-            alert_count = 0
-
-            def on_batch(
-                owner: Mylib,
-                labels: list[str],
-                device_ids: list[int],
-                capabilities: list[int],
-            ) -> None:
-                nonlocal batch_count
-                batch_count += 1
-                print(
-                    f"  >>> DeviceBatch #{batch_count}: "
-                    f"ctx=0x{owner.ctx:08X}  count={len(labels)}"
-                    f"  labels={labels}"
-                    f"  ids={device_ids}"
-                    f"  caps={capabilities}"
-                )
-
-            def on_alert(
-                owner: Mylib,
-                sensorId: int,
-                deviceId: int,
-                status: DeviceStatus,
-                timestampMs: int,
-            ) -> None:
-                nonlocal alert_count
-                alert_count += 1
-                print(
-                    f"  >>> SensorAlert #{alert_count}: "
-                    f"sensorId={sensorId}  deviceId={deviceId}  status={status.name}  ts={timestampMs}"
-                )
-
-            h_disc = lib.onDeviceDiscovered(on_discovered)
-            h_status = lib.onDeviceStatusChanged(on_status)
-            h_status2 = lib.onDeviceStatusChanged(on_status_logger)
-            h_alert = lib.onSensorAlert(on_alert)
-            h_batch = lib.onDeviceBatch(on_batch)
-
+        def on_discovered(_owner, deviceId, name, deviceType, address):
+            nonlocal discovery_count
+            discovery_count += 1
             print(
-                f"  Handles: discovered={h_disc}  status={h_status}"
-                f"  status2={h_status2}  alert={h_alert}  batch={h_batch}\n"
+                f'  >>> DeviceDiscovered #{discovery_count}: '
+                f'id={deviceId} "{name}" [{deviceType}] {address}'
             )
 
-            print("--- Configuring library ---")
-            initialize_result = lib.initializeRequest("/opt/devices.yaml")
+        def on_status(_owner, deviceId, name, online, timestampMs):
+            nonlocal status_count
+            status_count += 1
+            state = "ONLINE" if online else "OFFLINE"
             print(
-                f"  config={initialize_result.configPath}  "
-                f"initialized={'yes' if initialize_result.initialized else 'no'}\n"
+                f'  >>> DeviceStatusChanged #{status_count}: '
+                f'id={deviceId} "{name}" {state} (ts={timestampMs})'
             )
 
-            print("--- Adding devices ---")
-            fleet = [
-                AddDeviceSpec("Core-Router", "router", "10.0.0.1"),
-                AddDeviceSpec("Edge-Switch-A", "switch", "10.0.1.1"),
-                AddDeviceSpec("Edge-Switch-B", "switch", "10.0.1.2"),
-                AddDeviceSpec("AP-Floor-3", "ap", "10.0.2.10"),
-                AddDeviceSpec("TempSensor-DC1", "sensor", "10.0.3.50"),
-            ]
+        def on_status_logger(_owner, _deviceId, name, online, _ts):
+            print(f"  >>> [Logger] {name} is now {'UP' if online else 'DOWN'}")
 
-            added = lib.addDevice(fleet)
-            ids = [device.deviceId for device in added.devices]
-            for device in added.devices:
-                print(f"  + {device.name} -> id={device.deviceId}")
+        def on_alert(_owner, sensorId, deviceId, status, timestampMs):
+            nonlocal alert_count
+            alert_count += 1
+            print(
+                f"  >>> SensorAlert: sensorId={sensorId} deviceId={deviceId} "
+                f"status={int(status)} ts={timestampMs}"
+            )
 
-            time.sleep(0.3)
-            print()
+        def on_batch(_owner, labels, deviceIds, capabilities):
+            nonlocal batch_count
+            batch_count += 1
+            print(
+                f"  >>> DeviceBatch #{batch_count}: {len(labels)} devices "
+                f"labels={list(labels)} ids={list(deviceIds)} "
+                f"capabilities={list(capabilities)}"
+            )
 
-            print(f"--- Device inventory ({len(ids)} added) ---")
-            listed = lib.listDevices()
-            print(f"  Count: {len(listed.devices)}")
-            for index, device in enumerate(listed.devices):
-                state = "online" if device.online else "offline"
+        h_disc = lib.on_device_discovered(on_discovered)
+        h_status = lib.on_device_status_changed(on_status)
+        h_status2 = lib.on_device_status_changed(on_status_logger)
+        h_alert = lib.on_sensor_alert(on_alert)
+        h_batch = lib.on_device_batch(on_batch)
+        print(
+            f"  Handles: disc={h_disc} status={h_status} status2={h_status2} "
+            f"alert={h_alert} batch={h_batch}\n"
+        )
+
+        print("--- Configuring library ---")
+        ir = lib.initialize_request("/opt/devices.yaml")
+        assert ir.is_ok(), ir.error
+        print(
+            f"  config={ir.value.configPath}  "
+            f"initialized={'yes' if ir.value.initialized else 'no'}\n"
+        )
+
+        print("--- Adding devices ---")
+        fleet = [
+            AddDeviceSpec("Core-Router", "router", "10.0.0.1"),
+            AddDeviceSpec("Edge-Switch-A", "switch", "10.0.1.1"),
+            AddDeviceSpec("Edge-Switch-B", "switch", "10.0.1.2"),
+            AddDeviceSpec("AP-Floor-3", "ap", "10.0.2.10"),
+            AddDeviceSpec("TempSensor-DC1", "sensor", "10.0.3.50"),
+        ]
+        ar = lib.add_device(fleet)
+        assert ar.is_ok(), ar.error
+        ids = [d.deviceId for d in ar.value.devices]
+        for d in ar.value.devices:
+            print(f"  + {d.name} -> id={d.deviceId}")
+        time.sleep(0.3)
+        print()
+
+        print(f"--- Device inventory ({len(ids)} added) ---")
+        listed = lib.list_devices()
+        assert listed.is_ok(), listed.error
+        print(f"  Count: {len(listed.value.devices)}")
+        for i, d in enumerate(listed.value.devices):
+            state = "online" if d.online else "offline"
+            print(
+                f"  [{i}] id={d.deviceId:<3} {d.name:<18} "
+                f"type={d.deviceType:<10} addr={d.address:<16} {state}"
+            )
+        print()
+
+        if len(ids) > 2:
+            qid = ids[2]
+            print(f"--- Query device id={qid} ---")
+            r = lib.get_device(qid)
+            assert r.is_ok(), r.error
+            d = r.value
+            print(
+                f'  name="{d.name}" type="{d.deviceType}" addr="{d.address}" '
+                f'online={"yes" if d.online else "no"}\n'
+            )
+
+        if ids:
+            qid = ids[0]
+            print(f"--- GetSensorData (seq[byte], DeviceStatus, SensorId) id={qid} ---")
+            r = lib.get_sensor_data(qid)
+            assert r.is_ok(), r.error
+            s = r.value
+            print(
+                f"  sensorId={s.sensorId} status={s.status.name} "
+                f"rawData[{len(s.rawData)}]: {list(s.rawData[:4])}\n"
+            )
+
+            print(f"--- GetDeviceTags (seq[string]) id={qid} ---")
+            r = lib.get_device_tags(qid)
+            assert r.is_ok(), r.error
+            print(f"  tags={r.value.tags}\n")
+
+            print(f"--- GetDeviceCapabilities (array[4,int32], Timestamp) id={qid} ---")
+            r = lib.get_device_capabilities(qid)
+            assert r.is_ok(), r.error
+            print(f"  capturedAt={r.value.capturedAt} capabilities={r.value.capabilities}\n")
+            time.sleep(0.1)
+
+        print("--- Removing devices ---")
+        for idx in (0, 3):
+            if idx >= len(ids):
+                continue
+            r = lib.remove_device(ids[idx])
+            assert r.is_ok(), r.error
+            print(
+                f"  Removed id={ids[idx]} success={'yes' if r.value.success else 'no'}"
+            )
+        time.sleep(0.2)
+        print()
+
+        print("--- Removing first status listener (keeping logger) ---")
+        lib.off_device_status_changed(h_status)
+        print(f"  Removed handle {h_status}\n")
+
+        print("--- Removing one more device (only logger active) ---")
+        if len(ids) > 1:
+            r = lib.remove_device(ids[1])
+            if r.is_ok() and r.value.success:
+                print(f"  Removed id={ids[1]}")
+        time.sleep(0.2)
+        print()
+
+        print("--- Remaining devices ---")
+        listed = lib.list_devices()
+        if listed.is_ok():
+            print(f"  Count: {len(listed.value.devices)}")
+            for d in listed.value.devices:
+                state = "online" if d.online else "offline"
                 print(
-                    f"  [{index}] id={device.deviceId:<3}  {device.name:<18}  "
-                    f"type={device.deviceType:<10}  addr={device.address:<16}  {state}"
+                    f"  id={d.deviceId:<3} {d.name:<18} "
+                    f"type={d.deviceType:<10} addr={d.address:<16} {state}"
                 )
-            print()
+        print()
 
-            if len(ids) > 2:
-                queryId = ids[2]
-                print(f"--- Query device id={queryId} ---")
-                device = lib.getDevice(queryId)
-                print(
-                    f'  name="{device.name}"  type="{device.deviceType}"  '
-                    f'addr="{device.address}"  online={"yes" if device.online else "no"}'
-                )
-                print()
+        print("--- Unsubscribing all ---")
+        lib.off_device_discovered()
+        lib.off_device_status_changed()
+        lib.off_device_batch(h_batch)
+        lib.off_sensor_alert(h_alert)
+        print("  All event listeners removed.\n")
+        print(f"  Total discovery events received: {discovery_count}")
+        print(f"  Total status events received: {status_count}")
+        print(f"  Total sensor alert events received: {alert_count}")
+        print(f"  Total device batch events received: {batch_count}\n")
 
-            if ids:
-                qid = ids[0]
+        print("--- Shutting down (context manager) ---")
 
-                print(f"--- GetSensorData (seq[byte], DeviceStatus enum, SensorId distinct) id={qid} ---")
-                sensor = lib.getSensorData(qid)
-                print(
-                    f"  sensorId={sensor.sensorId}  status={sensor.status.name}  "
-                    f"rawData[{len(sensor.rawData)}]: {list(sensor.rawData[:4])}"
-                )
-                print()
-
-                print(f"--- GetDeviceTags (seq[string]) id={qid} ---")
-                tags = lib.getDeviceTags(qid)
-                print(f"  tags={tags.tags}")
-                print()
-
-                print(f"--- GetDeviceCapabilities (array[4,int32], Timestamp distinct) id={qid} ---")
-                caps = lib.getDeviceCapabilities(qid)
-                print(
-                    f"  capturedAt={caps.capturedAt}  capabilities={caps.capabilities}"
-                )
-                print()
-
-                time.sleep(0.1)
-
-            print("--- Removing devices ---")
-            for index in (0, 3):
-                if index >= len(ids):
-                    continue
-                removed = lib.removeDevice(ids[index])
-                print(
-                    f"  Removed id={ids[index]}  success={'yes' if removed.success else 'no'}"
-                )
-            time.sleep(0.2)
-            print()
-
-            print("--- Removing first status listener (keeping logger) ---")
-            lib.offDeviceStatusChanged(h_status)
-            print(f"  Removed handle {h_status}\n")
-
-            print("--- Removing one more device (only logger active) ---")
-            if len(ids) > 1:
-                removed = lib.removeDevice(ids[1])
-                if removed.success:
-                    print(f"  Removed id={ids[1]}")
-            time.sleep(0.2)
-            print()
-
-            print("--- Remaining devices ---")
-            listed = lib.listDevices()
-            print(f"  Count: {len(listed.devices)}")
-            for device in listed.devices:
-                state = "online" if device.online else "offline"
-                print(
-                    f"  id={device.deviceId:<3}  {device.name:<18}  "
-                    f"type={device.deviceType:<10}  addr={device.address:<16}  {state}"
-                )
-            print()
-
-            print("--- Unsubscribing all ---")
-            lib.offDeviceDiscovered()
-            lib.offDeviceStatusChanged()
-            lib.offDeviceBatch(h_batch)
-            lib.offSensorAlert(h_alert)
-            print("  All event listeners removed.\n")
-
-            print(f"  Total discovery events received: {discovery_count}")
-            print(f"  Total status events received: {status_count}")
-            print(f"  Total sensor alert events received: {alert_count}")
-            print(f"  Total device batch events received: {batch_count}\n")
-
-            print("--- Shutting down (context manager) ---")
-
-        print("\n=== Python wrapper example complete ===")
-        return 0
-    except MylibError as exc:
-        print(f"FATAL: {exc}", file=sys.stderr)
-        return 1
+    print("\n=== Python wrapper example complete ===")
+    return 0
 
 
 if __name__ == "__main__":

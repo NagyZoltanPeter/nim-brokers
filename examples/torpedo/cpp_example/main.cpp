@@ -345,8 +345,8 @@ static void printSideBySide(
 // ---------------------------------------------------------------------------
 
 static void drawScreen(
-    const GetPublicBoardRequestResult& red,
-    const GetPublicBoardRequestResult& blue,
+    const GetPublicBoardRequest& red,
+    const GetPublicBoardRequest& blue,
     const EventLog& log,
     const std::string& banner,
     const Config& cfg)
@@ -667,11 +667,11 @@ int main(int argc, char* argv[]) {
     Torpedolib red, blue;
     {
         auto r = red.createContext();
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Red createContext: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Red createContext: %s\n", r.error().c_str()); return 1; }
     }
     {
         auto r = blue.createContext();
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Blue createContext: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Blue createContext: %s\n", r.error().c_str()); return 1; }
     }
 
     // ── Register event listeners ──
@@ -681,33 +681,33 @@ int main(int argc, char* argv[]) {
     // ── Initialize captains ──
     {
         auto r = red.initializeCaptainRequest("Red Fleet", cfg.boardSize, "hunt", cfg.seedRed, cfg.turnDelayMs());
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Red init: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Red init: %s\n", r.error().c_str()); return 1; }
     }
     {
         auto r = blue.initializeCaptainRequest("Blue Fleet", cfg.boardSize, "hunt", cfg.seedBlue, cfg.turnDelayMs());
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Blue init: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Blue init: %s\n", r.error().c_str()); return 1; }
     }
 
     // ── Auto-place fleets ──
     {
         auto r = red.autoPlaceFleetRequest();
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Red place: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Red place: %s\n", r.error().c_str()); return 1; }
         eventLog.push("Red placed " + std::to_string(r->shipCount) + " ships");
     }
     {
         auto r = blue.autoPlaceFleetRequest();
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Blue place: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Blue place: %s\n", r.error().c_str()); return 1; }
         eventLog.push("Blue placed " + std::to_string(r->shipCount) + " ships");
     }
 
     // ── Link opponents ──
     {
         auto r = red.linkOpponentRequest(blue.ctx());
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Red link: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Red link: %s\n", r.error().c_str()); return 1; }
     }
     {
         auto r = blue.linkOpponentRequest(red.ctx());
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Blue link: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Blue link: %s\n", r.error().c_str()); return 1; }
     }
     eventLog.push("Linked contexts red=" + std::to_string(red.ctx()) +
                   " blue=" + std::to_string(blue.ctx()));
@@ -717,7 +717,7 @@ int main(int argc, char* argv[]) {
     std::string starterName = cfg.starterIsRed ? "Red Fleet" : "Blue Fleet";
     {
         auto r = starter.startGameRequest();
-        if (!r.ok()) { std::fprintf(stderr, "FATAL: Start: %s\n", r.error().c_str()); return 1; }
+        if (!r.isOk()) { std::fprintf(stderr, "FATAL: Start: %s\n", r.error().c_str()); return 1; }
     }
 
     std::string banner = starterName + " opens the duel";
@@ -751,7 +751,7 @@ int main(int argc, char* argv[]) {
         auto redView  = red.getPublicBoardRequest();
         auto blueView = blue.getPublicBoardRequest();
 
-        if (!redView.ok() || !blueView.ok()) {
+        if (!redView.isOk() || !blueView.isOk()) {
             std::fprintf(stderr, "FATAL: getPublicBoard failed\n");
             exitCode = 1;
             break;
@@ -766,7 +766,7 @@ int main(int argc, char* argv[]) {
             // Final render with winner announcement
             auto finalRed  = red.getPublicBoardRequest();
             auto finalBlue = blue.getPublicBoardRequest();
-            if (finalRed.ok() && finalBlue.ok()) {
+            if (finalRed.isOk() && finalBlue.isOk()) {
                 std::string winner = "Unknown";
                 if (finalRed->hasWon)  winner = "Red Fleet";
                 if (finalBlue->hasWon) winner = "Blue Fleet";

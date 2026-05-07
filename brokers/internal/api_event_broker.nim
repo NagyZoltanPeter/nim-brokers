@@ -718,186 +718,99 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   )
 
   # C++ wrapper: instance-owned dispatcher with owner-aware callbacks.
-  if not gApiCppEventSupportGenerated:
-    gApiCppEventSupportGenerated = true
-    gApiCppPreamble.add(
-      """
-template <typename Owner, typename Traits, typename... CArgs>
-class EventDispatcher {
-public:
-    using Callback = typename Traits::template Callback<Owner>;
-    using CCallback = typename Traits::CCallback;
-
-    explicit EventDispatcher(Owner& owner) noexcept
-        : owner_(&owner) {}
-
-    EventDispatcher(const EventDispatcher&) = delete;
-    EventDispatcher& operator=(const EventDispatcher&) = delete;
-    EventDispatcher(EventDispatcher&&) = delete;
-    EventDispatcher& operator=(EventDispatcher&&) = delete;
-
-    ~EventDispatcher() {
-        clear();
-    }
-
-    uint64_t add(Callback fn) noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (!owner_ || owner_->ctx() == 0 || !fn) {
-            return 0;
-        }
-
-        if (nativeHandle_ == 0) {
-            nativeHandle_ = Traits::registerWithC(
-                owner_->ctx(),
-                &EventDispatcher::trampoline,
-                static_cast<void*>(this)
-            );
-            if (nativeHandle_ == 0) {
-                return 0;
-            }
-        }
-
-        const uint64_t localHandle = nextLocalHandle_++;
-        try {
-            callbacks_.emplace(localHandle, std::move(fn));
-            return localHandle;
-        } catch (...) {
-            if (callbacks_.empty() && nativeHandle_ != 0) {
-                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
-                nativeHandle_ = 0;
-            }
-            return 0;
-        }
-    }
-
-    void remove(uint64_t localHandle) noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        callbacks_.erase(localHandle);
-        if (callbacks_.empty() && nativeHandle_ != 0) {
-            if (owner_ && owner_->ctx() != 0) {
-                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
-            }
-            nativeHandle_ = 0;
-        }
-    }
-
-    void clear() noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        callbacks_.clear();
-        if (nativeHandle_ != 0) {
-            if (owner_ && owner_->ctx() != 0) {
-                Traits::unregisterWithC(owner_->ctx(), nativeHandle_);
-            }
-            nativeHandle_ = 0;
-        }
-    }
-
-private:
-    static void trampoline(uint32_t ctx, void* userData, CArgs... args) noexcept {
-        auto* self = static_cast<EventDispatcher*>(userData);
-        if (!self) {
-            return;
-        }
-        self->deliver(ctx, args...);
-    }
-
-    void deliver(uint32_t ctx, CArgs... args) noexcept {
-        std::vector<Callback> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!owner_ || ctx != owner_->ctx()) {
-                return;
-            }
-
-            try {
-                snapshot.reserve(callbacks_.size());
-                for (const auto& [id, fn] : callbacks_) {
-                    if (fn) {
-                        snapshot.push_back(fn);
-                    }
-                }
-            } catch (...) {
-                return;
-            }
-        }
-
-        for (const auto& fn : snapshot) {
-            Traits::invoke(fn, *owner_, args...);
-        }
-    }
-
-    Owner* owner_ = nullptr;
-    std::mutex mutex_;
-    std::unordered_map<uint64_t, Callback> callbacks_;
-    uint64_t nativeHandle_ = 0;
-    uint64_t nextLocalHandle_ = 1;
-};
-"""
-    )
+  # The detail::EventDispatcher template itself is emitted by api_codegen_cpp;
+  # here we only flag that at least one event subscription exists.
+  gApiCppEventDispatcherEmitted = true
 
   var cppCbParams: seq[string] = @[("Owner& owner")]
-  var cppCbSummaryParams: seq[string] = @[("owner")]
   var cTrampolineParams: seq[string] = @[]
   var traitInvokeArgs: seq[string] = @["owner"]
+  # Setup statements emitted inside `invoke()` BEFORE the `fn(...)` call —
+  # used to materialise non-owning views (e.g. building a
+  # std::vector<std::string_view> from `const char** + count` for
+  # seq[string] event params). Kept lifetime-bound to the call so the span
+  # the user receives stays valid throughout.
+  var traitInvokePreamble = ""
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fName = $fieldNames[i]
       let fType = fieldTypes[i]
       if isSeqOfStringNode(fType):
-        # C++ callback sees std::span<const char*>
-        cppCbParams.add("std::span<const char*> " & fName)
-        cppCbSummaryParams.add(fName)
+        # Public C++ callback receives std::span<const std::string_view> —
+        # zero-copy parity with the CBOR-mode wrapper. Trampoline still
+        # takes the raw `const char** + count` C ABI; we materialise a
+        # temporary vector<string_view> in `invoke()` and pass a span
+        # over it to the user callback.
+        cppCbParams.add("std::span<const std::string_view> " & fName)
         cTrampolineParams.add("const char** " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
-        traitInvokeArgs.add(
-          "std::span<const char*>(" & fName & ", " & fName & "_count)"
+        let viewVar = fName & "_view"
+        traitInvokePreamble.add(
+          "        std::vector<std::string_view> " & viewVar & ";\n" & "        if (" &
+            fName & " && " & fName & "_count > 0) {\n" & "            " & viewVar &
+            ".reserve(" & fName & "_count);\n" & "            for (int32_t i = 0; i < " &
+            fName & "_count; ++i)\n" & "                " & viewVar & ".emplace_back(\n" &
+            "                    " & fName & "[i] ? std::string_view(" & fName &
+            "[i]) : std::string_view());\n" & "        }\n"
         )
+        traitInvokeArgs.add("std::span<const std::string_view>(" & viewVar & ")")
       elif isSeqOfPrimitiveNode(fType):
         let elemName = seqItemTypeName(fType)
         let cppElemType = nimTypeToCpp(ident(elemName))
         let cElemType = nimTypeToCSuffix(ident(elemName))
         cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
-        cppCbSummaryParams.add(fName)
         cTrampolineParams.add("const " & cElemType & "* " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
         traitInvokeArgs.add(
           "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
         )
       elif isSeqType(fType):
+        # Public C++ callback receives `std::span<const Item>` (parity
+        # with CBOR-mode wrapper). Trampoline still receives the raw
+        # `ItemCItem* + count` C ABI; we materialise a temporary
+        # `std::vector<Item>` in the invoke preamble via the per-type
+        # `detail::adopt<Item>(CItem)` helper, then pass a span over
+        # it. Per-event O(N) string-copy cost (same as the CBOR
+        # decoded vector path); kept lifetime-bound to the callback.
         let itemTypeName = seqItemTypeName(fType)
-        cppCbParams.add("std::span<const " & itemTypeName & "CItem> " & fName)
-        cppCbSummaryParams.add(fName)
+        cppCbParams.add("std::span<const " & itemTypeName & "> " & fName)
         cTrampolineParams.add(itemTypeName & "CItem* " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
-        traitInvokeArgs.add(
-          "std::span<const " & itemTypeName & "CItem>(" & fName & ", " & fName &
-            "_count)"
+        let viewVar = fName & "_view"
+        traitInvokePreamble.add(
+          "        std::vector<" & itemTypeName & "> " & viewVar & ";\n" & "        if (" &
+            fName & " && " & fName & "_count > 0) {\n" & "            " & viewVar &
+            ".reserve(" & fName & "_count);\n" & "            for (int32_t i = 0; i < " &
+            fName & "_count; ++i)\n" & "                " & viewVar &
+            ".emplace_back(adopt" & itemTypeName & "(" & fName & "[i]));\n" &
+            "        }\n"
         )
+        traitInvokeArgs.add("std::span<const " & itemTypeName & ">(" & viewVar & ")")
       elif isArrayTypeNode(fType):
         let elemName = arrayNodeElemName(fType)
         let cppElemType = nimTypeToCpp(ident(elemName))
         let cElemType = nimTypeToCSuffix(ident(elemName))
         cppCbParams.add("std::span<const " & cppElemType & "> " & fName)
-        cppCbSummaryParams.add(fName)
         cTrampolineParams.add("const " & cElemType & "* " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
         traitInvokeArgs.add(
           "std::span<const " & cppElemType & ">(" & fName & ", " & fName & "_count)"
         )
       elif isEnumRegistered($fType):
+        # Public C++ callback receives the C++ `enum class <Name>` (in
+        # namespace). C trampoline signature uses `::<Name>_C` (the C
+        # typedef-enum at global scope, suffixed by codegen to avoid
+        # the namespace collision). `invoke` static_casts between the
+        # two — both have int32_t underlying so the cast is a no-op
+        # at runtime.
         let enumTypeName = $fType
         cppCbParams.add(enumTypeName & " " & fName)
-        cppCbSummaryParams.add(fName)
-        cTrampolineParams.add(enumTypeName & " " & fName)
-        traitInvokeArgs.add(fName)
+        cTrampolineParams.add("::" & enumTypeName & "_C " & fName)
+        traitInvokeArgs.add("static_cast<" & enumTypeName & ">(" & fName & ")")
       else:
         let cbType = nimTypeToCppCallbackParam(fType)
         let cType = nimTypeToCInput(fType)
         cppCbParams.add(cbType & " " & fName)
-        cppCbSummaryParams.add(fName)
         cTrampolineParams.add(cType & " " & fName)
         if isCStringType(fType):
           traitInvokeArgs.add(
@@ -941,13 +854,14 @@ private:
   else:
     trait.add("Owner& owner")
   trait.add(") noexcept {\n")
+  if traitInvokePreamble.len > 0:
+    trait.add(traitInvokePreamble)
   trait.add("        try {\n")
   trait.add("            fn(" & traitInvokeArgs.join(", ") & ");\n")
   trait.add("        } catch (...) {\n")
   trait.add("        }\n")
   trait.add("    }\n")
   trait.add("};")
-  gApiCppPreamble.add(trait)
 
   let dispatcherAlias = typeDisplayName & "Dispatcher"
   var cArgTypes: seq[string] = @[]
@@ -969,55 +883,74 @@ private:
         )
         cArgTypes.add("int32_t")
       elif isEnumRegistered($fType):
-        cArgTypes.add($fType)
+        # Qualify with `::` and the `_C` suffix so the EventDispatcher
+        # template instantiation uses the C typedef-enum (global scope,
+        # suffix-renamed to avoid namespace collision with the C++ enum
+        # class).
+        cArgTypes.add("::" & $fType & "_C")
       else:
         cArgTypes.add(nimTypeToCInput(fType))
 
-  var dispatcherDecl =
-    "    using " & dispatcherAlias & " = EventDispatcher<__CPP_CLASS__, " & traitName
+  # detail:: forward decl of the trait, full definition emitted after class.
+  gApiCppDetailForwardDecls.add("struct " & traitName & ";")
+  gApiCppDetailTraits.add(trait)
+
+  # Public callback alias is an inlined std::function<void(Mylib&, …)> — no
+  # dependency on detail traits, so the class header stays self-contained.
+  var publicCbParams: seq[string] = @[]
+  for p in cppCbParams:
+    publicCbParams.add(p.replace("Owner&", "__CPP_CLASS__&"))
+  let callbackAlias = typeDisplayName & "Callback"
+
+  let dispField = toSnakeCase(typeDisplayName) & "Dispatcher_"
+
+  # Class private members: dispatcher type alias + unique_ptr field.
+  var aliasDecl =
+    "    using " & dispatcherAlias & " = detail::EventDispatcher<__CPP_CLASS__, detail::" &
+    traitName
   if cArgTypes.len > 0:
-    dispatcherDecl.add(", " & cArgTypes.join(", "))
-  dispatcherDecl.add(">;\n")
-  dispatcherDecl.add(
-    "    " & dispatcherAlias & " " & toSnakeCase(typeDisplayName) & "Dispatcher_;\n"
+    aliasDecl.add(", " & cArgTypes.join(", "))
+  aliasDecl.add(">;")
+  gApiCppPrivateMembers.add(aliasDecl)
+  gApiCppPrivateMembers.add(
+    "    std::unique_ptr<" & dispatcherAlias & "> " & dispField & ";"
   )
-  gApiCppPrivateMembers.add(dispatcherDecl)
 
+  # ctor / shutdown plumbing — now operates on a unique_ptr.
   gApiCppConstructorInitializers.add(
-    toSnakeCase(typeDisplayName) & "Dispatcher_(*this)"
+    dispField & "(std::make_unique<" & dispatcherAlias & ">(*this))"
   )
-  gApiCppShutdownStatements.add(toSnakeCase(typeDisplayName) & "Dispatcher_.clear();")
+  gApiCppShutdownStatements.add("if (" & dispField & ") " & dispField & "->clear();")
 
-  gApiCppClassMethods.add(
-    "using " & typeDisplayName & "Callback = " & traitName & "::Callback<__CPP_CLASS__>;"
+  # Public callback alias + on/off declarations inside the class.
+  gApiCppMethodDecls.add(
+    "using " & callbackAlias & " = std::function<void(" & publicCbParams.join(", ") &
+      ")>;"
   )
-  gApiCppInterfaceSummary.add(
-    typeDisplayName & "Callback(" & cppCbSummaryParams.join(", ") & ");"
+  gApiCppMethodDecls.add(
+    "uint64_t on" & typeDisplayName & "(" & callbackAlias & " fn) noexcept;"
+  )
+  gApiCppMethodDecls.add(
+    "void off" & typeDisplayName & "(uint64_t handle = 0) noexcept;"
   )
 
-  var onMethod =
-    "uint64_t on" & typeDisplayName & "(" & typeDisplayName & "Callback fn) noexcept {\n"
-  onMethod.add(
-    "        return " & toSnakeCase(typeDisplayName) &
-      "Dispatcher_.add(std::move(fn));\n"
-  )
-  onMethod.add("    }")
-  gApiCppClassMethods.add(onMethod)
-  gApiCppInterfaceSummary.add("on" & typeDisplayName & "(fn);")
+  # on / off inline definitions
+  var onDef =
+    "inline uint64_t __CPP_CLASS__::on" & typeDisplayName & "(" & callbackAlias &
+    " fn) noexcept {\n"
+  onDef.add("    return " & dispField & "->add(std::move(fn));\n")
+  onDef.add("}")
+  gApiCppMethodDefs.add(onDef)
 
-  var offMethod = "void off" & typeDisplayName & "(uint64_t handle = 0) noexcept {\n"
-  offMethod.add("        if (handle == 0) {\n")
-  offMethod.add(
-    "            " & toSnakeCase(typeDisplayName) & "Dispatcher_.clear();\n"
-  )
-  offMethod.add("        } else {\n")
-  offMethod.add(
-    "            " & toSnakeCase(typeDisplayName) & "Dispatcher_.remove(handle);\n"
-  )
-  offMethod.add("        }\n")
-  offMethod.add("    }")
-  gApiCppClassMethods.add(offMethod)
-  gApiCppInterfaceSummary.add("off" & typeDisplayName & "(handle = 0);")
+  var offDef =
+    "inline void __CPP_CLASS__::off" & typeDisplayName & "(uint64_t handle) noexcept {\n"
+  offDef.add("    if (handle == 0) {\n")
+  offDef.add("        " & dispField & "->clear();\n")
+  offDef.add("    } else {\n")
+  offDef.add("        " & dispField & "->remove(handle);\n")
+  offDef.add("    }\n")
+  offDef.add("}")
+  gApiCppMethodDefs.add(offDef)
 
   # Step 11: Generate Python on/off event methods (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):
@@ -1117,7 +1050,11 @@ private:
             )
             pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
           else:
-            # seq[CustomObject]: cast to CItem*, reconstruct
+            # seq[CustomObject]: cast to CItem*, reconstruct as a list of
+            # the public Python dataclass (decoding cstring fields to str)
+            # so the user callback sees the same Tag-with-str shape that
+            # request results expose, and that the CBOR-mode wrapper
+            # exposes from its decoded payload.
             pyDecodeLines.add("            " & listVar & " = []\n")
             pyDecodeLines.add(
               "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
@@ -1129,7 +1066,26 @@ private:
             pyDecodeLines.add(
               "                for _i in range(" & snakeFname & "_count):\n"
             )
-            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+            pyDecodeLines.add("                    _item = _arr[_i]\n")
+            let itemFields = lookupFfiStruct(elemName)
+            var itemArgs: seq[string] = @[]
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                itemArgs.add(
+                  ifName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
+                    " else \"\""
+                )
+              else:
+                itemArgs.add(ifName & "=_item." & ifName)
+            pyDecodeLines.add(
+              "                    " & listVar & ".append(" & elemName & "(\n"
+            )
+            for j, arg in itemArgs:
+              pyDecodeLines.add("                        " & arg)
+              if j < itemArgs.len - 1:
+                pyDecodeLines.add(",")
+              pyDecodeLines.add("\n")
+            pyDecodeLines.add("                    ))\n")
           pyForwards.add(listVar)
         elif isArrayTypeNode(fType):
           # C ABI: pointer + count (same layout as seq[primitive])
@@ -1161,28 +1117,31 @@ private:
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
 
-    # Build specific Callable type hint from event fields.
-    # Python callbacks are owner-aware like the C++ wrapper surface: the first
-    # argument is the Mylib wrapper instance that owns the registration.
-    var pyTypeHintParams: seq[string] = @["Mylib"]
+    # Build specific Callable type hint from event fields. Python callbacks
+    # are owner-aware like the C++ wrapper surface: the first argument is the
+    # owning library wrapper instance. The class name is filled in later via
+    # the __LIB_OWNER_CLASS__ placeholder (substituted at .py emission time
+    # when the libname-derived class name is known).
+    var pyTypeHintParams: seq[string] = @["__LIB_OWNER_CLASS__"]
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
     let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
-    var pySummaryParams: seq[string] = @[("owner")]
-    pySummaryParams.add(pyUserParams)
 
-    # on_<event> method
+    # on_<event> method (snake-only, parity with C++ on*/off* shape)
     block:
-      let pyCamelEvent = "on" & typeDisplayName
+      let pyOnName = "on_" & pySnakeEvent
       var m =
-        "    def " & pyCamelEvent & "(self, callback: " & pyCallableHint & ") -> int:\n"
+        "    def " & pyOnName & "(self, callback: " & pyCallableHint & ") -> int:\n"
       m.add(
         "        \"\"\"Subscribe to " & typeDisplayName &
-          " events.\n\n        The callback receives the owning Mylib instance as its first\n        argument instead of the raw ctx value so ownership stays at the\n        wrapper level while the C ABI details remain hidden. Returns a\n        handle for removal.\"\"\"\n"
+          " events. Returns a non-zero handle on success, 0 on failure.\n"
       )
-      m.add("        self._requireContext()\n")
-      # Build the trampoline that decodes ABI values to Python types
+      m.add("        The callback receives the owning library instance as\n")
+      m.add("        its first argument followed by the unpacked event\n")
+      m.add("        payload fields.\"\"\"\n")
+      m.add("        if self._ctx == 0:\n")
+      m.add("            return 0\n")
       m.add("        @" & cfuncTypeName & "\n")
       var trampolineParams = @["_ctx", "_user_data"]
       trampolineParams.add(pyTrampolineParams)
@@ -1197,51 +1156,36 @@ private:
           "(self._ctx, _trampoline, None)\n"
       )
       m.add("        if handle == 0:\n")
-      m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")
+      m.add("            return 0\n")
       m.add("        with self._lock:\n")
       m.add(
         "            self._cb_refs[(\"" & typeDisplayName &
           "\", handle)] = _trampoline\n"
       )
-      m.add("        return handle\n\n")
-      m.add(
-        "    def on_" & pySnakeEvent & "(self, callback: " & pyCallableHint &
-          ") -> int:\n"
-      )
-      m.add("        return self." & pyCamelEvent & "(callback)")
+      m.add("        return handle")
       gApiPyEventMethods.add(m)
-      gApiPyInterfaceSummary.add(
-        typeDisplayName & "Callback(" & pySummaryParams.join(", ") & ")"
-      )
-      gApiPyInterfaceSummary.add(pyCamelEvent & "(callback)")
-      gApiPyInterfaceSummary.add("on_" & pySnakeEvent & "(callback)")
+      gApiPyInterfaceSummary.add(pyOnName & "(callback) -> int")
 
     # off_<event> method
     block:
-      let pyCamelEvent = "off" & typeDisplayName
-      var m = "    def " & pyCamelEvent & "(self, handle: int = 0) -> None:\n"
+      let pyOffName = "off_" & pySnakeEvent
+      let pyOnNameStr = "on_" & pySnakeEvent
+      var m = "    def " & pyOffName & "(self, handle: int = 0) -> None:\n"
       m.add("        \"\"\"Unsubscribe from " & typeDisplayName & " events.\n\n")
       m.add("        Args:\n")
       m.add(
-        "            handle: Listener handle from on_" & pySnakeEvent &
+        "            handle: Listener handle from " & pyOnNameStr &
           "(). 0 removes all.\n"
       )
       m.add("        \"\"\"\n")
-      m.add("        self._requireContext()\n")
+      m.add("        if self._ctx == 0:\n")
+      m.add("            return\n")
       m.add("        self._lib." & publicDeregFuncName & "(self._ctx, handle)\n")
-      m.add("        # Note: callback references are intentionally kept alive in\n")
-      m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
-      m.add(
-        "        # have in-flight event futures holding the raw function pointer;\n"
-      )
-      m.add(
-        "        # releasing the ctypes object here could cause a use-after-free.\n\n"
-      )
-      m.add("    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n")
-      m.add("        self." & pyCamelEvent & "(handle)")
+      m.add("        # Callback references are intentionally kept alive in\n")
+      m.add("        # _cb_refs until shutdown(); the delivery thread may\n")
+      m.add("        # still hold in-flight references.")
       gApiPyEventMethods.add(m)
-      gApiPyInterfaceSummary.add(pyCamelEvent & "(handle = 0)")
-      gApiPyInterfaceSummary.add("off_" & pySnakeEvent & "(handle = 0)")
+      gApiPyInterfaceSummary.add(pyOffName & "(handle = 0) -> None")
 
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))

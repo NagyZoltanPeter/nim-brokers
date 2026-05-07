@@ -123,6 +123,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 registerBrokerLibrary:
   name:
     "apitestlib"
+  version:
+    "0.1.0"
   initializeRequest:
     InitializeRequest
   shutdownRequest:

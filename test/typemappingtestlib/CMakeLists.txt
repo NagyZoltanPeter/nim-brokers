@@ -12,10 +12,18 @@ option(BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
-# TYPEMAPTEST_DIR can be overridden at configure time; defaults to build/
-# relative to this CMakeLists.txt.
+# TYPEMAPTEST_DIR can be overridden at configure time. When USE_CBOR=ON it
+# defaults to build_cbor/ (the -d:BrokerFfiApiCBOR build output) and the
+# C++ test additionally pulls in the jsoncons headers used by the CBOR-mode
+# wrapper. With USE_CBOR=OFF it defaults to build/ (the native build).
+option(USE_CBOR "Link against the CBOR-mode build of typemappingtestlib (-d:BrokerFfiApiCBOR)" OFF)
+
 if(NOT TYPEMAPTEST_DIR)
-    set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
+    if(USE_CBOR)
+        set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
+    else()
+        set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
+    endif()
 endif()
 
 get_filename_component(TYPEMAPTEST_DIR "${TYPEMAPTEST_DIR}" ABSOLUTE)
@@ -110,6 +118,12 @@ if(ASAN)
 endif()
 
 target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)
+
+# CBOR-mode wrapper needs jsoncons headers (header-only).
+if(USE_CBOR)
+    target_include_directories(test_typemappingtestlib PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
+endif()
 
 # Embed RPATH so the binary finds libtypemappingtestlib next to itself at runtime.
 if(APPLE)

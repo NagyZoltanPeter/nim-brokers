@@ -92,9 +92,13 @@ when compileOption("threads"):
   import ./internal/mt_event_broker
   export mt_event_broker
 
-when compileOption("threads") and defined(BrokerFfiApi):
+when compileOption("threads") and
+    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
   import ./internal/api_event_broker
   export api_event_broker
+
+  import ./internal/api_event_broker_cbor
+  export api_event_broker_cbor
 
 export chronicles, results, chronos, broker_context
 
@@ -531,8 +535,12 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
           "Compile with `--threads:on` to use API EventBroker."
       .}
     else:
-      when defined(BrokerFfiApi):
-        generateApiEventBroker(body)
+      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or
+          defined(BrokerFfiApiNative):
+        when brokerFfiMode == mfCbor:
+          generateApiCborEventBroker(body)
+        else:
+          generateApiEventBroker(body)
       else:
         generateMtEventBroker(body)
   of ebDefault:

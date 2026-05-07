@@ -150,7 +150,11 @@ proc nimTypeToCSuffixIdent(name: string): string {.compileTime.} =
   else:
     # Check schema registry for aliases/distinct types
     if isEnumRegistered(name):
-      name # enum typedef name is used directly
+      # Suffix the C typedef-enum name with `_C` so it never collides
+      # with the C++ `enum class <Name>` we emit in the .hpp wrapper at
+      # `<ns>::<Name>`. C consumers see `<Name>_C`; C++ users see the
+      # strongly-typed `enum class <Name>` from the wrapper.
+      name & "_C"
     elif isAliasOrDistinctRegistered(name):
       # Recurse on the underlying type
       nimTypeToCSuffix(ident(resolveUnderlyingType(name)))
@@ -287,6 +291,11 @@ proc generateCEnum*(
   ## Generates a C typedef enum definition.
   ## Values are prefixed with SCREAMING_SNAKE_CASE enum name to avoid
   ## global namespace collisions in C.
+  ##
+  ## The typedef name carries a `_C` suffix so it doesn't collide with
+  ## the C++ `enum class <Name>` we emit in the .hpp wrapper at
+  ## `<ns>::<Name>`. The constant prefix keeps the original name (no
+  ## `_C`) so existing C consumers can spell `PRIORITY_P_LOW` as before.
   let prefix = toSnakeCase(enumName).toUpperAscii()
   result = "typedef enum {\n"
   for v in values:
@@ -294,7 +303,7 @@ proc generateCEnum*(
       "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
         ",\n"
     )
-  result.add("} " & enumName & ";\n")
+  result.add("} " & enumName & "_C;\n")
 
 # ---------------------------------------------------------------------------
 # Output directory helpers

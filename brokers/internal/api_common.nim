@@ -26,12 +26,14 @@ import ./api_codegen_cpp
 import ./api_codegen_python
 import ./api_codegen_nim
 import ./api_schema
+import ./api_ffi_mode
 
 export api_codegen_c
 export api_codegen_cpp
 export api_codegen_python
 export api_codegen_nim
 export api_schema
+export api_ffi_mode
 
 # ---------------------------------------------------------------------------
 # Library name accumulator
@@ -67,6 +69,78 @@ var gApiForeignGcHelperEmitted* {.compileTime.}: bool = false
   ## Flag: has the ensureForeignThreadGc() helper been emitted?
   ## Each broker codegen module checks this before emitting the helper
   ## to avoid duplicate definitions.
+
+# ---------------------------------------------------------------------------
+# CBOR-mode dispatch table accumulator
+# ---------------------------------------------------------------------------
+
+type CborRequestEntry* = object
+  apiName*: string ## Wire name foreign callers pass to `<lib>_call`.
+  adapterProc*: string ## Identifier of the generated adapter proc.
+  responseTypeName*: string
+    ## Nim type name for the response payload
+    ## (e.g. "GetStatus"). Foreign-language wrapper codegen consumes this
+    ## to emit typed return signatures. Empty if not yet populated by an
+    ## older caller path.
+  argFields*: seq[(string, string)]
+    ## (paramName, nimType) pairs from
+    ## the request signature, in declaration order. Empty for zero-arg
+    ## requests. Wrapper codegen turns this into the typed method
+    ## signature and the args struct mirroring the synthetic Nim
+    ## `<Type>CborArgs` object.
+
+var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
+  ## Accumulated by `RequestBroker(API)` expansions when `brokerFfiMode` is
+  ## `mfCbor`. `registerBrokerLibrary` drains this list to emit the
+  ## per-library `Table[string, CborApiAdapter]` and the `<lib>_call`
+  ## dispatch.
+
+type CborEventEntry* = object
+  apiName*: string ## Wire eventName foreign callers pass to `<lib>_subscribe`.
+  typeName*: string ## Nim type identifier for the event payload.
+
+var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
+  ## Accumulated by `EventBroker(API)` expansions when `brokerFfiMode` is
+  ## `mfCbor`. `registerBrokerLibrary` reads this list to generate
+  ## per-event listener installers and the `<lib>CborIsKnownEvent`
+  ## predicate. As with `gApiCborRequestEntries`, this list is read but
+  ## not reset — Nim's compile-time VM aliases `let` copies of seqs back
+  ## to the source.
+
+proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
+  ## Register an event for the next library's CBOR-mode subscribe surface.
+  for entry in gApiCborEventEntries:
+    if entry.apiName == apiName:
+      error(
+        "CBOR FFI: duplicate event apiName '" & apiName & "' (already registered by '" &
+          entry.typeName & "'). " &
+          "Each EventBroker(API) must have a unique event type name."
+      )
+  gApiCborEventEntries.add(CborEventEntry(apiName: apiName, typeName: typeName))
+
+proc registerCborRequestEntry*(
+    apiName, adapterProc: string,
+    responseTypeName: string = "",
+    argFields: seq[(string, string)] = @[],
+) {.compileTime.} =
+  ## Register a CBOR request adapter for the next library that calls
+  ## `registerBrokerLibrary`. Detects duplicate apiNames at compile time
+  ## so two requests can't shadow each other on the wire.
+  for entry in gApiCborRequestEntries:
+    if entry.apiName == apiName:
+      error(
+        "CBOR FFI: duplicate request apiName '" & apiName & "' (already registered by '" &
+          entry.adapterProc & "'). " &
+          "Each RequestBroker(API) must have a unique response type name."
+      )
+  gApiCborRequestEntries.add(
+    CborRequestEntry(
+      apiName: apiName,
+      adapterProc: adapterProc,
+      responseTypeName: responseTypeName,
+      argFields: argFields,
+    )
+  )
 
 # ---------------------------------------------------------------------------
 # Legacy FFI struct registry bridge

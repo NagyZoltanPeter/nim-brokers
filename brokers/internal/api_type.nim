@@ -134,13 +134,14 @@ proc generateApiType*(
     headerFields.add((fname, nimTypeToCOutput(ident(ftype))))
   appendHeaderDecl(generateCStruct(typeName & "CItem", headerFields))
 
-  # 5. Generate C++ struct with std::string fields + ctor from CItem
+  # 5. Generate plain C++ data struct + forward decl + detail::adopt(CItem)
   block:
+    gApiCppForwardDecls.add("struct " & typeName & ";")
+
     var cppStruct = "struct " & typeName & " {\n"
     for (fname, ftype) in fields:
       let cppType = nimTypeToCpp(ident(ftype))
       cppStruct.add("    " & cppType & " " & fname)
-      # Default initializers for non-class types
       if cppType in ["bool"]:
         cppStruct.add(" = false")
       elif cppType in [
@@ -149,20 +150,21 @@ proc generateApiType*(
       ]:
         cppStruct.add(" = 0")
       cppStruct.add(";\n")
-    cppStruct.add("    " & typeName & "() = default;\n")
-    # Constructor from CItem
-    cppStruct.add("    explicit " & typeName & "(const " & typeName & "CItem& c)")
-    var ctorInits: seq[string] = @[]
-    for (fname, ftype) in fields:
-      if ftype.toLowerAscii() in ["string", "cstring"]:
-        ctorInits.add(fname & "(c." & fname & " ? c." & fname & " : \"\")")
-      else:
-        ctorInits.add(fname & "(c." & fname & ")")
-    if ctorInits.len > 0:
-      cppStruct.add("\n        : " & ctorInits.join("\n        , "))
-    cppStruct.add(" {}\n")
     cppStruct.add("};\n")
     gApiCppStructs.add(cppStruct)
+
+    var adopt =
+      "inline " & typeName & " adopt" & typeName & "(const ::" & typeName &
+      "CItem& c) {\n"
+    adopt.add("    " & typeName & " r;\n")
+    for (fname, ftype) in fields:
+      if ftype.toLowerAscii() in ["string", "cstring"]:
+        adopt.add("    r." & fname & " = c." & fname & " ? c." & fname & " : \"\";\n")
+      else:
+        adopt.add("    r." & fname & " = c." & fname & ";\n")
+    adopt.add("    return r;\n")
+    adopt.add("}\n")
+    gApiCppDetailAdopters.add(adopt)
 
   # 6. Generate Python ctypes Structure + dataclass (when -d:BrokerFfiApiGenPy)
   when defined(BrokerFfiApiGenPy):

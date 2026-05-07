@@ -4,12 +4,20 @@ project(torpedo_examples CXX)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
-# TORPEDOLIB_DIR can be overridden at configure time; defaults to nimlib/build
-# relative to this CMakeLists.txt.
+# TORPEDOLIB_DIR can be overridden at configure time. With USE_CBOR=ON it
+# defaults to nimlib/build_cbor (the -d:BrokerFfiApiCBOR build output) and
+# the C++ target additionally pulls in jsoncons headers.
+option(USE_CBOR "Link against the CBOR-mode Nim library (torpedolib.nim built with -d:BrokerFfiApiCBOR)" OFF)
+
 if(NOT TORPEDOLIB_DIR)
-    set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
+    if(USE_CBOR)
+        set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
+    else()
+        set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
+    endif()
 endif()
 
+get_filename_component(TORPEDOLIB_DIRNAME "${TORPEDOLIB_DIR}" NAME)
 get_filename_component(TORPEDOLIB_DIR "${TORPEDOLIB_DIR}" ABSOLUTE)
 
 if(NOT EXISTS "${TORPEDOLIB_DIR}/torpedolib.h")
@@ -81,15 +89,21 @@ endif()
 
 target_link_libraries(torpedo_cpp PRIVATE torpedolib)
 
+# CBOR variant: header-only jsoncons for cbor encode/decode in <torpedolib>.hpp
+if(USE_CBOR)
+    target_include_directories(torpedo_cpp PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
+endif()
+
 if(APPLE)
     set_target_properties(torpedo_cpp PROPERTIES
-        BUILD_RPATH "@loader_path/../../nimlib/build"
-        INSTALL_RPATH "@loader_path/../../nimlib/build"
+        BUILD_RPATH "@loader_path/../../nimlib/${TORPEDOLIB_DIRNAME}"
+        INSTALL_RPATH "@loader_path/../../nimlib/${TORPEDOLIB_DIRNAME}"
     )
 elseif(UNIX)
     set_target_properties(torpedo_cpp PROPERTIES
-        BUILD_RPATH "$ORIGIN/../../nimlib/build"
-        INSTALL_RPATH "$ORIGIN/../../nimlib/build"
+        BUILD_RPATH "$ORIGIN/../../nimlib/${TORPEDOLIB_DIRNAME}"
+        INSTALL_RPATH "$ORIGIN/../../nimlib/${TORPEDOLIB_DIRNAME}"
     )
 endif()
 

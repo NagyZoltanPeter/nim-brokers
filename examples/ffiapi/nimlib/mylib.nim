@@ -437,6 +437,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 registerBrokerLibrary:
   name:
     "mylib"
+  version:
+    "1.0.0"
   initializeRequest:
     InitializeRequest
   shutdownRequest:

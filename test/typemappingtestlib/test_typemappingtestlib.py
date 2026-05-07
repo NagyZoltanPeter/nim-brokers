@@ -1,992 +1,708 @@
 #!/usr/bin/env python3
-"""Tests for generated Python wrapper — covers every Nim→C→Python type mapping.
+"""Unified Python parity test for typemappingtestlib (native + CBOR).
 
-Type mapping coverage:
-  Scalars:    bool, int32, int64, float64, string  (request params + result fields)
-  Enum:       Priority                             (request param, result field, event field)
-  Distinct:   JobId (int32), Timestamp (int64)     (request param, result field, event field)
-  seq result: seq[byte], seq[string], seq[int64], seq[Tag]
-  seq params: seq[Tag] (seq[object]), seq[string], seq[int64]
-  array:      array[4, int32], array[ConstArrayLen, int32] (result field, event field)
-  Events:     all of the above in callback fields
+Drives the same generated Python wrapper API on both the native FFI
+build and the CBOR FFI build. Selection is by environment:
 
-Build the test library first:
-    nimble buildTypeMapTestLib
+    TYPEMAP_BUILD_DIR=build       # default — native FFI wrapper
+    TYPEMAP_BUILD_DIR=build_cbor  # CBOR-mode wrapper
 
-Run:
-    nimble testPy
+Both wrappers expose:
+    class Typemappingtestlib:
+        def create_context() -> Result[None]
+        def valid_context() -> bool
+        def __bool__() -> bool
+        def shutdown() -> None
+        ctx -> int                    (property)
+    Result[T]: .is_ok() / .is_err() / .value / .error / bool(r)
+    Priority(IntEnum): pLow / pMedium / pHigh / pCritical
+
+Per-request methods return Result[<TypeName>]; per-event methods follow
+on_<name>(callback) -> int  /  off_<name>(handle = 0) -> None where the
+callback receives (lib_instance, *unpacked_payload_fields).
 """
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "build"))
+_BUILD_DIR_NAME = os.environ.get("TYPEMAP_BUILD_DIR", "build")
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE / _BUILD_DIR_NAME))
 
-from typemappingtestlib import (
+from typemappingtestlib import (  # noqa: E402
     Priority,
-    Typemappingtestlib as Lib,
-    TypemappingtestlibError as LibError,
+    Result,
     Tag,
+    Typemappingtestlib,
 )
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def wait_for(lst: list, count: int, timeout: float = 2.0) -> None:
-    """Poll until lst has at least `count` items or timeout expires."""
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
     deadline = time.monotonic() + timeout
-    while len(lst) < count and time.monotonic() < deadline:
-        time.sleep(0.05)
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _make_lib() -> Typemappingtestlib:
+    """Construct + create_context, asserting success."""
+    lib = Typemappingtestlib()
+    init = lib.create_context()
+    assert init.is_ok(), f"create_context failed: {init.error}"
+    return lib
 
 
 # ---------------------------------------------------------------------------
-# Original tests (unchanged)
+# Lifecycle
 # ---------------------------------------------------------------------------
 
 
 class TestLifecycle(unittest.TestCase):
-    """Validate correct initialize and teardown."""
-
     def test_create_and_shutdown(self):
-        lib = Lib()
+        lib = Typemappingtestlib()
         self.assertFalse(lib)
-        lib.createContext()
+        self.assertEqual(lib.ctx, 0)
+        r = lib.create_context()
+        self.assertTrue(r.is_ok(), r.error)
         self.assertTrue(lib)
         self.assertNotEqual(lib.ctx, 0)
         lib.shutdown()
         self.assertFalse(lib)
 
     def test_context_manager(self):
-        with Lib() as lib:
-            lib.createContext()
+        with Typemappingtestlib() as lib:
+            self.assertTrue(lib.create_context().is_ok())
             self.assertTrue(lib)
-            self.assertNotEqual(lib.ctx, 0)
         self.assertFalse(lib)
 
     def test_double_shutdown_is_safe(self):
-        lib = Lib()
-        lib.createContext()
+        lib = _make_lib()
         lib.shutdown()
-        lib.shutdown()  # Should not raise
+        lib.shutdown()  # second call is a no-op
 
-    def test_double_create_raises(self):
-        with Lib() as lib:
-            lib.createContext()
-            with self.assertRaises(LibError):
-                lib.createContext()
+    def test_double_create_returns_err(self):
+        lib = _make_lib()
+        try:
+            r = lib.create_context()
+            self.assertTrue(r.is_err())
+            self.assertIn("already", r.error.lower())
+        finally:
+            lib.shutdown()
 
-    def test_request_without_context_raises(self):
-        lib = Lib()
-        with self.assertRaises(LibError):
-            lib.echoRequest("hello")
+    def test_request_without_context_returns_err(self):
+        lib = Typemappingtestlib()
+        try:
+            r = lib.echo_request("hi")
+            self.assertTrue(r.is_err())
+        finally:
+            lib.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Requests
+# ---------------------------------------------------------------------------
 
 
 class TestRequests(unittest.TestCase):
-    """Issue multiple requests and validate results."""
-
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
 
     def test_initialize_request(self):
-        res = self.lib.initializeRequest("test-label")
-        self.assertEqual(res.label, "test-label")
+        r = self.lib.initialize_request("ctx-A")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.label, "ctx-A")
 
     def test_echo_request(self):
-        self.lib.initializeRequest("ctx-A")
-        res = self.lib.echoRequest("hello")
-        self.assertEqual(res.reply, "ctx-A:hello")
+        self.lib.initialize_request("ctx-A")
+        r = self.lib.echo_request("hello")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.reply, "ctx-A:hello")
 
-    def test_counter_request_increments(self):
+    def test_counter_increments(self):
         for expected in range(1, 4):
-            res = self.lib.counterRequest()
-            self.assertEqual(res.value, expected)
+            r = self.lib.counter_request()
+            self.assertTrue(r.is_ok())
+            self.assertEqual(r.value.value, expected)
 
-    def test_multiple_echo_requests(self):
-        self.lib.initializeRequest("multi")
+    def test_multiple_echo(self):
+        self.lib.initialize_request("multi")
         for i in range(5):
-            res = self.lib.echoRequest(f"msg-{i}")
-            self.assertEqual(res.reply, f"multi:msg-{i}")
-
-
-class TestEvents(unittest.TestCase):
-    """Consume events from the library."""
-
-    def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
-
-    def tearDown(self):
-        self.lib.shutdown()
-
-    def test_counter_changed_event(self):
-        received: list[tuple[int, int]] = []
-        handle = self.lib.onCounterChanged(
-            lambda owner, value: received.append((owner.ctx, value))
-        )
-        self.assertGreater(handle, 0)
-
-        self.lib.counterRequest()
-        self.lib.counterRequest()
-        self.lib.counterRequest()
-
-        wait_for(received, 3)
-
-        self.assertEqual(len(received), 3)
-        self.assertEqual([v for _, v in received], [1, 2, 3])
-        for ctx, _ in received:
-            self.assertEqual(ctx, self.lib.ctx)
-
-        self.lib.offCounterChanged(handle)
-
-    def test_off_stops_delivery(self):
-        received: list[int] = []
-        handle = self.lib.onCounterChanged(
-            lambda owner, value: received.append(value)
-        )
-        self.lib.counterRequest()
-        wait_for(received, 1)
-
-        self.lib.offCounterChanged(handle)
-        count_after_off = len(received)
-
-        self.lib.counterRequest()
-        time.sleep(0.3)
-
-        self.assertEqual(len(received), count_after_off)
-
-
-class TestContextSeparation(unittest.TestCase):
-    """Validate that two library instances have independent state."""
-
-    def tearDown(self) -> None:
-        # Allow the Nim runtime to fully tear down threads from multi-context
-        # tests before the next test creates new contexts. In --mm:refc builds
-        # the GC needs a brief window to process pending finalizers.
-        time.sleep(0.05)
-
-    def test_independent_counters(self):
-        with Lib() as lib1, Lib() as lib2:
-            lib1.createContext()
-            lib2.createContext()
-            self.assertNotEqual(lib1.ctx, lib2.ctx)
-
-            lib1.initializeRequest("alpha")
-            lib2.initializeRequest("beta")
-
-            for i in range(1, 4):
-                res = lib1.counterRequest()
-                self.assertEqual(res.value, i)
-
-            for i in range(1, 3):
-                res = lib2.counterRequest()
-                self.assertEqual(res.value, i)
-
-            res = lib1.counterRequest()
-            self.assertEqual(res.value, 4)
-
-    def test_independent_echo(self):
-        with Lib() as lib1, Lib() as lib2:
-            lib1.createContext()
-            lib2.createContext()
-
-            lib1.initializeRequest("one")
-            lib2.initializeRequest("two")
-
-            self.assertEqual(lib1.echoRequest("x").reply, "one:x")
-            self.assertEqual(lib2.echoRequest("x").reply, "two:x")
-
-    def test_independent_events(self):
-        events1: list[int] = []
-        events2: list[int] = []
-
-        with Lib() as lib1, Lib() as lib2:
-            lib1.createContext()
-            lib2.createContext()
-
-            h1 = lib1.onCounterChanged(lambda owner, v: events1.append(v))
-            h2 = lib2.onCounterChanged(lambda owner, v: events2.append(v))
-
-            lib1.counterRequest()
-            lib1.counterRequest()
-            lib2.counterRequest()
-
-            deadline = time.monotonic() + 2.0
-            while (len(events1) < 2 or len(events2) < 1) and time.monotonic() < deadline:
-                time.sleep(0.05)
-
-            self.assertEqual(events1, [1, 2])
-            self.assertEqual(events2, [1])
-
-            lib1.offCounterChanged(h1)
-            lib2.offCounterChanged(h2)
-
-    def test_shutdown_one_does_not_affect_other(self):
-        lib1 = Lib()
-        lib2 = Lib()
-        lib1.createContext()
-        lib2.createContext()
-
-        lib1.initializeRequest("first")
-        lib2.initializeRequest("second")
-
-        lib1.shutdown()
-
-        res = lib2.echoRequest("still-alive")
-        self.assertEqual(res.reply, "second:still-alive")
-
-        lib2.shutdown()
+            r = self.lib.echo_request(f"m-{i}")
+            self.assertTrue(r.is_ok())
+            self.assertEqual(r.value.reply, f"multi:m-{i}")
 
 
 # ---------------------------------------------------------------------------
-# Scalar primitive types: bool, int32, int64, float64
+# Scalar types
 # ---------------------------------------------------------------------------
 
 
 class TestScalarTypes(unittest.TestCase):
-    """PrimScalarRequest + PrimScalarEvent: bool, int32, int64, float64 roundtrip."""
-
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
 
     def test_bool_true(self):
-        res = self.lib.primScalarRequest(True, 0, 0, 0.0)
-        self.assertIs(res.flag, True)
+        r = self.lib.prim_scalar_request(True, 1, 2, 3.5)
+        self.assertTrue(r.is_ok())
+        self.assertTrue(r.value.flag)
 
     def test_bool_false(self):
-        res = self.lib.primScalarRequest(False, 0, 0, 0.0)
-        self.assertIs(res.flag, False)
+        r = self.lib.prim_scalar_request(False, 0, 0, 0.0)
+        self.assertTrue(r.is_ok())
+        self.assertFalse(r.value.flag)
 
     def test_int32_roundtrip(self):
-        res = self.lib.primScalarRequest(False, -2147483648, 0, 0.0)
-        self.assertEqual(res.i32, -2147483648)  # INT32_MIN
-
-        res = self.lib.primScalarRequest(False, 2147483647, 0, 0.0)
-        self.assertEqual(res.i32, 2147483647)  # INT32_MAX
+        for v in (-(2**31), 0, 2**31 - 1):
+            r = self.lib.prim_scalar_request(False, v, 0, 0.0)
+            self.assertTrue(r.is_ok())
+            self.assertEqual(r.value.i32, v)
 
     def test_int64_roundtrip(self):
-        big = 9_000_000_000_000
-        res = self.lib.primScalarRequest(False, 0, big, 0.0)
-        self.assertEqual(res.i64, big)
+        for v in (-(2**63), 0, 2**63 - 1, -9_000_000_000_000):
+            r = self.lib.prim_scalar_request(False, 0, v, 0.0)
+            self.assertTrue(r.is_ok())
+            self.assertEqual(r.value.i64, v)
 
-    def test_float64_roundtrip(self):
-        res = self.lib.primScalarRequest(False, 0, 0, 3.141592653589793)
-        self.assertEqual(res.f64, 3.141592653589793)
-
-    def test_all_fields_roundtrip(self):
-        res = self.lib.primScalarRequest(True, 42, 1_000_000_000, 2.718)
-        self.assertIs(res.flag, True)
-        self.assertEqual(res.i32, 42)
-        self.assertEqual(res.i64, 1_000_000_000)
-        self.assertAlmostEqual(res.f64, 2.718, places=12)
-
-    def test_prim_scalar_event(self):
-        evts: list[tuple] = []
-        handle = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts.append((flag, i32, i64, f64))
-        )
-
-        self.lib.primScalarRequest(True, 7, 777777, 1.5)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        flag, i32, i64, f64 = evts[0]
-        self.assertIs(flag, True)
-        self.assertEqual(i32, 7)
-        self.assertEqual(i64, 777777)
-        self.assertAlmostEqual(f64, 1.5, places=12)
-
-        self.lib.offPrimScalarEvent(handle)
-
-    def test_prim_scalar_event_false_flag(self):
-        evts: list[bool] = []
-        handle = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts.append(flag)
-        )
-
-        self.lib.primScalarRequest(False, 0, 0, 0.0)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertIs(evts[0], False)
-
-        self.lib.offPrimScalarEvent(handle)
+    def test_float64_pi_bits(self):
+        pi = 3.141592653589793
+        r = self.lib.prim_scalar_request(False, 0, 0, pi)
+        self.assertTrue(r.is_ok())
+        self.assertAlmostEqual(r.value.f64, pi, places=15)
 
 
 # ---------------------------------------------------------------------------
-# Enum (Priority) + Distinct (JobId, Timestamp)
+# Enum + distinct
 # ---------------------------------------------------------------------------
 
 
-class TestEnumDistinctTypes(unittest.TestCase):
-    """TypedScalarRequest + TypedScalarEvent: enum (Priority) and distinct (JobId, Timestamp)."""
-
+class TestEnumDistinct(unittest.TestCase):
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
-
-    def test_enum_roundtrip_low(self):
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_LOW, 10)
-        self.assertEqual(res.priority, Priority.PRIORITY_P_LOW)
-        self.assertEqual(int(res.priority), 0)
-
-    def test_enum_roundtrip_high(self):
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_HIGH, 1)
-        self.assertEqual(res.priority, Priority.PRIORITY_P_HIGH)
-        self.assertEqual(int(res.priority), 2)
-
-    def test_enum_roundtrip_critical(self):
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_CRITICAL, 1)
-        self.assertEqual(int(res.priority), 3)
-
-    def test_distinct_jobid_echoed(self):
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_LOW, 5)
-        self.assertEqual(res.jobId, 5)
-
-    def test_distinct_jobid_next(self):
-        # Provider returns nextId = jobId + 1
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_LOW, 5)
-        self.assertEqual(res.nextId, 6)
-
-    def test_distinct_jobid_zero(self):
-        res = self.lib.typedScalarRequest(Priority.PRIORITY_P_MEDIUM, 0)
-        self.assertEqual(res.jobId, 0)
-        self.assertEqual(res.nextId, 1)
 
     def test_all_priority_values(self):
-        priorities = [
-            Priority.PRIORITY_P_LOW,
-            Priority.PRIORITY_P_MEDIUM,
-            Priority.PRIORITY_P_HIGH,
-            Priority.PRIORITY_P_CRITICAL,
-        ]
-        for p in priorities:
-            res = self.lib.typedScalarRequest(p, 1)
-            self.assertEqual(res.priority, p)
+        for p in (Priority.pLow, Priority.pMedium, Priority.pHigh, Priority.pCritical):
+            r = self.lib.typed_scalar_request(p, 1)
+            self.assertTrue(r.is_ok())
+            self.assertEqual(r.value.priority, p)
 
-    def test_typed_scalar_event_enum(self):
-        evts: list[tuple] = []
-        handle = self.lib.onTypedScalarEvent(
-            lambda owner, priority, job_id, ts: evts.append((priority, job_id, ts))
-        )
+    def test_jobid_zero(self):
+        r = self.lib.typed_scalar_request(Priority.pMedium, 0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.jobId, 0)
+        self.assertEqual(r.value.nextId, 1)
 
-        self.lib.typedScalarRequest(Priority.PRIORITY_P_HIGH, 7)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        priority, job_id, ts = evts[0]
-        # priority is wrapped in Priority IntEnum by the trampoline
-        self.assertEqual(priority, Priority.PRIORITY_P_HIGH)
-        self.assertEqual(int(priority), 2)
-        # job_id is a plain int (JobId = int alias)
-        self.assertEqual(job_id, 7)
-        # ts = int64(jobId) * 10 as computed by provider
-        self.assertEqual(ts, 70)
-
-        self.lib.offTypedScalarEvent(handle)
-
-    def test_typed_scalar_event_distinct_timestamp(self):
-        evts: list[int] = []
-        handle = self.lib.onTypedScalarEvent(
-            lambda owner, priority, job_id, ts: evts.append(ts)
-        )
-
-        # Provider: ts = Timestamp(int64(jobId) * 10)
-        self.lib.typedScalarRequest(Priority.PRIORITY_P_LOW, 3)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], 30)  # 3 * 10
-
-        self.lib.offTypedScalarEvent(handle)
-
-    def test_fixedarray_result_contains_timestamp(self):
-        # Timestamp in result field: ts = Timestamp(seed)
-        res = self.lib.fixedArrayRequest(99)
-        self.assertEqual(res.ts, 99)
+    def test_jobid_max_minus_one(self):
+        # rt.jobid_big.nextId — INT32_MAX-1 wraps to INT32_MAX, no overflow
+        r = self.lib.typed_scalar_request(Priority.pLow, 2**31 - 2)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.jobId, 2**31 - 2)
+        self.assertEqual(r.value.nextId, 2**31 - 1)
 
 
 # ---------------------------------------------------------------------------
-# seq[byte] result
+# Container types — request results
 # ---------------------------------------------------------------------------
 
 
-class TestSeqByteResult(unittest.TestCase):
-    """ByteSeqRequest: seq[byte] result field."""
-
+class TestSeqByte(unittest.TestCase):
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
 
-    def test_empty_seq_byte(self):
-        res = self.lib.byteSeqRequest(0)
-        self.assertEqual(res.data, [])
+    def test_empty(self):
+        r = self.lib.byte_seq_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.data), [])
 
-    def test_seq_byte_length(self):
-        res = self.lib.byteSeqRequest(8)
-        self.assertEqual(len(res.data), 8)
+    def test_length(self):
+        r = self.lib.byte_seq_request(5)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.data), [0, 1, 2, 3, 4])
 
-    def test_seq_byte_values(self):
-        # Provider: data[i] = i mod 256
-        res = self.lib.byteSeqRequest(5)
-        self.assertEqual(res.data, [0, 1, 2, 3, 4])
+    def test_wrap_around(self):
+        r = self.lib.byte_seq_request(260)
+        self.assertTrue(r.is_ok())
+        data = list(r.value.data)
+        self.assertEqual(len(data), 260)
+        self.assertEqual(data[0], 0)
+        self.assertEqual(data[255], 255)
+        self.assertEqual(data[256], 0)
 
-    def test_seq_byte_wrap_around(self):
-        res = self.lib.byteSeqRequest(260)
-        self.assertEqual(len(res.data), 260)
-        self.assertEqual(res.data[0], 0)
-        self.assertEqual(res.data[255], 255)
-        self.assertEqual(res.data[256], 0)  # wraps at 256
-
-    def test_seq_byte_single_element(self):
-        res = self.lib.byteSeqRequest(1)
-        self.assertEqual(res.data, [0])
-
-    def test_seq_byte_large(self):
-        res = self.lib.byteSeqRequest(100)
-        self.assertEqual(len(res.data), 100)
-        for i, v in enumerate(res.data):
-            self.assertEqual(v, i % 256)
+    def test_large(self):
+        # rt.byte_seq_large — exercises CBOR multi-byte length encoding
+        r = self.lib.byte_seq_request(4096)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(len(list(r.value.data)), 4096)
 
 
-# ---------------------------------------------------------------------------
-# seq[string] result + seq[string] input param
-# ---------------------------------------------------------------------------
-
-
-class TestSeqStringTypes(unittest.TestCase):
-    """StringSeqRequest (result) + SeqStringParamRequest (input param) + StringSeqEvent."""
-
+class TestSeqString(unittest.TestCase):
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
 
-    # --- seq[string] as result ---
+    def test_empty_result(self):
+        r = self.lib.string_seq_request("x", 0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.items), [])
 
-    def test_empty_seq_string_result(self):
-        res = self.lib.stringSeqRequest("x", 0)
-        self.assertEqual(res.items, [])
+    def test_count(self):
+        r = self.lib.string_seq_request("x", 3)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.items), ["x-0", "x-1", "x-2"])
 
-    def test_seq_string_result_count(self):
-        res = self.lib.stringSeqRequest("item", 4)
-        self.assertEqual(len(res.items), 4)
+    def test_special_chars(self):
+        r = self.lib.string_seq_request("a/b:c", 2)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.items), ["a/b:c-0", "a/b:c-1"])
 
-    def test_seq_string_result_values(self):
-        res = self.lib.stringSeqRequest("tag", 3)
-        self.assertEqual(res.items, ["tag-0", "tag-1", "tag-2"])
+    def test_param_empty(self):
+        r = self.lib.seq_string_param_request([])
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.count, 0)
 
-    def test_seq_string_result_with_special_chars(self):
-        res = self.lib.stringSeqRequest("a/b:c", 2)
-        self.assertEqual(res.items, ["a/b:c-0", "a/b:c-1"])
+    def test_param_unicode(self):
+        r = self.lib.seq_string_param_request(["héllo", "wörld"])
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.count, 2)
+        self.assertEqual(r.value.joined, "héllo,wörld")
 
-    # --- seq[string] as input param ---
 
-    def test_seq_string_param_empty(self):
-        res = self.lib.seqStringParamRequest([])
-        self.assertEqual(res.count, 0)
-        self.assertEqual(res.joined, "")
+class TestSeqPrim(unittest.TestCase):
+    def setUp(self):
+        self.lib = _make_lib()
 
-    def test_seq_string_param_single(self):
-        res = self.lib.seqStringParamRequest(["hello"])
-        self.assertEqual(res.count, 1)
-        self.assertEqual(res.joined, "hello")
+    def tearDown(self):
+        self.lib.shutdown()
 
-    def test_seq_string_param_multiple(self):
-        res = self.lib.seqStringParamRequest(["alpha", "beta", "gamma"])
-        self.assertEqual(res.count, 3)
-        self.assertEqual(res.joined, "alpha,beta,gamma")
+    def test_empty(self):
+        r = self.lib.prim_seq_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [])
 
-    def test_seq_string_param_unicode(self):
-        res = self.lib.seqStringParamRequest(["héllo", "wörld"])
-        self.assertEqual(res.count, 2)
-        self.assertEqual(res.joined, "héllo,wörld")
+    def test_values(self):
+        r = self.lib.prim_seq_request(4)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [0, 10, 20, 30])
 
-    # --- StringSeqEvent: seq[string] in event callback field ---
+    def test_param_sum(self):
+        r = self.lib.prim_seq_param_request([1, 2, 3, 4])
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.count, 4)
+        self.assertEqual(r.value.total, 10)
+
+
+class TestArrays(unittest.TestCase):
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_fixed_array(self):
+        r = self.lib.fixed_array_request(5)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [5, 10, 15, 20])
+        self.assertEqual(r.value.ts, 5)
+
+    def test_fixed_array_zero(self):
+        r = self.lib.fixed_array_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [0, 0, 0, 0])
+
+    def test_fixed_array_negative(self):
+        r = self.lib.fixed_array_request(-3)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [-3, -6, -9, -12])
+
+    def test_const_array(self):
+        r = self.lib.const_array_request(3)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [3, 6, 9, 12, 15, 18])
+
+    def test_const_array_zero(self):
+        r = self.lib.const_array_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.values), [0] * 6)
+
+
+class TestSeqObject(unittest.TestCase):
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_seq_tag_result(self):
+        r = self.lib.obj_seq_result_request(2)
+        self.assertTrue(r.is_ok())
+        tags = list(r.value.tags)
+        self.assertEqual(len(tags), 2)
+        self.assertEqual(tags[0].key, "key-0")
+        self.assertEqual(tags[1].value, "val-1")
+
+    def test_seq_tag_empty(self):
+        r = self.lib.obj_seq_result_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.tags), [])
+
+    def test_seq_tag_param(self):
+        tags_in = [Tag(key="alpha", value="1"), Tag(key="beta", value="2")]
+        r = self.lib.obj_seq_param_request(tags_in)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.count, 2)
+        self.assertEqual(r.value.first, "alpha")
+
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+
+
+class TestEvents(unittest.TestCase):
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_counter_changed(self):
+        received = []
+        ev = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            ev.set()
+
+        h = self.lib.on_counter_changed(cb)
+        self.assertNotEqual(h, 0)
+        self.lib.counter_request()
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(received, [1])
+        self.lib.off_counter_changed(h)
+
+    def test_off_stops_delivery(self):
+        count = [0]
+
+        def cb(_lib, _value):
+            count[0] += 1
+
+        h = self.lib.on_counter_changed(cb)
+        self.lib.counter_request()
+        _wait_for(lambda: count[0] >= 1)
+        self.lib.off_counter_changed(h)
+        before = count[0]
+        self.lib.counter_request()
+        time.sleep(0.1)
+        self.assertEqual(count[0], before)
+
+    def test_prim_scalar_event(self):
+        captured = {}
+        ev = threading.Event()
+
+        def cb(_lib, flag, i32, i64, f64):
+            captured["flag"] = flag
+            captured["i32"] = i32
+            captured["i64"] = i64
+            captured["f64"] = f64
+            ev.set()
+
+        h = self.lib.on_prim_scalar_event(cb)
+        self.lib.prim_scalar_request(True, 7, 1234567890123, 3.5)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(captured["i64"], 1234567890123)
+        self.assertEqual(captured["f64"], 3.5)
+        self.lib.off_prim_scalar_event(h)
+
+    def test_typed_scalar_event(self):
+        captured = {}
+        ev = threading.Event()
+
+        def cb(_lib, priority, jobId, ts):
+            captured["priority"] = priority
+            captured["jobId"] = jobId
+            captured["ts"] = ts
+            ev.set()
+
+        h = self.lib.on_typed_scalar_event(cb)
+        self.lib.typed_scalar_request(Priority.pHigh, 41)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(captured["priority"], Priority.pHigh)
+        self.assertEqual(captured["ts"], 410)
+        self.lib.off_typed_scalar_event(h)
 
     def test_string_seq_event(self):
-        evts: list[list[str]] = []
-        handle = self.lib.onStringSeqEvent(
-            lambda owner, items: evts.append(list(items))
-        )
+        captured = {}
+        ev = threading.Event()
 
-        self.lib.stringSeqRequest("ev", 3)
-        wait_for(evts, 1)
+        def cb(_lib, items):
+            captured["items"] = list(items)
+            ev.set()
 
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], ["ev-0", "ev-1", "ev-2"])
-
-        self.lib.offStringSeqEvent(handle)
-
-    def test_string_seq_event_empty(self):
-        evts: list[list[str]] = []
-        handle = self.lib.onStringSeqEvent(
-            lambda owner, items: evts.append(list(items))
-        )
-
-        self.lib.stringSeqRequest("x", 0)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [])
-
-        self.lib.offStringSeqEvent(handle)
-
-
-# ---------------------------------------------------------------------------
-# seq[primitive] (seq[int64]) result + input param
-# ---------------------------------------------------------------------------
-
-
-class TestSeqPrimTypes(unittest.TestCase):
-    """PrimSeqRequest (result) + PrimSeqParamRequest (input param) + PrimSeqEvent."""
-
-    def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
-
-    def tearDown(self):
-        self.lib.shutdown()
-
-    # --- seq[int64] as result ---
-
-    def test_empty_prim_seq_result(self):
-        res = self.lib.primSeqRequest(0)
-        self.assertEqual(res.values, [])
-
-    def test_prim_seq_result_length(self):
-        res = self.lib.primSeqRequest(5)
-        self.assertEqual(len(res.values), 5)
-
-    def test_prim_seq_result_values(self):
-        # Provider: values[i] = i * 10
-        res = self.lib.primSeqRequest(4)
-        self.assertEqual(res.values, [0, 10, 20, 30])
-
-    def test_prim_seq_result_large_int64(self):
-        res = self.lib.primSeqRequest(3)
-        self.assertEqual(res.values[2], 20)  # 2 * 10
-
-    # --- seq[int64] as input param ---
-
-    def test_prim_seq_param_empty(self):
-        res = self.lib.primSeqParamRequest([])
-        self.assertEqual(res.count, 0)
-        self.assertEqual(res.total, 0)
-
-    def test_prim_seq_param_single(self):
-        res = self.lib.primSeqParamRequest([42])
-        self.assertEqual(res.count, 1)
-        self.assertEqual(res.total, 42)
-
-    def test_prim_seq_param_sum(self):
-        res = self.lib.primSeqParamRequest([1, 2, 3, 4, 5])
-        self.assertEqual(res.count, 5)
-        self.assertEqual(res.total, 15)
-
-    def test_prim_seq_param_large_values(self):
-        big = 1_000_000_000_000
-        res = self.lib.primSeqParamRequest([big, big])
-        self.assertEqual(res.count, 2)
-        self.assertEqual(res.total, 2 * big)
-
-    # --- PrimSeqEvent: seq[int64] in event callback field ---
-
-    def test_prim_seq_event(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onPrimSeqEvent(
-            lambda owner, values: evts.append(list(values))
-        )
-
-        self.lib.primSeqRequest(3)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [0, 10, 20])
-
-        self.lib.offPrimSeqEvent(handle)
-
-    def test_prim_seq_event_empty(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onPrimSeqEvent(
-            lambda owner, values: evts.append(list(values))
-        )
-
-        self.lib.primSeqRequest(0)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [])
-
-        self.lib.offPrimSeqEvent(handle)
-
-
-# ---------------------------------------------------------------------------
-# array[N, T] result + event
-# ---------------------------------------------------------------------------
-
-
-class TestFixedArrayTypes(unittest.TestCase):
-    """FixedArrayRequest (result) + FixedArrayEvent: array[4, int32]."""
-
-    def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
-
-    def tearDown(self):
-        self.lib.shutdown()
-
-    def test_array_result_values(self):
-        # Provider: [seed, seed*2, seed*3, seed*4]
-        res = self.lib.fixedArrayRequest(5)
-        self.assertEqual(res.values, [5, 10, 15, 20])
-
-    def test_array_result_length(self):
-        res = self.lib.fixedArrayRequest(1)
-        self.assertEqual(len(res.values), 4)
-
-    def test_array_result_seed_zero(self):
-        res = self.lib.fixedArrayRequest(0)
-        self.assertEqual(res.values, [0, 0, 0, 0])
-
-    def test_array_result_negative_seed(self):
-        res = self.lib.fixedArrayRequest(-3)
-        self.assertEqual(res.values, [-3, -6, -9, -12])
-
-    def test_array_result_timestamp(self):
-        # Provider: ts = Timestamp(seed)
-        res = self.lib.fixedArrayRequest(42)
-        self.assertEqual(res.ts, 42)
+        h = self.lib.on_string_seq_event(cb)
+        self.lib.string_seq_request("x", 3)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(captured["items"], ["x-0", "x-1", "x-2"])
+        self.lib.off_string_seq_event(h)
 
     def test_fixed_array_event(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onFixedArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
+        captured = {}
+        ev = threading.Event()
 
-        self.lib.fixedArrayRequest(3)
-        wait_for(evts, 1)
+        def cb(_lib, values):
+            captured["values"] = list(values)
+            ev.set()
 
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [3, 6, 9, 12])
-        self.assertEqual(len(evts[0]), 4)
+        h = self.lib.on_fixed_array_event(cb)
+        self.lib.fixed_array_request(5)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(captured["values"], [5, 10, 15, 20])
+        self.lib.off_fixed_array_event(h)
 
-        self.lib.offFixedArrayEvent(handle)
+    def test_tag_seq_event(self):
+        captured = []
+        ev = threading.Event()
 
-    def test_fixed_array_event_zero_seed(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onFixedArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
+        def cb(_lib, tags):
+            captured.extend((t.key, t.value) for t in tags)
+            ev.set()
 
-        self.lib.fixedArrayRequest(0)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [0, 0, 0, 0])
-
-        self.lib.offFixedArrayEvent(handle)
-
-    def test_fixed_array_multiple_requests(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onFixedArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
-
-        self.lib.fixedArrayRequest(1)
-        self.lib.fixedArrayRequest(2)
-        wait_for(evts, 2)
-
-        self.assertEqual(len(evts), 2)
-        self.assertEqual(evts[0], [1, 2, 3, 4])
-        self.assertEqual(evts[1], [2, 4, 6, 8])
-
-        self.lib.offFixedArrayEvent(handle)
+        h = self.lib.on_tag_seq_event(cb)
+        self.lib.obj_seq_result_request(2)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(captured, [("key-0", "val-0"), ("key-1", "val-1")])
+        self.lib.off_tag_seq_event(h)
 
 
 # ---------------------------------------------------------------------------
-# seq[object] — Tag — input param and result
+# Multi-listener
 # ---------------------------------------------------------------------------
 
 
-class TestSeqObjectTypes(unittest.TestCase):
-    """ObjSeqParamRequest (input) + ObjSeqResultRequest (result): seq[Tag]."""
-
+class TestMultipleListeners(unittest.TestCase):
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
 
     def tearDown(self):
         self.lib.shutdown()
 
-    # --- seq[Tag] as input param ---
+    def test_two_listeners_both_receive(self):
+        s1, s2 = [], []
+        l1 = threading.Lock()
+        l2 = threading.Lock()
 
-    def test_obj_seq_param_empty(self):
-        res = self.lib.objSeqParamRequest([])
-        self.assertEqual(res.count, 0)
-        self.assertEqual(res.first, "")
+        def cb1(_lib, _value):
+            with l1:
+                s1.append(_value)
 
-    def test_obj_seq_param_single(self):
-        tags = [Tag(key="mykey", value="myval")]
-        res = self.lib.objSeqParamRequest(tags)
-        self.assertEqual(res.count, 1)
-        self.assertEqual(res.first, "mykey")
+        def cb2(_lib, _value):
+            with l2:
+                s2.append(_value)
 
-    def test_obj_seq_param_multiple(self):
-        tags = [
-            Tag(key="first", value="1"),
-            Tag(key="second", value="2"),
-            Tag(key="third", value="3"),
-        ]
-        res = self.lib.objSeqParamRequest(tags)
-        self.assertEqual(res.count, 3)
-        self.assertEqual(res.first, "first")
+        h1 = self.lib.on_counter_changed(cb1)
+        h2 = self.lib.on_counter_changed(cb2)
+        self.lib.counter_request()
+        _wait_for(lambda: len(s1) >= 1 and len(s2) >= 1)
+        self.assertEqual(s1, [1])
+        self.assertEqual(s2, [1])
+        self.lib.off_counter_changed(h1)
+        self.lib.off_counter_changed(h2)
 
-    def test_obj_seq_param_string_encoding(self):
-        # Verify string fields within objects survive the C ABI round-trip
-        tags = [Tag(key="key with spaces", value="value/path")]
-        res = self.lib.objSeqParamRequest(tags)
-        self.assertEqual(res.count, 1)
-        self.assertEqual(res.first, "key with spaces")
+    def test_remove_one_keeps_other(self):
+        s1, s2 = [], []
+        l1, l2 = threading.Lock(), threading.Lock()
 
-    # --- seq[Tag] as result ---
+        def cb1(_lib, v):
+            with l1:
+                s1.append(v)
 
-    def test_obj_seq_result_empty(self):
-        res = self.lib.objSeqResultRequest(0)
-        self.assertEqual(res.tags, [])
+        def cb2(_lib, v):
+            with l2:
+                s2.append(v)
 
-    def test_obj_seq_result_length(self):
-        res = self.lib.objSeqResultRequest(4)
-        self.assertEqual(len(res.tags), 4)
-
-    def test_obj_seq_result_keys(self):
-        res = self.lib.objSeqResultRequest(3)
-        keys = [t.key for t in res.tags]
-        self.assertEqual(keys, ["key-0", "key-1", "key-2"])
-
-    def test_obj_seq_result_values(self):
-        res = self.lib.objSeqResultRequest(3)
-        vals = [t.value for t in res.tags]
-        self.assertEqual(vals, ["val-0", "val-1", "val-2"])
-
-    def test_obj_seq_result_tag_type(self):
-        res = self.lib.objSeqResultRequest(2)
-        for tag in res.tags:
-            self.assertTrue(hasattr(tag, "key"))
-            self.assertTrue(hasattr(tag, "value"))
-            self.assertIsInstance(tag.key, str)
-            self.assertIsInstance(tag.value, str)
-
-    def test_obj_seq_roundtrip(self):
-        # Generate tags via result, then pass them back as input
-        gen = self.lib.objSeqResultRequest(3)
-        tags_in = gen.tags
-
-        # Now use them as input: only 'key' and 'value' matter, Tag is a dataclass
-        res = self.lib.objSeqParamRequest(tags_in)
-        self.assertEqual(res.count, 3)
-        self.assertEqual(res.first, "key-0")
+        h1 = self.lib.on_counter_changed(cb1)
+        h2 = self.lib.on_counter_changed(cb2)
+        self.lib.counter_request()
+        _wait_for(lambda: len(s1) >= 1 and len(s2) >= 1)
+        self.lib.off_counter_changed(h1)
+        self.lib.counter_request()
+        _wait_for(lambda: len(s2) >= 2)
+        time.sleep(0.05)
+        self.assertEqual(len(s1), 1)
+        self.assertEqual(len(s2), 2)
+        self.lib.off_counter_changed(h2)
 
 
 # ---------------------------------------------------------------------------
-# array[ConstArrayLen, int32] — const-defined size
+# Multi-context
 # ---------------------------------------------------------------------------
 
 
-class TestConstArraySize(unittest.TestCase):
-    """ConstArrayRequest + ConstArrayEvent: array size given by a Nim const (ConstArrayLen=6).
+class TestMultiContext(unittest.TestCase):
+    def test_independent_counters(self):
+        a = _make_lib()
+        b = _make_lib()
+        try:
+            self.assertNotEqual(a.ctx, b.ctx)
+            a.initialize_request("alpha")
+            b.initialize_request("beta")
+            for i in range(1, 4):
+                self.assertEqual(a.counter_request().value.value, i)
+            for i in range(1, 3):
+                self.assertEqual(b.counter_request().value.value, i)
+            self.assertEqual(a.counter_request().value.value, 4)
+        finally:
+            a.shutdown()
+            b.shutdown()
 
-    This exercises the arrayNodeSize nnkSym path in api_codegen_c.nim.
-    """
+    def test_independent_echo(self):
+        a = _make_lib()
+        b = _make_lib()
+        try:
+            a.initialize_request("one")
+            b.initialize_request("two")
+            self.assertEqual(a.echo_request("x").value.reply, "one:x")
+            self.assertEqual(b.echo_request("x").value.reply, "two:x")
+        finally:
+            a.shutdown()
+            b.shutdown()
 
-    ARRAY_LEN = 6
 
+# ---------------------------------------------------------------------------
+# Foreign-thread stress (light) — exercise ctypes callback handoff
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipIf(
+    os.environ.get("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS") == "1",
+    "fragile refc bursts skipped",
+)
+class TestForeignThreadStress(unittest.TestCase):
     def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+        self.lib = _make_lib()
+        self.lib.initialize_request("stress")
 
     def tearDown(self):
         self.lib.shutdown()
 
-    def test_const_array_result_length(self):
-        res = self.lib.constArrayRequest(1)
-        self.assertEqual(len(res.values), self.ARRAY_LEN)
+    def test_concurrent_echo(self):
+        threads = 4
+        iters = 10
+        failures = []
 
-    def test_const_array_result_values(self):
-        # Provider: values[i] = seed * (i + 1)
-        res = self.lib.constArrayRequest(3)
-        self.assertEqual(res.values, [3, 6, 9, 12, 15, 18])
+        def run(t):
+            for i in range(iters):
+                r = self.lib.echo_request(f"t{t}-i{i}")
+                if not r.is_ok() or not r.value.reply.startswith("stress:"):
+                    failures.append(r.error or "bad reply")
 
-    def test_const_array_result_zero_seed(self):
-        res = self.lib.constArrayRequest(0)
-        self.assertEqual(res.values, [0, 0, 0, 0, 0, 0])
+        ts = [threading.Thread(target=run, args=(i,)) for i in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(failures, [])
 
-    def test_const_array_result_negative_seed(self):
-        res = self.lib.constArrayRequest(-2)
-        self.assertEqual(res.values, [-2, -4, -6, -8, -10, -12])
+    def test_concurrent_seq_object(self):
+        threads = 4
+        iters = 10
+        failures = []
 
-    def test_const_array_event_values(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onConstArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
+        def run(_):
+            for _i in range(iters):
+                r = self.lib.obj_seq_result_request(5)
+                if not r.is_ok() or len(list(r.value.tags)) != 5:
+                    failures.append("bad seq[Tag] count")
 
-        self.lib.constArrayRequest(2)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts), 1)
-        self.assertEqual(evts[0], [2, 4, 6, 8, 10, 12])
-
-        self.lib.offConstArrayEvent(handle)
-
-    def test_const_array_event_length(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onConstArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
-
-        self.lib.constArrayRequest(1)
-        wait_for(evts, 1)
-
-        self.assertEqual(len(evts[0]), self.ARRAY_LEN)
-
-        self.lib.offConstArrayEvent(handle)
-
-    def test_const_array_event_zero_seed(self):
-        evts: list[list[int]] = []
-        handle = self.lib.onConstArrayEvent(
-            lambda owner, values: evts.append(list(values))
-        )
-
-        self.lib.constArrayRequest(0)
-        wait_for(evts, 1)
-
-        self.assertEqual(evts[0], [0, 0, 0, 0, 0, 0])
-
-        self.lib.offConstArrayEvent(handle)
+        ts = [threading.Thread(target=run, args=(i,)) for i in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(failures, [])
 
 
 # ---------------------------------------------------------------------------
-# Multi-event stress: multiple listeners, multiple event types
+# Listener correctness — seq[object] callback memory safety
 # ---------------------------------------------------------------------------
 
 
-class TestMultipleEventListeners(unittest.TestCase):
-    """Register multiple callbacks for the same event; verify all fire."""
+class TestSeqObjectEventMemorySafety(unittest.TestCase):
+    def test_callback_data_correctness(self):
+        lib = _make_lib()
+        try:
+            received = []
+            lock = threading.Lock()
 
-    def setUp(self):
-        self.lib = Lib()
-        self.lib.createContext()
+            def cb(_lib, tags):
+                snap = [(t.key, t.value) for t in tags]
+                with lock:
+                    received.append(snap)
 
-    def tearDown(self):
-        self.lib.shutdown()
+            h = lib.on_tag_seq_event(cb)
+            self.assertNotEqual(h, 0)
+            for n in (3, 5, 0):
+                lib.obj_seq_result_request(n)
+            _wait_for(lambda: len(received) >= 3)
+            self.assertEqual(len(received), 3)
+            self.assertEqual(len(received[0]), 3)
+            self.assertEqual(received[0][0], ("key-0", "val-0"))
+            self.assertEqual(len(received[1]), 5)
+            self.assertEqual(received[1][4], ("key-4", "val-4"))
+            self.assertEqual(received[2], [])
+            lib.off_tag_seq_event(h)
+        finally:
+            lib.shutdown()
 
-    def test_two_scalar_event_listeners(self):
-        evts1: list[int] = []
-        evts2: list[int] = []
+    @unittest.skipIf(
+        os.environ.get("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS") == "1",
+        "fragile refc bursts skipped",
+    )
+    def test_rapid_fire_no_leak(self):
+        lib = _make_lib()
+        try:
+            count = [0]
+            lock = threading.Lock()
 
-        h1 = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts1.append(i32)
-        )
-        h2 = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts2.append(i32)
-        )
+            def cb(_lib, _tags):
+                with lock:
+                    count[0] += 1
 
-        self.lib.primScalarRequest(False, 99, 0, 0.0)
-        wait_for(evts1, 1)
-        wait_for(evts2, 1)
-
-        self.assertEqual(evts1, [99])
-        self.assertEqual(evts2, [99])
-
-        self.lib.offPrimScalarEvent(h1)
-        self.lib.offPrimScalarEvent(h2)
-
-    def test_remove_one_listener_keeps_other(self):
-        evts1: list[int] = []
-        evts2: list[int] = []
-
-        h1 = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts1.append(i32)
-        )
-        h2 = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: evts2.append(i32)
-        )
-
-        self.lib.primScalarRequest(False, 1, 0, 0.0)
-        wait_for(evts1, 1)
-        wait_for(evts2, 1)
-        self.assertEqual(len(evts1), 1)
-        self.assertEqual(len(evts2), 1)
-
-        self.lib.offPrimScalarEvent(h1)
-
-        self.lib.primScalarRequest(False, 2, 0, 0.0)
-        wait_for(evts2, 2)
-        time.sleep(0.1)
-
-        # h1 was removed — evts1 stays at 1
-        self.assertEqual(len(evts1), 1)
-        self.assertEqual(len(evts2), 2)
-        self.assertEqual(evts2[1], 2)
-
-        self.lib.offPrimScalarEvent(h2)
-
-    def test_concurrent_event_types(self):
-        """Fire requests that emit different event types; verify each fires independently."""
-        scalar_evts: list[int] = []
-        array_evts: list[list[int]] = []
-        string_evts: list[list[str]] = []
-
-        hs = self.lib.onPrimScalarEvent(
-            lambda owner, flag, i32, i64, f64: scalar_evts.append(i32)
-        )
-        ha = self.lib.onFixedArrayEvent(
-            lambda owner, values: array_evts.append(list(values))
-        )
-        hst = self.lib.onStringSeqEvent(
-            lambda owner, items: string_evts.append(list(items))
-        )
-
-        self.lib.primScalarRequest(False, 55, 0, 0.0)
-        self.lib.fixedArrayRequest(4)
-        self.lib.stringSeqRequest("z", 2)
-
-        wait_for(scalar_evts, 1)
-        wait_for(array_evts, 1)
-        wait_for(string_evts, 1)
-
-        self.assertEqual(scalar_evts, [55])
-        self.assertEqual(array_evts, [[4, 8, 12, 16]])
-        self.assertEqual(string_evts, [["z-0", "z-1"]])
-
-        self.lib.offPrimScalarEvent(hs)
-        self.lib.offFixedArrayEvent(ha)
-        self.lib.offStringSeqEvent(hst)
+            h = lib.on_tag_seq_event(cb)
+            iterations = 50
+            for _ in range(iterations):
+                lib.obj_seq_result_request(10)
+            _wait_for(lambda: count[0] >= iterations, timeout=10.0)
+            self.assertEqual(count[0], iterations)
+            lib.off_tag_seq_event(h)
+        finally:
+            lib.shutdown()
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)

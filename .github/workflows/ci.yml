@@ -104,6 +104,20 @@ jobs:
         shell: bash
         run: nimble testFfiApiCpp --verbose
 
+      - name: Run nimble testFfiApiCmake
+        # Validates the generated <lib>Config.cmake by configuring and
+        # building a downstream consumer that does find_package(mylib).
+        shell: bash
+        run: nimble testFfiApiCmake --verbose
+
+      - name: Run nimble testApiCbor
+        # Nim-side CBOR matrix (codec + library init + event subscribe +
+        # discovery API + typemappingtestlib_cbor parity). Doesn't compile
+        # any C++ consumer, so no jsoncons fetch is needed here — that's
+        # only required by the `examples` job below.
+        shell: bash
+        run: nimble testApiCbor --verbose
+
   examples:
     runs-on: ubuntu-latest
     env:
@@ -128,6 +142,16 @@ jobs:
           cmake --version
           python3 --version
 
+      - name: Install Python cbor2 (CBOR Python wrapper dep)
+        run: python3 -m pip install --user cbor2
+
+      - name: Fetch jsoncons (CBOR C++ wrapper dep)
+        run: |
+          if [ ! -d vendor/jsoncons ]; then
+            git clone --depth 1 --branch v1.0.0 \
+              https://github.com/danielaparker/jsoncons.git vendor/jsoncons
+          fi
+
       - name: Run C FFI example
         run: nimble runFfiExampleC -y --verbose
 
@@ -136,6 +160,18 @@ jobs:
 
       - name: Run Python FFI example
         run: nimble runFfiExamplePy -y --verbose
+
+      - name: Run CBOR C++ FFI parity example (same mylib.nim + cpp_example/main.cpp, CBOR mode)
+        run: nimble runFfiExampleCborCpp -y --verbose
+
+      - name: Run CBOR Python FFI parity example (same mylib.nim + python_example/main.py, CBOR mode)
+        run: nimble runFfiExampleCborPy -y --verbose
+
+      - name: Run CBOR Python parity matrix
+        run: nimble runTypeMapTestLibCborPy -y --verbose
+
+      - name: Run CBOR C++ parity matrix
+        run: nimble runTypeMapTestLibCborCpp -y --verbose
 
   nph:
     runs-on: ubuntu-latest

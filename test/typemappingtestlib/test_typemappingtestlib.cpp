@@ -26,6 +26,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -152,7 +153,7 @@ static void test_lifecycle_create_and_shutdown() {
     Typemappingtestlib lib;
     CHECK(!lib.validContext());
     auto r = lib.createContext();
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(lib.validContext());
     CHECK_NE(lib.ctx(), 0u);
     lib.shutdown();
@@ -182,16 +183,16 @@ static void test_lifecycle_double_shutdown_is_safe() {
 static void test_lifecycle_double_create_returns_error() {
     Typemappingtestlib lib;
     auto r1 = lib.createContext();
-    CHECK(r1.ok());
+    CHECK(r1.isOk());
     auto r2 = lib.createContext();
-    CHECK(!r2.ok()); // second create should fail
+    CHECK(!r2.isOk()); // second create should fail
     lib.shutdown();
 }
 
 static void test_lifecycle_request_without_context_fails() {
     Typemappingtestlib lib; // ctx_ == 0
     auto r = lib.echoRequest("hello");
-    CHECK(!r.ok());
+    CHECK(!r.isOk());
 }
 
 // ============================================================================
@@ -202,7 +203,7 @@ static void test_requests_initialize() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.initializeRequest("test-label");
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->label, std::string("test-label"));
     lib.shutdown();
 }
@@ -212,7 +213,7 @@ static void test_requests_echo() {
     lib.createContext();
     lib.initializeRequest("ctx-A");
     auto r = lib.echoRequest("hello");
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->reply, std::string("ctx-A:hello"));
     lib.shutdown();
 }
@@ -222,7 +223,7 @@ static void test_requests_counter_increments() {
     lib.createContext();
     for (int32_t expected = 1; expected <= 3; ++expected) {
         auto r = lib.counterRequest();
-        CHECK(r.ok());
+        CHECK(r.isOk());
         CHECK_EQ(r->value, expected);
     }
     lib.shutdown();
@@ -234,7 +235,7 @@ static void test_requests_multiple_echo() {
     lib.initializeRequest("multi");
     for (int i = 0; i < 5; ++i) {
         auto r = lib.echoRequest("msg-" + std::to_string(i));
-        CHECK(r.ok());
+        CHECK(r.isOk());
         CHECK_EQ(r->reply, "multi:msg-" + std::to_string(i));
     }
     lib.shutdown();
@@ -379,7 +380,7 @@ static void test_context_shutdown_one_does_not_affect_other() {
     lib1.shutdown();
 
     auto r = lib2.echoRequest("still-alive");
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->reply, std::string("second:still-alive"));
 
     lib2.shutdown();
@@ -394,7 +395,7 @@ static void test_scalar_bool_true() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(true, 0, 0, 0.0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->flag == true);
     lib.shutdown();
 }
@@ -403,7 +404,7 @@ static void test_scalar_bool_false() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(false, 0, 0, 0.0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->flag == false);
     lib.shutdown();
 }
@@ -413,11 +414,11 @@ static void test_scalar_int32_roundtrip() {
     lib.createContext();
 
     auto r1 = lib.primScalarRequest(false, INT32_MIN, 0, 0.0);
-    CHECK(r1.ok());
+    CHECK(r1.isOk());
     CHECK_EQ(r1->i32, INT32_MIN);
 
     auto r2 = lib.primScalarRequest(false, INT32_MAX, 0, 0.0);
-    CHECK(r2.ok());
+    CHECK(r2.isOk());
     CHECK_EQ(r2->i32, INT32_MAX);
 
     lib.shutdown();
@@ -428,7 +429,7 @@ static void test_scalar_int64_roundtrip() {
     lib.createContext();
     int64_t big = 9'000'000'000'000LL;
     auto r = lib.primScalarRequest(false, 0, big, 0.0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->i64, big);
     lib.shutdown();
 }
@@ -438,7 +439,7 @@ static void test_scalar_float64_roundtrip() {
     lib.createContext();
     double pi = 3.141592653589793;
     auto r = lib.primScalarRequest(false, 0, 0, pi);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_NEAR(r->f64, pi, 1e-12);
     lib.shutdown();
 }
@@ -447,7 +448,7 @@ static void test_scalar_all_fields_roundtrip() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primScalarRequest(true, 42, 1'000'000'000LL, 2.718);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->flag == true);
     CHECK_EQ(r->i32, 42);
     CHECK_EQ(r->i64, 1'000'000'000LL);
@@ -507,9 +508,9 @@ static void test_scalar_prim_scalar_event_false_flag() {
 static void test_enum_roundtrip_low() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 10);
-    CHECK(r.ok());
-    CHECK_EQ(r->priority, PRIORITY_P_LOW);
+    auto r = lib.typedScalarRequest(Priority::pLow, 10);
+    CHECK(r.isOk());
+    CHECK_EQ(r->priority, Priority::pLow);
     CHECK_EQ(static_cast<int>(r->priority), 0);
     lib.shutdown();
 }
@@ -517,9 +518,9 @@ static void test_enum_roundtrip_low() {
 static void test_enum_roundtrip_high() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_HIGH, 1);
-    CHECK(r.ok());
-    CHECK_EQ(r->priority, PRIORITY_P_HIGH);
+    auto r = lib.typedScalarRequest(Priority::pHigh, 1);
+    CHECK(r.isOk());
+    CHECK_EQ(r->priority, Priority::pHigh);
     CHECK_EQ(static_cast<int>(r->priority), 2);
     lib.shutdown();
 }
@@ -527,8 +528,8 @@ static void test_enum_roundtrip_high() {
 static void test_enum_roundtrip_critical() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_CRITICAL, 1);
-    CHECK(r.ok());
+    auto r = lib.typedScalarRequest(Priority::pCritical, 1);
+    CHECK(r.isOk());
     CHECK_EQ(static_cast<int>(r->priority), 3);
     lib.shutdown();
 }
@@ -536,8 +537,8 @@ static void test_enum_roundtrip_critical() {
 static void test_distinct_jobid_echoed() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
-    CHECK(r.ok());
+    auto r = lib.typedScalarRequest(Priority::pLow, 5);
+    CHECK(r.isOk());
     CHECK_EQ(r->jobId, 5);
     lib.shutdown();
 }
@@ -545,8 +546,8 @@ static void test_distinct_jobid_echoed() {
 static void test_distinct_jobid_next() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_LOW, 5);
-    CHECK(r.ok());
+    auto r = lib.typedScalarRequest(Priority::pLow, 5);
+    CHECK(r.isOk());
     CHECK_EQ(r->nextId, 6); // nextId = jobId + 1
     lib.shutdown();
 }
@@ -554,8 +555,8 @@ static void test_distinct_jobid_next() {
 static void test_distinct_jobid_zero() {
     Typemappingtestlib lib;
     lib.createContext();
-    auto r = lib.typedScalarRequest(PRIORITY_P_MEDIUM, 0);
-    CHECK(r.ok());
+    auto r = lib.typedScalarRequest(Priority::pMedium, 0);
+    CHECK(r.isOk());
     CHECK_EQ(r->jobId, 0);
     CHECK_EQ(r->nextId, 1);
     lib.shutdown();
@@ -565,11 +566,11 @@ static void test_all_priority_values() {
     Typemappingtestlib lib;
     lib.createContext();
     Priority priorities[] = {
-        PRIORITY_P_LOW, PRIORITY_P_MEDIUM, PRIORITY_P_HIGH, PRIORITY_P_CRITICAL
+        Priority::pLow, Priority::pMedium, Priority::pHigh, Priority::pCritical
     };
     for (auto p : priorities) {
         auto r = lib.typedScalarRequest(p, 1);
-        CHECK(r.ok());
+        CHECK(r.isOk());
         CHECK_EQ(r->priority, p);
     }
     lib.shutdown();
@@ -586,12 +587,12 @@ static void test_typed_scalar_event_enum() {
             evts.push({p, jid, ts});
         });
 
-    lib.typedScalarRequest(PRIORITY_P_HIGH, 7);
+    lib.typedScalarRequest(Priority::pHigh, 7);
     waitFor([&] { return evts.size() >= 1; });
 
     CHECK_EQ(evts.size(), 1u);
     auto e = evts.at(0);
-    CHECK_EQ(e.priority, PRIORITY_P_HIGH);
+    CHECK_EQ(e.priority, Priority::pHigh);
     CHECK_EQ(static_cast<int>(e.priority), 2);
     CHECK_EQ(e.jobId, 7);
     CHECK_EQ(e.ts, 70LL); // ts = jobId * 10
@@ -608,7 +609,7 @@ static void test_typed_scalar_event_distinct_timestamp() {
     auto h = lib.onTypedScalarEvent(
         [&evts](Typemappingtestlib&, Priority, int32_t, int64_t ts) { evts.push(ts); });
 
-    lib.typedScalarRequest(PRIORITY_P_LOW, 3);
+    lib.typedScalarRequest(Priority::pLow, 3);
     waitFor([&] { return evts.size() >= 1; });
 
     CHECK_EQ(evts.size(), 1u);
@@ -622,7 +623,7 @@ static void test_fixedarray_result_contains_timestamp() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(99);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->ts, 99LL); // ts = Timestamp(seed)
     lib.shutdown();
 }
@@ -635,7 +636,7 @@ static void test_seq_byte_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->data.empty());
     lib.shutdown();
 }
@@ -644,7 +645,7 @@ static void test_seq_byte_length() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(8);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->data.size(), 8u);
     lib.shutdown();
 }
@@ -653,7 +654,7 @@ static void test_seq_byte_values() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(5);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->data.size(), 5u);
     for (size_t i = 0; i < r->data.size(); ++i)
         CHECK_EQ(r->data[i], static_cast<uint8_t>(i));
@@ -664,7 +665,7 @@ static void test_seq_byte_wrap_around() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(260);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->data.size(), 260u);
     CHECK_EQ(r->data[0], 0u);
     CHECK_EQ(r->data[255], 255u);
@@ -676,7 +677,7 @@ static void test_seq_byte_single_element() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(1);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->data.size(), 1u);
     CHECK_EQ(r->data[0], 0u);
     lib.shutdown();
@@ -686,7 +687,7 @@ static void test_seq_byte_large() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.byteSeqRequest(100);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->data.size(), 100u);
     for (size_t i = 0; i < r->data.size(); ++i)
         CHECK_EQ(r->data[i], static_cast<uint8_t>(i % 256));
@@ -701,7 +702,7 @@ static void test_seq_string_result_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("x", 0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->items.empty());
     lib.shutdown();
 }
@@ -710,7 +711,7 @@ static void test_seq_string_result_count() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("item", 4);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->items.size(), 4u);
     lib.shutdown();
 }
@@ -719,7 +720,7 @@ static void test_seq_string_result_values() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("tag", 3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->items.size(), 3u);
     CHECK_EQ(r->items[0], std::string("tag-0"));
     CHECK_EQ(r->items[1], std::string("tag-1"));
@@ -731,7 +732,7 @@ static void test_seq_string_result_special_chars() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.stringSeqRequest("a/b:c", 2);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->items.size(), 2u);
     CHECK_EQ(r->items[0], std::string("a/b:c-0"));
     CHECK_EQ(r->items[1], std::string("a/b:c-1"));
@@ -742,7 +743,7 @@ static void test_seq_string_param_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 0);
     CHECK_EQ(r->joined, std::string(""));
     lib.shutdown();
@@ -752,7 +753,7 @@ static void test_seq_string_param_single() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"hello"});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 1);
     CHECK_EQ(r->joined, std::string("hello"));
     lib.shutdown();
@@ -762,7 +763,7 @@ static void test_seq_string_param_multiple() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"alpha", "beta", "gamma"});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 3);
     CHECK_EQ(r->joined, std::string("alpha,beta,gamma"));
     lib.shutdown();
@@ -772,7 +773,7 @@ static void test_seq_string_param_unicode() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.seqStringParamRequest({"héllo", "wörld"});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 2);
     CHECK_EQ(r->joined, std::string("héllo,wörld"));
     lib.shutdown();
@@ -784,10 +785,11 @@ static void test_string_seq_event() {
 
     SafeList<std::vector<std::string>> evts;
     auto h = lib.onStringSeqEvent(
-        [&evts](Typemappingtestlib&, std::span<const char*> items) {
+        [&evts](Typemappingtestlib&, std::span<const std::string_view> items) {
             std::vector<std::string> v;
-            for (const char* s : items)
-                v.emplace_back(s ? s : "");
+            v.reserve(items.size());
+            for (auto sv : items)
+                v.emplace_back(sv);
             evts.push(std::move(v));
         });
 
@@ -811,8 +813,12 @@ static void test_string_seq_event_empty() {
 
     SafeList<std::vector<std::string>> evts;
     auto h = lib.onStringSeqEvent(
-        [&evts](Typemappingtestlib&, std::span<const char*> items) {
-            evts.push(std::vector<std::string>(items.begin(), items.end()));
+        [&evts](Typemappingtestlib&, std::span<const std::string_view> items) {
+            std::vector<std::string> v;
+            v.reserve(items.size());
+            for (auto sv : items)
+                v.emplace_back(sv);
+            evts.push(std::move(v));
         });
 
     lib.stringSeqRequest("x", 0);
@@ -833,7 +839,7 @@ static void test_prim_seq_result_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->values.empty());
     lib.shutdown();
 }
@@ -842,7 +848,7 @@ static void test_prim_seq_result_length() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(5);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values.size(), 5u);
     lib.shutdown();
 }
@@ -851,7 +857,7 @@ static void test_prim_seq_result_values() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(4);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values.size(), 4u);
     for (size_t i = 0; i < r->values.size(); ++i)
         CHECK_EQ(r->values[i], static_cast<int64_t>(i) * 10LL);
@@ -862,7 +868,7 @@ static void test_prim_seq_result_large_int64() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqRequest(3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values[2], 20LL);
     lib.shutdown();
 }
@@ -871,7 +877,7 @@ static void test_prim_seq_param_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 0);
     CHECK_EQ(r->total, 0LL);
     lib.shutdown();
@@ -881,7 +887,7 @@ static void test_prim_seq_param_single() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({42LL});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 1);
     CHECK_EQ(r->total, 42LL);
     lib.shutdown();
@@ -891,7 +897,7 @@ static void test_prim_seq_param_sum() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.primSeqParamRequest({1LL, 2LL, 3LL, 4LL, 5LL});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 5);
     CHECK_EQ(r->total, 15LL);
     lib.shutdown();
@@ -902,7 +908,7 @@ static void test_prim_seq_param_large_values() {
     lib.createContext();
     int64_t big = 1'000'000'000'000LL;
     auto r = lib.primSeqParamRequest({big, big});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 2);
     CHECK_EQ(r->total, 2 * big);
     lib.shutdown();
@@ -960,7 +966,7 @@ static void test_array_result_values() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(5);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values[0], 5);
     CHECK_EQ(r->values[1], 10);
     CHECK_EQ(r->values[2], 15);
@@ -972,7 +978,7 @@ static void test_array_result_length() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(1);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values.size(), 4u);
     lib.shutdown();
 }
@@ -981,7 +987,7 @@ static void test_array_result_seed_zero() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     for (auto v : r->values)
         CHECK_EQ(v, 0);
     lib.shutdown();
@@ -991,7 +997,7 @@ static void test_array_result_negative_seed() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(-3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values[0], -3);
     CHECK_EQ(r->values[1], -6);
     CHECK_EQ(r->values[2], -9);
@@ -1003,7 +1009,7 @@ static void test_array_result_timestamp() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.fixedArrayRequest(42);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->ts, 42LL);
     lib.shutdown();
 }
@@ -1094,7 +1100,7 @@ static void test_obj_seq_param_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqParamRequest({});
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 0);
     CHECK_EQ(r->first, std::string(""));
     lib.shutdown();
@@ -1112,7 +1118,7 @@ static void test_obj_seq_param_single() {
     lib.createContext();
     std::vector<Tag> tags = {makeTag("mykey", "myval")};
     auto r = lib.objSeqParamRequest(tags);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 1);
     CHECK_EQ(r->first, std::string("mykey"));
     lib.shutdown();
@@ -1125,7 +1131,7 @@ static void test_obj_seq_param_multiple() {
         makeTag("first", "1"), makeTag("second", "2"), makeTag("third", "3")
     };
     auto r = lib.objSeqParamRequest(tags);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 3);
     CHECK_EQ(r->first, std::string("first"));
     lib.shutdown();
@@ -1136,7 +1142,7 @@ static void test_obj_seq_param_string_encoding() {
     lib.createContext();
     std::vector<Tag> tags = {makeTag("key with spaces", "value/path")};
     auto r = lib.objSeqParamRequest(tags);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 1);
     CHECK_EQ(r->first, std::string("key with spaces"));
     lib.shutdown();
@@ -1146,7 +1152,7 @@ static void test_obj_seq_result_empty() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK(r->tags.empty());
     lib.shutdown();
 }
@@ -1155,7 +1161,7 @@ static void test_obj_seq_result_length() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(4);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->tags.size(), 4u);
     lib.shutdown();
 }
@@ -1164,7 +1170,7 @@ static void test_obj_seq_result_keys() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->tags.size(), 3u);
     CHECK_EQ(r->tags[0].key, std::string("key-0"));
     CHECK_EQ(r->tags[1].key, std::string("key-1"));
@@ -1176,7 +1182,7 @@ static void test_obj_seq_result_values() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->tags[0].value, std::string("val-0"));
     CHECK_EQ(r->tags[1].value, std::string("val-1"));
     CHECK_EQ(r->tags[2].value, std::string("val-2"));
@@ -1187,7 +1193,7 @@ static void test_obj_seq_result_tag_fields() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.objSeqResultRequest(2);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     for (const auto& tag : r->tags) {
         CHECK(!tag.key.empty());
         CHECK(!tag.value.empty());
@@ -1200,10 +1206,10 @@ static void test_obj_seq_roundtrip() {
     lib.createContext();
     // Generate tags via result request
     auto gen = lib.objSeqResultRequest(3);
-    CHECK(gen.ok());
+    CHECK(gen.isOk());
     // Pass them back as input param
     auto r = lib.objSeqParamRequest(gen->tags);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->count, 3);
     CHECK_EQ(r->first, std::string("key-0"));
     lib.shutdown();
@@ -1220,7 +1226,7 @@ static void test_const_array_result_length() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.constArrayRequest(1);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values.size(), kConstArrayLen);
     lib.shutdown();
 }
@@ -1230,7 +1236,7 @@ static void test_const_array_result_values() {
     lib.createContext();
     // Provider: values[i] = seed * (i + 1)
     auto r = lib.constArrayRequest(3);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     CHECK_EQ(r->values.size(), kConstArrayLen);
     int32_t expected[] = {3, 6, 9, 12, 15, 18};
     for (size_t i = 0; i < kConstArrayLen; ++i)
@@ -1242,7 +1248,7 @@ static void test_const_array_result_zero_seed() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.constArrayRequest(0);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     for (auto v : r->values)
         CHECK_EQ(v, 0);
     lib.shutdown();
@@ -1252,7 +1258,7 @@ static void test_const_array_result_negative_seed() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.constArrayRequest(-2);
-    CHECK(r.ok());
+    CHECK(r.isOk());
     int32_t expected[] = {-2, -4, -6, -8, -10, -12};
     for (size_t i = 0; i < kConstArrayLen; ++i)
         CHECK_EQ(r->values[i], expected[i]);
@@ -1299,6 +1305,40 @@ static void test_const_array_event_length() {
     CHECK_EQ(evts.at(0).size(), kConstArrayLen);
 
     lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+static void test_const_array_event_neg_seed() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<std::vector<int32_t>> evts;
+    auto h = lib.onConstArrayEvent(
+        [&evts](Typemappingtestlib&, std::span<const int32_t> values) {
+            evts.push(std::vector<int32_t>(values.begin(), values.end()));
+        });
+
+    lib.constArrayRequest(-2);
+    waitFor([&] { return evts.size() >= 1; });
+
+    CHECK_EQ(evts.size(), 1u);
+    auto snap = evts.at(0);
+    std::vector<int32_t> expected{-2, -4, -6, -8, -10, -12};
+    CHECK_EQ(snap.size(), expected.size());
+    for (size_t i = 0; i < snap.size() && i < expected.size(); ++i)
+        CHECK_EQ(snap[i], expected[i]);
+
+    lib.offConstArrayEvent(h);
+    lib.shutdown();
+}
+
+static void test_distinct_jobid_max_minus_one() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.typedScalarRequest(Priority::pLow, INT32_MAX - 1);
+    CHECK(r.isOk());
+    CHECK_EQ(r->jobId, INT32_MAX - 1);
+    CHECK_EQ(r->nextId, INT32_MAX);
     lib.shutdown();
 }
 
@@ -1406,10 +1446,11 @@ static void test_concurrent_event_types() {
             arrayEvts.push(std::vector<int32_t>(values.begin(), values.end()));
         });
     auto hst = lib.onStringSeqEvent(
-        [&stringEvts](Typemappingtestlib&, std::span<const char*> items) {
+        [&stringEvts](Typemappingtestlib&, std::span<const std::string_view> items) {
             std::vector<std::string> v;
-            for (const char* s : items)
-                v.emplace_back(s ? s : "");
+            v.reserve(items.size());
+            for (auto sv : items)
+                v.emplace_back(sv);
             stringEvts.push(std::move(v));
         });
 
@@ -1478,7 +1519,7 @@ static void test_foreign_thread_concurrent_requests() {
             for (int i = 0; i < kIters; ++i) {
                 std::string msg = "thread-" + std::to_string(t) + "-msg-" + std::to_string(i);
                 auto r = lib.echoRequest(msg);
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     results[t].error = r.error();
                     return;
                 }
@@ -1533,7 +1574,7 @@ static void test_foreign_thread_concurrent_seq_string_requests() {
                 std::string prefix = "t" + std::to_string(t) + "i" + std::to_string(i);
                 int n = 5 + (t % 3);
                 auto r = lib.stringSeqRequest(prefix, n);
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
@@ -1576,7 +1617,7 @@ static void test_foreign_thread_concurrent_seq_prim_requests() {
             for (int i = 0; i < kIters; ++i) {
                 int n = 3 + (t % 4);
                 auto r = lib.primSeqRequest(n);
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
@@ -1619,7 +1660,7 @@ static void test_foreign_thread_concurrent_seq_object_requests() {
             for (int i = 0; i < kIters; ++i) {
                 int n = 3 + (t % 5);
                 auto r = lib.objSeqResultRequest(n);
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
@@ -1671,7 +1712,7 @@ static void test_foreign_thread_concurrent_seq_object_param_requests() {
                     tags.push_back(std::move(tag));
                 }
                 auto r = lib.objSeqParamRequest(tags);
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     failures.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
@@ -1706,18 +1747,18 @@ static void test_foreign_thread_concurrent_lifecycle() {
         threads.emplace_back([&, t]() {
             Typemappingtestlib lib;
             auto cr = lib.createContext();
-            if (!cr.ok()) {
+            if (!cr.isOk()) {
                 failures.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             auto ir = lib.initializeRequest("lifecycle-t" + std::to_string(t));
-            if (!ir.ok()) {
+            if (!ir.isOk()) {
                 failures.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             // Make a request to verify the context is fully functional
             auto r = lib.echoRequest("test");
-            if (!r.ok()) {
+            if (!r.isOk()) {
                 failures.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -1756,30 +1797,30 @@ static void test_foreign_thread_mixed_request_types() {
                 switch (i % 5) {
                 case 0: {
                     auto r = lib.echoRequest("t" + std::to_string(t));
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 1: {
                     auto r = lib.counterRequest();
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->value <= 0) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 2: {
                     auto r = lib.primScalarRequest(true, 42, 1000, 3.14);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->flag != true || r->i32 != 42) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 3: {
                     auto r = lib.stringSeqRequest("x", 3);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->items.size() != 3) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 4: {
                     auto r = lib.fixedArrayRequest(7);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->values[0] != 7) { failures.fetch_add(1); return; }
                     break;
                 }
@@ -1815,34 +1856,34 @@ static void test_foreign_thread_stress_all_types() {
                 switch (i % 8) {
                 case 0: {
                     auto r = lib.echoRequest("stress-" + std::to_string(t));
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 1: {
                     auto r = lib.counterRequest();
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 2: {
                     auto r = lib.primScalarRequest(false, -100, -999999, -1.5);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 3: {
                     auto r = lib.stringSeqRequest("s", 10);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->items.size() != 10) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 4: {
                     auto r = lib.primSeqRequest(20);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->values.size() != 20) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 5: {
                     auto r = lib.objSeqResultRequest(5);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->tags.size() != 5) { failures.fetch_add(1); return; }
                     break;
                 }
@@ -1855,13 +1896,13 @@ static void test_foreign_thread_stress_all_types() {
                         tags.push_back(std::move(tag));
                     }
                     auto r = lib.objSeqParamRequest(tags);
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->count != 3) { failures.fetch_add(1); return; }
                     break;
                 }
                 case 7: {
                     auto r = lib.seqStringParamRequest({"a", "b", "c"});
-                    if (!r.ok()) { failures.fetch_add(1); return; }
+                    if (!r.isOk()) { failures.fetch_add(1); return; }
                     if (r->count != 3) { failures.fetch_add(1); return; }
                     break;
                 }
@@ -1897,13 +1938,11 @@ static void test_seq_object_event_callback_data_correctness() {
     SafeList<std::vector<TagData>> received;
 
     auto h = lib.onTagSeqEvent(
-        [&received](Typemappingtestlib&, std::span<const TagCItem> tags) {
+        [&received](Typemappingtestlib&, std::span<const Tag> tags) {
             std::vector<TagData> snapshot;
+            snapshot.reserve(tags.size());
             for (const auto& t : tags) {
-                snapshot.push_back(TagData{
-                    t.key ? std::string(t.key) : "",
-                    t.value ? std::string(t.value) : ""
-                });
+                snapshot.push_back(TagData{t.key, t.value});
             }
             received.push(std::move(snapshot));
         });
@@ -1949,7 +1988,7 @@ static void test_seq_object_event_rapid_fire_no_leak() {
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Typemappingtestlib&, std::span<const TagCItem>) {
+        [&eventCount](Typemappingtestlib&, std::span<const Tag>) {
             eventCount.fetch_add(1, std::memory_order_relaxed);
         });
 
@@ -1974,13 +2013,14 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
 
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&eventCount](Typemappingtestlib&, std::span<const TagCItem> tags) {
-            // Read tag data to ensure the CItem pointers are valid
+        [&eventCount](Typemappingtestlib&, std::span<const Tag> tags) {
+            // Touch every string to force a read — catches use-after-free
+            // in the trampoline's view-array materialisation.
             for (const auto& t : tags) {
-                if (t.key) {
-                    volatile size_t len = std::strlen(t.key);
-                    (void)len;
-                }
+                volatile size_t kl = t.key.size();
+                volatile size_t vl = t.value.size();
+                (void)kl;
+                (void)vl;
             }
             eventCount.fetch_add(1, std::memory_order_relaxed);
         });
@@ -1995,7 +2035,7 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
         threads.emplace_back([&, t]() {
             for (int i = 0; i < kIters; ++i) {
                 auto r = lib.objSeqResultRequest(5 + (t % 3));
-                if (!r.ok()) {
+                if (!r.isOk()) {
                     requestFailures.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
@@ -2068,6 +2108,7 @@ int main() {
     RUN(test_distinct_jobid_echoed);
     RUN(test_distinct_jobid_next);
     RUN(test_distinct_jobid_zero);
+    RUN(test_distinct_jobid_max_minus_one);
     RUN(test_all_priority_values);
     RUN(test_typed_scalar_event_enum);
     RUN(test_typed_scalar_event_distinct_timestamp);
@@ -2123,6 +2164,7 @@ int main() {
     RUN(test_const_array_event_values);
     RUN(test_const_array_event_length);
     RUN(test_const_array_event_zero_seed);
+    RUN(test_const_array_event_neg_seed);
 
     printf("\n--- TestSeqObjectTypes ---\n");
     RUN(test_obj_seq_param_empty);
