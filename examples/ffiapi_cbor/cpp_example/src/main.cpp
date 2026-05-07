@@ -64,9 +64,9 @@ int main() {
   bool lastOnline = false;
 
   uint64_t handle = lib.onDeviceUpdated(
-      [&](const mylibcbor::DeviceUpdated& evt) {
-        lastDeviceId = evt.deviceId;
-        lastOnline = evt.online;
+      [&](mylibcbor::Lib&, int64_t deviceId, bool online) {
+        lastDeviceId = deviceId;
+        lastOnline = online;
         deliveryCount.fetch_add(1);
       });
   if (handle == 0) {

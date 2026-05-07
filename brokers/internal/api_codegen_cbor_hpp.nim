@@ -124,6 +124,87 @@ proc snakeToLowerCamel*(s: string): string {.compileTime.} =
       result.add(ch)
 
 # ---------------------------------------------------------------------------
+# Event callback parameter mapping
+# ---------------------------------------------------------------------------
+#
+# For event payload fields we deliver UNPACKED positional args to user
+# callbacks (mirroring native FFI mode). The parameter type differs from
+# the storage type for non-POD fields:
+#   string       -> std::string_view  (zero-copy view on decoded std::string)
+#   seq[T]       -> std::span<const Tcpp>  (view on decoded std::vector)
+#   array[N, T]  -> std::span<const Tcpp>  (CBOR decodes array into vector)
+#   nested obj   -> const T&
+#   primitives   -> by value
+#
+# `eventCallbackParamType` returns the C++ parameter type spelling.
+# `eventCallbackArgExpr` returns the expression that pulls the arg out
+# of the decoded payload struct (named `evt`).
+
+proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
+  ## Returns the C++ parameter type for unpacked event callback args.
+  ## Empty string => the field's underlying Nim type isn't mappable.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  let prim = primCppType(t)
+  if prim.len > 0:
+    if t == "string":
+      return "std::string_view"
+    return prim
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
+    return
+      if inner.len > 0:
+        "std::span<const " & inner & ">"
+      else:
+        ""
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    let inner = nimTypeToCppType(elem)
+    return
+      if inner.len > 0:
+        "std::span<const " & inner & ">"
+      else:
+        ""
+  if lower.startsWith("option[") and lower.endsWith("]"):
+    let inner = nimTypeToCppType(unwrapBracket(t, "option"))
+    return
+      if inner.len > 0:
+        "std::optional<" & inner & ">"
+      else:
+        ""
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return "const " & t & "&"
+    of atkEnum:
+      return t
+    of atkAlias, atkDistinct:
+      return primCppType(resolveUnderlyingType(t))
+  ""
+
+proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
+  ## Builds the expression that destructures `evt.<fieldName>` into the
+  ## callback param shape returned by `eventCallbackParamType`.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if t == "string":
+    return "std::string_view(evt." & fieldName & ")"
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
+    if inner.len > 0:
+      return "std::span<const " & inner & ">(evt." & fieldName & ")"
+    return "evt." & fieldName
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    let inner = nimTypeToCppType(elem)
+    if inner.len > 0:
+      return "std::span<const " & inner & ">(evt." & fieldName & ")"
+    return "evt." & fieldName
+  # Primitives, enums, distincts, options, nested objects: pass directly.
+  "evt." & fieldName
+
+# ---------------------------------------------------------------------------
 # Per-type emission
 # ---------------------------------------------------------------------------
 
@@ -385,6 +466,32 @@ proc generateCborCppHeaderFile*(
         return ok
     false
 
+  # Pre-compute event eligibility: an event is "emittable" iff its payload
+  # struct was fully mapped AND every field has an unpacked-callback param
+  # mapping (string -> string_view, seq -> span, etc.).
+  var emittableEvents: seq[CborEventEntry] = @[]
+  for ev in eventEntries:
+    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
+      continue
+    let entry = lookupTypeEntry(ev.typeName)
+    var allOk = true
+    for f in entry.fields:
+      if eventCallbackParamType(f.nimType).len == 0:
+        allOk = false
+        break
+    if allOk:
+      emittableEvents.add(ev)
+
+  # ==================================================================
+  # Section 0.5: detail:: forward declarations (so Lib can name them)
+  # ==================================================================
+  h.add("namespace detail {\n")
+  h.add("template <typename Owner, typename Traits>\n")
+  h.add("class EventDispatcher;\n\n")
+  for ev in emittableEvents:
+    h.add("struct " & ev.typeName & "EventTraits;\n")
+  h.add("} // namespace detail\n\n")
+
   # ==================================================================
   # Section 1: Lib class — declarations only (no detail:: dependencies)
   # ==================================================================
@@ -432,51 +539,51 @@ proc generateCborCppHeaderFile*(
     )
   h.add("\n")
 
-  # Per-event handler aliases + subscribe/unsubscribe declarations.
-  var handlerMapMembers = newStringOfCap(0)
-  var trampolineDecls = newStringOfCap(0)
+  # Per-event Callback aliases + on/off declarations. The public alias is
+  # emitted as a fully-spelled `std::function<...>` (mirrors native FFI)
+  # so that Lib's public surface does NOT depend on the detail::Traits
+  # struct being complete at this point — only forward-declared. The
+  # EventDispatcher's internal `Callback` typedef (resolved from Traits
+  # later) produces the same std::function<> instantiation, so the types
+  # are interchangeable at call sites.
   for ev in eventEntries:
-    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
+    if ev notin emittableEvents:
       h.add(
         "  // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
           "' is not yet emitted as a typed C++ struct.\n"
       )
       continue
+    let entry = lookupTypeEntry(ev.typeName)
     let camelBase = snakeToLowerCamel(ev.apiName)
     var pascal = camelBase
     if pascal.len > 0:
       pascal[0] = toUpperAscii(pascal[0])
-    let handlerAlias = ev.typeName & "Handler"
-    let trampolineIdent = ev.typeName & "Trampoline"
-    let mapIdent = ev.typeName & "Handlers_"
+    let callbackAlias = ev.typeName & "Callback"
     let onName = "on" & pascal
     let offName = "off" & pascal
-    h.add(
-      "  using " & handlerAlias & " = std::function<void(const " & ev.typeName & "&)>;\n"
-    )
-    h.add("  uint64_t " & onName & "(" & handlerAlias & " fn) noexcept;\n")
+    h.add("  using " & callbackAlias & " = std::function<void(Lib&")
+    for f in entry.fields:
+      h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
+    h.add(")>;\n")
+    h.add("  uint64_t " & onName & "(" & callbackAlias & " fn) noexcept;\n")
     h.add("  void " & offName & "(uint64_t handle = 0) noexcept;\n\n")
-    trampolineDecls.add(
-      "  static void " & trampolineIdent &
-        "(uint32_t, const char*, const void*, int32_t, void*) noexcept;\n"
-    )
-    handlerMapMembers.add(
-      "  std::unordered_map<uint64_t, std::shared_ptr<" & handlerAlias & ">> " & mapIdent &
-        ";\n"
-    )
 
   # Discovery declarations.
   h.add("  std::string listApis();\n")
   h.add("  std::string getSchema();\n\n")
 
-  # Private section: trampolines, rawCall/rawCallOwned, members.
+  # Private section: dispatcher members + ctx + lastError scratch.
   h.add(" private:\n")
-  if trampolineDecls.len > 0:
-    h.add(trampolineDecls)
   h.add("  uint32_t ctx_ = 0;\n")
   h.add("  std::string lastError_;\n")
-  if handlerMapMembers.len > 0:
-    h.add(handlerMapMembers)
+  for ev in emittableEvents:
+    let dispatcherType = ev.typeName & "Dispatcher"
+    let dispatcherMember = ev.apiName & "Dispatcher_"
+    h.add(
+      "  using " & dispatcherType & " = detail::EventDispatcher<Lib, detail::" &
+        ev.typeName & "EventTraits>;\n"
+    )
+    h.add("  std::unique_ptr<" & dispatcherType & "> " & dispatcherMember & ";\n")
   h.add("};\n\n")
 
   # ==================================================================
@@ -690,6 +797,134 @@ proc generateCborCppHeaderFile*(
   h.add("  return {0, std::move(resp)};\n")
   h.add("}\n\n")
 
+  # ---- EventDispatcher template (CBOR-flavored) ----
+  # One C-level subscription per event type, lazily registered on first
+  # add() and unregistered when the last user callback is removed. User
+  # callbacks are stored in a local map and fanned out under a snapshot
+  # taken inside the trampoline. Mirrors native FFI EventDispatcher
+  # semantics without the variadic C-arg shape (CBOR cb shape is fixed).
+  h.add("template <typename Owner, typename Traits>\n")
+  h.add("class EventDispatcher {\n")
+  h.add(" public:\n")
+  h.add("  using Callback = typename Traits::template Callback<Owner>;\n")
+  h.add("  using EventStruct = typename Traits::EventStruct;\n\n")
+  h.add("  explicit EventDispatcher(Owner& owner) noexcept : owner_(&owner) {}\n")
+  h.add("  EventDispatcher(const EventDispatcher&) = delete;\n")
+  h.add("  EventDispatcher& operator=(const EventDispatcher&) = delete;\n")
+  h.add("  EventDispatcher(EventDispatcher&&) = delete;\n")
+  h.add("  EventDispatcher& operator=(EventDispatcher&&) = delete;\n")
+  h.add("  ~EventDispatcher() { clear(); }\n\n")
+  h.add("  uint64_t add(Callback fn) noexcept {\n")
+  h.add("    std::lock_guard<std::mutex> lock(mutex_);\n")
+  h.add("    if (!owner_ || owner_->ctx() == 0 || !fn) return 0;\n")
+  h.add("    if (nativeHandle_ == 0) {\n")
+  h.add("      nativeHandle_ = Traits::registerWithC(\n")
+  h.add(
+    "          owner_->ctx(), &EventDispatcher::trampoline, static_cast<void*>(this));\n"
+  )
+  h.add("      if (nativeHandle_ == 0) return 0;\n")
+  h.add("    }\n")
+  h.add("    const uint64_t localHandle = nextLocalHandle_++;\n")
+  h.add("    try {\n")
+  h.add("      callbacks_.emplace(localHandle, std::move(fn));\n")
+  h.add("      return localHandle;\n")
+  h.add("    } catch (...) {\n")
+  h.add("      if (callbacks_.empty() && nativeHandle_ != 0) {\n")
+  h.add("        Traits::unregisterWithC(owner_->ctx(), nativeHandle_);\n")
+  h.add("        nativeHandle_ = 0;\n")
+  h.add("      }\n")
+  h.add("      return 0;\n")
+  h.add("    }\n")
+  h.add("  }\n\n")
+  h.add("  void remove(uint64_t localHandle) noexcept {\n")
+  h.add("    std::lock_guard<std::mutex> lock(mutex_);\n")
+  h.add("    callbacks_.erase(localHandle);\n")
+  h.add("    if (callbacks_.empty() && nativeHandle_ != 0) {\n")
+  h.add("      if (owner_ && owner_->ctx() != 0)\n")
+  h.add("        Traits::unregisterWithC(owner_->ctx(), nativeHandle_);\n")
+  h.add("      nativeHandle_ = 0;\n")
+  h.add("    }\n")
+  h.add("  }\n\n")
+  h.add("  void clear() noexcept {\n")
+  h.add("    std::lock_guard<std::mutex> lock(mutex_);\n")
+  h.add("    callbacks_.clear();\n")
+  h.add("    if (nativeHandle_ != 0) {\n")
+  h.add("      if (owner_ && owner_->ctx() != 0)\n")
+  h.add("        Traits::unregisterWithC(owner_->ctx(), nativeHandle_);\n")
+  h.add("      nativeHandle_ = 0;\n")
+  h.add("    }\n")
+  h.add("  }\n\n")
+  h.add(" private:\n")
+  h.add("  static void trampoline(uint32_t ctx, const char* /*eventName*/,\n")
+  h.add("                         const void* payloadBuf, int32_t payloadLen,\n")
+  h.add("                         void* userData) noexcept {\n")
+  h.add("    auto* self = static_cast<EventDispatcher*>(userData);\n")
+  h.add("    if (!self || !payloadBuf || payloadLen <= 0) return;\n")
+  h.add("    EventStruct evt;\n")
+  h.add("    try {\n")
+  h.add("      std::span<const std::uint8_t> v{\n")
+  h.add("          static_cast<const std::uint8_t*>(payloadBuf),\n")
+  h.add("          static_cast<std::size_t>(payloadLen)};\n")
+  h.add("      evt = jsoncons::cbor::decode_cbor<EventStruct>(v.begin(), v.end());\n")
+  h.add("    } catch (...) { return; }\n")
+  h.add("    self->deliver(ctx, evt);\n")
+  h.add("  }\n\n")
+  h.add("  void deliver(uint32_t ctx, const EventStruct& evt) noexcept {\n")
+  h.add("    std::vector<Callback> snapshot;\n")
+  h.add("    {\n")
+  h.add("      std::lock_guard<std::mutex> lock(mutex_);\n")
+  h.add("      if (!owner_ || ctx != owner_->ctx()) return;\n")
+  h.add("      try {\n")
+  h.add("        snapshot.reserve(callbacks_.size());\n")
+  h.add(
+    "        for (const auto& [id, fn] : callbacks_) if (fn) snapshot.push_back(fn);\n"
+  )
+  h.add("      } catch (...) { return; }\n")
+  h.add("    }\n")
+  h.add("    for (const auto& fn : snapshot) Traits::invoke(fn, *owner_, evt);\n")
+  h.add("  }\n\n")
+  h.add("  Owner* owner_ = nullptr;\n")
+  h.add("  std::mutex mutex_;\n")
+  h.add("  std::unordered_map<uint64_t, Callback> callbacks_;\n")
+  h.add("  uint64_t nativeHandle_ = 0;\n")
+  h.add("  uint64_t nextLocalHandle_ = 1;\n")
+  h.add("};\n\n")
+
+  # ---- Per-event Traits structs ----
+  for ev in emittableEvents:
+    let entry = lookupTypeEntry(ev.typeName)
+    h.add("struct " & ev.typeName & "EventTraits {\n")
+    h.add("  using EventStruct = " & ev.typeName & ";\n\n")
+    # Callback alias: Owner&, then unpacked args.
+    h.add("  template <typename Owner>\n")
+    h.add("  using Callback = std::function<void(Owner&")
+    for f in entry.fields:
+      h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
+    h.add(")>;\n\n")
+    h.add(
+      "  static uint64_t registerWithC(uint32_t ctx,\n" &
+        "      void (*cb)(uint32_t, const char*, const void*, int32_t, void*),\n" &
+        "      void* userData) noexcept {\n"
+    )
+    h.add("    return " & p & "subscribe(ctx, \"" & ev.apiName & "\", cb, userData);\n")
+    h.add("  }\n\n")
+    h.add("  static void unregisterWithC(uint32_t ctx, uint64_t handle) noexcept {\n")
+    h.add("    " & p & "unsubscribe(ctx, \"" & ev.apiName & "\", handle);\n")
+    h.add("  }\n\n")
+    h.add("  template <typename Owner>\n")
+    h.add(
+      "  static void invoke(const Callback<Owner>& fn, Owner& owner,\n" &
+        "                     const " & ev.typeName & "& evt) noexcept {\n"
+    )
+    h.add("    try {\n")
+    h.add("      fn(owner")
+    for f in entry.fields:
+      h.add(", " & eventCallbackArgExpr(f.name, f.nimType))
+    h.add(");\n")
+    h.add("    } catch (...) {}\n")
+    h.add("  }\n")
+    h.add("};\n\n")
+
   h.add("} // namespace detail\n\n")
 
   # ==================================================================
@@ -697,7 +932,23 @@ proc generateCborCppHeaderFile*(
   # ==================================================================
 
   # ---- Lifecycle ----
-  h.add("inline Lib::Lib() { " & p & "initialize(); }\n\n")
+  # Constructor initializes one EventDispatcher per emittable event type.
+  h.add("inline Lib::Lib()")
+  if emittableEvents.len > 0:
+    h.add("\n")
+    var first = true
+    for ev in emittableEvents:
+      let dispatcherType = ev.typeName & "Dispatcher"
+      let dispatcherMember = ev.apiName & "Dispatcher_"
+      if first:
+        h.add("    : ")
+        first = false
+      else:
+        h.add("    , ")
+      h.add(dispatcherMember & "(std::make_unique<" & dispatcherType & ">(*this))\n")
+    h.add(" { " & p & "initialize(); }\n\n")
+  else:
+    h.add(" { " & p & "initialize(); }\n\n")
   h.add("inline Lib::~Lib() { shutdown(); }\n\n")
   h.add("inline Result<void> Lib::createContext() {\n")
   h.add("  if (ctx_)\n")
@@ -717,13 +968,11 @@ proc generateCborCppHeaderFile*(
   h.add("inline bool Lib::validContext() const noexcept { return ctx_ != 0; }\n")
   h.add("inline Lib::operator bool() const noexcept { return validContext(); }\n")
   h.add("inline uint32_t Lib::ctx() const noexcept { return ctx_; }\n\n")
-  # shutdown clears all event handler maps before calling C shutdown
+  # shutdown clears all event dispatchers before calling C shutdown
   h.add("inline void Lib::shutdown() noexcept {\n")
-  for ev in eventEntries:
-    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
-      continue
-    let mapIdent = ev.typeName & "Handlers_"
-    h.add("  " & mapIdent & ".clear();\n")
+  for ev in emittableEvents:
+    let dispatcherMember = ev.apiName & "Dispatcher_"
+    h.add("  if (" & dispatcherMember & ") " & dispatcherMember & "->clear();\n")
   h.add("  if (ctx_) { " & p & "shutdown(ctx_); ctx_ = 0; }\n")
   h.add("}\n\n")
 
@@ -817,54 +1066,24 @@ proc generateCborCppHeaderFile*(
     )
     h.add("}\n\n")
 
-  # ---- Per-event subscribe / unsubscribe / trampoline implementations ----
-  for ev in eventEntries:
-    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
-      continue
+  # ---- Per-event on/off implementations (delegate to dispatcher) ----
+  for ev in emittableEvents:
     let camelBase = snakeToLowerCamel(ev.apiName)
     var pascal = camelBase
     if pascal.len > 0:
       pascal[0] = toUpperAscii(pascal[0])
-    let handlerAlias = ev.typeName & "Handler"
-    let trampolineIdent = ev.typeName & "Trampoline"
-    let mapIdent = ev.typeName & "Handlers_"
+    let callbackAlias = ev.typeName & "Callback"
     let onName = "on" & pascal
     let offName = "off" & pascal
+    let dispatcherMember = ev.apiName & "Dispatcher_"
 
-    h.add("inline uint64_t Lib::" & onName & "(" & handlerAlias & " fn) noexcept {\n")
-    h.add("  auto sp = std::make_shared<" & handlerAlias & ">(std::move(fn));\n")
-    h.add(
-      "  const uint64_t id = " & p & "subscribe(\n" & "      ctx_, \"" & ev.apiName &
-        "\", &Lib::" & trampolineIdent & ", sp.get());\n"
-    )
-    h.add("  if (id == 0 || id == 1) return id;\n")
-    h.add("  " & mapIdent & "[id] = std::move(sp);\n")
-    h.add("  return id;\n")
+    h.add("inline uint64_t Lib::" & onName & "(" & callbackAlias & " fn) noexcept {\n")
+    h.add("  return " & dispatcherMember & "->add(std::move(fn));\n")
     h.add("}\n\n")
 
     h.add("inline void Lib::" & offName & "(uint64_t handle) noexcept {\n")
-    h.add("  " & p & "unsubscribe(ctx_, \"" & ev.apiName & "\", handle);\n")
-    h.add("  if (handle == 0) " & mapIdent & ".clear();\n")
-    h.add("  else " & mapIdent & ".erase(handle);\n")
-    h.add("}\n\n")
-
-    h.add(
-      "inline void Lib::" & trampolineIdent & "(\n" &
-        "    uint32_t /*ctx*/, const char* /*eventName*/,\n" &
-        "    const void* payloadBuf, int32_t payloadLen, void* userData) noexcept {\n"
-    )
-    h.add("  if (!userData || !payloadBuf || payloadLen <= 0) return;\n")
-    h.add("  auto* fn = static_cast<" & handlerAlias & "*>(userData);\n")
-    h.add("  try {\n")
-    h.add("    std::span<const std::uint8_t> v{\n")
-    h.add("        static_cast<const std::uint8_t*>(payloadBuf),\n")
-    h.add("        static_cast<std::size_t>(payloadLen)};\n")
-    h.add(
-      "    auto evt = jsoncons::cbor::decode_cbor<" & ev.typeName &
-        ">(v.begin(), v.end());\n"
-    )
-    h.add("    (*fn)(evt);\n")
-    h.add("  } catch (...) {}\n")
+    h.add("  if (handle == 0) " & dispatcherMember & "->clear();\n")
+    h.add("  else " & dispatcherMember & "->remove(handle);\n")
     h.add("}\n\n")
 
   # ---- Discovery implementations ----

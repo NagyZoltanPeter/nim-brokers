@@ -15,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -79,7 +80,9 @@ int main() {
   {
     EventSlot<tmlib::PrimScalarEvent> slot;
     auto h = lib.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, bool flag, int32_t i32, int64_t i64, double f64) {
+          slot.set(tmlib::PrimScalarEvent{flag, i32, i64, f64});
+        });
     auto r = lib.primScalarRequest(true, 7, 1234567890123LL, 3.5);
     check("prim_scalar_request.flag", true, r.value().flag);
     check("prim_scalar_request.i64", 1234567890123LL, r.value().i64);
@@ -97,7 +100,9 @@ int main() {
   {
     EventSlot<tmlib::TypedScalarEvent> slot;
     auto h = lib.onTypedScalarEvent(
-        [&](const tmlib::TypedScalarEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, tmlib::Priority priority, int32_t jobId, int64_t ts) {
+          slot.set(tmlib::TypedScalarEvent{priority, jobId, ts});
+        });
     auto r = lib.typedScalarRequest(tmlib::Priority::pHigh, 41);
     check("typed_scalar_request.priority", tmlib::Priority::pHigh,
           r.value().priority);
@@ -120,7 +125,10 @@ int main() {
   {
     EventSlot<tmlib::StringSeqEvent> slot;
     auto h = lib.onStringSeqEvent(
-        [&](const tmlib::StringSeqEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const std::string> items) {
+          slot.set(tmlib::StringSeqEvent{
+              std::vector<std::string>(items.begin(), items.end())});
+        });
     auto r = lib.stringSeqRequest("x", 3);
     std::vector<std::string> expected{"x-0", "x-1", "x-2"};
     check("string_seq_request.items", expected, r.value().items);
@@ -134,7 +142,10 @@ int main() {
   {
     EventSlot<tmlib::PrimSeqEvent> slot;
     auto h = lib.onPrimSeqEvent(
-        [&](const tmlib::PrimSeqEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const int64_t> values) {
+          slot.set(tmlib::PrimSeqEvent{
+              std::vector<int64_t>(values.begin(), values.end())});
+        });
     auto r = lib.primSeqRequest(4);
     std::vector<int64_t> expected{0, 10, 20, 30};
     check("prim_seq_request.values", expected, r.value().values);
@@ -146,7 +157,10 @@ int main() {
   {
     EventSlot<tmlib::FixedArrayEvent> slot;
     auto h = lib.onFixedArrayEvent(
-        [&](const tmlib::FixedArrayEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const int32_t> values) {
+          slot.set(tmlib::FixedArrayEvent{
+              std::vector<int32_t>(values.begin(), values.end())});
+        });
     auto r = lib.fixedArrayRequest(5);
     std::vector<int32_t> expected{5, 10, 15, 20};
     check("fixed_array_request.values", expected, r.value().values);
@@ -166,7 +180,10 @@ int main() {
   {
     EventSlot<tmlib::TagSeqEvent> slot;
     auto h = lib.onTagSeqEvent(
-        [&](const tmlib::TagSeqEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+          slot.set(tmlib::TagSeqEvent{
+              std::vector<tmlib::Tag>(tags.begin(), tags.end())});
+        });
     auto r = lib.objSeqResultRequest(2);
     auto& tags = r.value().tags;
     check("obj_seq_result_request.tags.size", static_cast<size_t>(2), tags.size());
@@ -206,7 +223,9 @@ int main() {
   {
     EventSlot<tmlib::CounterChanged> slot;
     auto h = lib.onCounterChanged(
-        [&](const tmlib::CounterChanged& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, int32_t value) {
+          slot.set(tmlib::CounterChanged{value});
+        });
     auto r = lib.counterRequest();
     if (slot.wait()) {
       check("counter_changed.value", r.value().value, slot.value.value);
@@ -348,7 +367,10 @@ int main() {
   {
     EventSlot<tmlib::ConstArrayEvent> slot;
     auto h = lib.onConstArrayEvent(
-        [&](const tmlib::ConstArrayEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const int32_t> values) {
+          slot.set(tmlib::ConstArrayEvent{
+              std::vector<int32_t>(values.begin(), values.end())});
+        });
     (void)lib.constArrayRequest(0);
     slot.wait();
     check("rt.const_array_event_zero.values",
@@ -358,7 +380,10 @@ int main() {
   {
     EventSlot<tmlib::ConstArrayEvent> slot;
     auto h = lib.onConstArrayEvent(
-        [&](const tmlib::ConstArrayEvent& evt) { slot.set(evt); });
+        [&](tmlib::Lib&, std::span<const int32_t> values) {
+          slot.set(tmlib::ConstArrayEvent{
+              std::vector<int32_t>(values.begin(), values.end())});
+        });
     (void)lib.constArrayRequest(-2);
     slot.wait();
     check("rt.const_array_event_neg.values",
@@ -540,14 +565,14 @@ int main() {
       std::mutex mA, mB;
       std::vector<int32_t> evtA, evtB;
       auto hA = a.onCounterChanged(
-          [&](const tmlib::CounterChanged& e) {
+          [&](tmlib::Lib&, int32_t value) {
             std::lock_guard<std::mutex> lk(mA);
-            evtA.push_back(e.value);
+            evtA.push_back(value);
           });
       auto hB = b.onCounterChanged(
-          [&](const tmlib::CounterChanged& e) {
+          [&](tmlib::Lib&, int32_t value) {
             std::lock_guard<std::mutex> lk(mB);
-            evtB.push_back(e.value);
+            evtB.push_back(value);
           });
 
       a.counterRequest();
@@ -645,9 +670,9 @@ int main() {
     lm.createContext();
     I32Sink s1, s2;
     auto h1 = lm.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& e) { s1.push(e.i32); });
+        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
     auto h2 = lm.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& e) { s2.push(e.i32); });
+        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
 
     lm.primScalarRequest(false, 99, 0, 0.0);
     waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
@@ -669,9 +694,9 @@ int main() {
     lm.createContext();
     I32Sink s1, s2;
     auto h1 = lm.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& e) { s1.push(e.i32); });
+        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
     auto h2 = lm.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& e) { s2.push(e.i32); });
+        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
 
     lm.primScalarRequest(false, 1, 0, 0.0);
     waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
@@ -702,16 +727,18 @@ int main() {
     std::vector<std::vector<std::string>> strSink;
 
     auto hs = lm.onPrimScalarEvent(
-        [&](const tmlib::PrimScalarEvent& e) { scalarSink.push(e.i32); });
+        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) {
+          scalarSink.push(i32);
+        });
     auto ha = lm.onFixedArrayEvent(
-        [&](const tmlib::FixedArrayEvent& e) {
+        [&](tmlib::Lib&, std::span<const int32_t> values) {
           std::lock_guard<std::mutex> lk(mArr);
-          arrSink.push_back(e.values);
+          arrSink.push_back(std::vector<int32_t>(values.begin(), values.end()));
         });
     auto hst = lm.onStringSeqEvent(
-        [&](const tmlib::StringSeqEvent& e) {
+        [&](tmlib::Lib&, std::span<const std::string> items) {
           std::lock_guard<std::mutex> lk(mStr);
-          strSink.push_back(e.items);
+          strSink.push_back(std::vector<std::string>(items.begin(), items.end()));
         });
 
     lm.primScalarRequest(false, 55, 0, 0.0);
@@ -1096,15 +1123,16 @@ int main() {
     std::mutex mtx;
     std::vector<std::vector<TagData>> received;
 
-    auto h = lib.onTagSeqEvent([&](const tmlib::TagSeqEvent& evt) {
-      std::vector<TagData> snap;
-      snap.reserve(evt.tags.size());
-      for (const auto& t : evt.tags) {
-        snap.push_back({t.key, t.value});
-      }
-      std::lock_guard<std::mutex> lk(mtx);
-      received.push_back(std::move(snap));
-    });
+    auto h = lib.onTagSeqEvent(
+        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+          std::vector<TagData> snap;
+          snap.reserve(tags.size());
+          for (const auto& t : tags) {
+            snap.push_back({t.key, t.value});
+          }
+          std::lock_guard<std::mutex> lk(mtx);
+          received.push_back(std::move(snap));
+        });
     check("lc.callback_correctness.handle_nonzero", true, h != 0);
 
     // Trigger 3 events with 3, 5, 0 tags.
@@ -1158,7 +1186,7 @@ int main() {
     lib.createContext();
     std::atomic<int> count{0};
     auto h = lib.onTagSeqEvent(
-        [&](const tmlib::TagSeqEvent&) { count.fetch_add(1); });
+        [&](tmlib::Lib&, std::span<const tmlib::Tag>) { count.fetch_add(1); });
 
     constexpr int kIterations = 100;
     for (int i = 0; i < kIterations; ++i) {
@@ -1179,16 +1207,17 @@ int main() {
     tmlib::Lib lib;
     lib.createContext();
     std::atomic<int> eventCount{0};
-    auto h = lib.onTagSeqEvent([&](const tmlib::TagSeqEvent& evt) {
-      // Touch every string to force a read — catches use-after-free.
-      for (const auto& tg : evt.tags) {
-        volatile size_t kl = tg.key.size();
-        volatile size_t vl = tg.value.size();
-        (void)kl;
-        (void)vl;
-      }
-      eventCount.fetch_add(1);
-    });
+    auto h = lib.onTagSeqEvent(
+        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+          // Touch every string to force a read — catches use-after-free.
+          for (const auto& tg : tags) {
+            volatile size_t kl = tg.key.size();
+            volatile size_t vl = tg.value.size();
+            (void)kl;
+            (void)vl;
+          }
+          eventCount.fetch_add(1);
+        });
 
     constexpr int kRequesters = 4;
     constexpr int kIters = 20;
