@@ -45,6 +45,7 @@ Current test task coverage:
 - `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
 - `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
 - `nimble testFfiApiCpp` — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
+- `nimble testFfiApiCmake` — Validates the generated `<lib>Config.cmake` package by configuring and building a downstream consumer in `test/cmake_consumer/` via `find_package(mylib CONFIG REQUIRED)` and linking smoke binaries against the IMPORTED targets `mylib::mylib` (C) and `mylib::mylib_cpp` (C++)
 - `nimble testApiCbor` — CBOR-mode FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the typemappingtestlib CBOR parity matrix (Nim side) across ORC/refc × debug/release
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 

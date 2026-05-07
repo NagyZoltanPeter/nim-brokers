@@ -438,6 +438,8 @@ proc setupProviders(ctx: BrokerContext) =
 registerBrokerLibrary:
   name:
     "typemappingtestlib"
+  version:
+    "0.1.0"
   initializeRequest:
     InitializeRequest
   shutdownRequest:

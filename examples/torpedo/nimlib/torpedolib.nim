@@ -1174,6 +1174,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 registerBrokerLibrary:
   name:
     "torpedolib"
+  version:
+    "1.0.0"
   initializeRequest:
     InitializeCaptainRequest
   shutdownRequest:

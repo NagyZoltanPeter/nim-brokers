@@ -104,6 +104,12 @@ jobs:
         shell: bash
         run: nimble testFfiApiCpp --verbose
 
+      - name: Run nimble testFfiApiCmake
+        # Validates the generated <lib>Config.cmake by configuring and
+        # building a downstream consumer that does find_package(mylib).
+        shell: bash
+        run: nimble testFfiApiCmake --verbose
+
       - name: Run nimble testApiCbor
         # Nim-side CBOR matrix (codec + library init + event subscribe +
         # discovery API + typemappingtestlib_cbor parity). Doesn't compile

@@ -31,6 +31,7 @@ import ./internal/api_codegen_cbor_h
 import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
 import ./internal/api_codegen_cbor_cddl
+import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
 import ./internal/api_cbor_subs_registry
 
@@ -46,6 +47,7 @@ proc parseLibraryConfig(
     body: NimNode
 ): tuple[
   name: string,
+  version: string,
   initializeRequest: NimNode,
   shutdownRequest: NimNode,
   refType: NimNode,
@@ -53,6 +55,7 @@ proc parseLibraryConfig(
   ffiModeExplicit: bool,
 ] {.compileTime.} =
   var name = ""
+  var version = "0.1.0"
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
@@ -71,6 +74,14 @@ proc parseLibraryConfig(
           name = value.strVal
         else:
           error("name must be a string literal", value)
+      of "version":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkStrLit:
+          version = v.strVal
+        else:
+          error("version must be a string literal", v)
       of "initializerequest":
         if value.kind == nnkStmtList and value.len == 1:
           initializeReq = value[0]
@@ -120,6 +131,7 @@ proc parseLibraryConfig(
 
   (
     name: name,
+    version: version,
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
@@ -147,6 +159,7 @@ proc registerBrokerLibraryNativeImpl(
   config:
     tuple[
       name: string,
+      version: string,
       initializeRequest: NimNode,
       shutdownRequest: NimNode,
       refType: NimNode,
@@ -160,6 +173,7 @@ proc registerBrokerLibraryCborImpl(
   config:
     tuple[
       name: string,
+      version: string,
       initializeRequest: NimNode,
       shutdownRequest: NimNode,
       refType: NimNode,
@@ -185,6 +199,7 @@ proc registerBrokerLibraryNativeImpl(
     config:
       tuple[
         name: string,
+        version: string,
         initializeRequest: NimNode,
         shutdownRequest: NimNode,
         refType: NimNode,
@@ -1207,6 +1222,10 @@ proc registerBrokerLibraryNativeImpl(
   when defined(BrokerFfiApiGenPy):
     generatePythonFile(outDir, libNameResolved)
 
+  generateCMakePackageFiles(
+    outDir, libNameResolved, config.version, cborMode = false, hasCpp = true
+  )
+
   when defined(brokerDebug):
     echo result.repr
 
@@ -1230,6 +1249,7 @@ proc registerBrokerLibraryCborImpl(
     config:
       tuple[
         name: string,
+        version: string,
         initializeRequest: NimNode,
         shutdownRequest: NimNode,
         refType: NimNode,
@@ -1956,6 +1976,10 @@ proc registerBrokerLibraryCborImpl(
   generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries)
+
+  generateCMakePackageFiles(
+    outDir, libName, config.version, cborMode = true, hasCpp = true
+  )
 
   # Emit the CDDL schema and capture its text for the runtime descriptor.
   let cddlText =

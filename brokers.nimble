@@ -485,6 +485,35 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
+task testFfiApiCmake,
+  "Validate the generated <lib>Config.cmake by building a downstream consumer":
+  ## Builds the native FFI example (which emits mylibConfig.cmake next to
+  ## libmylib.{dylib,so,dll}), then drives a tiny CMake project that calls
+  ## find_package(mylib) and links smoke_c + smoke_cpp against the IMPORTED
+  ## targets. Smoke binaries create a context, validate it, and exit 0.
+  buildFfiExampleLibrary()
+  let pkgDir = thisDir() / "examples" / "ffiapi" / "nimlib" / "build"
+  let consumerSrc = thisDir() / "test" / "cmake_consumer"
+  let consumerBuild = thisDir() / "test" / "cmake_consumer" / "cmake-build"
+  mkDir(consumerBuild)
+  exec "cmake -S " & quoteArg(consumerSrc) & " -B " & quoteArg(consumerBuild) &
+    " -DMYLIB_CPP_SMOKE=ON" &
+    " -Dmylib_DIR=" & quoteArg(pkgDir) &
+    cmakeWindowsConfigureExtras()
+  exec "cmake --build " & quoteArg(consumerBuild)
+  let exeC =
+    when defined(windows):
+      consumerBuild / "smoke_c.exe"
+    else:
+      consumerBuild / "smoke_c"
+  let exeCpp =
+    when defined(windows):
+      consumerBuild / "smoke_cpp.exe"
+    else:
+      consumerBuild / "smoke_cpp"
+  exec quoteArg(exeC)
+  exec quoteArg(exeCpp)
+
 # ---------------------------------------------------------------------------
 # CBOR-mode parity build of the same mylib.nim + same cpp_example/main.cpp.
 # Validates that the CBOR codegen emits a wrapper interface shape-compatible
