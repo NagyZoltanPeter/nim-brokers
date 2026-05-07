@@ -60,7 +60,7 @@ struct EventSlot {
 }  // namespace
 
 int main() {
-  tmlib::Lib lib;
+  tmlib::TypemappingtestlibCbor lib;
   lib.createContext();
 
   // ----- lifecycle / string param -----
@@ -80,7 +80,7 @@ int main() {
   {
     EventSlot<tmlib::PrimScalarEvent> slot;
     auto h = lib.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool flag, int32_t i32, int64_t i64, double f64) {
+        [&](tmlib::TypemappingtestlibCbor&, bool flag, int32_t i32, int64_t i64, double f64) {
           slot.set(tmlib::PrimScalarEvent{flag, i32, i64, f64});
         });
     auto r = lib.primScalarRequest(true, 7, 1234567890123LL, 3.5);
@@ -100,7 +100,7 @@ int main() {
   {
     EventSlot<tmlib::TypedScalarEvent> slot;
     auto h = lib.onTypedScalarEvent(
-        [&](tmlib::Lib&, tmlib::Priority priority, int32_t jobId, int64_t ts) {
+        [&](tmlib::TypemappingtestlibCbor&, tmlib::Priority priority, int32_t jobId, int64_t ts) {
           slot.set(tmlib::TypedScalarEvent{priority, jobId, ts});
         });
     auto r = lib.typedScalarRequest(tmlib::Priority::pHigh, 41);
@@ -125,9 +125,11 @@ int main() {
   {
     EventSlot<tmlib::StringSeqEvent> slot;
     auto h = lib.onStringSeqEvent(
-        [&](tmlib::Lib&, std::span<const std::string> items) {
-          slot.set(tmlib::StringSeqEvent{
-              std::vector<std::string>(items.begin(), items.end())});
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const std::string_view> items) {
+          std::vector<std::string> copy;
+          copy.reserve(items.size());
+          for (auto sv : items) copy.emplace_back(sv);
+          slot.set(tmlib::StringSeqEvent{std::move(copy)});
         });
     auto r = lib.stringSeqRequest("x", 3);
     std::vector<std::string> expected{"x-0", "x-1", "x-2"};
@@ -142,7 +144,7 @@ int main() {
   {
     EventSlot<tmlib::PrimSeqEvent> slot;
     auto h = lib.onPrimSeqEvent(
-        [&](tmlib::Lib&, std::span<const int64_t> values) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const int64_t> values) {
           slot.set(tmlib::PrimSeqEvent{
               std::vector<int64_t>(values.begin(), values.end())});
         });
@@ -157,7 +159,7 @@ int main() {
   {
     EventSlot<tmlib::FixedArrayEvent> slot;
     auto h = lib.onFixedArrayEvent(
-        [&](tmlib::Lib&, std::span<const int32_t> values) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const int32_t> values) {
           slot.set(tmlib::FixedArrayEvent{
               std::vector<int32_t>(values.begin(), values.end())});
         });
@@ -180,7 +182,7 @@ int main() {
   {
     EventSlot<tmlib::TagSeqEvent> slot;
     auto h = lib.onTagSeqEvent(
-        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const tmlib::Tag> tags) {
           slot.set(tmlib::TagSeqEvent{
               std::vector<tmlib::Tag>(tags.begin(), tags.end())});
         });
@@ -223,7 +225,7 @@ int main() {
   {
     EventSlot<tmlib::CounterChanged> slot;
     auto h = lib.onCounterChanged(
-        [&](tmlib::Lib&, int32_t value) {
+        [&](tmlib::TypemappingtestlibCbor&, int32_t value) {
           slot.set(tmlib::CounterChanged{value});
         });
     auto r = lib.counterRequest();
@@ -367,7 +369,7 @@ int main() {
   {
     EventSlot<tmlib::ConstArrayEvent> slot;
     auto h = lib.onConstArrayEvent(
-        [&](tmlib::Lib&, std::span<const int32_t> values) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const int32_t> values) {
           slot.set(tmlib::ConstArrayEvent{
               std::vector<int32_t>(values.begin(), values.end())});
         });
@@ -380,7 +382,7 @@ int main() {
   {
     EventSlot<tmlib::ConstArrayEvent> slot;
     auto h = lib.onConstArrayEvent(
-        [&](tmlib::Lib&, std::span<const int32_t> values) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const int32_t> values) {
           slot.set(tmlib::ConstArrayEvent{
               std::vector<int32_t>(values.begin(), values.end())});
         });
@@ -462,12 +464,12 @@ int main() {
     {
       uint32_t saved = 0;
       {
-        tmlib::Lib scoped;
+        tmlib::TypemappingtestlibCbor scoped;
         auto scopedInit = scoped.createContext();
         check("lc.raii.scoped_isOk", true, scopedInit.isOk());
         saved = scoped.ctx();
       }
-      tmlib::Lib after;
+      tmlib::TypemappingtestlibCbor after;
       auto afterInit = after.createContext();
       check("lc.raii.after_scope_isOk", true, afterInit.isOk());
       check("lc.raii.distinct_ctx", true, after.ctx() != saved);
@@ -526,9 +528,9 @@ int main() {
   {
     // 1) independent counters
     {
-      tmlib::Lib a;
+      tmlib::TypemappingtestlibCbor a;
       a.createContext();
-      tmlib::Lib b;
+      tmlib::TypemappingtestlibCbor b;
       b.createContext();
       check("mc.counters.distinct_ctx", true, a.ctx() != b.ctx());
       a.initializeRequest("alpha");
@@ -545,9 +547,9 @@ int main() {
 
     // 2) independent echo (label is per-context state)
     {
-      tmlib::Lib a;
+      tmlib::TypemappingtestlibCbor a;
       a.createContext();
-      tmlib::Lib b;
+      tmlib::TypemappingtestlibCbor b;
       b.createContext();
       a.initializeRequest("one");
       b.initializeRequest("two");
@@ -557,20 +559,20 @@ int main() {
 
     // 3) independent events (per-Lib subscription, no cross-talk)
     {
-      tmlib::Lib a;
+      tmlib::TypemappingtestlibCbor a;
       a.createContext();
-      tmlib::Lib b;
+      tmlib::TypemappingtestlibCbor b;
       b.createContext();
 
       std::mutex mA, mB;
       std::vector<int32_t> evtA, evtB;
       auto hA = a.onCounterChanged(
-          [&](tmlib::Lib&, int32_t value) {
+          [&](tmlib::TypemappingtestlibCbor&, int32_t value) {
             std::lock_guard<std::mutex> lk(mA);
             evtA.push_back(value);
           });
       auto hB = b.onCounterChanged(
-          [&](tmlib::Lib&, int32_t value) {
+          [&](tmlib::TypemappingtestlibCbor&, int32_t value) {
             std::lock_guard<std::mutex> lk(mB);
             evtB.push_back(value);
           });
@@ -612,11 +614,11 @@ int main() {
     //    `a` and a longer-lived Lib for `b`. When `a`'s scope ends, `b`
     //    must still serve requests against its own ctx.
     {
-      tmlib::Lib b;
+      tmlib::TypemappingtestlibCbor b;
       b.createContext();
       b.initializeRequest("second");
       {
-        tmlib::Lib a;
+        tmlib::TypemappingtestlibCbor a;
         a.createContext();
         a.initializeRequest("first");
         check("mc.shutdown_one.a_works",
@@ -666,13 +668,13 @@ int main() {
 
   // 1) two_scalar_event_listeners — both receive the same event
   {
-    tmlib::Lib lm;
+    tmlib::TypemappingtestlibCbor lm;
     lm.createContext();
     I32Sink s1, s2;
     auto h1 = lm.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
+        [&](tmlib::TypemappingtestlibCbor&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
     auto h2 = lm.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
+        [&](tmlib::TypemappingtestlibCbor&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
 
     lm.primScalarRequest(false, 99, 0, 0.0);
     waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
@@ -690,13 +692,13 @@ int main() {
 
   // 2) remove_one_listener_keeps_other — after off(h1), only h2 receives.
   {
-    tmlib::Lib lm;
+    tmlib::TypemappingtestlibCbor lm;
     lm.createContext();
     I32Sink s1, s2;
     auto h1 = lm.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
+        [&](tmlib::TypemappingtestlibCbor&, bool, int32_t i32, int64_t, double) { s1.push(i32); });
     auto h2 = lm.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
+        [&](tmlib::TypemappingtestlibCbor&, bool, int32_t i32, int64_t, double) { s2.push(i32); });
 
     lm.primScalarRequest(false, 1, 0, 0.0);
     waitUntil([&] { return s1.size() >= 1 && s2.size() >= 1; });
@@ -719,7 +721,7 @@ int main() {
   // 3) concurrent_event_types — three different event subscriptions on
   //    the same Lib, each fired by a distinct request.
   {
-    tmlib::Lib lm;
+    tmlib::TypemappingtestlibCbor lm;
     lm.createContext();
     I32Sink scalarSink;
     std::mutex mArr, mStr;
@@ -727,18 +729,21 @@ int main() {
     std::vector<std::vector<std::string>> strSink;
 
     auto hs = lm.onPrimScalarEvent(
-        [&](tmlib::Lib&, bool, int32_t i32, int64_t, double) {
+        [&](tmlib::TypemappingtestlibCbor&, bool, int32_t i32, int64_t, double) {
           scalarSink.push(i32);
         });
     auto ha = lm.onFixedArrayEvent(
-        [&](tmlib::Lib&, std::span<const int32_t> values) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const int32_t> values) {
           std::lock_guard<std::mutex> lk(mArr);
           arrSink.push_back(std::vector<int32_t>(values.begin(), values.end()));
         });
     auto hst = lm.onStringSeqEvent(
-        [&](tmlib::Lib&, std::span<const std::string> items) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const std::string_view> items) {
           std::lock_guard<std::mutex> lk(mStr);
-          strSink.push_back(std::vector<std::string>(items.begin(), items.end()));
+          std::vector<std::string> copy;
+          copy.reserve(items.size());
+          for (auto sv : items) copy.emplace_back(sv);
+          strSink.push_back(std::move(copy));
         });
 
     lm.primScalarRequest(false, 55, 0, 0.0);
@@ -791,7 +796,7 @@ int main() {
   {
     // 1) concurrent echo (string params + responses)
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       lib.initializeRequest("gc-test");
       constexpr int kThreads = 8, kIters = 20;
@@ -816,7 +821,7 @@ int main() {
 
     // 2) concurrent seq[string] result
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       lib.initializeRequest("seq-str");
       constexpr int kThreads = 6, kIters = 10;
@@ -847,7 +852,7 @@ int main() {
 
     // 3) concurrent seq[int64] result
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       constexpr int kThreads = 6, kIters = 15;
       std::atomic<int> failures{0};
@@ -876,7 +881,7 @@ int main() {
 
     // 4) concurrent seq[Tag] result
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       constexpr int kThreads = 4, kIters = 10;
       std::atomic<int> failures{0};
@@ -906,7 +911,7 @@ int main() {
 
     // 5) concurrent seq[Tag] INPUT param
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       constexpr int kThreads = 4, kIters = 8;
       std::atomic<int> failures{0};
@@ -943,7 +948,7 @@ int main() {
       std::vector<std::thread> ths;
       for (int t = 0; t < kThreads; ++t) {
         ths.emplace_back([&, t]() {
-          tmlib::Lib lib;
+          tmlib::TypemappingtestlibCbor lib;
           if (!lib.createContext()) {
             failures.fetch_add(1);
             return;
@@ -969,7 +974,7 @@ int main() {
 
     // 7) mixed request types
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       lib.initializeRequest("mixed");
       constexpr int kThreads = 6, kIters = 10;
@@ -1022,7 +1027,7 @@ int main() {
 
     // 8) stress all types
     {
-      tmlib::Lib lib;
+      tmlib::TypemappingtestlibCbor lib;
       lib.createContext();
       lib.initializeRequest("stress");
       constexpr int kThreads = 8, kIters = 30;
@@ -1114,7 +1119,7 @@ int main() {
   //    must arrive intact and complete (no truncation, no leaks, no
   //    use-after-free).
   {
-    tmlib::Lib lib;
+    tmlib::TypemappingtestlibCbor lib;
     lib.createContext();
     struct TagData {
       std::string key;
@@ -1124,7 +1129,7 @@ int main() {
     std::vector<std::vector<TagData>> received;
 
     auto h = lib.onTagSeqEvent(
-        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const tmlib::Tag> tags) {
           std::vector<TagData> snap;
           snap.reserve(tags.size());
           for (const auto& t : tags) {
@@ -1182,11 +1187,11 @@ int main() {
   //    ASAN; here we just count to ensure the dispatcher doesn't drop
   //    deliveries under sustained pressure.)
   {
-    tmlib::Lib lib;
+    tmlib::TypemappingtestlibCbor lib;
     lib.createContext();
     std::atomic<int> count{0};
     auto h = lib.onTagSeqEvent(
-        [&](tmlib::Lib&, std::span<const tmlib::Tag>) { count.fetch_add(1); });
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const tmlib::Tag>) { count.fetch_add(1); });
 
     constexpr int kIterations = 100;
     for (int i = 0; i < kIterations; ++i) {
@@ -1204,11 +1209,11 @@ int main() {
   //    listener; every emit must produce exactly one delivered event,
   //    every payload must have valid string content.
   {
-    tmlib::Lib lib;
+    tmlib::TypemappingtestlibCbor lib;
     lib.createContext();
     std::atomic<int> eventCount{0};
     auto h = lib.onTagSeqEvent(
-        [&](tmlib::Lib&, std::span<const tmlib::Tag> tags) {
+        [&](tmlib::TypemappingtestlibCbor&, std::span<const tmlib::Tag> tags) {
           // Touch every string to force a read — catches use-after-free.
           for (const auto& tg : tags) {
             volatile size_t kl = tg.key.size();

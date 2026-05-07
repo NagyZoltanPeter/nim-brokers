@@ -33,7 +33,7 @@ void waitForDeliveries(std::atomic<int>& counter, int target,
 }  // namespace
 
 int main() {
-  mylibcbor::Lib lib;
+  mylibcbor::Mylibcbor lib;
   auto initResult = lib.createContext();
   if (!initResult) {
     std::cerr << "createContext failed: " << initResult.error() << std::endl;
@@ -64,7 +64,7 @@ int main() {
   bool lastOnline = false;
 
   uint64_t handle = lib.onDeviceUpdated(
-      [&](mylibcbor::Lib&, int64_t deviceId, bool online) {
+      [&](mylibcbor::Mylibcbor&, int64_t deviceId, bool online) {
         lastDeviceId = deviceId;
         lastOnline = online;
         deliveryCount.fetch_add(1);

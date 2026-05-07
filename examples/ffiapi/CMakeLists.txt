@@ -4,11 +4,24 @@ project(mylib_examples C CXX)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
-# MYLIB_DIR can be overridden at configure time; defaults to nimlib/build
-# relative to this CMakeLists.txt.
+# MYLIB_DIR can be overridden at configure time. When USE_CBOR=ON it
+# defaults to nimlib/build_cbor (the -d:BrokerFfiApiCBOR build output)
+# and the C++ target additionally pulls in the jsoncons headers needed
+# by the CBOR-mode wrapper. With USE_CBOR=OFF it defaults to nimlib/build
+# (the -d:BrokerFfiApiNative build output).
+option(USE_CBOR "Link against the CBOR-mode Nim library (mylib.nim built with -d:BrokerFfiApiCBOR)" OFF)
+
 if(NOT MYLIB_DIR)
-    set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
+    if(USE_CBOR)
+        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
+    else()
+        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
+    endif()
 endif()
+
+# Subdir name used for embedded RPATH — keeps the example binary
+# discovering the right .dylib/.so without requiring LD_LIBRARY_PATH.
+get_filename_component(MYLIB_DIRNAME "${MYLIB_DIR}" NAME)
 
 # Resolve to absolute so downstream targets work regardless of build dir
 get_filename_component(MYLIB_DIR "${MYLIB_DIR}" ABSOLUTE)
@@ -88,13 +101,13 @@ target_link_libraries(example_c PRIVATE mylib)
 # RPATH: embed the path to the shared library so the binary runs in-tree
 if(APPLE)
     set_target_properties(example_c PROPERTIES
-        BUILD_RPATH "@loader_path/../../nimlib/build"
-        INSTALL_RPATH "@loader_path/../../nimlib/build"
+        BUILD_RPATH "@loader_path/../../nimlib/${MYLIB_DIRNAME}"
+        INSTALL_RPATH "@loader_path/../../nimlib/${MYLIB_DIRNAME}"
     )
 elseif(UNIX)
     set_target_properties(example_c PROPERTIES
-        BUILD_RPATH "$ORIGIN/../../nimlib/build"
-        INSTALL_RPATH "$ORIGIN/../../nimlib/build"
+        BUILD_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
+        INSTALL_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
     )
 endif()
 
@@ -141,15 +154,21 @@ endif()
 
 target_link_libraries(example_cpp PRIVATE mylib)
 
+# CBOR variant: header-only jsoncons for cbor encode/decode in <mylib>.hpp
+if(USE_CBOR)
+    target_include_directories(example_cpp PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
+endif()
+
 if(APPLE)
     set_target_properties(example_cpp PROPERTIES
-        BUILD_RPATH "@loader_path/../../nimlib/build"
-        INSTALL_RPATH "@loader_path/../../nimlib/build"
+        BUILD_RPATH "@loader_path/../../nimlib/${MYLIB_DIRNAME}"
+        INSTALL_RPATH "@loader_path/../../nimlib/${MYLIB_DIRNAME}"
     )
 elseif(UNIX)
     set_target_properties(example_cpp PROPERTIES
-        BUILD_RPATH "$ORIGIN/../../nimlib/build"
-        INSTALL_RPATH "$ORIGIN/../../nimlib/build"
+        BUILD_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
+        INSTALL_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
     )
 endif()
 

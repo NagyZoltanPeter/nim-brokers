@@ -29,6 +29,7 @@
 #include <chrono>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -45,7 +46,7 @@ int main() {
     // ── 1. Create the library wrapper and context explicitly ─────────
     Mylib lib;
     auto createContextResult = lib.createContext();
-    if (!createContextResult.ok()) {
+    if (!createContextResult.isOk()) {
         fprintf(stderr, "FATAL: %s\n", createContextResult.error().c_str());
         return 1;
     }
@@ -90,7 +91,7 @@ int main() {
     int batchCount = 0;
     auto h_batch = lib.onDeviceBatch(
         [&batchCount](Mylib& owner,
-                      std::span<const char*> labels,
+                      std::span<const std::string_view> labels,
                       std::span<const int64_t> deviceIds,
                       std::span<const int32_t> capabilities) {
             (void)owner;
@@ -111,7 +112,7 @@ int main() {
 
             printf("  >>> DeviceBatch #%d: %zu devices\n", batchCount, labels.size());
             printSpan("labels:", labels,
-                [](const char* s) { printf("\"%s\"", s ? s : "(null)"); });
+                [](std::string_view s) { printf("\"%.*s\"", (int)s.size(), s.data()); });
             printSpan("ids:", deviceIds,
                 [](int64_t v) { printf("%lld", (long long)v); });
             printSpan("capabilities:", capabilities,
@@ -148,7 +149,7 @@ int main() {
     printf("--- Configuring library ---\n");
     {
         auto res = lib.initializeRequest("/opt/devices.yaml");
-        if (!res.ok()) {
+        if (!res.isOk()) {
             fprintf(stderr, "Initialize error: %s\n", res.error().c_str());
             return 1;
         }
@@ -178,7 +179,7 @@ int main() {
     std::vector<int64_t> ids;
     {
         auto res = lib.addDevice(fleet);
-        if (!res.ok()) {
+        if (!res.isOk()) {
             fprintf(stderr, "  AddDevice error: %s\n", res.error().c_str());
             return 1;
         }
@@ -195,7 +196,7 @@ int main() {
     printf("--- Device inventory (%zu added) ---\n", ids.size());
     {
         auto res = lib.listDevices();
-        if (!res.ok()) {
+        if (!res.isOk()) {
             fprintf(stderr, "  ListDevices error: %s\n", res.error().c_str());
         } else {
             // res->devices is std::vector<DeviceInfo>
@@ -217,7 +218,7 @@ int main() {
         printf("--- Query device id=%lld ---\n", (long long)qid);
         auto res = lib.getDevice(qid);    
 
-        if (!res.ok()) {
+        if (!res.isOk()) {
             fprintf(stderr, "  GetDevice error: %s\n", res.error().c_str());
         } else {
             printf("  name=\"%s\"  type=\"%s\"  addr=\"%s\"  online=%s\n",
@@ -235,7 +236,7 @@ int main() {
         printf("--- GetSensorData (seq[byte] + enum + distinct) ---\n");
         {
             auto res = lib.getSensorData(qid);
-            if (!res.ok()) {
+            if (!res.isOk()) {
                 fprintf(stderr, "  GetSensorData error: %s\n", res.error().c_str());
             } else {
                 printf("  sensorId=%d  status=%d  rawData[%zu]: ",
@@ -250,7 +251,7 @@ int main() {
         printf("--- GetDeviceTags (seq[string]) ---\n");
         {
             auto res = lib.getDeviceTags(qid);
-            if (!res.ok()) {
+            if (!res.isOk()) {
                 fprintf(stderr, "  GetDeviceTags error: %s\n", res.error().c_str());
             } else {
                 printf("  tags[%zu]: ", res->tags.size());
@@ -264,7 +265,7 @@ int main() {
         printf("--- GetDeviceCapabilities (array[4,int32] + Timestamp) ---\n");
         {
             auto res = lib.getDeviceCapabilities(qid);
-            if (!res.ok()) {
+            if (!res.isOk()) {
                 fprintf(stderr, "  GetDeviceCaps error: %s\n", res.error().c_str());
             } else {
                 printf("  capturedAt=%lld  caps=[%d, %d, %d, %d]\n",
@@ -284,7 +285,7 @@ int main() {
     for (int i : {0, 3}) {
         if (i >= (int)ids.size()) continue;
         auto res = lib.removeDevice(ids[i]);
-        if (!res.ok()) {
+        if (!res.isOk()) {
             fprintf(stderr, "  RemoveDevice error: %s\n", res.error().c_str());
         } else {
             printf("  Removed id=%lld  success=%s\n",
@@ -303,7 +304,7 @@ int main() {
     printf("--- Removing one more device (only logger active) ---\n");
     if (ids.size() > 1) {
         auto res = lib.removeDevice(ids[1]);
-        if (res.ok())
+        if (res.isOk())
             printf("  Removed id=%lld\n", (long long)ids[1]);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -313,7 +314,7 @@ int main() {
     printf("--- Remaining devices ---\n");
     {
         auto res = lib.listDevices();
-        if (res.ok()) {
+        if (res.isOk()) {
             printf("  Count: %zu\n", res->devices.size());
             for (auto& d : res->devices) {
                 printf("  id=%-3lld  %-18s  type=%-10s  addr=%-16s  %s\n",

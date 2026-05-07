@@ -725,18 +725,35 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   var cppCbParams: seq[string] = @[("Owner& owner")]
   var cTrampolineParams: seq[string] = @[]
   var traitInvokeArgs: seq[string] = @["owner"]
+  # Setup statements emitted inside `invoke()` BEFORE the `fn(...)` call —
+  # used to materialise non-owning views (e.g. building a
+  # std::vector<std::string_view> from `const char** + count` for
+  # seq[string] event params). Kept lifetime-bound to the call so the span
+  # the user receives stays valid throughout.
+  var traitInvokePreamble = ""
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fName = $fieldNames[i]
       let fType = fieldTypes[i]
       if isSeqOfStringNode(fType):
-        # C++ callback sees std::span<const char*>
-        cppCbParams.add("std::span<const char*> " & fName)
+        # Public C++ callback receives std::span<const std::string_view> —
+        # zero-copy parity with the CBOR-mode wrapper. Trampoline still
+        # takes the raw `const char** + count` C ABI; we materialise a
+        # temporary vector<string_view> in `invoke()` and pass a span
+        # over it to the user callback.
+        cppCbParams.add("std::span<const std::string_view> " & fName)
         cTrampolineParams.add("const char** " & fName)
         cTrampolineParams.add("int32_t " & fName & "_count")
-        traitInvokeArgs.add(
-          "std::span<const char*>(" & fName & ", " & fName & "_count)"
+        let viewVar = fName & "_view"
+        traitInvokePreamble.add(
+          "        std::vector<std::string_view> " & viewVar & ";\n" & "        if (" &
+            fName & " && " & fName & "_count > 0) {\n" & "            " & viewVar &
+            ".reserve(" & fName & "_count);\n" & "            for (int32_t i = 0; i < " &
+            fName & "_count; ++i)\n" & "                " & viewVar & ".emplace_back(\n" &
+            "                    " & fName & "[i] ? std::string_view(" & fName &
+            "[i]) : std::string_view());\n" & "        }\n"
         )
+        traitInvokeArgs.add("std::span<const std::string_view>(" & viewVar & ")")
       elif isSeqOfPrimitiveNode(fType):
         let elemName = seqItemTypeName(fType)
         let cppElemType = nimTypeToCpp(ident(elemName))
@@ -818,6 +835,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   else:
     trait.add("Owner& owner")
   trait.add(") noexcept {\n")
+  if traitInvokePreamble.len > 0:
+    trait.add(traitInvokePreamble)
   trait.add("        try {\n")
   trait.add("            fn(" & traitInvokeArgs.join(", ") & ");\n")
   trait.add("        } catch (...) {\n")

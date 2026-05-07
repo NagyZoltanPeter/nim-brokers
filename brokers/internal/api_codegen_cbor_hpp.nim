@@ -151,7 +151,13 @@ proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
       return "std::string_view"
     return prim
   if lower.startsWith("seq[") and lower.endsWith("]"):
-    let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
+    let innerNim = unwrapBracket(t, "seq")
+    # seq[string] -> span<const std::string_view> (parity with native FFI;
+    # the trampoline materialises a temporary vector<string_view> over
+    # the decoded vector<string>).
+    if innerNim.strip() == "string":
+      return "std::span<const std::string_view>"
+    let inner = nimTypeToCppType(innerNim)
     return
       if inner.len > 0:
         "std::span<const " & inner & ">"
@@ -191,7 +197,12 @@ proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
   if t == "string":
     return "std::string_view(evt." & fieldName & ")"
   if lower.startsWith("seq[") and lower.endsWith("]"):
-    let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
+    let innerNim = unwrapBracket(t, "seq")
+    # seq[string]: pass a span over the temporary vector<string_view>
+    # built in the invoke preamble (see eventCallbackInvokeSetup).
+    if innerNim.strip() == "string":
+      return "std::span<const std::string_view>(" & fieldName & "_view)"
+    let inner = nimTypeToCppType(innerNim)
     if inner.len > 0:
       return "std::span<const " & inner & ">(evt." & fieldName & ")"
     return "evt." & fieldName
@@ -203,6 +214,22 @@ proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
     return "evt." & fieldName
   # Primitives, enums, distincts, options, nested objects: pass directly.
   "evt." & fieldName
+
+proc eventCallbackInvokeSetup*(fieldName, nimType: string): string {.compileTime.} =
+  ## Returns setup statements emitted inside `invoke()` BEFORE the user
+  ## callback is called. Used to materialise non-owning views over the
+  ## decoded payload (e.g. seq[string] -> vector<string_view>) so the
+  ## span the user receives stays valid for the call duration.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if lower.startsWith("seq[") and lower.endsWith("]") and
+      unwrapBracket(t, "seq").strip() == "string":
+    let viewVar = fieldName & "_view"
+    return
+      "      std::vector<std::string_view> " & viewVar & ";\n" & "      " & viewVar &
+      ".reserve(evt." & fieldName & ".size());\n" & "      for (const auto& s : evt." &
+      fieldName & ") " & viewVar & ".emplace_back(s);\n"
+  ""
 
 # ---------------------------------------------------------------------------
 # Per-type emission
@@ -268,6 +295,22 @@ proc generateCborCppHeaderFile*(
     else:
       libName & ".hpp"
   let p = libName & "_"
+
+  # Derive C++ class name from libName the same way the native codegen
+  # does: snake_case / kebab-case → PascalCase. "mylib" -> "Mylib",
+  # "typemappingtestlib_cbor" -> "TypemappingtestlibCbor". Keeps the
+  # public C++ surface identical between native and CBOR builds so the
+  # same client `main.cpp` can compile against either.
+  var className = ""
+  var capitalize = true
+  for ch in libName:
+    if ch == '_' or ch == '-':
+      capitalize = true
+    elif capitalize:
+      className.add(chr(ord(ch) - 32 * ord(ch in {'a' .. 'z'})))
+      capitalize = false
+    else:
+      className.add(ch)
 
   # Note: emittablePayloads is computed below from the actual struct
   # emission, not from the response / event lookup, so we cover types
@@ -495,14 +538,14 @@ proc generateCborCppHeaderFile*(
   # ==================================================================
   # Section 1: Lib class — declarations only (no detail:: dependencies)
   # ==================================================================
-  h.add("class Lib {\n")
+  h.add("class " & className & " {\n")
   h.add(" public:\n")
-  h.add("  Lib();\n")
-  h.add("  ~Lib();\n")
-  h.add("  Lib(const Lib&) = delete;\n")
-  h.add("  Lib& operator=(const Lib&) = delete;\n")
-  h.add("  Lib(Lib&&) = delete;\n")
-  h.add("  Lib& operator=(Lib&&) = delete;\n\n")
+  h.add("  " & className & "();\n")
+  h.add("  ~" & className & "();\n")
+  h.add("  " & className & "(const " & className & "&) = delete;\n")
+  h.add("  " & className & "& operator=(const " & className & "&) = delete;\n")
+  h.add("  " & className & "(" & className & "&&) = delete;\n")
+  h.add("  " & className & "& operator=(" & className & "&&) = delete;\n\n")
   h.add("  Result<void> createContext();\n")
   h.add("  bool validContext() const noexcept;\n")
   h.add("  explicit operator bool() const noexcept;\n")
@@ -561,7 +604,7 @@ proc generateCborCppHeaderFile*(
     let callbackAlias = ev.typeName & "Callback"
     let onName = "on" & pascal
     let offName = "off" & pascal
-    h.add("  using " & callbackAlias & " = std::function<void(Lib&")
+    h.add("  using " & callbackAlias & " = std::function<void(" & className & "&")
     for f in entry.fields:
       h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
     h.add(")>;\n")
@@ -580,8 +623,8 @@ proc generateCborCppHeaderFile*(
     let dispatcherType = ev.typeName & "Dispatcher"
     let dispatcherMember = ev.apiName & "Dispatcher_"
     h.add(
-      "  using " & dispatcherType & " = detail::EventDispatcher<Lib, detail::" &
-        ev.typeName & "EventTraits>;\n"
+      "  using " & dispatcherType & " = detail::EventDispatcher<" & className &
+        ", detail::" & ev.typeName & "EventTraits>;\n"
     )
     h.add("  std::unique_ptr<" & dispatcherType & "> " & dispatcherMember & ";\n")
   h.add("};\n\n")
@@ -916,6 +959,13 @@ proc generateCborCppHeaderFile*(
       "  static void invoke(const Callback<Owner>& fn, Owner& owner,\n" &
         "                     const " & ev.typeName & "& evt) noexcept {\n"
     )
+    # Per-field setup statements (e.g. seq[string] -> vector<string_view>)
+    # emitted BEFORE the try block so any temporary views the user callback
+    # observes stay alive for the entire call.
+    for f in entry.fields:
+      let setup = eventCallbackInvokeSetup(f.name, f.nimType)
+      if setup.len > 0:
+        h.add(setup)
     h.add("    try {\n")
     h.add("      fn(owner")
     for f in entry.fields:
@@ -933,7 +983,7 @@ proc generateCborCppHeaderFile*(
 
   # ---- Lifecycle ----
   # Constructor initializes one EventDispatcher per emittable event type.
-  h.add("inline Lib::Lib()")
+  h.add("inline " & className & "::" & className & "()")
   if emittableEvents.len > 0:
     h.add("\n")
     var first = true
@@ -949,8 +999,8 @@ proc generateCborCppHeaderFile*(
     h.add(" { " & p & "initialize(); }\n\n")
   else:
     h.add(" { " & p & "initialize(); }\n\n")
-  h.add("inline Lib::~Lib() { shutdown(); }\n\n")
-  h.add("inline Result<void> Lib::createContext() {\n")
+  h.add("inline " & className & "::~" & className & "() { shutdown(); }\n\n")
+  h.add("inline Result<void> " & className & "::createContext() {\n")
   h.add("  if (ctx_)\n")
   h.add("    return Result<void>::err(\"Context already created\");\n")
   h.add("  char* err = nullptr;\n")
@@ -965,11 +1015,17 @@ proc generateCborCppHeaderFile*(
   h.add("  }\n")
   h.add("  return Result<void>::ok();\n")
   h.add("}\n\n")
-  h.add("inline bool Lib::validContext() const noexcept { return ctx_ != 0; }\n")
-  h.add("inline Lib::operator bool() const noexcept { return validContext(); }\n")
-  h.add("inline uint32_t Lib::ctx() const noexcept { return ctx_; }\n\n")
+  h.add(
+    "inline bool " & className &
+      "::validContext() const noexcept { return ctx_ != 0; }\n"
+  )
+  h.add(
+    "inline " & className &
+      "::operator bool() const noexcept { return validContext(); }\n"
+  )
+  h.add("inline uint32_t " & className & "::ctx() const noexcept { return ctx_; }\n\n")
   # shutdown clears all event dispatchers before calling C shutdown
-  h.add("inline void Lib::shutdown() noexcept {\n")
+  h.add("inline void " & className & "::shutdown() noexcept {\n")
   for ev in emittableEvents:
     let dispatcherMember = ev.apiName & "Dispatcher_"
     h.add("  if (" & dispatcherMember & ") " & dispatcherMember & "->clear();\n")
@@ -998,8 +1054,8 @@ proc generateCborCppHeaderFile*(
         argsAssign.add("  args." & n & " = " & n & ";\n")
         first = false
     h.add(
-      "inline Result<" & e.responseTypeName & "> Lib::" & methodName & "(" & sigParams &
-        ") {\n"
+      "inline Result<" & e.responseTypeName & "> " & className & "::" & methodName & "(" &
+        sigParams & ") {\n"
     )
     if e.argFields.len > 0:
       h.add("  " & argsName & " args;\n")
@@ -1077,17 +1133,22 @@ proc generateCborCppHeaderFile*(
     let offName = "off" & pascal
     let dispatcherMember = ev.apiName & "Dispatcher_"
 
-    h.add("inline uint64_t Lib::" & onName & "(" & callbackAlias & " fn) noexcept {\n")
+    h.add(
+      "inline uint64_t " & className & "::" & onName & "(" & callbackAlias &
+        " fn) noexcept {\n"
+    )
     h.add("  return " & dispatcherMember & "->add(std::move(fn));\n")
     h.add("}\n\n")
 
-    h.add("inline void Lib::" & offName & "(uint64_t handle) noexcept {\n")
+    h.add(
+      "inline void " & className & "::" & offName & "(uint64_t handle) noexcept {\n"
+    )
     h.add("  if (handle == 0) " & dispatcherMember & "->clear();\n")
     h.add("  else " & dispatcherMember & "->remove(handle);\n")
     h.add("}\n\n")
 
   # ---- Discovery implementations ----
-  h.add("inline std::string Lib::listApis() {\n")
+  h.add("inline std::string " & className & "::listApis() {\n")
   h.add("  void* buf = nullptr;\n")
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "listApis(&buf, &len);\n")
@@ -1101,7 +1162,7 @@ proc generateCborCppHeaderFile*(
   h.add("  auto v = nb.view();\n")
   h.add("  return std::string(reinterpret_cast<const char*>(v.data()), v.size());\n")
   h.add("}\n\n")
-  h.add("inline std::string Lib::getSchema() {\n")
+  h.add("inline std::string " & className & "::getSchema() {\n")
   h.add("  void* buf = nullptr;\n")
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "getSchema(&buf, &len);\n")

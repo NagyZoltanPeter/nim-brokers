@@ -173,6 +173,24 @@ proc buildFfiExampleFlags(generatePy = false): string =
 proc buildFfiExampleLibrary(generatePy = false) =
   exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
 
+# Parity build: SAME mylib.nim source compiled with the CBOR FFI flag,
+# emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
+# compile against the CBOR-generated mylib.h / mylib.hpp — proves the
+# generated wrapper interface is shape-identical to the native build.
+proc buildFfiExampleCborFlags(): string =
+  result =
+    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
+  result.add(nimMainPrefixFlag("mylib"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build_cbor", "mylib"))
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
+
+proc buildFfiExampleCborLibrary() =
+  exec "nim c " & buildFfiExampleCborFlags() & " examples/ffiapi/nimlib/mylib.nim"
+
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
@@ -190,14 +208,31 @@ proc buildTorpedoExampleLibrary(generatePy = false) =
   exec "nim c " & buildTorpedoExampleFlags(generatePy) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc ffiExamplesBuildDir(): string =
-  "examples/ffiapi/cmake-build"
+proc buildTorpedoExampleCborFlags(): string =
+  result =
+    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
+  result.add(nimMainPrefixFlag("torpedolib"))
+  result.add(nimWindowsCcFlag())
+  result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build_cbor", "torpedolib"))
+  if existsEnv("MM"):
+    result.add(" --mm:" & getEnv("MM"))
+  else:
+    result.add(" --mm:orc")
 
-proc buildFfiCmakeTarget(target = "") =
+proc buildTorpedoExampleCborLibrary() =
+  exec "nim c " & buildTorpedoExampleCborFlags() &
+    " examples/torpedo/nimlib/torpedolib.nim"
+
+proc ffiExamplesBuildDir(useCbor = false): string =
+  if useCbor: "examples/ffiapi/cmake-build-cbor" else: "examples/ffiapi/cmake-build"
+
+proc buildFfiCmakeTarget(target = "", useCbor = false) =
   let cmakeDir = "examples/ffiapi"
-  let buildDir = ffiExamplesBuildDir()
+  let buildDir = ffiExamplesBuildDir(useCbor)
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
+    cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -209,14 +244,16 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
   else:
     joinPath(exampleDir, "build", "example")
 
-proc torpedoCmakeBuildDir(): string =
-  "examples/torpedo/cmake-build"
+proc torpedoCmakeBuildDir(useCbor = false): string =
+  if useCbor: "examples/torpedo/cmake-build-cbor" else: "examples/torpedo/cmake-build"
 
-proc buildTorpedoCmakeTarget(target = "") =
+proc buildTorpedoCmakeTarget(target = "", useCbor = false) =
   let cmakeDir = "examples/torpedo"
-  let buildDir = torpedoCmakeBuildDir()
+  let buildDir = torpedoCmakeBuildDir(useCbor)
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
+    cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -435,6 +472,27 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   buildFfiExampleLibrary(true)
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
+
+# ---------------------------------------------------------------------------
+# CBOR-mode parity build of the same mylib.nim + same cpp_example/main.cpp.
+# Validates that the CBOR codegen emits a wrapper interface shape-compatible
+# with the native one (same class name, same Result API, same on/off events).
+# ---------------------------------------------------------------------------
+
+task buildFfiExampleCbor,
+  "Build FFI API example library (CBOR mode, into nimlib/build_cbor)":
+  buildFfiExampleCborLibrary()
+
+task buildFfiExampleCborCpp,
+  "Build FFI API example — C++ application against the CBOR-mode library (via CMake)":
+  buildFfiExampleCborLibrary()
+  buildFfiCmakeTarget("example_cpp", useCbor = true)
+
+task runFfiExampleCborCpp,
+  "Build and run the C++ FFI example application against the CBOR-mode library":
+  buildFfiExampleCborLibrary()
+  buildFfiCmakeTarget("example_cpp", useCbor = true)
+  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
 # ---------------------------------------------------------------------------
 # CBOR-mode example library + C++ consumer
@@ -804,6 +862,23 @@ task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)
 task runTorpedoExampleCpp, "Build and run the Torpedo Duel C++ text UI example":
   buildTorpedoExampleLibrary()
   buildTorpedoCmakeTarget("torpedo_cpp")
+  exec quoteArg(torpedoExecutablePath())
+
+# CBOR-mode parity build of the torpedo example. Same torpedolib.nim source
+# + same cpp_example/main.cpp, compiled against the CBOR FFI codegen output.
+task buildTorpedoExampleCbor,
+  "Build the torpedo FFI example library (CBOR mode, into nimlib/build_cbor)":
+  buildTorpedoExampleCborLibrary()
+
+task buildTorpedoExampleCborCpp,
+  "Build the Torpedo Duel C++ application against the CBOR-mode library (via CMake)":
+  buildTorpedoExampleCborLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
+
+task runTorpedoExampleCborCpp,
+  "Build and run the Torpedo Duel C++ text UI example against the CBOR-mode library":
+  buildTorpedoExampleCborLibrary()
+  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
   exec quoteArg(torpedoExecutablePath())
 
 task nph, "Install nph if needed and format modified Nim files":
