@@ -1191,7 +1191,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     if not hideFromForeignSurface:
       let pySnakeName = toSnakeCase(typeDisplayName)
       let pyFreeFuncName = apiPublicCName("free_" & baseExportName & "_result")
-      let pyResultName = typeDisplayName & "Result"
+      # Public Python dataclass uses the bare TypeName (no `Result` suffix)
+      # — matches the C++ wrapper struct name and the CBOR-mode Python
+      # wrapper. Method return shape is `Result[<TypeName>]`.
+      let pyResultName = typeDisplayName
       let pyCResultName = typeDisplayName & "CResult"
 
       block:
@@ -1352,12 +1355,20 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       proc buildPyMethodBody(
           funcName, callArgs, pyResultName2, pyFreeFuncName2: string
       ): string {.compileTime.} =
+        ## Builds the body of a Python request method. Returns
+        ## `Result[<TypeName>]`: success carries the decoded dataclass,
+        ## error carries the C-side error_message string. Mirrors the
+        ## CBOR-mode Python wrapper and the C++ wrapper Result<T>.
         result = ""
+        result.add("        if self._ctx == 0:\n")
+        result.add(
+          "            return Result.err(\"Library context is not created\")\n"
+        )
         result.add("        c = self._lib." & funcName & "(" & callArgs & ")\n")
         result.add("        try:\n")
         result.add("            if c.error_message:\n")
         result.add(
-          "                raise __LIB_ERROR__(c.error_message.decode(\"utf-8\"))\n"
+          "                return Result.err(c.error_message.decode(\"utf-8\"))\n"
         )
         if hasInlineFields:
           for i in 0 ..< fieldNames.len:
@@ -1367,15 +1378,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           for i in 0 ..< fieldNames.len:
             let fName = $fieldNames[i]
             dcArgs.add(fName & "=" & fName)
-          result.add("            return " & pyResultName2 & "(\n")
+          result.add("            return Result.ok(" & pyResultName2 & "(\n")
           for j, arg in dcArgs:
             result.add("                " & arg)
             if j < dcArgs.len - 1:
               result.add(",")
             result.add("\n")
-          result.add("            )\n")
+          result.add("            ))\n")
         else:
-          result.add("            return " & pyResultName2 & "()\n")
+          result.add("            return Result.ok(" & pyResultName2 & "())\n")
         result.add("        finally:\n")
         result.add("            self._lib." & pyFreeFuncName2 & "(ctypes.byref(c))")
 
@@ -1421,38 +1432,28 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             else:
               callArgs.add(", " & paramName)
 
+        let pyRetTy = "Result[" & pyResultName & "]"
         var pyMethod =
-          "    def " & camelName & "(" & pyParams & ") -> " & pyResultName & ":\n"
+          "    def " & pySnakeName & "(" & pyParams & ") -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
-        pyMethod.add("        self._requireContext()\n")
         pyMethod.add(pyPreCall)
         pyMethod.add(
           buildPyMethodBody(funcName, callArgs, pyResultName, pyFreeFuncName)
         )
-        pyMethod.add("\n\n")
-        pyMethod.add(
-          "    def " & pySnakeName & "(" & pyParams & ") -> " & pyResultName & ":\n"
-        )
-        pyMethod.add(
-          "        return self." & camelName & "(" & aliasArgs.join(", ") & ")"
-        )
         gApiPyMethods.add(pyMethod)
-        gApiPyInterfaceSummary.add(camelName & "(" & summaryParams.join(", ") & ")")
-        gApiPyInterfaceSummary.add(pySnakeName & "(" & summaryParams.join(", ") & ")")
+        gApiPyInterfaceSummary.add(
+          pySnakeName & "(" & summaryParams.join(", ") & ") -> " & pyRetTy
+        )
       elif not zeroArgSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
-        var pyMethod = "    def " & camelName & "(self) -> " & pyResultName & ":\n"
+        let pyRetTy = "Result[" & pyResultName & "]"
+        var pyMethod = "    def " & pySnakeName & "(self) -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
-        pyMethod.add("        self._requireContext()\n")
         pyMethod.add(
           buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
         )
-        pyMethod.add("\n\n")
-        pyMethod.add("    def " & pySnakeName & "(self) -> " & pyResultName & ":\n")
-        pyMethod.add("        return self." & camelName & "()")
         gApiPyMethods.add(pyMethod)
-        gApiPyInterfaceSummary.add(camelName & "()")
-        gApiPyInterfaceSummary.add(pySnakeName & "()")
+        gApiPyInterfaceSummary.add(pySnakeName & "() -> " & pyRetTy)
 
   # Step 7: Append free_result header declaration
   if not hideFromForeignSurface:

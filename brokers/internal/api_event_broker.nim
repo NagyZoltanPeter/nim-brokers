@@ -1050,7 +1050,11 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             )
             pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
           else:
-            # seq[CustomObject]: cast to CItem*, reconstruct
+            # seq[CustomObject]: cast to CItem*, reconstruct as a list of
+            # the public Python dataclass (decoding cstring fields to str)
+            # so the user callback sees the same Tag-with-str shape that
+            # request results expose, and that the CBOR-mode wrapper
+            # exposes from its decoded payload.
             pyDecodeLines.add("            " & listVar & " = []\n")
             pyDecodeLines.add(
               "            if " & snakeFname & " and " & snakeFname & "_count > 0:\n"
@@ -1062,7 +1066,26 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             pyDecodeLines.add(
               "                for _i in range(" & snakeFname & "_count):\n"
             )
-            pyDecodeLines.add("                    " & listVar & ".append(_arr[_i])\n")
+            pyDecodeLines.add("                    _item = _arr[_i]\n")
+            let itemFields = lookupFfiStruct(elemName)
+            var itemArgs: seq[string] = @[]
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                itemArgs.add(
+                  ifName & "=_item." & ifName & ".decode(\"utf-8\") if _item." & ifName &
+                    " else \"\""
+                )
+              else:
+                itemArgs.add(ifName & "=_item." & ifName)
+            pyDecodeLines.add(
+              "                    " & listVar & ".append(" & elemName & "(\n"
+            )
+            for j, arg in itemArgs:
+              pyDecodeLines.add("                        " & arg)
+              if j < itemArgs.len - 1:
+                pyDecodeLines.add(",")
+              pyDecodeLines.add("\n")
+            pyDecodeLines.add("                    ))\n")
           pyForwards.add(listVar)
         elif isArrayTypeNode(fType):
           # C ABI: pointer + count (same layout as seq[primitive])
@@ -1094,28 +1117,31 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
     let cfuncTypeName = "self._" & typeDisplayName & "CCallback"
 
-    # Build specific Callable type hint from event fields.
-    # Python callbacks are owner-aware like the C++ wrapper surface: the first
-    # argument is the Mylib wrapper instance that owns the registration.
-    var pyTypeHintParams: seq[string] = @["Mylib"]
+    # Build specific Callable type hint from event fields. Python callbacks
+    # are owner-aware like the C++ wrapper surface: the first argument is the
+    # owning library wrapper instance. The class name is filled in later via
+    # the __LIB_OWNER_CLASS__ placeholder (substituted at .py emission time
+    # when the libname-derived class name is known).
+    var pyTypeHintParams: seq[string] = @["__LIB_OWNER_CLASS__"]
     if hasInlineFields:
       for i in 0 ..< fieldNames.len:
         pyTypeHintParams.add(nimTypeToPyAnnotation(fieldTypes[i]))
     let pyCallableHint = "Callable[[" & pyTypeHintParams.join(", ") & "], None]"
-    var pySummaryParams: seq[string] = @[("owner")]
-    pySummaryParams.add(pyUserParams)
 
-    # on_<event> method
+    # on_<event> method (snake-only, parity with C++ on*/off* shape)
     block:
-      let pyCamelEvent = "on" & typeDisplayName
+      let pyOnName = "on_" & pySnakeEvent
       var m =
-        "    def " & pyCamelEvent & "(self, callback: " & pyCallableHint & ") -> int:\n"
+        "    def " & pyOnName & "(self, callback: " & pyCallableHint & ") -> int:\n"
       m.add(
         "        \"\"\"Subscribe to " & typeDisplayName &
-          " events.\n\n        The callback receives the owning Mylib instance as its first\n        argument instead of the raw ctx value so ownership stays at the\n        wrapper level while the C ABI details remain hidden. Returns a\n        handle for removal.\"\"\"\n"
+          " events. Returns a non-zero handle on success, 0 on failure.\n"
       )
-      m.add("        self._requireContext()\n")
-      # Build the trampoline that decodes ABI values to Python types
+      m.add("        The callback receives the owning library instance as\n")
+      m.add("        its first argument followed by the unpacked event\n")
+      m.add("        payload fields.\"\"\"\n")
+      m.add("        if self._ctx == 0:\n")
+      m.add("            return 0\n")
       m.add("        @" & cfuncTypeName & "\n")
       var trampolineParams = @["_ctx", "_user_data"]
       trampolineParams.add(pyTrampolineParams)
@@ -1130,51 +1156,36 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           "(self._ctx, _trampoline, None)\n"
       )
       m.add("        if handle == 0:\n")
-      m.add("            raise __LIB_ERROR__(\"Failed to register event listener\")\n")
+      m.add("            return 0\n")
       m.add("        with self._lock:\n")
       m.add(
         "            self._cb_refs[(\"" & typeDisplayName &
           "\", handle)] = _trampoline\n"
       )
-      m.add("        return handle\n\n")
-      m.add(
-        "    def on_" & pySnakeEvent & "(self, callback: " & pyCallableHint &
-          ") -> int:\n"
-      )
-      m.add("        return self." & pyCamelEvent & "(callback)")
+      m.add("        return handle")
       gApiPyEventMethods.add(m)
-      gApiPyInterfaceSummary.add(
-        typeDisplayName & "Callback(" & pySummaryParams.join(", ") & ")"
-      )
-      gApiPyInterfaceSummary.add(pyCamelEvent & "(callback)")
-      gApiPyInterfaceSummary.add("on_" & pySnakeEvent & "(callback)")
+      gApiPyInterfaceSummary.add(pyOnName & "(callback) -> int")
 
     # off_<event> method
     block:
-      let pyCamelEvent = "off" & typeDisplayName
-      var m = "    def " & pyCamelEvent & "(self, handle: int = 0) -> None:\n"
+      let pyOffName = "off_" & pySnakeEvent
+      let pyOnNameStr = "on_" & pySnakeEvent
+      var m = "    def " & pyOffName & "(self, handle: int = 0) -> None:\n"
       m.add("        \"\"\"Unsubscribe from " & typeDisplayName & " events.\n\n")
       m.add("        Args:\n")
       m.add(
-        "            handle: Listener handle from on_" & pySnakeEvent &
+        "            handle: Listener handle from " & pyOnNameStr &
           "(). 0 removes all.\n"
       )
       m.add("        \"\"\"\n")
-      m.add("        self._requireContext()\n")
+      m.add("        if self._ctx == 0:\n")
+      m.add("            return\n")
       m.add("        self._lib." & publicDeregFuncName & "(self._ctx, handle)\n")
-      m.add("        # Note: callback references are intentionally kept alive in\n")
-      m.add("        # _cb_refs until shutdown(). The Nim delivery thread may still\n")
-      m.add(
-        "        # have in-flight event futures holding the raw function pointer;\n"
-      )
-      m.add(
-        "        # releasing the ctypes object here could cause a use-after-free.\n\n"
-      )
-      m.add("    def off_" & pySnakeEvent & "(self, handle: int = 0) -> None:\n")
-      m.add("        self." & pyCamelEvent & "(handle)")
+      m.add("        # Callback references are intentionally kept alive in\n")
+      m.add("        # _cb_refs until shutdown(); the delivery thread may\n")
+      m.add("        # still hold in-flight references.")
       gApiPyEventMethods.add(m)
-      gApiPyInterfaceSummary.add(pyCamelEvent & "(handle = 0)")
-      gApiPyInterfaceSummary.add("off_" & pySnakeEvent & "(handle = 0)")
+      gApiPyInterfaceSummary.add(pyOffName & "(handle = 0) -> None")
 
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))

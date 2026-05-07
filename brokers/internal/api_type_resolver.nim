@@ -269,15 +269,15 @@ macro autoRegisterApiType*(T: typed): untyped =
       # for namespace awareness)
       # No separate C++ struct needed — C enum typedef is used directly
 
-      # Generate Python IntEnum class
+      # Generate Python IntEnum class. Use the original Nim value names
+      # (e.g. `pLow`) — matches the C++ `enum class Priority { pLow, ... }`
+      # surface so the same client code that writes `Priority.pLow` works
+      # in both native- and CBOR-built Python wrappers.
       when defined(BrokerFfiApiGenPy):
         var pyEnum = "class " & typeName & "(enum.IntEnum):\n"
         pyEnum.add("    \"\"\"" & typeName & " — generated from Nim enum.\"\"\"\n")
         for v in apiValues:
-          pyEnum.add(
-            "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " &
-              $v.ordinal & "\n"
-          )
+          pyEnum.add("    " & v.name & " = " & $v.ordinal & "\n")
         gApiPyTypedefs.add(pyEnum)
 
       # Emit recursive calls for nested enum dependencies (rare but possible)

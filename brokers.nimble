@@ -544,7 +544,7 @@ task runTypeMapTestLibCborCpp,
   exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
 
 task runTypeMapTestLibCborPy,
-  "Build the CBOR-mode parity library + Python wrapper and run the Python parity test":
+  "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":
   buildTypeMapTestLibCbor(true)
   let mm =
     if existsEnv("MM"):
@@ -554,10 +554,12 @@ task runTypeMapTestLibCborPy,
   let release = existsEnv("RELEASE")
   if isNim224MacosRefcDebug(mm, release):
     putEnv("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS", "1")
-  # The Python parity test was originally written against the CBOR-only
-  # wrapper API and lives next to the CBOR build's generated .py file.
+  # The same test_typemappingtestlib.py drives both native and CBOR
+  # builds; selection is via TYPEMAP_BUILD_DIR which points at the
+  # build output that holds the matching generated .py wrapper.
+  putEnv("TYPEMAP_BUILD_DIR", "build_cbor")
   exec quoteArg(findPythonExe()) & " " &
-    quoteArg("test/typemappingtestlib/test_typemappingtestlib_cbor.py")
+    quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
 proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   var flags =

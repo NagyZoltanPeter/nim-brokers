@@ -30,7 +30,7 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nimlib" / "build"))
 
-from torpedolib import Torpedolib, TorpedolibError
+from torpedolib import Torpedolib
 
 
 DEFAULT_REFRESH_DELAY = 0.18
@@ -268,10 +268,10 @@ def register_callbacks(lib: Torpedolib, side: str, event_log: deque[str]) -> lis
             detail += f": {message}"
         event_log.append(detail)
 
-    handles.append(("CaptainRemark", lib.onCaptainRemark(on_remark)))
-    handles.append(("ShotResolved", lib.onShotResolved(on_shot)))
-    handles.append(("MatchEnded", lib.onMatchEnded(on_match)))
-    handles.append(("VolleyEvent", lib.onVolleyEvent(on_volley)))
+    handles.append(("CaptainRemark", lib.on_captain_remark(on_remark)))
+    handles.append(("ShotResolved", lib.on_shot_resolved(on_shot)))
+    handles.append(("MatchEnded", lib.on_match_ended(on_match)))
+    handles.append(("VolleyEvent", lib.on_volley_event(on_volley)))
     event_log.append(f"{side} event listeners attached")
     return handles
 
@@ -285,13 +285,13 @@ def unregister_callbacks(lib: Torpedolib, handles: list[tuple[str, int]]) -> Non
     """
     for event_name, handle in handles:
         if event_name == "CaptainRemark":
-            lib.offCaptainRemark(handle)
+            lib.off_captain_remark(handle)
         elif event_name == "ShotResolved":
-            lib.offShotResolved(handle)
+            lib.off_shot_resolved(handle)
         elif event_name == "MatchEnded":
-            lib.offMatchEnded(handle)
+            lib.off_match_ended(handle)
         elif event_name == "VolleyEvent":
-            lib.offVolleyEvent(handle)
+            lib.off_volley_event(handle)
 
 
 def run_duel(args: argparse.Namespace) -> int:
@@ -301,27 +301,30 @@ def run_duel(args: argparse.Namespace) -> int:
     event_log: deque[str] = deque(maxlen=24)
 
     with Torpedolib() as red, Torpedolib() as blue, RawTerminal() as term:
-        red.createContext()
-        blue.createContext()
+        for side, lib in (("Red", red), ("Blue", blue)):
+            r = lib.create_context()
+            if not r.is_ok():
+                print(f"FATAL: {side} create_context: {r.error}", file=sys.stderr)
+                return 1
 
         red_handles = register_callbacks(red, "Red Fleet", event_log)
         blue_handles = register_callbacks(blue, "Blue Fleet", event_log)
 
-        red.initializeCaptainRequest("Red Fleet", args.board_size, "hunt", args.seed_red, turn_delay_ms)
-        blue.initializeCaptainRequest("Blue Fleet", args.board_size, "hunt", args.seed_blue, turn_delay_ms)
+        red.initialize_captain_request("Red Fleet", args.board_size, "hunt", args.seed_red, turn_delay_ms)
+        blue.initialize_captain_request("Blue Fleet", args.board_size, "hunt", args.seed_blue, turn_delay_ms)
 
-        red_setup = red.autoPlaceFleetRequest()
-        blue_setup = blue.autoPlaceFleetRequest()
+        red_setup = red.auto_place_fleet_request().value
+        blue_setup = blue.auto_place_fleet_request().value
         event_log.append(f"Red placed {red_setup.shipCount} ships")
         event_log.append(f"Blue placed {blue_setup.shipCount} ships")
 
-        red.linkOpponentRequest(blue.ctx)
-        blue.linkOpponentRequest(red.ctx)
+        red.link_opponent_request(blue.ctx)
+        blue.link_opponent_request(red.ctx)
         event_log.append(f"Linked contexts red={red.ctx} blue={blue.ctx}")
 
         starter = red if args.starter == "red" else blue
         starter_name = "Red Fleet" if args.starter == "red" else "Blue Fleet"
-        starter.startGameRequest()
+        starter.start_game_request()
 
         banner = f"{starter_name} opens the duel"
         try:
@@ -331,15 +334,15 @@ def run_duel(args: argparse.Namespace) -> int:
                 if key in ("q", "Q"):
                     return 0
 
-                red_view = red.getPublicBoardRequest()
-                blue_view = blue.getPublicBoardRequest()
+                red_view = red.get_public_board_request().value
+                blue_view = blue.get_public_board_request().value
                 if event_log:
                     banner = event_log[-1]
                 draw_screen(red_view, blue_view, event_log, banner, refresh_delay)
 
                 if red_view.gameOver or blue_view.gameOver:
-                    final_red = red.getPublicBoardRequest()
-                    final_blue = blue.getPublicBoardRequest()
+                    final_red = red.get_public_board_request().value
+                    final_blue = blue.get_public_board_request().value
                     winner = "Red Fleet" if final_red.hasWon else "Blue Fleet" if final_blue.hasWon else "Unknown"
                     banner = f"{winner} wins the duel"
                     draw_screen(final_red, final_blue, event_log, banner, refresh_delay)
@@ -358,11 +361,7 @@ def run_duel(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    try:
-        return run_duel(args)
-    except TorpedolibError as exc:
-        print(f"FATAL: {exc}", file=sys.stderr)
-        return 1
+    return run_duel(args)
 
 
 if __name__ == "__main__":

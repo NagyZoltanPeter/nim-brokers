@@ -9,12 +9,14 @@
 ##
 ## The wrapper emits typed `dataclass` definitions for each registered
 ## request response, request args, and event payload type, and per-
-## request methods on the `Lib` class that CBOR-encode the args, dispatch
-## through the C gate, and decode the response envelope into a `Result`
-## object. Per-event `subscribe_<name>(handler)` methods accept typed
-## callables and dispatch decoded events to them via a ctypes CFUNCTYPE
-## trampoline kept alive in a per-event handler map (mirroring the C++
-## shared_ptr layout from phase 4).
+## request methods on the libname-PascalCase wrapper class that
+## CBOR-encode the args, dispatch through the C gate, and decode the
+## response envelope into a `Result` object. Per-event `on_<name>(callback)`
+## methods register a typed callable that receives the owning library
+## instance plus the unpacked event payload fields; `off_<name>(handle = 0)`
+## removes a single registration (or, with handle 0, all of them).
+## Trampolines are kept alive in a per-event handler map mirroring the
+## C++ EventDispatcher's GC anchor.
 ##
 ## Type-matrix coverage (Phase 7D):
 ##   - Primitives: bool, int/intN, uint/uintN/byte, float/floatN, string,
@@ -268,6 +270,21 @@ proc generateCborPyFile*(
       libName & ".py"
   let p = libName & "_"
 
+  # Derive Python class name from libName (PascalCase) the same way the
+  # native Python codegen does — gives the same public class name in both
+  # builds so a single test source can drive either.
+  var className = ""
+  block:
+    var capitalize = true
+    for ch in libName:
+      if ch == '_' or ch == '-':
+        capitalize = true
+      elif capitalize:
+        className.add(chr(ord(ch) - 32 * ord(ch in {'a' .. 'z'})))
+        capitalize = false
+      else:
+        className.add(ch)
+
   # Note: type emission below walks `gApiTypeRegistry` directly so we
   # cover every referenced object/enum/distinct, not just request
   # response or event payload types. The objectNames seq populated
@@ -513,23 +530,42 @@ proc generateCborPyFile*(
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
-  py.add("class Lib:\n")
-  py.add("    \"\"\"RAII wrapper around the library's context. Construction\n")
-  py.add("    calls `_initialize` and `_createContext`; `close()` (and the\n")
-  py.add("    context manager) calls `_shutdown`. Use `with Lib() as lib:`\n")
-  py.add("    for deterministic cleanup.\n")
+  # Public-API interface summary, emitted as a leading comment block so
+  # the file reads as a self-documenting overview before the
+  # implementation. Matches the native Python wrapper layout.
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# Public API surface (auto-generated)\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# class " & className & ":\n")
+  py.add("#   __enter__() -> " & className & "\n")
+  py.add("#   __exit__(*_) -> None\n")
+  py.add("#   create_context() -> Result[None]\n")
+  py.add("#   valid_context() -> bool\n")
+  py.add("#   __bool__() -> bool\n")
+  py.add("#   shutdown() -> None\n")
+  py.add("#   ctx -> int    (property)\n")
+  py.add("#\n")
+  py.add("# Each request method returns Result[<TypeName>]; each event has\n")
+  py.add("# on_<name>(callback) -> handle and off_<name>(handle = 0) -> None.\n")
+  py.add("# Mirrors the C++ wrapper public surface and the native-FFI Python\n")
+  py.add("# wrapper so the same client code drives both builds.\n\n")
+
+  py.add("class " & className & ":\n")
+  py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
+  py.add("    Usage::\n\n")
+  py.add("        with " & className & "() as lib:\n")
+  py.add("            init = lib.create_context()\n")
+  py.add("            assert init.is_ok(), init.error\n")
+  py.add("            r = lib.echo_request(\"ping\")\n")
   py.add("    \"\"\"\n\n")
   py.add("    def __init__(self) -> None:\n")
   py.add("        _LIB." & p & "initialize()\n")
-  py.add("        err = ctypes.c_char_p()\n")
-  py.add("        self._ctx = _LIB." & p & "createContext(ctypes.byref(err))\n")
-  py.add("        if self._ctx == 0:\n")
-  py.add(
-    "            msg = err.value.decode(\"utf-8\", errors=\"replace\") if err.value else \"createContext returned 0\"\n"
-  )
-  py.add("            if err.value:\n")
-  py.add("                _LIB." & p & "freeBuffer(err)\n")
-  py.add("            raise RuntimeError(f\"createContext failed: {msg}\")\n")
+  py.add("        self._ctx: int = 0\n")
+  py.add("        # Per-event handler maps + GC-anchor for trampolines.\n")
 
   # Per-event handler maps, initialised in __init__.
   for ev in eventEntries:
@@ -539,22 +575,52 @@ proc generateCborPyFile*(
     py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
   py.add("\n")
 
-  py.add("    def close(self) -> None:\n")
+  py.add("    def create_context(self) -> Result[None]:\n")
+  py.add("        \"\"\"Create the library context. Result[None] — Result.ok(None)\n")
+  py.add("        on success, Result.err(msg) on failure.\"\"\"\n")
+  py.add("        if self._ctx != 0:\n")
+  py.add("            return Result.err(\"Context already created\")\n")
+  py.add("        err = ctypes.c_char_p()\n")
+  py.add("        ctx = _LIB." & p & "createContext(ctypes.byref(err))\n")
+  py.add("        if ctx == 0:\n")
+  py.add(
+    "            msg = err.value.decode(\"utf-8\", errors=\"replace\") if err.value else \"createContext returned 0\"\n"
+  )
+  py.add("            if err.value:\n")
+  py.add("                _LIB." & p & "freeBuffer(err)\n")
+  py.add("            return Result.err(msg)\n")
+  py.add("        self._ctx = ctx\n")
+  py.add("        return Result.ok(None)\n\n")
+
+  py.add("    def valid_context(self) -> bool:\n")
+  py.add("        return self._ctx != 0\n\n")
+  py.add("    def __bool__(self) -> bool:\n")
+  py.add("        return self.valid_context()\n\n")
+  py.add("    @property\n")
+  py.add("    def ctx(self) -> int:\n")
+  py.add("        return self._ctx\n\n")
+  py.add("    def shutdown(self) -> None:\n")
+  py.add(
+    "        \"\"\"Tear down the library context. Safe to call multiple times.\"\"\"\n"
+  )
   py.add("        if self._ctx:\n")
   py.add("            _LIB." & p & "shutdown(self._ctx)\n")
-  py.add("            self._ctx = 0\n\n")
-  py.add("    def __enter__(self) -> \"Lib\":\n")
+  py.add("            self._ctx = 0\n")
+  for ev in eventEntries:
+    if ev.typeName notin objectNames:
+      continue
+    let mapName = "_" & ev.apiName & "_handlers"
+    py.add("        self." & mapName & ".clear()\n")
+  py.add("\n")
+  py.add("    def __enter__(self) -> \"" & className & "\":\n")
   py.add("        return self\n\n")
   py.add("    def __exit__(self, exc_type, exc, tb) -> None:\n")
-  py.add("        self.close()\n\n")
+  py.add("        self.shutdown()\n\n")
   py.add("    def __del__(self) -> None:\n")
   py.add("        try:\n")
-  py.add("            self.close()\n")
+  py.add("            self.shutdown()\n")
   py.add("        except Exception:\n")
   py.add("            pass\n\n")
-  py.add("    @property\n")
-  py.add("    def context(self) -> int:\n")
-  py.add("        return self._ctx\n\n")
 
   # Discovery API helpers (Phase 6).
   py.add("    def list_apis(self) -> Dict[str, Any]:\n")
@@ -660,6 +726,8 @@ proc generateCborPyFile*(
       "    def " & methodName & "(" & sigParams & ") -> Result[" & e.responseTypeName &
         "]:\n"
     )
+    py.add("        if self._ctx == 0:\n")
+    py.add("            return Result.err(\"Library context is not created\")\n")
     if e.argFields.len > 0:
       py.add("        req_payload = cbor2.dumps(" & argsDictBuilder & ")\n")
     else:
@@ -687,20 +755,30 @@ proc generateCborPyFile*(
       )
       continue
     let mapName = "_" & ev.apiName & "_handlers"
-    let subName = "subscribe_" & ev.apiName
-    let unsubName = "unsubscribe_" & ev.apiName
+    let onName = "on_" & ev.apiName
+    let offName = "off_" & ev.apiName
 
+    # Build per-field type hints + per-field destructure args. The user
+    # callback signature is `(<ClassName>, *unpacked_field_types) -> None`
+    # — parity with the C++ wrapper and the native-FFI Python wrapper.
+    let entry = lookupTypeEntry(ev.typeName)
+    var hintParts: seq[string] = @[className]
+    var destructureArgs: seq[string] = @["self"]
+    for f in entry.fields:
+      hintParts.add(nimTypeToPyHint(f.nimType))
+      destructureArgs.add("evt." & f.name)
+    let pyCallableHint = "Callable[[" & hintParts.join(", ") & "], None]"
+
+    py.add("    def " & onName & "(self, callback: " & pyCallableHint & ") -> int:\n")
     py.add(
-      "    def " & subName & "(self, handler: Callable[[" & ev.typeName &
-        "], None]) -> int:\n"
+      "        \"\"\"Subscribe to '" & ev.apiName &
+        "' events. Returns a handle (>=2) on success, 0 on failure.\n"
     )
-    py.add(
-      "        \"\"\"Register `handler` for events emitted with name '" & ev.apiName &
-        "'. Returns the\n" &
-        "        subscription handle (>=2). 0 indicates a framework error;\n" &
-        "        1 is the probe-mode sentinel (cb=None probes won't go\n" &
-        "        through this typed path).\n        \"\"\"\n"
-    )
+    py.add("        The callback receives the owning library instance as its\n")
+    py.add("        first argument followed by the unpacked event payload\n")
+    py.add("        fields.\"\"\"\n")
+    py.add("        if self._ctx == 0:\n")
+    py.add("            return 0\n")
     py.add("        def trampoline(\n")
     py.add("            ctx: int, name: bytes, buf: int, buf_len: int, _ud: int\n")
     py.add("        ) -> None:\n")
@@ -710,7 +788,7 @@ proc generateCborPyFile*(
     py.add("                payload = ctypes.string_at(buf, buf_len)\n")
     py.add("                data = cbor2.loads(payload)\n")
     py.add("                evt = _decode_" & ev.typeName & "(data)\n")
-    py.add("                handler(evt)\n")
+    py.add("                callback(" & destructureArgs.join(", ") & ")\n")
     py.add("            except Exception:\n")
     py.add("                # Swallow handler errors so they don't escape\n")
     py.add("                # back across the C ABI boundary.\n")
@@ -723,22 +801,25 @@ proc generateCborPyFile*(
     py.add("        if h == 0 or h == 1:\n")
     py.add("            return h\n")
     py.add("        # Hold a reference to both the CFUNCTYPE wrapper and the\n")
-    py.add("        # user handler — without this the Python GC would free\n")
+    py.add("        # user callback — without this the Python GC would free\n")
     py.add("        # the trampoline before the C side fires it.\n")
-    py.add("        self." & mapName & "[h] = (cb, handler)\n")
+    py.add("        self." & mapName & "[h] = (cb, callback)\n")
     py.add("        return h\n\n")
 
-    py.add("    def " & unsubName & "(self, handle: int) -> int:\n")
+    py.add("    def " & offName & "(self, handle: int = 0) -> None:\n")
     py.add(
-      "        status = _LIB." & p & "unsubscribe(self._ctx, b\"" & ev.apiName &
-        "\", handle)\n"
+      "        \"\"\"Unsubscribe from '" & ev.apiName &
+        "' events. handle=0 removes all.\"\"\"\n"
     )
-    py.add("        if status == 0:\n")
-    py.add("            if handle == 0:\n")
-    py.add("                self." & mapName & ".clear()\n")
-    py.add("            else:\n")
-    py.add("                self." & mapName & ".pop(handle, None)\n")
-    py.add("        return status\n\n")
+    py.add("        if self._ctx == 0:\n")
+    py.add("            return\n")
+    py.add(
+      "        _LIB." & p & "unsubscribe(self._ctx, b\"" & ev.apiName & "\", handle)\n"
+    )
+    py.add("        if handle == 0:\n")
+    py.add("            self." & mapName & ".clear()\n")
+    py.add("        else:\n")
+    py.add("            self." & mapName & ".pop(handle, None)\n\n")
 
   try:
     writeFile(pyPath, py)

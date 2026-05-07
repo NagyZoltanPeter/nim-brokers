@@ -200,7 +200,7 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("import threading\n")
   py.add("from dataclasses import dataclass, field\n")
   py.add("from pathlib import Path\n")
-  py.add("from typing import Callable, Optional\n\n")
+  py.add("from typing import Callable, Generic, Optional, TypeVar\n\n")
 
   # Library loader
   py.add(
@@ -238,17 +238,38 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("        return ctypes.CDLL(path)\n")
   py.add("    raise OSError(f\"Cannot find shared library '{name}'\")\n\n")
 
-  # Error class
+  # Result[T] envelope — mirrors C++ Result<T> and CBOR-mode Python wrapper
   py.add(
     "# ---------------------------------------------------------------------------\n"
   )
-  py.add("# Error type\n")
+  py.add("# Result[T] envelope\n")
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
-  py.add("class " & className & "Error(Exception):\n")
-  py.add("    \"\"\"Raised when a library call returns an error.\"\"\"\n")
-  py.add("    pass\n\n")
+  py.add("T = TypeVar(\"T\")\n\n")
+  py.add("@dataclass\n")
+  py.add("class Result(Generic[T]):\n")
+  py.add("    \"\"\"Mirror of Nim's Result[T, string] envelope.\n\n")
+  py.add("    Use the ``ok()`` / ``err()`` factories to construct, never the\n")
+  py.add("    dataclass constructor directly. Boolean tests, ``is_ok()`` /\n")
+  py.add("    ``is_err()``, ``.value`` and ``.error`` mirror the C++ Result<T>\n")
+  py.add("    surface so the same test code drives native and CBOR builds.\n")
+  py.add("    \"\"\"\n\n")
+  py.add("    _ok: bool = False\n")
+  py.add("    value: Optional[T] = None\n")
+  py.add("    error: str = \"\"\n\n")
+  py.add("    @classmethod\n")
+  py.add("    def ok(cls, value: T) -> \"Result[T]\":\n")
+  py.add("        return cls(_ok=True, value=value)\n\n")
+  py.add("    @classmethod\n")
+  py.add("    def err(cls, msg: str) -> \"Result[T]\":\n")
+  py.add("        return cls(_ok=False, error=msg)\n\n")
+  py.add("    def is_ok(self) -> bool:\n")
+  py.add("        return self._ok\n\n")
+  py.add("    def is_err(self) -> bool:\n")
+  py.add("        return not self._ok\n\n")
+  py.add("    def __bool__(self) -> bool:\n")
+  py.add("        return self._ok\n\n")
 
   # Enum / type alias definitions (IntEnum classes, SensorId = int, etc.)
   if gApiPyTypedefs.len > 0:
@@ -303,13 +324,28 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
-  py.add("# Quick Python wrapper interface summary (names only)\n")
+  # Public-API interface summary, emitted as a leading comment block so the
+  # generated file reads as a self-documenting overview before the
+  # implementation details. Mirrors the C++ wrapper's class declaration.
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# Public API surface (auto-generated from broker declarations)\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# class " & className & ":\n")
   for summaryLine in [
-    "__enter__()", "__exit__()", "createContext()", "create_context()",
-    "validContext()", "valid_context()", "__bool__()", "shutdown()", "ctx",
+    "__enter__() -> " & className, "__exit__(*_) -> None",
+    "create_context() -> Result[None]", "valid_context() -> bool", "__bool__() -> bool",
+    "shutdown() -> None", "ctx -> int    (property)",
   ]:
     py.add("#   " & summaryLine & "\n")
+  py.add("#\n")
+  py.add("# Each request method returns Result[<TypeName>] (use .is_ok() / .value /\n")
+  py.add("# .error). Each event has on_<name>(callback) -> handle and\n")
+  py.add("# off_<name>(handle = 0) -> None.\n")
+  py.add("#\n")
   for summaryLine in gApiPyInterfaceSummary:
     py.add("#   " & summaryLine & "\n")
   py.add("\n")
@@ -317,9 +353,11 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
   py.add("        with " & className & "() as lib:\n")
-  py.add("            lib.createContext()\n")
-  py.add("            result = lib.initializeRequest(\"/path/to/config\")\n")
-  py.add("            print(result.configPath)\n")
+  py.add("            init = lib.create_context()\n")
+  py.add("            assert init.is_ok(), init.error\n")
+  py.add("            r = lib.initialize_request(\"/path/to/config\")\n")
+  py.add("            if r.is_ok():\n")
+  py.add("                print(r.value.label)\n")
   py.add("    \"\"\"\n\n")
 
   # __init__
@@ -360,43 +398,28 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("    def __exit__(self, *_: object) -> None:\n")
   py.add("        self.shutdown()\n\n")
 
-  py.add("    def createContext(self) -> None:\n")
-  py.add("        \"\"\"Create the library context explicitly.\"\"\"\n")
+  py.add("    def create_context(self) -> Result[None]:\n")
+  py.add("        \"\"\"Create the library context. Result[None].\"\"\"\n")
   py.add("        if self._ctx != 0:\n")
-  py.add("            raise " & className & "Error(\"Context already created\")\n")
+  py.add("            return Result.err(\"Context already created\")\n")
   py.add("        c = self._lib." & libName & "_createContext()\n")
   py.add("        try:\n")
   py.add("            if c.error_message:\n")
-  py.add(
-    "                raise " & className & "Error(c.error_message.decode(\"utf-8\"))\n"
-  )
+  py.add("                return Result.err(c.error_message.decode(\"utf-8\"))\n")
   py.add("            self._ctx = c.ctx\n")
   py.add("            if self._ctx == 0:\n")
-  py.add(
-    "                raise " & className & "Error(\"Library context creation failed\")\n"
-  )
+  py.add("                return Result.err(\"Library context creation failed\")\n")
+  py.add("            return Result.ok(None)\n")
   py.add("        finally:\n")
   py.add(
     "            self._lib." & freeCreateContextResultFuncName & "(ctypes.byref(c))\n\n"
   )
 
-  py.add("    def create_context(self) -> None:\n")
-  py.add("        self.createContext()\n\n")
-
-  py.add("    def validContext(self) -> bool:\n")
+  py.add("    def valid_context(self) -> bool:\n")
   py.add("        return self._ctx != 0\n\n")
 
-  py.add("    def valid_context(self) -> bool:\n")
-  py.add("        return self.validContext()\n\n")
-
   py.add("    def __bool__(self) -> bool:\n")
-  py.add("        return self.validContext()\n\n")
-
-  py.add("    def _requireContext(self) -> None:\n")
-  py.add("        if self._ctx == 0:\n")
-  py.add(
-    "            raise " & className & "Error(\"Library context is not created\")\n\n"
-  )
+  py.add("        return self.valid_context()\n\n")
 
   # shutdown
   py.add("    def shutdown(self) -> None:\n")
@@ -424,18 +447,23 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("        \"\"\"The raw library context handle.\"\"\"\n")
   py.add("        return self._ctx\n\n")
 
-  # Request methods
-  let pyErrClass = className & "Error"
+  # Request methods. The `__LIB_OWNER_CLASS__` placeholder lets the request
+  # / event broker codegen reference the (libname-derived) wrapper class
+  # name without knowing it at the time the method body is built.
   for m in gApiPyMethods:
     py.add(
-      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+      m.replace("__LIB_OWNER_CLASS__", className).replace(
+        ApiLibPrefixPlaceholder, apiPrefix
+      )
     )
     py.add("\n\n")
 
   # Event methods
   for m in gApiPyEventMethods:
     py.add(
-      m.replace("__LIB_ERROR__", pyErrClass).replace(ApiLibPrefixPlaceholder, apiPrefix)
+      m.replace("__LIB_OWNER_CLASS__", className).replace(
+        ApiLibPrefixPlaceholder, apiPrefix
+      )
     )
     py.add("\n\n")
 
