@@ -217,9 +217,13 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("# class " & className & ":\n")
   for summaryLine in [
     "version() -> str    (@staticmethod)",
-    "__enter__() -> " & className, "__exit__(*_) -> None",
-    "create_context() -> Result[None]", "valid_context() -> bool", "__bool__() -> bool",
-    "shutdown() -> None", "ctx -> int    (property)",
+    "__enter__() -> " & className,
+    "__exit__(*_) -> None",
+    "create_context() -> Result[None]",
+    "valid_context() -> bool",
+    "__bool__() -> bool",
+    "shutdown() -> None",
+    "ctx -> int    (property)",
   ]:
     py.add("#   " & summaryLine & "\n")
   py.add("#\n")

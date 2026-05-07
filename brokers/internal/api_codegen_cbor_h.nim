@@ -49,9 +49,8 @@ proc generateCborCHeaderFile*(
   h.add(" * Library identity\n")
   h.add(" * ---------------------------------------------------------------- */\n\n")
   h.add(
-    "/* Returns a NUL-terminated semver string for this library build (\"" &
-      version & "\").\n" &
-      " * The returned pointer is owned by the library — do NOT free. */\n"
+    "/* Returns a NUL-terminated semver string for this library build (\"" & version &
+      "\").\n" & " * The returned pointer is owned by the library — do NOT free. */\n"
   )
   h.add("const char* " & p & "version(void);\n\n")
 

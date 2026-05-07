@@ -1203,9 +1203,10 @@ proc registerBrokerLibraryNativeImpl(
     quote do:
       const `versionConstIdent`: cstring = `versionStrLit`
       proc `versionFuncIdent`*(): cstring {.
-        exportc: `versionFuncNameLit`, cdecl, dynlib
+          exportc: `versionFuncNameLit`, cdecl, dynlib
       .} =
         `versionConstIdent`
+
   )
   appendHeaderDecl(generateCFuncProto(versionFuncName, "const char*", @[]))
 
@@ -1541,9 +1542,10 @@ proc registerBrokerLibraryCborImpl(
     quote do:
       const `cborVersionConstIdent`: cstring = `cborVersionStrLit`
       proc `cborVersionFuncIdent`*(): cstring {.
-        exportc: `cborVersionFuncNameLit`, cdecl, dynlib
+          exportc: `cborVersionFuncNameLit`, cdecl, dynlib
       .} =
         `cborVersionConstIdent`
+
   )
 
   # ------------------------------------------------------------------

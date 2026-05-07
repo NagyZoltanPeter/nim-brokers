@@ -497,8 +497,7 @@ task testFfiApiCmake,
   let consumerBuild = thisDir() / "test" / "cmake_consumer" / "cmake-build"
   mkDir(consumerBuild)
   exec "cmake -S " & quoteArg(consumerSrc) & " -B " & quoteArg(consumerBuild) &
-    " -DMYLIB_CPP_SMOKE=ON" &
-    " -Dmylib_DIR=" & quoteArg(pkgDir) &
+    " -DMYLIB_CPP_SMOKE=ON" & " -Dmylib_DIR=" & quoteArg(pkgDir) &
     cmakeWindowsConfigureExtras()
   exec "cmake --build " & quoteArg(consumerBuild)
   let exeC =
