@@ -1404,7 +1404,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             let pyType = nimTypeToPyAnnotation(paramType)
             pyParams.add(", " & paramName & ": " & pyType)
             aliasArgs.add(paramName)
-            summaryParams.add(paramName)
+            summaryParams.add(paramName & ": " & pyType)
             if isSeqOfObjectNode(paramType):
               let itemTypeName = seqItemTypeName(paramType)
               pyPreCall.add(

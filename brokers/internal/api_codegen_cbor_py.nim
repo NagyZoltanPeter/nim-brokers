@@ -300,6 +300,46 @@ proc generateCborPyFile*(
     "from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar\n" & "\n" &
     "import cbor2\n" & "\n\n"
 
+  # Public-API interface summary, emitted right below the imports so the
+  # file reads as a self-documenting overview before the implementation.
+  # Same shape as the native Python wrapper's leading block — every
+  # request method and every event subscribe / unsubscribe pair appears
+  # with its full signature so a reader can scan the public surface
+  # without diving into the body.
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# Public API surface (auto-generated from broker declarations)\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# class " & className & ":\n")
+  py.add("#   __enter__() -> " & className & "\n")
+  py.add("#   __exit__(*_) -> None\n")
+  py.add("#   create_context() -> Result[None]\n")
+  py.add("#   valid_context() -> bool\n")
+  py.add("#   __bool__() -> bool\n")
+  py.add("#   shutdown() -> None\n")
+  py.add("#   ctx -> int    (property)\n")
+  py.add("#\n")
+  py.add("# Each request method returns Result[<TypeName>] (use .is_ok() / .value /\n")
+  py.add("# .error). Each event has on_<name>(callback) -> handle and\n")
+  py.add("# off_<name>(handle = 0) -> None.\n")
+  py.add("#\n")
+  for e in requestEntries:
+    var sigParams = ""
+    for i, (n, t) in e.argFields.pairs:
+      if i > 0:
+        sigParams.add(", ")
+      sigParams.add(n & ": " & nimTypeToPyHint(t))
+    py.add(
+      "#   " & e.apiName & "(" & sigParams & ") -> Result[" & e.responseTypeName & "]\n"
+    )
+  for ev in eventEntries:
+    py.add("#   on_" & ev.apiName & "(callback) -> int\n")
+    py.add("#   off_" & ev.apiName & "(handle = 0) -> None\n")
+  py.add("\n")
+
   # Library loading.
   py.add(
     "# ---------------------------------------------------------------------------\n"
@@ -530,30 +570,6 @@ proc generateCborPyFile*(
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
-  # Public-API interface summary, emitted as a leading comment block so
-  # the file reads as a self-documenting overview before the
-  # implementation. Matches the native Python wrapper layout.
-  py.add(
-    "# ---------------------------------------------------------------------------\n"
-  )
-  py.add("# Public API surface (auto-generated)\n")
-  py.add(
-    "# ---------------------------------------------------------------------------\n"
-  )
-  py.add("# class " & className & ":\n")
-  py.add("#   __enter__() -> " & className & "\n")
-  py.add("#   __exit__(*_) -> None\n")
-  py.add("#   create_context() -> Result[None]\n")
-  py.add("#   valid_context() -> bool\n")
-  py.add("#   __bool__() -> bool\n")
-  py.add("#   shutdown() -> None\n")
-  py.add("#   ctx -> int    (property)\n")
-  py.add("#\n")
-  py.add("# Each request method returns Result[<TypeName>]; each event has\n")
-  py.add("# on_<name>(callback) -> handle and off_<name>(handle = 0) -> None.\n")
-  py.add("# Mirrors the C++ wrapper public surface and the native-FFI Python\n")
-  py.add("# wrapper so the same client code drives both builds.\n\n")
-
   py.add("class " & className & ":\n")
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")

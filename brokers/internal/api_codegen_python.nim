@@ -202,6 +202,33 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("from pathlib import Path\n")
   py.add("from typing import Callable, Generic, Optional, TypeVar\n\n")
 
+  # Public-API interface summary, emitted right below the imports so the
+  # file reads as a self-documenting overview before any implementation.
+  # The summary lines (per-method / per-event) are populated by the
+  # request- and event-broker codegens at macro expansion time.
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# Public API surface (auto-generated from broker declarations)\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
+  py.add("# class " & className & ":\n")
+  for summaryLine in [
+    "__enter__() -> " & className, "__exit__(*_) -> None",
+    "create_context() -> Result[None]", "valid_context() -> bool", "__bool__() -> bool",
+    "shutdown() -> None", "ctx -> int    (property)",
+  ]:
+    py.add("#   " & summaryLine & "\n")
+  py.add("#\n")
+  py.add("# Each request method returns Result[<TypeName>] (use .is_ok() / .value /\n")
+  py.add("# .error). Each event has on_<name>(callback) -> handle and\n")
+  py.add("# off_<name>(handle = 0) -> None.\n")
+  py.add("#\n")
+  for summaryLine in gApiPyInterfaceSummary:
+    py.add("#   " & summaryLine & "\n")
+  py.add("\n")
+
   # Library loader
   py.add(
     "# ---------------------------------------------------------------------------\n"
@@ -324,31 +351,6 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
-  # Public-API interface summary, emitted as a leading comment block so the
-  # generated file reads as a self-documenting overview before the
-  # implementation details. Mirrors the C++ wrapper's class declaration.
-  py.add(
-    "# ---------------------------------------------------------------------------\n"
-  )
-  py.add("# Public API surface (auto-generated from broker declarations)\n")
-  py.add(
-    "# ---------------------------------------------------------------------------\n"
-  )
-  py.add("# class " & className & ":\n")
-  for summaryLine in [
-    "__enter__() -> " & className, "__exit__(*_) -> None",
-    "create_context() -> Result[None]", "valid_context() -> bool", "__bool__() -> bool",
-    "shutdown() -> None", "ctx -> int    (property)",
-  ]:
-    py.add("#   " & summaryLine & "\n")
-  py.add("#\n")
-  py.add("# Each request method returns Result[<TypeName>] (use .is_ok() / .value /\n")
-  py.add("# .error). Each event has on_<name>(callback) -> handle and\n")
-  py.add("# off_<name>(handle = 0) -> None.\n")
-  py.add("#\n")
-  for summaryLine in gApiPyInterfaceSummary:
-    py.add("#   " & summaryLine & "\n")
-  py.add("\n")
   py.add("class " & className & ":\n")
   py.add("    \"\"\"Pythonic wrapper around the " & libName & " shared library.\n\n")
   py.add("    Usage::\n\n")
