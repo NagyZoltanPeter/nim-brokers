@@ -494,65 +494,6 @@ task runFfiExampleCborCpp,
   buildFfiCmakeTarget("example_cpp", useCbor = true)
   exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
-# ---------------------------------------------------------------------------
-# CBOR-mode example library + C++ consumer
-# ---------------------------------------------------------------------------
-
-proc buildFfiCborExampleFlags(generatePy = false): string =
-  result =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi_cbor/nimlib/build"
-  result.add(nimMainPrefixFlag("mylibcbor"))
-  result.add(nimWindowsCcFlag())
-  result.add(nimWindowsImplibFlag("examples/ffiapi_cbor/nimlib/build", "mylibcbor"))
-  if existsEnv("MM"):
-    result.add(" --mm:" & getEnv("MM"))
-  else:
-    result.add(" --mm:orc")
-  if generatePy or existsEnv("GEN_PY"):
-    result.add(" -d:BrokerFfiApiGenPy")
-
-proc buildFfiCborExampleLibrary(generatePy = false) =
-  exec "nim c " & buildFfiCborExampleFlags(generatePy) &
-    " examples/ffiapi_cbor/nimlib/mylibcbor.nim"
-
-proc ffiCborExampleCmakeBuildDir(): string =
-  "examples/ffiapi_cbor/cpp_example/build"
-
-proc buildFfiCborExampleCpp() =
-  let cmakeDir = "examples/ffiapi_cbor/cpp_example"
-  let buildDir = ffiCborExampleCmakeBuildDir()
-  mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
-  exec "cmake --build " & buildDir
-
-proc ffiCborExampleCppExePath(): string =
-  when defined(windows):
-    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example.exe"
-  else:
-    ffiCborExampleCmakeBuildDir() & "/mylibcbor_cpp_example"
-
-task buildFfiCborExample, "Build the CBOR-mode FFI example library":
-  buildFfiCborExampleLibrary()
-
-task buildFfiCborExampleCpp,
-  "Build the CBOR-mode FFI example library + C++ consumer (via CMake)":
-  buildFfiCborExampleLibrary()
-  buildFfiCborExampleCpp()
-
-task runFfiCborExampleCpp, "Build and run the CBOR-mode C++ consumer example":
-  buildFfiCborExampleLibrary()
-  buildFfiCborExampleCpp()
-  exec quoteArg(ffiCborExampleCppExePath())
-
-task buildFfiCborExamplePy,
-  "Build the CBOR-mode example library + generated Python wrapper":
-  buildFfiCborExampleLibrary(true)
-
-task runFfiCborExamplePy, "Build and run the CBOR-mode Python consumer example":
-  buildFfiCborExampleLibrary(true)
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("examples/ffiapi_cbor/python_example/main.py")
-
 proc buildTypeMapTestLibCbor(genPy: bool = false) =
   let mm =
     if existsEnv("MM"):
@@ -888,7 +829,7 @@ task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
 
 task alltests,
-  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, testApiCbor, runFfiCborExampleCpp, runFfiCborExamplePy, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, runFfiExampleCborCpp, testApiCbor, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
   exec "nimble test"
   exec "nimble testApi"
   exec "nimble testFfiApi"
@@ -896,9 +837,8 @@ task alltests,
   exec "nimble runFfiExamplePy"
   exec "nimble runFfiExampleCpp"
   exec "nimble runFfiExampleC"
+  exec "nimble runFfiExampleCborCpp"
   exec "nimble testApiCbor"
-  exec "nimble runFfiCborExampleCpp"
-  exec "nimble runFfiCborExamplePy"
   exec "nimble runTypeMapTestLibCborCpp"
   exec "nimble runTypeMapTestLibCborPy"
 

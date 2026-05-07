@@ -90,12 +90,15 @@ The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. T
 
 `-d:BrokerFfiApiCBOR` selects the CBOR strategy: every library exposes a fixed 10-function ABI (`<lib>_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
 
+The CBOR-mode example builds reuse the SAME `examples/ffiapi/` and `examples/torpedo/` sources as the native builds — `mylib.nim` / `torpedolib.nim` are compiled with `-d:BrokerFfiApiCBOR` into `nimlib/build_cbor/`, and the existing `cpp_example/main.cpp` is linked against the CBOR-generated header (via `-DUSE_CBOR=ON` in the CMake project). This is the parity-validation harness: the same C++ client compiles cleanly against either build mode.
+
 ```
-nimble buildFfiCborExample          # build examples/ffiapi_cbor/nimlib/mylibcbor.nim as shared library
-nimble buildFfiCborExampleCpp       # build the C++ example via CMake
-nimble buildFfiCborExamplePy        # build lib + generated Python wrapper
-nimble runFfiCborExampleCpp         # rebuild library + run C++ example
-nimble runFfiCborExamplePy          # rebuild library + wrapper + run Python example
+nimble buildFfiExampleCbor          # mylib.nim with -d:BrokerFfiApiCBOR -> examples/ffiapi/nimlib/build_cbor/
+nimble buildFfiExampleCborCpp       # above + cmake (USE_CBOR=ON) build of cpp_example
+nimble runFfiExampleCborCpp         # above + run the CBOR-built C++ example
+nimble buildTorpedoExampleCbor      # same for torpedo
+nimble buildTorpedoExampleCborCpp
+nimble runTorpedoExampleCborCpp
 nimble buildTypeMapTestLibCbor      # build the parity test library
 nimble runTypeMapTestLibCborPy      # run the Python parity matrix
 nimble runTypeMapTestLibCborCpp     # run the C++ parity matrix
@@ -129,8 +132,7 @@ GitHub Actions CI currently runs:
 - `nimble runFfiExampleC`
 - `nimble runFfiExampleCpp`
 - `nimble runFfiExamplePy`
-- `nimble runFfiCborExampleCpp`
-- `nimble runFfiCborExamplePy`
+- `nimble runFfiExampleCborCpp`
 - `nimble runTypeMapTestLibCborPy`
 - `nimble runTypeMapTestLibCborCpp`
 

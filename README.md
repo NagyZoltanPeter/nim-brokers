@@ -324,11 +324,16 @@ and exposes a runtime discovery API (`<lib>_listApis`,
 `<lib>_getSchema`) returning the same schema as a CBOR-encoded
 `LibraryDescriptor`.
 
-Build and run the CBOR-mode examples:
+Build and run the CBOR-mode examples. The same `examples/ffiapi/`
+sources are reused — `runFfiExampleCborCpp` compiles `mylib.nim` with
+`-d:BrokerFfiApiCBOR` into `nimlib/build_cbor/` and links the existing
+`cpp_example/main.cpp` against the CBOR-generated header. This proves
+the wrapper interface shape is identical between native and CBOR
+builds.
 
 ```sh
-nimble runFfiCborExampleCpp     # build lib + jsoncons C++ example
-nimble runFfiCborExamplePy      # build lib + generated Python wrapper + run
+nimble runFfiExampleCborCpp     # parity build: same mylib.nim + cpp_example/main.cpp, CBOR mode
+nimble runTorpedoExampleCborCpp # parity build for the torpedo example
 nimble runTypeMapTestLibCborPy  # full type-mapping parity test (Python)
 nimble runTypeMapTestLibCborCpp # full type-mapping parity test (C++)
 ```
