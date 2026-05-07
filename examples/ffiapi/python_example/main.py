@@ -12,12 +12,18 @@ Demonstrates the generated Python wrapper API on the mylib library:
 The same shape works for native- and CBOR-mode builds of the library.
 """
 
+import os
 import sys
 import time
 from pathlib import Path
 
+# MYLIB_BUILD_DIR=build (default) drives the native FFI build,
+# MYLIB_BUILD_DIR=build_cbor drives the CBOR FFI build of the same source.
+# Both produce a typemappingtestlib-shaped Python wrapper module so this
+# example runs unchanged against either.
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "nimlib" / "build"))
+_BUILD_DIR = os.environ.get("MYLIB_BUILD_DIR", "build")
+sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 
 from mylib import AddDeviceSpec, Mylib  # noqa: E402
 

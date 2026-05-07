@@ -11,6 +11,7 @@ Run from the repository root:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections import deque
@@ -28,7 +29,12 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "nimlib" / "build"))
+# TORPEDOLIB_BUILD_DIR=build (default) drives the native FFI build;
+# TORPEDOLIB_BUILD_DIR=build_cbor drives the CBOR FFI build of the same
+# source. Both produce a torpedolib-shaped Python wrapper module so this
+# example runs unchanged against either.
+_BUILD_DIR = os.environ.get("TORPEDOLIB_BUILD_DIR", "build")
+sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 
 from torpedolib import Torpedolib
 

@@ -177,7 +177,7 @@ proc buildFfiExampleLibrary(generatePy = false) =
 # emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
 # compile against the CBOR-generated mylib.h / mylib.hpp — proves the
 # generated wrapper interface is shape-identical to the native build.
-proc buildFfiExampleCborFlags(): string =
+proc buildFfiExampleCborFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("mylib"))
@@ -187,9 +187,12 @@ proc buildFfiExampleCborFlags(): string =
     result.add(" --mm:" & getEnv("MM"))
   else:
     result.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
 
-proc buildFfiExampleCborLibrary() =
-  exec "nim c " & buildFfiExampleCborFlags() & " examples/ffiapi/nimlib/mylib.nim"
+proc buildFfiExampleCborLibrary(generatePy = false) =
+  exec "nim c " & buildFfiExampleCborFlags(generatePy) &
+    " examples/ffiapi/nimlib/mylib.nim"
 
 proc buildTorpedoExampleFlags(generatePy = false): string =
   result =
@@ -208,7 +211,7 @@ proc buildTorpedoExampleLibrary(generatePy = false) =
   exec "nim c " & buildTorpedoExampleFlags(generatePy) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc buildTorpedoExampleCborFlags(): string =
+proc buildTorpedoExampleCborFlags(generatePy = false): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("torpedolib"))
@@ -218,9 +221,11 @@ proc buildTorpedoExampleCborFlags(): string =
     result.add(" --mm:" & getEnv("MM"))
   else:
     result.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    result.add(" -d:BrokerFfiApiGenPy")
 
-proc buildTorpedoExampleCborLibrary() =
-  exec "nim c " & buildTorpedoExampleCborFlags() &
+proc buildTorpedoExampleCborLibrary(generatePy = false) =
+  exec "nim c " & buildTorpedoExampleCborFlags(generatePy) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
 proc ffiExamplesBuildDir(useCbor = false): string =
@@ -493,6 +498,13 @@ task runFfiExampleCborCpp,
   buildFfiExampleCborLibrary()
   buildFfiCmakeTarget("example_cpp", useCbor = true)
   exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
+
+task runFfiExampleCborPy,
+  "Build the CBOR-mode FFI example library + Python wrapper and run the SAME python_example/main.py against it":
+  buildFfiExampleCborLibrary(true)
+  putEnv("MYLIB_BUILD_DIR", "build_cbor")
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/ffiapi/python_example/main.py")
 
 # CBOR-mode parity build of the typemapping test library: compiles the
 # SAME test/typemappingtestlib/typemappingtestlib.nim source with
@@ -829,6 +841,13 @@ task runTorpedoExampleCborCpp,
   buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
   exec quoteArg(torpedoExecutablePath())
 
+task runTorpedoExampleCborPy,
+  "Build the CBOR-mode torpedo library + Python wrapper and run the SAME python_example/main.py against it":
+  buildTorpedoExampleCborLibrary(true)
+  putEnv("TORPEDOLIB_BUILD_DIR", "build_cbor")
+  exec quoteArg(findPythonExe()) & " " &
+    quoteArg("examples/torpedo/python_example/main.py")
+
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
 
@@ -836,7 +855,7 @@ task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
 
 task alltests,
-  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, runFfiExampleCborCpp, testApiCbor, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
+  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, runFfiExampleCborCpp, runFfiExampleCborPy, testApiCbor, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
   exec "nimble test"
   exec "nimble testApi"
   exec "nimble testFfiApi"
@@ -845,6 +864,7 @@ task alltests,
   exec "nimble runFfiExampleCpp"
   exec "nimble runFfiExampleC"
   exec "nimble runFfiExampleCborCpp"
+  exec "nimble runFfiExampleCborPy"
   exec "nimble testApiCbor"
   exec "nimble runTypeMapTestLibCborCpp"
   exec "nimble runTypeMapTestLibCborPy"

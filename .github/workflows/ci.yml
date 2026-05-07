@@ -158,6 +158,9 @@ jobs:
       - name: Run CBOR C++ FFI parity example (same mylib.nim + cpp_example/main.cpp, CBOR mode)
         run: nimble runFfiExampleCborCpp -y --verbose
 
+      - name: Run CBOR Python FFI parity example (same mylib.nim + python_example/main.py, CBOR mode)
+        run: nimble runFfiExampleCborPy -y --verbose
+
       - name: Run CBOR Python parity matrix
         run: nimble runTypeMapTestLibCborPy -y --verbose
 
