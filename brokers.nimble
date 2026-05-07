@@ -1,8 +1,8 @@
 import std/[os, strutils]
 
 # Package
-version = "0.1.0"
-author = "Status Research & Development GmbH"
+version = "1.0.0"
+author = "Nagy Zoltan Peter"
 description =
   "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
 license = "MIT"

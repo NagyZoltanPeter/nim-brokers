@@ -1,8 +1,12 @@
 # nim-brokers
 
-Type-safe, thread-local, decoupled messaging patterns for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos).
-
-nim-brokers provides three compile-time macro-generated broker patterns that enable event-driven and request-response communication between modules without direct dependencies.
+What is nim-brokers?
+- it is a type-safe component communication library for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos).
+- it supports Pub/Sub and Request/Response patterns, with both single-thread and multi-thread variants.
+   - built with simple aim to decouple interface definitions from implementations, and to decouple modules that need to talk to each other without creating direct dependencies. 
+- it also includes an FFI API layer for exposing broker-driven services as a shared library with generated C, C++, and optional Python bindings.
+   - enabled Nim library developers to easily expose typed, decoupled interfaces to foreign languages without manual C ABI design or glue code.
+   - The same Nim implementation can be used with other Nim modules and if required from foreign languages through the generated FFI layer - with type safety guaranteed and no boilerplate. 
 
 ## Presentation slides  
 
@@ -17,21 +21,42 @@ nimble install brokers
 Or add to your `.nimble` file:
 
 ```nim
-requires "brokers >= 0.1.0"
+requires "brokers >= 1.0.0"
+```
+
+## Testing
+
+```
+nimble alltests
+```
+
+> inspect with `nimble tasks` to see the full list of test variants (debug/release, orc/refc, multi-threaded, etc).
+
+## Debug
+
+As nim-brokers are macro heavy, in order to inspect generated AST during compilation:
+
+```
+nim c -d:brokerDebug ...
 ```
 
 ## Broker Types
 
 ### EventBroker
 
-Reactive pub/sub: many emitters → many listeners. Listeners are async procs; events are dispatched via `asyncSpawn` (fire-and-forget).
+Reactive pub/sub: many emitters → many listeners. Listeners are async procs; events are dispatched as fire-and-forget.
 
 ```nim
 import brokers/event_broker
 
+# interface definition separated:
 EventBroker:
   type GreetingEvent = object
     text*: string
+
+
+
+# Usage:
 
 # Register a listener (returns a handle for later removal)
 let handle = GreetingEvent.listen(
@@ -59,6 +84,7 @@ Single-provider request/response. One provider registers; callers make typed req
 ```nim
 import brokers/request_broker
 
+#interface definition separated:
 # Async mode (default)
 RequestBroker:
   type Greeting = object
@@ -67,13 +93,16 @@ RequestBroker:
   proc signature*(): Future[Result[Greeting, string]] {.async.}
   proc signature*(lang: string): Future[Result[Greeting, string]] {.async.}
 
+# Implementation is dynamicly set:
 Greeting.setProvider(
   proc(): Future[Result[Greeting, string]] {.async.} =
     ok(Greeting(text: "hello"))
 )
 
+# use it from anywhere where the definition is visible:
 let res = await Greeting.request()
 assert res.isOk()
+
 Greeting.clearProvider()
 ```
 
@@ -94,7 +123,7 @@ let res = Config.request()  # no await needed
 Config.clearProvider()
 ```
 
-If no `signature` proc is declared, a zero-argument form is generated automatically.
+> If no `signature` proc is declared, a zero-argument form is generated automatically.
 
 ### MultiRequestBroker
 
@@ -130,10 +159,13 @@ Info.removeProvider(handle.get())
 Info.clearProviders()
 ```
 
+## Multi-thread support
+
+With `(mt)` variants, nim-brokers supports cross-thread communication with the same type-safe, decoupled interface as the single-thread versions. The multi-thread implementation uses a zero-fd channel and shared signal strategy for cross-thread coordination, while same-thread calls bypass channels entirely for near-zero overhead.
+
 ### RequestBroker (multi-thread)
 
-Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via a zero-fd channel and a shared per-thread signal. Same-thread requests bypass channels entirely for near-zero overhead.
-
+Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via a zero-fd channel and a shared per-thread signal.
 ```nim
 import std/atomics, std/threads
 import chronos
@@ -254,7 +286,7 @@ See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture 
 
 ## Broker FFI API
 
-nim-brokers also includes a macro-based FFI API layer for exposing broker-driven services as a shared library with generated C, C++, and optional Python bindings.
+nim-brokers also includes a macro-based FFI API layer for exposing broker-shaped API as a shared library with generated C, C++, and optional Python bindings.
 
 At a high level:
 
@@ -270,12 +302,9 @@ The process-wide runtime init and per-context lifecycle are intentionally separa
 - `InitializeRequest` is the broker request used for post-create configuration.
 - `ShutdownRequest` is the broker request used for orderly application teardown during shutdown.
 
-For API events, the generated C ABI now includes both the emitting `ctx` and an
-opaque `userData` pointer in the callback signature. The generated C++ wrapper
-builds on that with an owner-aware dispatcher template: public C++ event
-callbacks receive `Mylib& owner` as their first argument, callback exceptions
-are swallowed before they can cross the C boundary, and the wrapper is
-intentionally non-copyable and non-movable so callback identity stays stable.
+For API events, the generated C ABI includes both the emitting `ctx` and an
+opaque `userData` pointer in the callback signature. 
+The generated C++ wrapper builds on that with an owner-aware dispatcher template: public C++ event callbacks receive `Mylib& owner` as their first argument, callback exceptions are swallowed before they can cross the C boundary, and the wrapper is intentionally non-copyable and non-movable so callback identity stays stable.
 
 If you need multiple wrapper instances in a container, store
 `std::unique_ptr<Mylib>` rather than `Mylib` values directly.
@@ -302,19 +331,35 @@ nimble runFfiExamplePy
 
 See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
 
-### CBOR FFI strategy
+### FFI API strategies: CBOR vs Native
 
-The CBOR strategy is the **default** FFI surface. It collapses every
-library to the same fixed 10-function C ABI plus a single
+Currently developer can choose two major path, decision might be driven on API surface and usage needs.
+
+### Native FFI strategy
+
+This translates every Request/Event -Broker API interface into a plain export C ABI with typed structs and free helpers. The generated header is self-contained and does not require any external dependencies. Buffer ownership rules are per-helper and documented in the generated header. 
+
+While it is a good strategy where the API surface is reasonable small and transmits mainly primitive types and no complex structs or collections.
+
+Strategy flag: `-d:BrokerFfiApiNative`. This is an explicit opt-in; the default is CBOR.
+
+#### CBOR FFI strategy
+
+The CBOR strategy is the **default** FFI surface.
+It is built on top of the idea of serializing all transmittable data into CBOR blobs at the ABI boundary, and decoding/encoding on the wrapper side.
+
+This has great advantages over `native` because of reduced memory allocations and unifies the interface can be easily ported to other languages with CBOR support. It also allows to transmit complex data structures and collections without the need of defining a C struct for each of them.
+
+It collapses everylibrary to the same fixed 10-function C ABI plus a single
 event-callback typedef, with CBOR as the on-wire format. Wrappers
 carry the typed surface (typed `Lib::*` methods on C++, `IntEnum` +
 `dataclass` on Python) and decode/encode through `jsoncons::cbor`
 (C++) or `cbor2` (Python). Buffer ownership rule: every `void*`
 crossing the ABI is allocated by Nim and freed by Nim.
 
-The alternative **native** strategy emits a per-request typed C ABI
-(struct + free helper per type) and is selected with
-`-d:BrokerFfiApiNative`. To be explicit you can also select CBOR with
+The major difference from the native strategy is that the generated header is C++ and is not self-contained and requires the wrapper's CBOR library as a dependency. The generated API surface is also more uniform.
+
+To be explicit you can also select CBOR with
 `-d:BrokerFfiApiCBOR`. Either strategy flag enables FFI codegen on its
 own — there is no need to combine it with `-d:BrokerFfiApi` (which by
 itself enables FFI codegen and defaults to CBOR).
@@ -343,6 +388,8 @@ headers under `vendor/jsoncons/include` (header-only, no build step).
 The Python wrapper requires `cbor2` on the active interpreter
 (`pip install --user cbor2`).
 
+
+### Comparison
 | Aspect | Native strategy | CBOR strategy |
 |--------|-----------------|---------------|
 | C ABI surface | Per-request typed structs + free helpers | Fixed 10-function ABI + event callback typedef |
@@ -350,6 +397,17 @@ The Python wrapper requires `cbor2` on the active interpreter
 | Buffer ownership | Mixed (per-helper) | Uniform (Nim allocates, Nim frees) |
 | Discovery API | Static headers | Static `<lib>.cddl` + runtime `_listApis` / `_getSchema` |
 | Compile flag | `-d:BrokerFfiApiNative` | `-d:BrokerFfiApiCBOR` (default; also picked by bare `-d:BrokerFfiApi`) |
+
+### Interface parity of strategies
+
+The same Nim implementation can be built with either strategy without changes to the source. 
+- The generated C ABI are different. 
+- Wrapper API surface are semantically equivalent and in functional parity with each other. 
+  - C++ wrapper is always generated
+  - Python wrapper can be generated for both strategies.
+
+> :exclamation: The same example source files can be compiled against either generated header with no changes!
+
 
 ### Torpedo Duel — a richer FFI API example
 
@@ -392,7 +450,9 @@ nimble runTorpedoExamplePy -- --fast # reduced delays
 See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full
 architecture, sequence diagrams, and API surface reference.
 
-## BrokerContext
+
+## Some more details...
+### BrokerContext
 
 All three brokers support scoped instances via `BrokerContext`. This is useful when multiple independent components on the same thread each need their own broker state (e.g. separate listener/provider sets).
 
@@ -426,7 +486,7 @@ When no `BrokerContext` argument is passed, the `DefaultBrokerContext` is used.
 
 A global context lock is available via `lockGlobalBrokerContext` for serialized cross-module coordination within `chronos` async procs.
 
-## Non-Object Types
+### Non-Object Types
 
 All three brokers support native types, aliases, and externally-defined types. These are automatically wrapped in `distinct` to prevent overload ambiguity. If the type is already `distinct`, it is preserved as-is.
 
@@ -623,20 +683,6 @@ produces cross-heap crashes). When running the AddressSanitizer tasks,
 `C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\` must also be on
 `PATH`; the `memcheck_ci.yml` workflow handles this for CI. See
 LIMITATION.md → §2.1 for the toolchain rationale.
-
-## Testing
-
-```
-nimble test
-```
-
-## Debug
-
-To inspect generated AST during compilation:
-
-```
-nim c -d:brokerDebug ...
-```
 
 ## License
 
