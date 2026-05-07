@@ -8,8 +8,20 @@
 #include "mylib.hpp"
 
 #include <cstdio>
+#include <string_view>
 
 int main() {
+    constexpr std::string_view kExpectedVersion{"1.0.0"};
+    if (mylib::Mylib::version() != kExpectedVersion) {
+        std::fprintf(stderr,
+                     "Mylib::version mismatch: got '%.*s', expected '%.*s'\n",
+                     static_cast<int>(mylib::Mylib::version().size()),
+                     mylib::Mylib::version().data(),
+                     static_cast<int>(kExpectedVersion.size()),
+                     kExpectedVersion.data());
+        return 10;
+    }
+
     mylib::Mylib lib;
     auto r = lib.createContext();
     if (!r.isOk()) {

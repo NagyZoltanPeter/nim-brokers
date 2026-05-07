@@ -437,6 +437,8 @@ proc generateCppHeaderFile*(
   hpp.add("    " & className & "(" & className & "&&) = delete;\n")
   hpp.add("    " & className & "& operator=(" & className & "&&) = delete;\n\n")
 
+  hpp.add("    static std::string_view version() noexcept;\n\n")
+
   hpp.add("    Result<void> createContext();\n")
   hpp.add("    bool validContext() const noexcept;\n")
   hpp.add("    explicit operator bool() const noexcept;\n")
@@ -485,6 +487,10 @@ proc generateCppHeaderFile*(
   hpp.add("    : " & ctorInitializers.join("\n    , ") & " {}\n\n")
 
   hpp.add("inline " & className & "::~" & className & "() { shutdown(); }\n\n")
+
+  hpp.add("inline std::string_view " & className & "::version() noexcept {\n")
+  hpp.add("    return " & libName & "_version();\n")
+  hpp.add("}\n\n")
 
   hpp.add("inline Result<void> " & className & "::createContext() {\n")
   hpp.add("    if (ctx_)\n")

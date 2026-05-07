@@ -195,6 +195,7 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("import ctypes\n")
   py.add("import ctypes.util\n")
   py.add("import enum\n")
+  py.add("import functools\n")
   py.add("import os\n")
   py.add("import sys\n")
   py.add("import threading\n")
@@ -215,6 +216,7 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   )
   py.add("# class " & className & ":\n")
   for summaryLine in [
+    "version() -> str    (@staticmethod)",
     "__enter__() -> " & className, "__exit__(*_) -> None",
     "create_context() -> Result[None]", "valid_context() -> bool", "__bool__() -> bool",
     "shutdown() -> None", "ctx -> int    (property)",
@@ -347,6 +349,20 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add(
     "# ---------------------------------------------------------------------------\n"
   )
+  py.add("# Library loader (shared by Lib instances and the static version() helper)\n")
+  py.add(
+    "# ---------------------------------------------------------------------------\n\n"
+  )
+  py.add("@functools.lru_cache(maxsize=1)\n")
+  py.add("def _version_lib() -> ctypes.CDLL:\n")
+  py.add("    lib = _load_library()\n")
+  py.add("    lib." & libName & "_version.argtypes = []\n")
+  py.add("    lib." & libName & "_version.restype = ctypes.c_char_p\n")
+  py.add("    return lib\n\n\n")
+
+  py.add(
+    "# ---------------------------------------------------------------------------\n"
+  )
   py.add("# Wrapper class\n")
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
@@ -361,6 +377,16 @@ proc generatePythonFile*(outDir: string, libName: string) {.compileTime, raises:
   py.add("            if r.is_ok():\n")
   py.add("                print(r.value.label)\n")
   py.add("    \"\"\"\n\n")
+
+  # version (static; no instance / context needed)
+  py.add("    @staticmethod\n")
+  py.add("    def version() -> str:\n")
+  py.add(
+    "        \"\"\"Return the static semver string baked into the " & libName &
+      " library.\"\"\"\n"
+  )
+  py.add("        raw = _version_lib()." & libName & "_version()\n")
+  py.add("        return raw.decode(\"utf-8\") if raw else \"\"\n\n")
 
   # __init__
   py.add("    def __init__(self, lib_path: Optional[str] = None) -> None:\n")

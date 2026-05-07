@@ -22,6 +22,7 @@ import ./api_codegen_c, ./api_common
 proc generateCborCHeaderFile*(
     outDir: string,
     libName: string,
+    version: string,
     requestApiNames: seq[string],
     eventApiNames: seq[string],
 ) {.compileTime, raises: [].} =
@@ -43,6 +44,16 @@ proc generateCborCHeaderFile*(
   h.add("#include <stdbool.h>\n")
   h.add("#include <stddef.h>\n\n")
   h.add("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
+
+  h.add("/* ----------------------------------------------------------------\n")
+  h.add(" * Library identity\n")
+  h.add(" * ---------------------------------------------------------------- */\n\n")
+  h.add(
+    "/* Returns a NUL-terminated semver string for this library build (\"" &
+      version & "\").\n" &
+      " * The returned pointer is owned by the library — do NOT free. */\n"
+  )
+  h.add("const char* " & p & "version(void);\n\n")
 
   h.add("/* ----------------------------------------------------------------\n")
   h.add(" * Lifecycle\n")

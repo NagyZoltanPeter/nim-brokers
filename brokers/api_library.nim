@@ -1191,6 +1191,24 @@ proc registerBrokerLibraryNativeImpl(
       )
     )
 
+  # Version export — constant cstring baked from registerBrokerLibrary's
+  # `version` field. Lifetime is the lifetime of the loaded library; the
+  # caller never frees the returned pointer.
+  let versionFuncName = libName & "_version"
+  let versionFuncNameLit = newLit(versionFuncName)
+  let versionFuncIdent = ident(versionFuncName)
+  let versionConstIdent = ident("g" & libName & "VersionStr")
+  let versionStrLit = newLit(config.version)
+  result.add(
+    quote do:
+      const `versionConstIdent`: cstring = `versionStrLit`
+      proc `versionFuncIdent`*(): cstring {.
+        exportc: `versionFuncNameLit`, cdecl, dynlib
+      .} =
+        `versionConstIdent`
+  )
+  appendHeaderDecl(generateCFuncProto(versionFuncName, "const char*", @[]))
+
   # Append lifecycle function prototypes to header
   appendHeaderDecl(
     generateCStruct(
@@ -1509,6 +1527,23 @@ proc registerBrokerLibraryCborImpl(
 
       var `nimInitFlagIdent`: Atomic[int]
       var `gcRegFlagIdent` {.threadvar.}: bool
+  )
+
+  # ------------------------------------------------------------------
+  # `<lib>_version` — static semver baked from `registerBrokerLibrary`.
+  # ------------------------------------------------------------------
+  let cborVersionFuncName = libName & "_version"
+  let cborVersionFuncNameLit = newLit(cborVersionFuncName)
+  let cborVersionFuncIdent = ident(cborVersionFuncName)
+  let cborVersionConstIdent = ident("g" & libName & "VersionStr")
+  let cborVersionStrLit = newLit(config.version)
+  result.add(
+    quote do:
+      const `cborVersionConstIdent`: cstring = `cborVersionStrLit`
+      proc `cborVersionFuncIdent`*(): cstring {.
+        exportc: `cborVersionFuncNameLit`, cdecl, dynlib
+      .} =
+        `cborVersionConstIdent`
   )
 
   # ------------------------------------------------------------------
@@ -1972,7 +2007,7 @@ proc registerBrokerLibraryCborImpl(
   var eventNames: seq[string] = @[]
   for e in eventEntries:
     eventNames.add(e.apiName)
-  generateCborCHeaderFile(outDir, libName, requestNames, eventNames)
+  generateCborCHeaderFile(outDir, libName, config.version, requestNames, eventNames)
   generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries)

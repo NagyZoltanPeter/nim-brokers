@@ -314,6 +314,7 @@ proc generateCborPyFile*(
     "# ---------------------------------------------------------------------------\n"
   )
   py.add("# class " & className & ":\n")
+  py.add("#   version() -> str    (@staticmethod)\n")
   py.add("#   __enter__() -> " & className & "\n")
   py.add("#   __exit__(*_) -> None\n")
   py.add("#   create_context() -> Result[None]\n")
@@ -368,6 +369,8 @@ proc generateCborPyFile*(
   py.add(
     "# ---------------------------------------------------------------------------\n\n"
   )
+  py.add("_LIB." & p & "version.argtypes = []\n")
+  py.add("_LIB." & p & "version.restype = ctypes.c_char_p\n\n")
   py.add("_LIB." & p & "initialize.argtypes = []\n")
   py.add("_LIB." & p & "initialize.restype = None\n\n")
   py.add("_LIB." & p & "createContext.argtypes = [ctypes.POINTER(ctypes.c_char_p)]\n")
@@ -578,6 +581,16 @@ proc generateCborPyFile*(
   py.add("            assert init.is_ok(), init.error\n")
   py.add("            r = lib.echo_request(\"ping\")\n")
   py.add("    \"\"\"\n\n")
+
+  py.add("    @staticmethod\n")
+  py.add("    def version() -> str:\n")
+  py.add(
+    "        \"\"\"Return the static semver string baked into the " & libName &
+      " library.\"\"\"\n"
+  )
+  py.add("        raw = _LIB." & p & "version()\n")
+  py.add("        return raw.decode(\"utf-8\") if raw else \"\"\n\n")
+
   py.add("    def __init__(self) -> None:\n")
   py.add("        _LIB." & p & "initialize()\n")
   py.add("        self._ctx: int = 0\n")

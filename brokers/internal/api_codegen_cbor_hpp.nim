@@ -546,6 +546,7 @@ proc generateCborCppHeaderFile*(
   h.add("  " & className & "& operator=(const " & className & "&) = delete;\n")
   h.add("  " & className & "(" & className & "&&) = delete;\n")
   h.add("  " & className & "& operator=(" & className & "&&) = delete;\n\n")
+  h.add("  static std::string_view version() noexcept;\n\n")
   h.add("  Result<void> createContext();\n")
   h.add("  bool validContext() const noexcept;\n")
   h.add("  explicit operator bool() const noexcept;\n")
@@ -1000,6 +1001,9 @@ proc generateCborCppHeaderFile*(
   else:
     h.add(" { " & p & "initialize(); }\n\n")
   h.add("inline " & className & "::~" & className & "() { shutdown(); }\n\n")
+  h.add("inline std::string_view " & className & "::version() noexcept {\n")
+  h.add("  return " & p & "version();\n")
+  h.add("}\n\n")
   h.add("inline Result<void> " & className & "::createContext() {\n")
   h.add("  if (ctx_)\n")
   h.add("    return Result<void>::err(\"Context already created\");\n")

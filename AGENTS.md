@@ -89,7 +89,9 @@ The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. T
 
 #### CBOR-mode FFI tasks
 
-`-d:BrokerFfiApiCBOR` selects the CBOR strategy: every library exposes a fixed 10-function ABI (`<lib>_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
+`-d:BrokerFfiApiCBOR` selects the CBOR strategy: every library exposes a fixed 11-function ABI (`<lib>_version`, `_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
+
+Both ABI modes (native and CBOR) additionally expose `<lib>_version() -> const char*` returning the static semver string baked from the `version:` field of `registerBrokerLibrary` (default `0.1.0`). The pointer references library-owned static storage and must NOT be freed by the caller. Wrappers re-export it as a class member: `<Lib>::version() -> std::string_view` (C++ static method) and `<Lib>.version() -> str` (Python `@staticmethod`). Both can be called without an instance — no context, no library lifecycle required.
 
 The CBOR-mode example builds reuse the SAME `examples/ffiapi/` and `examples/torpedo/` sources as the native builds — `mylib.nim` / `torpedolib.nim` are compiled with `-d:BrokerFfiApiCBOR` into `nimlib/build_cbor/`, and the existing `cpp_example/main.cpp` is linked against the CBOR-generated header (via `-DUSE_CBOR=ON` in the CMake project). This is the parity-validation harness: the same C++ client compiles cleanly against either build mode.
 

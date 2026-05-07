@@ -28,8 +28,18 @@ sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 from mylib import AddDeviceSpec, Mylib  # noqa: E402
 
 
+_EXPECTED_VERSION = "1.0.0"
+
+
 def main() -> int:
     print("=== Device Monitor — Python Wrapper Example ===\n")
+
+    actual_version = Mylib.version()
+    print(f"mylib version: {actual_version}")
+    assert actual_version == _EXPECTED_VERSION, (
+        f"Mylib.version() mismatch: got {actual_version!r}, "
+        f"expected {_EXPECTED_VERSION!r}"
+    )
 
     discovery_count = 0
     status_count = 0
