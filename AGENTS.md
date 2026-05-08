@@ -6,7 +6,7 @@ This file provides guidance to when working with code in this repository.
 
 nim-brokers is a standalone Nim macro library (nimble package name: `brokers`) providing type-safe, decoupled messaging patterns built on top of **chronos** (async) and **results**. Originally extracted from the waku project. Modules are imported as `brokers/event_broker`, `brokers/request_broker`, `brokers/multi_request_broker`, and `brokers/broker_context`.
 
-The repository also contains a **Broker FFI API** generator for exposing broker-based APIs as a shared library consumable from C, C++, and Python. The example library lives under `examples/ffiapi/nimlib/mylib.nim` and demonstrates generated lifecycle functions, request exports, event callback registration, a generated C++ wrapper, and an optional generated Python ctypes wrapper.
+The repository also contains a **Broker FFI API** generator for exposing broker-based APIs as a shared library consumable from C, C++, Python, and Rust. The example library lives under `examples/ffiapi/nimlib/mylib.nim` and demonstrates generated lifecycle functions, request exports, event callback registration, a generated C++ wrapper, an optional generated Python ctypes wrapper, and an optional generated Rust crate.
 
 There are three broker macros, each with a single-thread and multi-thread variant:
 
@@ -47,6 +47,7 @@ Current test task coverage:
 - `nimble testFfiApiCpp` — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
 - `nimble testFfiApiCmake` — Validates the generated `<lib>Config.cmake` package by configuring and building a downstream consumer in `test/cmake_consumer/` via `find_package(mylib CONFIG REQUIRED)` and linking smoke binaries against the IMPORTED targets `mylib::mylib` (C) and `mylib::mylib_cpp` (C++)
 - `nimble testApiCbor` — CBOR-mode FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the typemappingtestlib CBOR parity matrix (Nim side) across ORC/refc × debug/release
+- `nimble runTypeMapTestLibRust` / `runTypeMapTestLibCborRust` — Rust parity matrix for the typemappingtestlib (native and CBOR builds; requires stable Rust 1.75+ via rustup)
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -81,11 +82,15 @@ nimble buildFfiExamples     # build both C and C++ examples via CMake
 nimble runFfiExampleC       # rebuild library + run C example
 nimble runFfiExampleCpp     # rebuild library + run C++ example
 nimble runFfiExamplePy      # rebuild library + generated wrapper + run Python example
+nimble runFfiExampleRust    # rebuild library + generated Rust crate + run native Rust example
+nimble runFfiExampleCborRust # CBOR-mode counterpart of runFfiExampleRust
 nimble runTorpedoExamplePy # build and run the more complex torpedo example over Python bindings, implements game ui and orchestrator in Python
 nimble runTorpedoExampleCpp # build and run the more complex torpedo example over C++ bindings, implements game ui and orchestrator in C++
+nimble runTorpedoExampleRust    # native Rust torpedo example
+nimble runTorpedoExampleCborRust # CBOR-mode Rust torpedo example
 ```
 
-The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`.
+The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`. The Rust workflow generates a complete Cargo crate at `examples/ffiapi/nimlib/build/mylib_rs/` (or `build_cbor/mylib_rs/` for CBOR mode) when compiled with `-d:BrokerFfiApiGenRust`. Consumers include it via a `#[path]` module declaration so a single example crate can switch between modes via Cargo features.
 
 #### CBOR-mode FFI tasks
 
@@ -113,6 +118,30 @@ External dependencies for CBOR-mode wrappers:
   `nimble fetchVendor` (or `git submodule update --init --recursive`) to
   populate it before building any CBOR C++ target.
 - Python: the `cbor2` package on the active interpreter (`pip install --user cbor2`).
+- Rust: stable toolchain (MSRV 1.75+) via rustup. Cargo fetches `ciborium`,
+  `serde`, `serde_json`, `serde_bytes` automatically when building with
+  `--features cbor`. Native-mode Rust builds need only the toolchain — no
+  external crates.
+
+#### Foreign-language wrapper generation flags
+
+| Flag | Generates | Output location |
+|------|-----------|-----------------|
+| `-d:BrokerFfiApiGenPy` | `<lib>.py` ctypes wrapper | next to the `.so` |
+| `-d:BrokerFfiApiGenRust` | `<lib>_rs/` Cargo crate (Cargo.toml + src/lib.rs) | next to the `.so` |
+
+C and C++ headers are always emitted; Python and Rust are opt-in.
+
+##### Rust codegen scope
+
+Native- and CBOR-mode Rust have **full parity** for both requests and events across the type matrix the typemappingtestlib parity test exercises: primitive scalars (bool / intN / uintN / byte / floatN / string), enums (`#[repr(i32)]` Rust enums with `From<i32>`), distinct/alias (`pub type X = Y`), `seq[primitive]` (`Vec<T>`), `seq[string]` (`Vec<String>`), `seq[Object]` (`Vec<T>` with all-primitive/string fields), and `array[N, primitive]` (`Vec<T>`). The same client code drives either build mode unchanged.
+
+Per-mode shape:
+
+- **Native**: `extern "C"` blocks declare typed pointers (`*const T` for `seq[primitive]`, `*const *const c_char` for `seq[string]`, `*const TCItem` for `seq[Object]`). Request methods marshal Rust `Vec<T>` to/from C-side `(ptr, count)` pairs. Each event has a per-event extern `fn` typedef, a per-event dispatcher `static`, and a generated trampoline that converts FFI args to safe Rust values (Vec/String/enum/distinct) before fanning out to subscribed closures via `Arc<dyn Fn(...) + Send + Sync>` snapshot-and-clone.
+- **CBOR**: per-method response decode goes directly from CBOR bytes into the typed `#[derive(Deserialize)]` struct via a per-method `__Env<T>` envelope (no JSON intermediate, so `seq[byte]` and other byte-string fields preserve type fidelity). Events share one trampoline that demuxes by `(ctx, event_name)` and decodes the payload via `ciborium` into the typed event struct, then unpacks fields and fans out to the user closure with the **same** `Fn(field1, field2, ...)` signature the native build uses.
+
+Edge cases still left as `// TODO(rust-codegen)` stubs in native mode (CBOR handles them): `seq[Object]` where the object contains nested objects or composite fields (the codegen restricts `seq[T]` element objects to those with primitive/string fields only); `array[N, Object]`; `array[N, string]`. None of the example libraries hit these cases.
 
 #### Examine generated nim code
 
@@ -141,6 +170,10 @@ GitHub Actions CI currently runs:
 - `nimble runFfiExampleCborCpp`
 - `nimble runTypeMapTestLibCborPy`
 - `nimble runTypeMapTestLibCborCpp`
+- `nimble runFfiExampleRust`
+- `nimble runFfiExampleCborRust`
+- `nimble runTypeMapTestLibRust`
+- `nimble runTypeMapTestLibCborRust`
 
 Any change that affects broker runtime behavior, FFI generation, or example integration should preserve all of the above.
 
@@ -227,6 +260,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   - **processing thread** — runs `setupProviders(ctx)` and executes request providers
 - Generated C header: `<libName>.h` (pure C), C++ wrapper: `<libName>.hpp` (includes the `.h`).
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
+- Generated Rust wrapper support is optional and enabled with `-d:BrokerFfiApiGenRust`. It emits a complete Cargo crate `<libName>_rs/` (Cargo.toml + src/lib.rs) next to the `.so`. The crate declares the C ABI via hand-written `extern "C"` blocks (no bindgen / no clang dep) and exposes the same `Lib::new() / create_context() / <request>(args) -> Result<T, String> / on_<event> / off_<event> / shutdown / Drop` surface the C++ wrapper provides.
 
 ### Concurrency safety notes
 
@@ -250,6 +284,7 @@ brokers/
     api_codegen_c.nim       — C type mapping, accumulators, header generation (.h)
     api_codegen_cpp.nim     — C++ type mapping, accumulators, wrapper generation (.hpp)
     api_codegen_python.nim  — Python type mapping, accumulators, wrapper generation (.py)
+    api_codegen_rust.nim    — Native-mode Rust type mapping, accumulators, Cargo crate generation (Cargo.toml + src/lib.rs)
     api_codegen_nim.nim     — Nim→C ABI type mapping (toCFieldType)
     api_event_broker.nim    — API-specific EventBroker generation helpers
     api_request_broker.nim  — API-specific RequestBroker generation helpers
@@ -264,6 +299,7 @@ brokers/
     api_codegen_cbor_h.nim   — Fixed-shape C header for CBOR-mode libraries
     api_codegen_cbor_hpp.nim — jsoncons-backed C++ wrapper (typed Lib class, traits)
     api_codegen_cbor_py.nim  — cbor2-backed Python wrapper (dataclasses, typed methods)
+    api_codegen_cbor_rust.nim — ciborium+serde-backed Rust crate (typed Lib struct, per-method __Env<T> envelope)
     api_codegen_cbor_cddl.nim — CDDL schema emission for the CBOR FFI surface
     mt_event_broker.nim     — Multi-thread EventBroker(mt) macro
     mt_request_broker.nim   — Multi-thread RequestBroker(mt) macro
@@ -276,7 +312,8 @@ examples/
     example/main.c          — Pure C consumer example
     cpp_example/main.cpp    — C++ wrapper consumer example
     python_example/main.py  — Python ctypes wrapper consumer example
-  torpedo/                  - more complex demonstration of using API brokers, follows the same code and build structure as ffiapi example.
+    rust_example/           — Rust crate consumer example (Cargo.toml + build.rs + src/main.rs); switches build modes via the `cbor` Cargo feature
+  torpedo/                  - more complex demonstration of using API brokers, follows the same code and build structure as ffiapi example (now includes a `rust_example/` Cargo crate alongside the C++/Python ones).
 test/
   test_event_broker.nim
   test_request_broker.nim
@@ -286,7 +323,7 @@ test/
   test_api_request_broker.nim
   test_api_event_broker.nim
   test_api_library_init.nim
-  typemappingtestlib/       - exercises every Nim→C→C++/Python type mapping through FFI and generated bindings.
+  typemappingtestlib/       - exercises every Nim→C→C++/Python/Rust type mapping through FFI and generated bindings. Includes a `rust_test/` Cargo crate that runs the same parity matrix as `test_typemappingtestlib.{cpp,py}`.
 ```
 
 ## Coding Conventions

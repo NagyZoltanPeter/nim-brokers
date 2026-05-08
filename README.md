@@ -4,7 +4,7 @@ What is nim-brokers?
 - it is a type-safe component communication library for Nim, built on top of [chronos](https://github.com/status-im/nim-chronos).
 - it supports Pub/Sub and Request/Response patterns, with both single-thread and multi-thread variants.
    - built with simple aim to decouple interface definitions from implementations, and to decouple modules that need to talk to each other without creating direct dependencies. 
-- it also includes an FFI API layer for exposing broker-driven services as a shared library with generated C, C++, and optional Python bindings.
+- it also includes an FFI API layer for exposing broker-driven services as a shared library with generated C, C++, and optional Python and Rust bindings.
    - enabled Nim library developers to easily expose typed, decoupled interfaces to foreign languages without manual C ABI design or glue code.
    - The same Nim implementation can be used with other Nim modules and if required from foreign languages through the generated FFI layer - with type safety guaranteed and no boilerplate. 
 
@@ -330,6 +330,8 @@ nimble runFfiExamplePy
 ```
 
 See [Broker FFI API](doc/Broker_FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
+
+See [Type-support matrix](doc/TYPESUPPORT.md) for the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust) × each FFI mode (native / CBOR), with footnoted defects, recommended idioms, and a worked example.
 
 ### FFI API strategies: CBOR vs Native
 

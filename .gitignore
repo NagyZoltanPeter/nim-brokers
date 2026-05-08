@@ -4,6 +4,7 @@ nimbledeps
 build/
 **/build*/*
 **/cmake-build*/*
+**/target/*
 .gitnexus
 
 # Python __pycache__ from running the generated wrapper

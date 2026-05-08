@@ -190,6 +190,25 @@ proc generateApiType*(
         pyDc.add("\n")
       gApiPyDataclasses.add(pyDc)
 
+  # 7. Generate Rust struct + #[repr(C)] CItem (when -d:BrokerFfiApiGenRust)
+  when defined(BrokerFfiApiGenRust):
+    block:
+      var rsFfi = "#[repr(C)]\n"
+      rsFfi.add("#[derive(Debug)]\n")
+      rsFfi.add("pub struct " & typeName & "CItem {\n")
+      for (fname, ftype) in fields:
+        rsFfi.add("    pub " & fname & ": " & nimTypeToRustFfi(ident(ftype)) & ",\n")
+      rsFfi.add("}")
+      gApiRustFfiStructs.add(rsFfi)
+
+    block:
+      var rsSafe = "#[derive(Debug, Clone, Default)]\n"
+      rsSafe.add("pub struct " & typeName & " {\n")
+      for (fname, ftype) in fields:
+        rsSafe.add("    pub " & fname & ": " & nimTypeToRust(ident(ftype)) & ",\n")
+      rsSafe.add("}")
+      gApiRustStructs.add(rsSafe)
+
   when defined(brokerDebug):
     echo result.repr
 

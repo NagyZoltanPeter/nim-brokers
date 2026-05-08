@@ -1187,6 +1187,264 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       gApiPyEventMethods.add(m)
       gApiPyInterfaceSummary.add(pyOffName & "(handle = 0) -> None")
 
+  # Step 11b: Generate Rust on/off event methods (when -d:BrokerFfiApiGenRust)
+  when defined(BrokerFfiApiGenRust):
+    let rsSnakeEvent = toSnakeCase(typeDisplayName)
+
+    proc rsScalarMappable(t: NimNode): bool {.compileTime.} =
+      if isCStringType(t):
+        return true
+      if t.kind == nnkIdent:
+        let n = ($t).toLowerAscii()
+        if n in [
+          "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte",
+          "uint16", "uint32", "uint64", "float", "float32", "float64",
+        ]:
+          return true
+        if isEnumRegistered($t):
+          return true
+        if isAliasOrDistinctRegistered($t):
+          return true
+      false
+
+    proc rsEventTypeMappable(t: NimNode): bool {.compileTime.} =
+      if rsScalarMappable(t):
+        return true
+      if isSeqType(t):
+        let elem = seqItemTypeName(t)
+        if isNimPrimitive(elem):
+          return true
+        if isTypeRegistered(elem):
+          let entry = lookupTypeEntry(elem)
+          if entry.kind == atkObject:
+            for f in entry.fields:
+              let lc = f.nimType.toLowerAscii()
+              if lc notin [
+                "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                "string", "cstring",
+              ]:
+                return false
+            return true
+        return false
+      if isArrayTypeNode(t):
+        let elem = arrayNodeElemName(t)
+        return isNimPrimitive(elem) and elem.toLowerAscii() notin ["string", "cstring"]
+      false
+
+    proc rsElemFfi(elemName: string): string {.compileTime.} =
+      let lc = elemName.toLowerAscii()
+      if lc in ["string", "cstring"]:
+        return "*const ::std::os::raw::c_char"
+      if isNimPrimitive(elemName):
+        return nimTypeToRustFfi(ident(elemName))
+      if isEnumRegistered(elemName):
+        return "i32"
+      if isAliasOrDistinctRegistered(elemName):
+        return nimTypeToRustFfi(ident(resolveUnderlyingType(elemName)))
+      elemName & "CItem"
+
+    proc rsElemSafe(elemName: string): string {.compileTime.} =
+      let lc = elemName.toLowerAscii()
+      if lc in ["string", "cstring"]:
+        return "String"
+      nimTypeToRust(ident(elemName))
+
+    var allFieldsRustMappable = true
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        if not rsEventTypeMappable(fieldTypes[i]):
+          allFieldsRustMappable = false
+          break
+
+    if not allFieldsRustMappable:
+      gApiRustEventMethods.add(
+        "    // TODO(rust-codegen): event '" & typeDisplayName &
+          "' uses a Nim type combination not yet mappable to native Rust.\n"
+      )
+    else:
+      # Per-event extern callback type, dispatcher static, trampoline,
+      # register/deregister extern decls, and on_/off_ methods.
+      let cbTyName = typeDisplayName & "EventCb"
+      let dispatcherName = typeDisplayName & "Dispatcher"
+      let dispStaticName = "g_" & rsSnakeEvent & "_dispatcher"
+
+      var cbArgs = "ctx: u32, _ud: *mut ::std::ffi::c_void"
+      var fnSigParts: seq[string] = @[]
+      var trampConvLines: string = ""
+      var trampInvokeArgs: seq[string] = @[]
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let fName = toSnakeCase($fieldNames[i])
+          let fType = fieldTypes[i]
+          if isSeqType(fType):
+            let elem = seqItemTypeName(fType)
+            cbArgs.add(", " & fName & ": *const " & rsElemFfi(elem))
+            cbArgs.add(", " & fName & "_count: i32")
+            fnSigParts.add("Vec<" & rsElemSafe(elem) & ">")
+            let lc = elem.toLowerAscii()
+            if lc in ["string", "cstring"]:
+              trampConvLines.add(
+                "    let _" & fName & "_safe: Vec<String> = if " & fName &
+                  ".is_null() || " & fName & "_count <= 0 { Vec::new() } else {\n"
+              )
+              trampConvLines.add(
+                "        ::std::slice::from_raw_parts(" & fName & ", " & fName &
+                  "_count as usize).iter().map(|p| if p.is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(*p).to_string_lossy().into_owned() }).collect()\n"
+              )
+              trampConvLines.add("    };\n")
+            elif isNimPrimitive(elem):
+              trampConvLines.add(
+                "    let _" & fName & "_safe: Vec<" & rsElemSafe(elem) & "> = if " &
+                  fName & ".is_null() || " & fName &
+                  "_count <= 0 { Vec::new() } else { ::std::slice::from_raw_parts(" &
+                  fName & ", " & fName & "_count as usize).to_vec() };\n"
+              )
+            elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              let entry = lookupTypeEntry(elem)
+              trampConvLines.add(
+                "    let _" & fName & "_safe: Vec<" & elem & "> = if " & fName &
+                  ".is_null() || " & fName & "_count <= 0 { Vec::new() } else {\n"
+              )
+              trampConvLines.add(
+                "        let _slice = ::std::slice::from_raw_parts(" & fName & ", " &
+                  fName & "_count as usize);\n"
+              )
+              trampConvLines.add(
+                "        let mut _v: Vec<" & elem &
+                  "> = Vec::with_capacity(_slice.len());\n"
+              )
+              trampConvLines.add("        for _ci in _slice.iter() {\n")
+              trampConvLines.add("            _v.push(" & elem & " {\n")
+              for f in entry.fields:
+                let lcf = f.nimType.toLowerAscii()
+                if lcf in ["string", "cstring"]:
+                  trampConvLines.add(
+                    "                " & f.name & ": if _ci." & f.name &
+                      ".is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(_ci." &
+                      f.name & ").to_string_lossy().into_owned() },\n"
+                  )
+                else:
+                  trampConvLines.add(
+                    "                " & f.name & ": _ci." & f.name & ",\n"
+                  )
+              trampConvLines.add("            });\n")
+              trampConvLines.add("        }\n")
+              trampConvLines.add("        _v\n")
+              trampConvLines.add("    };\n")
+            trampInvokeArgs.add("_" & fName & "_safe.clone()")
+          elif isArrayTypeNode(fType):
+            let elem = arrayNodeElemName(fType)
+            cbArgs.add(", " & fName & ": *const " & rsElemFfi(elem))
+            cbArgs.add(", " & fName & "_count: i32")
+            fnSigParts.add("Vec<" & rsElemSafe(elem) & ">")
+            trampConvLines.add(
+              "    let _" & fName & "_safe: Vec<" & rsElemSafe(elem) & "> = if " & fName &
+                ".is_null() || " & fName &
+                "_count <= 0 { Vec::new() } else { ::std::slice::from_raw_parts(" & fName &
+                ", " & fName & "_count as usize).to_vec() };\n"
+            )
+            trampInvokeArgs.add("_" & fName & "_safe.clone()")
+          elif isCStringType(fType):
+            cbArgs.add(", " & fName & ": *const ::std::os::raw::c_char")
+            fnSigParts.add("String")
+            trampConvLines.add(
+              "    let _" & fName & "_safe: String = if " & fName &
+                ".is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(" & fName &
+                ").to_string_lossy().into_owned() };\n"
+            )
+            trampInvokeArgs.add("_" & fName & "_safe.clone()")
+          elif fType.kind == nnkIdent and isEnumRegistered($fType):
+            cbArgs.add(", " & fName & ": i32")
+            fnSigParts.add($fType)
+            trampInvokeArgs.add("(" & fName & " as i32).into()")
+          elif fType.kind == nnkIdent and isAliasOrDistinctRegistered($fType):
+            cbArgs.add(", " & fName & ": " & nimTypeToRustFfi(fType))
+            fnSigParts.add($fType)
+            trampInvokeArgs.add(fName)
+          else:
+            # Plain primitive (Copy).
+            cbArgs.add(", " & fName & ": " & nimTypeToRustFfi(fType))
+            fnSigParts.add(nimTypeToRust(fType))
+            trampInvokeArgs.add(fName)
+
+      let fnBound = fnSigParts.join(", ")
+      gApiRustEventCbAliases.add(
+        "pub type " & cbTyName & " = unsafe extern \"C\" fn(" & cbArgs & ");"
+      )
+      gApiRustEventCbAliases.add(
+        "type " & dispatcherName & "Handler = ::std::sync::Arc<dyn Fn(" & fnBound &
+          ") + Send + Sync + 'static>;"
+      )
+      gApiRustEventCbAliases.add(
+        "static " & dispStaticName &
+          ": ::std::sync::OnceLock<::std::sync::Mutex<::std::collections::HashMap<u64, " &
+          dispatcherName & "Handler>>> = ::std::sync::OnceLock::new();"
+      )
+      gApiRustEventCbAliases.add(
+        "fn " & dispStaticName &
+          "_get() -> &'static ::std::sync::Mutex<::std::collections::HashMap<u64, " &
+          dispatcherName & "Handler>> { " & dispStaticName &
+          ".get_or_init(|| ::std::sync::Mutex::new(::std::collections::HashMap::new())) }"
+      )
+      # Trampoline body: convert FFI args to safe values, snapshot handlers,
+      # then fan out by cloning the safe values for each handler invocation.
+      let trampolineName = rsSnakeEvent & "_trampoline"
+      var tramp = "unsafe extern \"C\" fn " & trampolineName & "(" & cbArgs & ") {\n"
+      tramp.add("    let _ = ctx;\n")
+      tramp.add(trampConvLines)
+      tramp.add("    let snapshot: Vec<" & dispatcherName & "Handler> = {\n")
+      tramp.add("        let g = " & dispStaticName & "_get().lock().unwrap();\n")
+      tramp.add("        g.values().cloned().collect()\n")
+      tramp.add("    };\n")
+      tramp.add("    for cb in snapshot { cb(" & trampInvokeArgs.join(", ") & "); }\n")
+      tramp.add("}")
+      gApiRustEventCbAliases.add(tramp)
+
+      # extern register/deregister decls.
+      gApiRustExternFns.add(
+        "fn " & publicRegFuncName & "(ctx: u32, cb: " & cbTyName &
+          ", user_data: *mut ::std::ffi::c_void) -> u64;"
+      )
+      gApiRustExternFns.add("fn " & publicDeregFuncName & "(ctx: u32, handle: u64);")
+
+      # on_<event> method.
+      let onName = "on_" & rsSnakeEvent
+      var onMethod =
+        "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
+        ") + Send + Sync + 'static {\n"
+      onMethod.add("        if self.ctx == 0 { return 0; }\n")
+      onMethod.add(
+        "        let h = unsafe { " & publicRegFuncName & "(self.ctx, " & trampolineName &
+          ", ::std::ptr::null_mut()) };\n"
+      )
+      onMethod.add("        if h == 0 { return 0; }\n")
+      onMethod.add(
+        "        " & dispStaticName &
+          "_get().lock().unwrap().insert(h, ::std::sync::Arc::new(callback));\n"
+      )
+      onMethod.add("        h\n")
+      onMethod.add("    }")
+      gApiRustEventMethods.add(onMethod)
+      gApiRustInterfaceSummary.add(onName & "(callback) -> u64")
+
+      # off_<event> method.
+      let offName = "off_" & rsSnakeEvent
+      var offMethod = "    pub fn " & offName & "(&self, handle: u64) {\n"
+      offMethod.add("        if self.ctx == 0 { return; }\n")
+      offMethod.add(
+        "        unsafe { " & publicDeregFuncName & "(self.ctx, handle); }\n"
+      )
+      offMethod.add(
+        "        let mut g = " & dispStaticName & "_get().lock().unwrap();\n"
+      )
+      offMethod.add(
+        "        if handle == 0 { g.clear(); } else { g.remove(&handle); }\n"
+      )
+      offMethod.add("    }")
+      gApiRustEventMethods.add(offMethod)
+      gApiRustInterfaceSummary.add(offName & "(handle)")
+
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))
   gApiEventCleanupProcNames.add(cleanupProcName)

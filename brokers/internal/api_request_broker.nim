@@ -1455,6 +1455,406 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         gApiPyMethods.add(pyMethod)
         gApiPyInterfaceSummary.add(pySnakeName & "() -> " & pyRetTy)
 
+  # Step 6d: Generate Rust wrapper crate entries (when -d:BrokerFfiApiGenRust)
+  when defined(BrokerFfiApiGenRust):
+    if not hideFromForeignSurface:
+      let rsSnakeName = toSnakeCase(typeDisplayName)
+      let rsFreeFuncName = apiPublicCName("free_" & baseExportName & "_result")
+      let rsResultName = typeDisplayName
+      let rsCResultName = typeDisplayName & "CResult"
+
+      proc rsScalarMappable(t: NimNode): bool {.compileTime.} =
+        if isCStringType(t):
+          return true
+        if t.kind == nnkIdent:
+          let n = ($t).toLowerAscii()
+          if n in [
+            "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte",
+            "uint16", "uint32", "uint64", "float", "float32", "float64",
+          ]:
+            return true
+          if isEnumRegistered($t):
+            return true
+          if isAliasOrDistinctRegistered($t):
+            return true
+        false
+
+      proc rsTypeMappable(t: NimNode): bool {.compileTime.} =
+        ## Accepts the v2 native-mode set: scalars + seq[primitive] +
+        ## seq[string] + seq[Object] + array[N, primitive].
+        if rsScalarMappable(t):
+          return true
+        if isSeqType(t):
+          let elem = seqItemTypeName(t)
+          if isNimPrimitive(elem):
+            return true
+          # Object element — accept only if the object's own fields are
+          # all primitive/string (parity with C++ wrapper's TCItem path).
+          if isTypeRegistered(elem):
+            let entry = lookupTypeEntry(elem)
+            if entry.kind == atkObject:
+              for f in entry.fields:
+                let lc = f.nimType.toLowerAscii()
+                if lc notin [
+                  "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                  "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                  "string", "cstring",
+                ]:
+                  return false
+              return true
+          return false
+        if isArrayTypeNode(t):
+          # array[N, primitive] only — array of object would need richer
+          # CItem expansion that's not in scope here.
+          let elem = arrayNodeElemName(t)
+          return
+            isNimPrimitive(elem) and elem.toLowerAscii() notin ["string", "cstring"]
+        false
+
+      proc rsElemFfi(elemName: string): string {.compileTime.} =
+        let lc = elemName.toLowerAscii()
+        if lc in ["string", "cstring"]:
+          return "*const ::std::os::raw::c_char"
+        if isNimPrimitive(elemName):
+          return nimTypeToRustFfi(ident(elemName))
+        if isEnumRegistered(elemName):
+          return "i32"
+        if isAliasOrDistinctRegistered(elemName):
+          return nimTypeToRustFfi(ident(resolveUnderlyingType(elemName)))
+        elemName & "CItem"
+
+      proc rsElemSafe(elemName: string): string {.compileTime.} =
+        let lc = elemName.toLowerAscii()
+        if lc in ["string", "cstring"]:
+          return "String"
+        nimTypeToRust(ident(elemName))
+
+      var anyUnmappable = false
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          if not rsTypeMappable(fieldTypes[i]):
+            anyUnmappable = true
+            break
+      if not anyUnmappable and not argSig.isNil():
+        for paramDef in argParams:
+          for i in 0 ..< paramDef.len - 2:
+            let pType = paramDef[paramDef.len - 2]
+            if not rsTypeMappable(pType):
+              anyUnmappable = true
+              break
+          if anyUnmappable:
+            break
+
+      if anyUnmappable:
+        gApiRustMethods.add(
+          "    // TODO(rust-codegen): request '" & typeDisplayName &
+            "' uses a Nim type combination not yet mappable to native Rust.\n"
+        )
+      else:
+        # ---- #[repr(C)] CResult ------------------------------------
+        block:
+          var ffi = "#[repr(C)]\n"
+          ffi.add("#[derive(Debug)]\n")
+          ffi.add("pub struct " & rsCResultName & " {\n")
+          ffi.add("    pub error_message: *const ::std::os::raw::c_char,\n")
+          if hasInlineFields:
+            for i in 0 ..< fieldNames.len:
+              let fName = $fieldNames[i]
+              let fType = fieldTypes[i]
+              if isSeqType(fType):
+                let elem = seqItemTypeName(fType)
+                ffi.add("    pub " & fName & ": *const " & rsElemFfi(elem) & ",\n")
+                ffi.add("    pub " & fName & "_count: i32,\n")
+              elif isArrayTypeNode(fType):
+                let n = arrayNodeSize(fType)
+                let elem = arrayNodeElemName(fType)
+                ffi.add(
+                  "    pub " & fName & ": [" & rsElemFfi(elem) & "; " & $n & "],\n"
+                )
+              else:
+                ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(fType) & ",\n")
+          ffi.add("}")
+          gApiRustFfiStructs.add(ffi)
+
+        # ---- Safe Rust struct -------------------------------------
+        block:
+          var safe = "#[derive(Debug, Clone, Default)]\n"
+          safe.add("pub struct " & rsResultName & " {\n")
+          if hasInlineFields:
+            for i in 0 ..< fieldNames.len:
+              let fName = $fieldNames[i]
+              let fType = fieldTypes[i]
+              if isSeqType(fType) or isArrayTypeNode(fType):
+                let elem =
+                  if isSeqType(fType):
+                    seqItemTypeName(fType)
+                  else:
+                    arrayNodeElemName(fType)
+                safe.add("    pub " & fName & ": Vec<" & rsElemSafe(elem) & ">,\n")
+              else:
+                safe.add("    pub " & fName & ": " & nimTypeToRust(fType) & ",\n")
+          else:
+            safe.add("    _phantom: (),\n")
+          safe.add("}")
+          gApiRustStructs.add(safe)
+
+        # ---- extern "C" function declarations ---------------------
+        proc rsExtParamDecl(pName: string, pType: NimNode): string {.compileTime.} =
+          if isSeqType(pType):
+            let elem = seqItemTypeName(pType)
+            return pName & ": *const " & rsElemFfi(elem) & ", " & pName & "_count: i32"
+          if isArrayTypeNode(pType):
+            let elem = arrayNodeElemName(pType)
+            return pName & ": *const " & rsElemFfi(elem)
+          pName & ": " & nimTypeToRustFfi(pType)
+
+        if not zeroArgSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          gApiRustExternFns.add(
+            "fn " & funcName & "(ctx: u32) -> " & rsCResultName & ";"
+          )
+        if not argSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(argSigName))
+          var argDecl = "ctx: u32"
+          for paramDef in argParams:
+            for i in 0 ..< paramDef.len - 2:
+              let pName = $paramDef[i]
+              let pType = paramDef[paramDef.len - 2]
+              argDecl.add(", " & rsExtParamDecl(pName, pType))
+          gApiRustExternFns.add(
+            "fn " & funcName & "(" & argDecl & ") -> " & rsCResultName & ";"
+          )
+        gApiRustExternFns.add(
+          "fn " & rsFreeFuncName & "(r: *mut " & rsCResultName & ");"
+        )
+
+        # ---- Pre-call setup + call args ---------------------------
+        proc rsArgPreCall(pName: string, pType: NimNode): string {.compileTime.} =
+          if isCStringType(pType):
+            return
+              "        let _" & pName & "_c = match ::std::ffi::CString::new(" & pName &
+              ") { Ok(s) => s, Err(_) => return Result::err(\"invalid C string\") };\n"
+          if isSeqType(pType):
+            let elem = seqItemTypeName(pType)
+            let lc = elem.toLowerAscii()
+            if lc in ["string", "cstring"]:
+              # Build Vec<CString> + Vec<*const c_char> for a seq[string] arg.
+              var s =
+                "        let _" & pName & "_owned: Vec<::std::ffi::CString> = " & pName &
+                ".iter().map(|s| ::std::ffi::CString::new(s.as_str()).unwrap_or_default()).collect();\n"
+              s.add(
+                "        let _" & pName & "_ptrs: Vec<*const ::std::os::raw::c_char> = _" &
+                  pName & "_owned.iter().map(|c| c.as_ptr()).collect();\n"
+              )
+              return s
+            if isNimPrimitive(elem):
+              return "" # Vec<T>.as_ptr() inline is fine.
+            # seq[Object]: build per-item CString-owned columns + Vec<TCItem>.
+            if isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              let entry = lookupTypeEntry(elem)
+              var s =
+                "        let mut _" & pName &
+                "_str_storage: Vec<::std::ffi::CString> = Vec::new();\n"
+              s.add(
+                "        let mut _" & pName & "_items: Vec<" & elem &
+                  "CItem> = Vec::with_capacity(" & pName & ".len());\n"
+              )
+              s.add("        for _it in " & pName & ".iter() {\n")
+              s.add("            let mut _ci = " & elem & "CItem {\n")
+              for f in entry.fields:
+                let lcf = f.nimType.toLowerAscii()
+                if lcf in ["string", "cstring"]:
+                  s.add("                " & f.name & ": ::std::ptr::null(),\n")
+                else:
+                  s.add("                " & f.name & ": Default::default(),\n")
+              s.add("            };\n")
+              for f in entry.fields:
+                let lcf = f.nimType.toLowerAscii()
+                if lcf in ["string", "cstring"]:
+                  s.add("            {\n")
+                  s.add(
+                    "                let _cs = ::std::ffi::CString::new(_it." & f.name &
+                      ".as_str()).unwrap_or_default();\n"
+                  )
+                  s.add("                _ci." & f.name & " = _cs.as_ptr();\n")
+                  s.add("                _" & pName & "_str_storage.push(_cs);\n")
+                  s.add("            }\n")
+                else:
+                  s.add("            _ci." & f.name & " = _it." & f.name & ";\n")
+              s.add("            _" & pName & "_items.push(_ci);\n")
+              s.add("        }\n")
+              return s
+            return ""
+          if isArrayTypeNode(pType):
+            return ""
+          ""
+
+        proc rsArgPassArgs(pName: string, pType: NimNode): string {.compileTime.} =
+          if isCStringType(pType):
+            return "_" & pName & "_c.as_ptr()"
+          if isSeqType(pType):
+            let elem = seqItemTypeName(pType)
+            let lc = elem.toLowerAscii()
+            if lc in ["string", "cstring"]:
+              return "_" & pName & "_ptrs.as_ptr(), _" & pName & "_ptrs.len() as i32"
+            if isNimPrimitive(elem):
+              return pName & ".as_ptr(), " & pName & ".len() as i32"
+            if isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              return "_" & pName & "_items.as_ptr(), _" & pName & "_items.len() as i32"
+            return pName
+          if isArrayTypeNode(pType):
+            return pName & ".as_ptr()"
+          if pType.kind == nnkIdent and isEnumRegistered($pType):
+            return pName & " as i32"
+          if pType.kind == nnkIdent and isAliasOrDistinctRegistered($pType):
+            return pName
+          pName
+
+        proc rsBuildBody(funcName, callArgs: string): string {.compileTime.} =
+          result = ""
+          result.add(
+            "        if self.ctx == 0 { return Result::err(\"Library context is not created\"); }\n"
+          )
+          result.add("        unsafe {\n")
+          result.add("            let mut c = " & funcName & "(" & callArgs & ");\n")
+          result.add("            if !c.error_message.is_null() {\n")
+          result.add(
+            "                let msg = ::std::ffi::CStr::from_ptr(c.error_message).to_string_lossy().into_owned();\n"
+          )
+          result.add("                " & rsFreeFuncName & "(&mut c as *mut _);\n")
+          result.add("                return Result::err(msg);\n")
+          result.add("            }\n")
+          if hasInlineFields:
+            result.add("            let mut _r = " & rsResultName & "::default();\n")
+            for i in 0 ..< fieldNames.len:
+              let fName = $fieldNames[i]
+              let fType = fieldTypes[i]
+              if isCStringType(fType):
+                result.add(
+                  "            _r." & fName & " = if c." & fName &
+                    ".is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(c." &
+                    fName & ").to_string_lossy().into_owned() };\n"
+                )
+              elif fType.kind == nnkIdent and isEnumRegistered($fType):
+                result.add(
+                  "            _r." & fName & " = (c." & fName & " as i32).into();\n"
+                )
+              elif isSeqType(fType):
+                let elem = seqItemTypeName(fType)
+                let lc = elem.toLowerAscii()
+                if lc in ["string", "cstring"]:
+                  result.add(
+                    "            if !c." & fName & ".is_null() && c." & fName &
+                      "_count > 0 {\n"
+                  )
+                  result.add(
+                    "                let _slice = ::std::slice::from_raw_parts(c." &
+                      fName & ", c." & fName & "_count as usize);\n"
+                  )
+                  result.add(
+                    "                _r." & fName &
+                      " = _slice.iter().map(|p| if p.is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(*p).to_string_lossy().into_owned() }).collect();\n"
+                  )
+                  result.add("            }\n")
+                elif isNimPrimitive(elem):
+                  result.add(
+                    "            if !c." & fName & ".is_null() && c." & fName &
+                      "_count > 0 {\n"
+                  )
+                  result.add(
+                    "                _r." & fName & " = ::std::slice::from_raw_parts(c." &
+                      fName & ", c." & fName & "_count as usize).to_vec();\n"
+                  )
+                  result.add("            }\n")
+                elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+                  let entry = lookupTypeEntry(elem)
+                  result.add(
+                    "            if !c." & fName & ".is_null() && c." & fName &
+                      "_count > 0 {\n"
+                  )
+                  result.add(
+                    "                let _slice = ::std::slice::from_raw_parts(c." &
+                      fName & ", c." & fName & "_count as usize);\n"
+                  )
+                  result.add(
+                    "                let mut _v: Vec<" & elem &
+                      "> = Vec::with_capacity(_slice.len());\n"
+                  )
+                  result.add("                for _ci in _slice.iter() {\n")
+                  result.add("                    _v.push(" & elem & " {\n")
+                  for f in entry.fields:
+                    let lcf = f.nimType.toLowerAscii()
+                    if lcf in ["string", "cstring"]:
+                      result.add(
+                        "                        " & f.name & ": if _ci." & f.name &
+                          ".is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(_ci." &
+                          f.name & ").to_string_lossy().into_owned() },\n"
+                      )
+                    else:
+                      result.add(
+                        "                        " & f.name & ": _ci." & f.name & ",\n"
+                      )
+                  result.add("                    });\n")
+                  result.add("                }\n")
+                  result.add("                _r." & fName & " = _v;\n")
+                  result.add("            }\n")
+              elif isArrayTypeNode(fType):
+                result.add("            _r." & fName & " = c." & fName & ".to_vec();\n")
+              else:
+                result.add("            _r." & fName & " = c." & fName & ";\n")
+            result.add("            " & rsFreeFuncName & "(&mut c as *mut _);\n")
+            result.add("            Result::ok(_r)\n")
+          else:
+            result.add("            " & rsFreeFuncName & "(&mut c as *mut _);\n")
+            result.add("            Result::ok(" & rsResultName & "::default())\n")
+          result.add("        }\n")
+
+        if not argSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(argSigName))
+          var rsParams = "&self"
+          var rsCallArgs = "self.ctx"
+          var rsPreCall = ""
+          var rsSummaryParams: seq[string] = @[]
+          for paramDef in argParams:
+            for i in 0 ..< paramDef.len - 2:
+              let pName = $paramDef[i]
+              let pType = paramDef[paramDef.len - 2]
+              let safeTy =
+                if isSeqType(pType) or isArrayTypeNode(pType):
+                  let elem =
+                    if isSeqType(pType):
+                      seqItemTypeName(pType)
+                    else:
+                      arrayNodeElemName(pType)
+                  "Vec<" & rsElemSafe(elem) & ">"
+                else:
+                  nimTypeToRust(pType)
+              rsParams.add(", " & pName & ": " & safeTy)
+              rsPreCall.add(rsArgPreCall(pName, pType))
+              rsCallArgs.add(", " & rsArgPassArgs(pName, pType))
+              rsSummaryParams.add(pName & ": " & safeTy)
+          var rsMethod =
+            "    pub fn " & rsSnakeName & "(" & rsParams & ") -> Result<" & rsResultName &
+            "> {\n"
+          rsMethod.add(rsPreCall)
+          rsMethod.add(rsBuildBody(funcName, rsCallArgs))
+          rsMethod.add("    }")
+          gApiRustMethods.add(rsMethod)
+          gApiRustInterfaceSummary.add(
+            rsSnakeName & "(" & rsSummaryParams.join(", ") & ") -> Result<" &
+              rsResultName & ">"
+          )
+        elif not zeroArgSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          var rsMethod =
+            "    pub fn " & rsSnakeName & "(&self) -> Result<" & rsResultName & "> {\n"
+          rsMethod.add(rsBuildBody(funcName, "self.ctx"))
+          rsMethod.add("    }")
+          gApiRustMethods.add(rsMethod)
+          gApiRustInterfaceSummary.add(
+            rsSnakeName & "() -> Result<" & rsResultName & ">"
+          )
+
   # Step 7: Append free_result header declaration
   if not hideFromForeignSurface:
     appendHeaderDecl(freeHeaderProto)

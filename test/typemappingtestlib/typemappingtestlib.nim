@@ -202,6 +202,34 @@ RequestBroker(API):
     values: seq[int64]
   ): Future[Result[PrimSeqParamRequest, string]] {.async.}
 
+## ObjParamRequest: takes a single Tag (Object) as INPUT param — exercises
+## whole-struct pass-by-value across the FFI surface. Returns "key=value".
+##
+## Gated to CBOR mode: native C/C++/Python/Rust codegen all fail for this
+## case (see doc/TYPESUPPORT.md, Section 2 "Object as param"). Probing
+## those backends would break the native C/C++ build before the test
+## even runs, so the broker is only registered when CBOR is in effect.
+when defined(BrokerFfiApiCBOR):
+  RequestBroker(API):
+    type ObjParamRequest = object
+      summary*: string
+
+    proc signature*(tag: Tag): Future[Result[ObjParamRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# Probe negatives (documented; not active brokers). See doc/TYPESUPPORT.md.
+#   - array[N, Object]:    C header emits bare 'Inner' which is undeclared
+#                          in C scope; C++ test fails with "unknown type
+#                          name 'Inner'". Native Rust + C/C++ broken;
+#                          Python ctypes correct; CBOR works.
+#   - array[N, string]:    request broker codegen rejects with
+#                          'array[N, cstring]' vs 'array[N, string]'
+#                          mismatch — fails before reaching wrappers.
+#   - seq[Object<seq>]:    api_type.nim toCFieldType(ident("seq[T]"))
+#                          fails — CItem layout requires simple-ident
+#                          field types. Inner type can't even register.
+# ---------------------------------------------------------------------------
+
 # ---------------------------------------------------------------------------
 # Event Brokers — original
 # ---------------------------------------------------------------------------
@@ -430,6 +458,16 @@ proc setupProviders(ctx: BrokerContext) =
         total += v
       return ok(PrimSeqParamRequest(count: int32(values.len), total: total)),
   )
+
+  when defined(BrokerFfiApiCBOR):
+    discard ObjParamRequest.setProvider(
+      ctx,
+      proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
+        return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
+    )
+
+  # No probe providers — see "Probe negatives" comment above for why each
+  # of array[N, Object] / array[N, string] / seq[Object<seq>] is omitted.
 
 # ---------------------------------------------------------------------------
 # Library registration

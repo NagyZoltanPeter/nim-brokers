@@ -378,6 +378,17 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.count, 2)
         self.assertEqual(r.value.first, "alpha")
 
+    def test_obj_as_param(self):
+        # Object-as-request-param probe. The broker is gated to CBOR mode
+        # in the Nim source — native C/C++/Python/Rust all fail for this
+        # pattern (see doc/TYPESUPPORT.md, Section 2). We only assert when
+        # running against the CBOR build.
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("obj_param_request only registered in CBOR build")
+        r = self.lib.obj_param_request(Tag(key="k", value="v"))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.summary, "k=v")
+
 
 # ---------------------------------------------------------------------------
 # Events

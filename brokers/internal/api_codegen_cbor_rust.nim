@@ -1,0 +1,769 @@
+## Generated Rust wrapper for the CBOR FFI surface.
+##
+## The generated `<lib>_rs/` Cargo crate ships alongside the shared library
+## and uses `ciborium` + `serde` for CBOR encode/decode of typed payloads
+## plus `serde_json` for the discovery endpoints (`list_apis`, `get_schema`)
+## which return JSON. Foreign Rust projects only need the three crate
+## dependencies — no other tooling.
+##
+## The wrapper emits typed `#[derive(Serialize, Deserialize)]` structs for
+## each registered request response, request args, and event payload type,
+## plus per-request methods on the libname-PascalCase wrapper that
+## CBOR-encode the args, dispatch through the C ABI, and decode the
+## response envelope into a `Result<T, String>`. Per-event
+## `on_<name>(callback) -> u64` methods register a typed closure; the
+## library holds a `Mutex<HashMap<u64, ...>>` per event keyed by handle so
+## the trampoline can dispatch back to user code, mirroring the C++
+## `EventDispatcher` GC anchor.
+##
+## Type-matrix coverage:
+##   - Primitives: bool, int/intN, uint/uintN/byte, float/floatN, string,
+##     char.
+##   - Enums (atkEnum) → `#[repr(i32)]` Rust enums with `From<i32>` impls.
+##   - Distinct/Alias (atkDistinct/atkAlias) → Rust `pub type X = Y;`
+##     aliases of the resolved underlying type.
+##   - Registered objects → `#[derive(Serialize, Deserialize, Clone, Debug,
+##     Default)] pub struct` with typed fields.
+##   - Composite types: seq[T], array[N, T] (typed as Vec<T>),
+##     including seq[byte] and seq[<object>]; nested objects.
+## Unmappable types still produce a TODO stub so the wrapper compiles.
+
+{.push raises: [].}
+
+import std/[macros, strutils, tables]
+import ./api_codegen_c, ./api_common, ./api_schema
+
+# ---------------------------------------------------------------------------
+# Nim → Rust type mapping (registry-aware)
+# ---------------------------------------------------------------------------
+
+const rustPrimMap = {
+  "bool": "bool",
+  "string": "String",
+  "char": "String",
+  "int": "i32",
+  "int8": "i8",
+  "int16": "i16",
+  "int32": "i32",
+  "int64": "i64",
+  "uint": "u32",
+  "uint8": "u8",
+  "uint16": "u16",
+  "uint32": "u32",
+  "uint64": "u64",
+  "byte": "u8",
+  "float": "f64",
+  "float32": "f32",
+  "float64": "f64",
+}.toTable
+
+proc isRustPrimitive(nimType: string): bool {.compileTime.} =
+  nimType.strip() in rustPrimMap
+
+proc primRustHint(nimType: string): string {.compileTime.} =
+  rustPrimMap.getOrDefault(nimType.strip(), "")
+
+proc unwrapBracket(s, head: string): string {.compileTime.} =
+  let t = s.strip()
+  t[head.len + 1 .. ^2].strip()
+
+proc parseArrayInner(s: string): string {.compileTime.} =
+  let inner = s.strip()[6 ..^ 2]
+  let comma = inner.find(',')
+  if comma < 0:
+    return ""
+  inner[comma + 1 .. ^1].strip()
+
+proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
+  ## Recursive Nim → Rust type. Falls back to "" for types we can't yet map.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if isRustPrimitive(t):
+    return primRustHint(t)
+  if lower.startsWith("seq[") and lower.endsWith("]"):
+    let inner = nimTypeToRustHint(unwrapBracket(t, "seq"))
+    return
+      if inner.len > 0:
+        "Vec<" & inner & ">"
+      else:
+        "Vec<serde_cbor_value::Value>"
+  if lower.startsWith("array["):
+    let elem = parseArrayInner(t)
+    let inner = nimTypeToRustHint(elem)
+    return
+      if inner.len > 0:
+        "Vec<" & inner & ">"
+      else:
+        "Vec<serde_cbor_value::Value>"
+  if lower.startsWith("option[") and lower.endsWith("]"):
+    let inner = nimTypeToRustHint(unwrapBracket(t, "option"))
+    return
+      if inner.len > 0:
+        "Option<" & inner & ">"
+      else:
+        "Option<serde_cbor_value::Value>"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject, atkEnum:
+      return t
+    of atkAlias, atkDistinct:
+      return primRustHint(resolveUnderlyingType(t))
+  ""
+
+proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
+  ## Returns a Rust default expression for a struct field initializer
+  ## (used in `Default::default()` derivations — the generated structs
+  ## use `#[derive(Default)]` so this is mainly informational, but
+  ## emitted as part of TODO comments).
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  case t
+  of "bool":
+    return "false"
+  of "string", "char":
+    return "String::new()"
+  of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte", "uint16",
+      "uint32", "uint64":
+    return "0"
+  of "float32", "float", "float64":
+    return "0.0"
+  else:
+    discard
+  if lower.startsWith("seq[") or lower.startsWith("array["):
+    return "Vec::new()"
+  if lower.startsWith("option["):
+    return "None"
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    case entry.kind
+    of atkObject:
+      return "Default::default()"
+    of atkEnum:
+      return t & "::default()"
+    of atkAlias, atkDistinct:
+      return nimTypeToRustDefaultHint(resolveUnderlyingType(t))
+  "Default::default()"
+
+proc isRustMappable*(nimType: string): bool {.compileTime.} =
+  nimTypeToRustHint(nimType).len > 0
+
+# ---------------------------------------------------------------------------
+# File emission
+# ---------------------------------------------------------------------------
+
+{.pop.}
+
+proc cborRustClassName(libName: string): string {.compileTime.} =
+  result = ""
+  var capitalize = true
+  for ch in libName:
+    if ch == '_' or ch == '-':
+      capitalize = true
+    elif capitalize:
+      result.add(chr(ord(ch) - 32 * ord(ch in {'a' .. 'z'})))
+      capitalize = false
+    else:
+      result.add(ch)
+
+proc generateCborRustFile*(
+    outDir: string,
+    libName: string,
+    requestEntries: seq[CborRequestEntry],
+    eventEntries: seq[CborEventEntry],
+) {.compileTime, raises: [].} =
+  ## Writes the Rust wrapper crate (Cargo.toml + src/lib.rs) for a
+  ## CBOR-mode library under `<outDir>/<libName>_rs/`.
+  ensureGeneratedOutputDir(outDir)
+  let crateDir =
+    if outDir.len > 0:
+      outDir & "/" & libName & "_rs"
+    else:
+      libName & "_rs"
+  let srcDir = crateDir & "/src"
+  ensureGeneratedOutputDir(crateDir)
+  ensureGeneratedOutputDir(srcDir)
+
+  let className = cborRustClassName(libName)
+  let p = libName & "_"
+
+  # ---------------------- Cargo.toml ----------------------
+  var cargo = "# Generated by nim-brokers CBOR FFI Rust codegen — do not edit.\n"
+  cargo.add("[package]\n")
+  cargo.add("name = \"" & libName & "\"\n")
+  cargo.add("version = \"0.1.0\"\n")
+  cargo.add("edition = \"2021\"\n")
+  cargo.add("rust-version = \"1.75\"\n\n")
+  cargo.add("[lib]\n")
+  cargo.add("name = \"" & libName & "\"\n")
+  cargo.add("crate-type = [\"rlib\"]\n\n")
+  cargo.add("[dependencies]\n")
+  cargo.add("ciborium = \"0.2\"\n")
+  cargo.add("serde = { version = \"1\", features = [\"derive\"] }\n")
+  cargo.add("serde_bytes = \"0.11\"\n")
+  cargo.add("serde_json = \"1\"\n")
+  try:
+    writeFile(crateDir & "/Cargo.toml", cargo)
+  except IOError:
+    error(
+      "Failed to write generated CBOR Rust Cargo.toml '" & crateDir & "/Cargo.toml': " &
+        getCurrentExceptionMsg()
+    )
+
+  # ---------------------- src/lib.rs ----------------------
+  var rs = "// Generated by nim-brokers CBOR FFI Rust codegen — do not edit.\n"
+  rs.add("//\n")
+  rs.add("// Rust wrapper around the C ABI declared in `" & libName & ".h`.\n")
+  rs.add("// Requires Rust 1.75+ and the `ciborium` + `serde` + `serde_json` crates.\n")
+  rs.add("//\n")
+  rs.add("// Public API surface (auto-generated from broker declarations):\n")
+  rs.add("//   pub fn version() -> String  (associated)\n")
+  rs.add("//   pub fn new() -> Self\n")
+  rs.add("//   pub fn create_context(&mut self) -> Result<()>\n")
+  rs.add("//   pub fn valid_context(&self) -> bool\n")
+  rs.add("//   pub fn shutdown(&mut self)\n")
+  rs.add("//   pub fn ctx(&self) -> u32\n")
+  rs.add("//\n")
+  rs.add("// Each request method returns Result<T, String>. Each event has\n")
+  rs.add("// on_<name>(callback) -> u64 and off_<name>(handle).\n")
+  rs.add("//\n")
+  for e in requestEntries:
+    var sigParams = ""
+    for i, (n, t) in e.argFields.pairs:
+      if i > 0:
+        sigParams.add(", ")
+      sigParams.add(n & ": " & nimTypeToRustHint(t))
+    rs.add(
+      "//   " & e.apiName & "(" & sigParams & ") -> Result<" & e.responseTypeName & ">\n"
+    )
+  for ev in eventEntries:
+    rs.add("//   on_" & ev.apiName & "(callback) -> u64\n")
+    rs.add("//   off_" & ev.apiName & "(handle)\n")
+  rs.add("\n")
+
+  rs.add("#![allow(non_camel_case_types)]\n")
+  rs.add("#![allow(non_snake_case)]\n")
+  rs.add("#![allow(non_upper_case_globals)]\n")
+  rs.add("#![allow(dead_code)]\n")
+  rs.add("#![allow(unused_imports)]\n")
+  rs.add("#![allow(clippy::missing_safety_doc)]\n\n")
+
+  rs.add("use serde::{Deserialize, Serialize};\n")
+  rs.add("use std::collections::HashMap;\n")
+  rs.add("use std::ffi::{CStr, CString};\n")
+  rs.add("use std::os::raw::{c_char, c_int, c_void};\n")
+  rs.add("use std::sync::{Arc, Mutex, OnceLock};\n\n")
+
+  # ---- extern "C" bindings ---------------------------------------------
+  rs.add("// -------- C ABI bindings --------\n\n")
+  rs.add("extern \"C\" {\n")
+  rs.add("    fn " & p & "version() -> *const c_char;\n")
+  rs.add("    fn " & p & "initialize();\n")
+  rs.add("    fn " & p & "createContext(err: *mut *const c_char) -> u32;\n")
+  rs.add("    fn " & p & "shutdown(ctx: u32) -> i32;\n")
+  rs.add("    fn " & p & "allocBuffer(size: i32) -> *mut c_void;\n")
+  rs.add("    fn " & p & "freeBuffer(p: *mut c_void);\n")
+  rs.add("    fn " & p & "call(\n")
+  rs.add("        ctx: u32,\n")
+  rs.add("        api_name: *const c_char,\n")
+  rs.add("        in_buf: *const c_void,\n")
+  rs.add("        in_len: i32,\n")
+  rs.add("        out_buf: *mut *mut c_void,\n")
+  rs.add("        out_len: *mut i32,\n")
+  rs.add("    ) -> i32;\n")
+  rs.add("    fn " & p & "subscribe(\n")
+  rs.add("        ctx: u32,\n")
+  rs.add("        event_name: *const c_char,\n")
+  rs.add("        cb: EventCb,\n")
+  rs.add("        user_data: *mut c_void,\n")
+  rs.add("    ) -> u64;\n")
+  rs.add(
+    "    fn " & p &
+      "unsubscribe(ctx: u32, event_name: *const c_char, handle: u64) -> i32;\n"
+  )
+  rs.add(
+    "    fn " & p & "listApis(out_buf: *mut *mut c_void, out_len: *mut i32) -> i32;\n"
+  )
+  rs.add(
+    "    fn " & p & "getSchema(out_buf: *mut *mut c_void, out_len: *mut i32) -> i32;\n"
+  )
+  rs.add("}\n\n")
+
+  rs.add(
+    "pub type EventCb = unsafe extern \"C\" fn(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, ud: *mut c_void);\n\n"
+  )
+
+  # ---- Result envelope -------------------------------------------------
+  rs.add("/// Mirror of Nim's `Result[T, string]` envelope on the wire.\n")
+  rs.add("#[derive(Debug, Clone)]\n")
+  rs.add("pub struct Result<T> {\n")
+  rs.add("    inner: ::std::result::Result<T, String>,\n")
+  rs.add("}\n\n")
+  rs.add("impl<T> Result<T> {\n")
+  rs.add("    pub fn ok(value: T) -> Self { Self { inner: Ok(value) } }\n")
+  rs.add(
+    "    pub fn err<S: Into<String>>(msg: S) -> Self { Self { inner: Err(msg.into()) } }\n"
+  )
+  rs.add("    pub fn is_ok(&self) -> bool { self.inner.is_ok() }\n")
+  rs.add("    pub fn is_err(&self) -> bool { self.inner.is_err() }\n")
+  rs.add("    pub fn value(&self) -> Option<&T> { self.inner.as_ref().ok() }\n")
+  rs.add(
+    "    pub fn error(&self) -> Option<&str> { self.inner.as_ref().err().map(|s| s.as_str()) }\n"
+  )
+  rs.add(
+    "    pub fn into_result(self) -> ::std::result::Result<T, String> { self.inner }\n"
+  )
+  rs.add("}\n\n")
+
+  # ---- Generated payload types -----------------------------------------
+  var enumNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind == atkEnum:
+      enumNames.add(entry.name)
+  var aliasNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind in {atkDistinct, atkAlias}:
+      aliasNames.add(entry.name)
+  var objectNames: seq[string] = @[]
+  for entry in gApiTypeRegistry:
+    if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
+      objectNames.add(entry.name)
+
+  if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
+    rs.add("// -------- Generated payload types --------\n\n")
+
+  # Enums.
+  for name in enumNames:
+    let entry = lookupTypeEntry(name)
+    rs.add("#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n")
+    rs.add("#[repr(i32)]\n")
+    rs.add("#[serde(into = \"i32\", from = \"i32\")]\n")
+    rs.add("pub enum " & name & " {\n")
+    if entry.enumValues.len == 0:
+      rs.add("    Unknown = 0,\n")
+    else:
+      for v in entry.enumValues:
+        rs.add("    " & v.name & " = " & $v.ordinal & ",\n")
+    rs.add("}\n\n")
+    rs.add("impl Default for " & name & " {\n")
+    if entry.enumValues.len == 0:
+      rs.add("    fn default() -> Self { " & name & "::Unknown }\n")
+    else:
+      rs.add(
+        "    fn default() -> Self { " & name & "::" & entry.enumValues[0].name & " }\n"
+      )
+    rs.add("}\n\n")
+    rs.add("impl From<i32> for " & name & " {\n")
+    rs.add("    fn from(v: i32) -> Self {\n")
+    rs.add("        match v {\n")
+    for v in entry.enumValues:
+      rs.add("            " & $v.ordinal & " => " & name & "::" & v.name & ",\n")
+    rs.add("            _ => Self::default(),\n")
+    rs.add("        }\n")
+    rs.add("    }\n")
+    rs.add("}\n\n")
+    rs.add("impl From<" & name & "> for i32 {\n")
+    rs.add("    fn from(v: " & name & ") -> Self { v as i32 }\n")
+    rs.add("}\n\n")
+
+  # Distinct / alias.
+  for name in aliasNames:
+    let underlying = resolveUnderlyingType(name)
+    let pyU = primRustHint(underlying)
+    if pyU.len == 0:
+      rs.add(
+        "// TODO: alias '" & name & "' resolves to '" & underlying &
+          "' which has no Rust primitive mapping\n\n"
+      )
+      continue
+    rs.add("pub type " & name & " = " & pyU & ";\n\n")
+
+  # Objects.
+  for name in objectNames:
+    let entry = lookupTypeEntry(name)
+    rs.add("#[derive(Debug, Clone, Default, Serialize, Deserialize)]\n")
+    rs.add("pub struct " & name & " {\n")
+    var anyField = false
+    for f in entry.fields:
+      let hint = nimTypeToRustHint(f.nimType)
+      if hint.len == 0:
+        rs.add("    // TODO: Nim type '" & f.nimType & "' not yet mappable\n")
+        continue
+      # Map seq[byte] to serde_bytes::ByteBuf for compact CBOR encoding.
+      let useByteBuf = f.nimType.strip().toLowerAscii() == "seq[byte]"
+      if useByteBuf:
+        rs.add("    #[serde(with = \"serde_bytes\")]\n")
+      rs.add("    pub " & f.name & ": " & hint & ",\n")
+      anyField = true
+    if not anyField:
+      rs.add("    _phantom: (),\n")
+    rs.add("}\n\n")
+
+  # ---- Lib struct ------------------------------------------------------
+  rs.add("// -------- Lib struct --------\n\n")
+
+  # Build per-event handler-map type: HashMap<u64, Arc<dyn Fn(...) + Send + Sync + 'static>>
+  rs.add("type EventHandler = Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;\n\n")
+  rs.add("struct EventState {\n")
+  rs.add("    handles_by_event: HashMap<String, HashMap<u64, EventHandler>>,\n")
+  rs.add("}\n\n")
+  rs.add("impl EventState {\n")
+  rs.add("    fn new() -> Self { Self { handles_by_event: HashMap::new() } }\n")
+  rs.add("}\n\n")
+
+  rs.add(
+    "static EVENT_REGISTRY: OnceLock<Mutex<HashMap<u32, Mutex<EventState>>>> = OnceLock::new();\n\n"
+  )
+  rs.add("fn event_registry() -> &'static Mutex<HashMap<u32, Mutex<EventState>>> {\n")
+  rs.add("    EVENT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))\n")
+  rs.add("}\n\n")
+
+  rs.add(
+    "/// Pythonic / C++-equivalent wrapper around the `" & libName & "` library.\n"
+  )
+  rs.add("pub struct " & className & " {\n")
+  rs.add("    ctx: u32,\n")
+  rs.add("}\n\n")
+
+  rs.add("impl " & className & " {\n")
+  rs.add("    /// Static semver string baked into the shared library.\n")
+  rs.add("    pub fn version() -> String {\n")
+  rs.add("        unsafe {\n")
+  rs.add("            let p = " & p & "version();\n")
+  rs.add(
+    "            if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }\n"
+  )
+  rs.add("        }\n")
+  rs.add("    }\n\n")
+
+  rs.add("    pub fn new() -> Self {\n")
+  rs.add("        unsafe { " & p & "initialize(); }\n")
+  rs.add("        Self { ctx: 0 }\n")
+  rs.add("    }\n\n")
+
+  rs.add("    pub fn create_context(&mut self) -> Result<()> {\n")
+  rs.add(
+    "        if self.ctx != 0 { return Result::err(\"Context already created\"); }\n"
+  )
+  rs.add("        unsafe {\n")
+  rs.add("            let mut err: *const c_char = std::ptr::null();\n")
+  rs.add("            let ctx = " & p & "createContext(&mut err as *mut _);\n")
+  rs.add("            if ctx == 0 {\n")
+  rs.add("                let msg = if err.is_null() {\n")
+  rs.add("                    String::from(\"createContext returned 0\")\n")
+  rs.add("                } else {\n")
+  rs.add(
+    "                    let s = CStr::from_ptr(err).to_string_lossy().into_owned();\n"
+  )
+  rs.add("                    " & p & "freeBuffer(err as *mut c_void);\n")
+  rs.add("                    s\n")
+  rs.add("                };\n")
+  rs.add("                return Result::err(msg);\n")
+  rs.add("            }\n")
+  rs.add("            self.ctx = ctx;\n")
+  rs.add(
+    "            event_registry().lock().unwrap().insert(ctx, Mutex::new(EventState::new()));\n"
+  )
+  rs.add("            Result::ok(())\n")
+  rs.add("        }\n")
+  rs.add("    }\n\n")
+
+  rs.add("    pub fn valid_context(&self) -> bool { self.ctx != 0 }\n")
+  rs.add("    pub fn ctx(&self) -> u32 { self.ctx }\n\n")
+
+  rs.add("    pub fn shutdown(&mut self) {\n")
+  rs.add("        if self.ctx != 0 {\n")
+  rs.add("            unsafe { " & p & "shutdown(self.ctx); }\n")
+  rs.add("            event_registry().lock().unwrap().remove(&self.ctx);\n")
+  rs.add("            self.ctx = 0;\n")
+  rs.add("        }\n")
+  rs.add("    }\n\n")
+
+  # Discovery helpers.
+  rs.add(
+    "    pub fn list_apis(&self) -> ::std::result::Result<serde_json::Value, String> {\n"
+  )
+  rs.add("        unsafe { fetch_descriptor(" & p & "listApis, \"listApis\") }\n")
+  rs.add("    }\n\n")
+  rs.add(
+    "    pub fn get_schema(&self) -> ::std::result::Result<serde_json::Value, String> {\n"
+  )
+  rs.add("        unsafe { fetch_descriptor(" & p & "getSchema, \"getSchema\") }\n")
+  rs.add("    }\n\n")
+
+  # Internal call helper.
+  rs.add(
+    "    fn do_call(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, String> {\n"
+  )
+  rs.add(
+    "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
+  )
+  rs.add("        unsafe {\n")
+  rs.add(
+    "            let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+  )
+  rs.add("            let in_buf: *const c_void = if req_payload.is_empty() {\n")
+  rs.add("                std::ptr::null()\n")
+  rs.add("            } else {\n")
+  rs.add("                let p = " & p & "allocBuffer(req_payload.len() as i32);\n")
+  rs.add(
+    "                if p.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+  )
+  rs.add(
+    "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), p as *mut u8, req_payload.len());\n"
+  )
+  rs.add("                p as *const c_void\n")
+  rs.add("            };\n")
+  rs.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
+  rs.add("            let mut out_len: i32 = 0;\n")
+  rs.add("            let status = " & p & "call(\n")
+  rs.add("                self.ctx,\n")
+  rs.add("                cname.as_ptr(),\n")
+  rs.add("                in_buf,\n")
+  rs.add("                req_payload.len() as i32,\n")
+  rs.add("                &mut out_buf as *mut _,\n")
+  rs.add("                &mut out_len as *mut _,\n")
+  rs.add("            );\n")
+  rs.add("            let mut out: Vec<u8> = Vec::new();\n")
+  rs.add("            if !out_buf.is_null() && out_len > 0 {\n")
+  rs.add(
+    "                let slice = std::slice::from_raw_parts(out_buf as *const u8, out_len as usize);\n"
+  )
+  rs.add("                out = slice.to_vec();\n")
+  rs.add("                " & p & "freeBuffer(out_buf);\n")
+  rs.add("            }\n")
+  rs.add("            if status != 0 {\n")
+  rs.add("                if status == -4 && !out.is_empty() {\n")
+  rs.add(
+    "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
+  )
+  rs.add("                }\n")
+  rs.add("                return Err(format!(\"framework error: {}\", status));\n")
+  rs.add("            }\n")
+  rs.add("            Ok(out)\n")
+  rs.add("        }\n")
+  rs.add("    }\n\n")
+
+  # Per-request methods.
+  rs.add("    // ---- Request methods ----\n\n")
+  for e in requestEntries:
+    if e.responseTypeName.len == 0:
+      continue
+    if e.responseTypeName notin objectNames:
+      rs.add(
+        "    // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
+          "' is not a registered object type.\n\n"
+      )
+      continue
+    var argsMappable = true
+    for (n, t) in e.argFields:
+      if not isRustMappable(t):
+        argsMappable = false
+        break
+    if not argsMappable:
+      rs.add(
+        "    // TODO: '" & e.apiName &
+          "' has parameters whose Nim types aren't yet mappable to Rust.\n\n"
+      )
+      continue
+
+    let methodName = e.apiName
+    var sigParams = "&self"
+    var argsStructFields = ""
+    if e.argFields.len > 0:
+      for (n, t) in e.argFields:
+        sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
+        argsStructFields.add("            \"" & n & "\": " & n & ",\n")
+
+    rs.add(
+      "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
+        "> {\n"
+    )
+    if e.argFields.len > 0:
+      # Build a serde_json::Value::Object for args, then encode via ciborium.
+      rs.add("        let args = serde_json::json!({\n")
+      rs.add(argsStructFields)
+      rs.add("        });\n")
+      rs.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      rs.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
+      rs.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
+      rs.add("        }\n")
+    else:
+      rs.add("        let buf: Vec<u8> = Vec::new();\n")
+    rs.add("        let raw = match self.do_call(\"" & e.apiName & "\", &buf) {\n")
+    rs.add("            Ok(v) => v,\n")
+    rs.add("            Err(e) => return Result::err(e),\n")
+    rs.add("        };\n")
+    rs.add("        if raw.is_empty() {\n")
+    rs.add("            return Result::err(\"empty response envelope\");\n")
+    rs.add("        }\n")
+    rs.add("        #[derive(Deserialize)]\n")
+    rs.add(
+      "        struct __Env { #[serde(default)] ok: Option<" & e.responseTypeName &
+        ">, #[serde(default)] err: Option<String> }\n"
+    )
+    rs.add("        let env: __Env = match ciborium::from_reader(raw.as_slice()) {\n")
+    rs.add("            Ok(v) => v,\n")
+    rs.add(
+      "            Err(e) => return Result::err(format!(\"cbor decode: {}\", e)),\n"
+    )
+    rs.add("        };\n")
+    rs.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
+    rs.add("        match env.ok {\n")
+    rs.add("            Some(v) => Result::ok(v),\n")
+    rs.add("            None => Result::err(\"missing ok in envelope\"),\n")
+    rs.add("        }\n")
+    rs.add("    }\n\n")
+
+  # Per-event subscribe / unsubscribe.
+  rs.add("    // ---- Event registration ----\n\n")
+  for ev in eventEntries:
+    if ev.typeName notin objectNames:
+      rs.add(
+        "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
+          "' is not a registered object type.\n\n"
+      )
+      continue
+    let onName = "on_" & ev.apiName
+    let offName = "off_" & ev.apiName
+    # Build per-field type hints + per-field destructure args. The user
+    # callback signature is `Fn(field1, field2, ...)` — parity with the
+    # native-mode wrapper so the same client code drives either build.
+    let entry = lookupTypeEntry(ev.typeName)
+    var hintParts: seq[string] = @[]
+    var destructureArgs: seq[string] = @[]
+    for f in entry.fields:
+      let hint = nimTypeToRustHint(f.nimType)
+      hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
+      destructureArgs.add("v." & f.name)
+    let fnBound = hintParts.join(", ")
+    rs.add(
+      "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
+        ") + Send + Sync + 'static {\n"
+    )
+    rs.add("        if self.ctx == 0 { return 0; }\n")
+    rs.add("        let wrapper: EventHandler = Arc::new(move |raw: &[u8]| {\n")
+    rs.add(
+      "            if let Ok(v) = ciborium::from_reader::<" & ev.typeName &
+        ", _>(raw) {\n"
+    )
+    rs.add("                callback(" & destructureArgs.join(", ") & ");\n")
+    rs.add("            }\n")
+    rs.add("        });\n")
+    rs.add(
+      "        let cname = match CString::new(\"" & ev.apiName &
+        "\") { Ok(s) => s, Err(_) => return 0 };\n"
+    )
+    rs.add("        let h = unsafe {\n")
+    rs.add(
+      "            " & p &
+        "subscribe(self.ctx, cname.as_ptr(), trampoline, std::ptr::null_mut())\n"
+    )
+    rs.add("        };\n")
+    rs.add("        if h == 0 || h == 1 { return h; }\n")
+    rs.add("        let reg = event_registry();\n")
+    rs.add("        let map = reg.lock().unwrap();\n")
+    rs.add("        if let Some(state_lock) = map.get(&self.ctx) {\n")
+    rs.add("            let mut state = state_lock.lock().unwrap();\n")
+    rs.add(
+      "            state.handles_by_event.entry(\"" & ev.apiName &
+        "\".to_string()).or_default().insert(h, wrapper);\n"
+    )
+    rs.add("        }\n")
+    rs.add("        h\n")
+    rs.add("    }\n\n")
+
+    rs.add("    pub fn " & offName & "(&self, handle: u64) {\n")
+    rs.add("        if self.ctx == 0 { return; }\n")
+    rs.add(
+      "        let cname = match CString::new(\"" & ev.apiName &
+        "\") { Ok(s) => s, Err(_) => return };\n"
+    )
+    rs.add(
+      "        unsafe { " & p & "unsubscribe(self.ctx, cname.as_ptr(), handle); }\n"
+    )
+    rs.add("        let reg = event_registry();\n")
+    rs.add("        let map = reg.lock().unwrap();\n")
+    rs.add("        if let Some(state_lock) = map.get(&self.ctx) {\n")
+    rs.add("            let mut state = state_lock.lock().unwrap();\n")
+    rs.add(
+      "            if let Some(handles) = state.handles_by_event.get_mut(\"" & ev.apiName &
+        "\") {\n"
+    )
+    rs.add(
+      "                if handle == 0 { handles.clear(); } else { handles.remove(&handle); }\n"
+    )
+    rs.add("            }\n")
+    rs.add("        }\n")
+    rs.add("    }\n\n")
+
+  rs.add("}\n\n")
+
+  rs.add("impl Default for " & className & " {\n")
+  rs.add("    fn default() -> Self { Self::new() }\n")
+  rs.add("}\n\n")
+
+  rs.add("impl Drop for " & className & " {\n")
+  rs.add("    fn drop(&mut self) { self.shutdown(); }\n")
+  rs.add("}\n\n")
+
+  # Trampoline (one shared C callback that demuxes by ctx + event name).
+  rs.add(
+    "unsafe extern \"C\" fn trampoline(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, _ud: *mut c_void) {\n"
+  )
+  rs.add("    if name.is_null() || buf.is_null() || buf_len <= 0 { return; }\n")
+  rs.add(
+    "    let event_name = match CStr::from_ptr(name).to_str() { Ok(s) => s.to_string(), Err(_) => return };\n"
+  )
+  rs.add(
+    "    let slice = std::slice::from_raw_parts(buf as *const u8, buf_len as usize);\n"
+  )
+  rs.add("    let reg = event_registry();\n")
+  rs.add("    let map = reg.lock().unwrap();\n")
+  rs.add("    let state_lock = match map.get(&ctx) { Some(s) => s, None => return };\n")
+  rs.add("    let snapshot: Vec<EventHandler> = {\n")
+  rs.add("        let state = state_lock.lock().unwrap();\n")
+  rs.add(
+    "        state.handles_by_event.get(&event_name).map(|hs| hs.values().cloned().collect()).unwrap_or_default()\n"
+  )
+  rs.add("    };\n")
+  rs.add("    drop(map);\n")
+  rs.add("    for cb in snapshot { cb(slice); }\n")
+  rs.add("}\n\n")
+
+  # Discovery descriptor helper.
+  rs.add("unsafe fn fetch_descriptor(\n")
+  rs.add("    f: unsafe extern \"C\" fn(*mut *mut c_void, *mut i32) -> i32,\n")
+  rs.add("    label: &str,\n")
+  rs.add(") -> ::std::result::Result<serde_json::Value, String> {\n")
+  rs.add("    let mut buf: *mut c_void = std::ptr::null_mut();\n")
+  rs.add("    let mut len: i32 = 0;\n")
+  rs.add("    let status = f(&mut buf as *mut _, &mut len as *mut _);\n")
+  rs.add(
+    "    if status != 0 { return Err(format!(\"{} framework error: {}\", label, status)); }\n"
+  )
+  rs.add("    if buf.is_null() || len <= 0 { return Ok(serde_json::Value::Null); }\n")
+  rs.add(
+    "    let slice = std::slice::from_raw_parts(buf as *const u8, len as usize);\n"
+  )
+  rs.add("    let v: serde_json::Value = match serde_json::from_slice(slice) {\n")
+  rs.add("        Ok(v) => v,\n")
+  rs.add("        Err(e) => {\n")
+  rs.add("            " & p & "freeBuffer(buf);\n")
+  rs.add("            return Err(format!(\"json decode {}: {}\", label, e));\n")
+  rs.add("        }\n")
+  rs.add("    };\n")
+  rs.add("    " & p & "freeBuffer(buf);\n")
+  rs.add("    Ok(v)\n")
+  rs.add("}\n")
+
+  try:
+    writeFile(srcDir & "/lib.rs", rs)
+  except IOError:
+    error(
+      "Failed to write generated CBOR Rust source '" & srcDir & "/lib.rs': " &
+        getCurrentExceptionMsg()
+    )
+
+{.push raises: [].}
+{.pop.}

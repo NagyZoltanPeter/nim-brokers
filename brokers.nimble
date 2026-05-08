@@ -157,7 +157,7 @@ proc cmakeWindowsConfigureExtras(): string =
   else:
     ""
 
-proc buildFfiExampleFlags(generatePy = false): string =
+proc buildFfiExampleFlags(generatePy = false, generateRust = false): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
@@ -169,15 +169,18 @@ proc buildFfiExampleFlags(generatePy = false): string =
     result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    result.add(" -d:BrokerFfiApiGenRust")
 
-proc buildFfiExampleLibrary(generatePy = false) =
-  exec "nim c " & buildFfiExampleFlags(generatePy) & " examples/ffiapi/nimlib/mylib.nim"
+proc buildFfiExampleLibrary(generatePy = false, generateRust = false) =
+  exec "nim c " & buildFfiExampleFlags(generatePy, generateRust) &
+    " examples/ffiapi/nimlib/mylib.nim"
 
 # Parity build: SAME mylib.nim source compiled with the CBOR FFI flag,
 # emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
 # compile against the CBOR-generated mylib.h / mylib.hpp — proves the
 # generated wrapper interface is shape-identical to the native build.
-proc buildFfiExampleCborFlags(generatePy = false): string =
+proc buildFfiExampleCborFlags(generatePy = false, generateRust = false): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("mylib"))
@@ -189,12 +192,14 @@ proc buildFfiExampleCborFlags(generatePy = false): string =
     result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    result.add(" -d:BrokerFfiApiGenRust")
 
-proc buildFfiExampleCborLibrary(generatePy = false) =
-  exec "nim c " & buildFfiExampleCborFlags(generatePy) &
+proc buildFfiExampleCborLibrary(generatePy = false, generateRust = false) =
+  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust) &
     " examples/ffiapi/nimlib/mylib.nim"
 
-proc buildTorpedoExampleFlags(generatePy = false): string =
+proc buildTorpedoExampleFlags(generatePy = false, generateRust = false): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
@@ -206,12 +211,14 @@ proc buildTorpedoExampleFlags(generatePy = false): string =
     result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    result.add(" -d:BrokerFfiApiGenRust")
 
-proc buildTorpedoExampleLibrary(generatePy = false) =
-  exec "nim c " & buildTorpedoExampleFlags(generatePy) &
+proc buildTorpedoExampleLibrary(generatePy = false, generateRust = false) =
+  exec "nim c " & buildTorpedoExampleFlags(generatePy, generateRust) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc buildTorpedoExampleCborFlags(generatePy = false): string =
+proc buildTorpedoExampleCborFlags(generatePy = false, generateRust = false): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("torpedolib"))
@@ -223,9 +230,11 @@ proc buildTorpedoExampleCborFlags(generatePy = false): string =
     result.add(" --mm:orc")
   if generatePy or existsEnv("GEN_PY"):
     result.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    result.add(" -d:BrokerFfiApiGenRust")
 
-proc buildTorpedoExampleCborLibrary(generatePy = false) =
-  exec "nim c " & buildTorpedoExampleCborFlags(generatePy) &
+proc buildTorpedoExampleCborLibrary(generatePy = false, generateRust = false) =
+  exec "nim c " & buildTorpedoExampleCborFlags(generatePy, generateRust) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
 proc ffiExamplesBuildDir(useCbor = false): string =
@@ -485,6 +494,30 @@ task runFfiExamplePy, "Build and run the Python wrapper example application":
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
+proc findCargoExe(): string =
+  ## Returns the cargo invocation token. Resolving the symlink (rustup
+  ## multi-call binary on most installs) loses the dispatch hint, so we
+  ## return the bare name and rely on PATH lookup at exec time.
+  if findExe("cargo").len == 0:
+    quit "Cargo (Rust toolchain) not found. Install rustup or add cargo to PATH."
+  result = "cargo"
+
+task buildFfiExampleRust,
+  "Build the FFI API example library + generated Rust wrapper crate (native mode)":
+  buildFfiExampleLibrary(generateRust = true)
+
+task runFfiExampleRust,
+  "Build the FFI API example library + run the Rust example (native mode)":
+  buildFfiExampleLibrary(generateRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+
+task runFfiExampleCborRust,
+  "Build the FFI API example library (CBOR mode) + run the Rust example with --features cbor":
+  buildFfiExampleCborLibrary(generateRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --features cbor --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+
 task testFfiApiCmake,
   "Validate the generated <lib>Config.cmake by building a downstream consumer":
   ## Builds the native FFI example (which emits mylibConfig.cmake next to
@@ -546,7 +579,7 @@ task runFfiExampleCborPy,
 # -d:BrokerFfiApiCBOR into build_cbor/ and drives the SAME
 # test_typemappingtestlib.{cpp,py} test code against that build (via the
 # CMake project's USE_CBOR=ON toggle for C++).
-proc buildTypeMapTestLibCbor(genPy: bool = false) =
+proc buildTypeMapTestLibCbor(genPy: bool = false, genRust: bool = false) =
   let mm =
     if existsEnv("MM"):
       getEnv("MM")
@@ -566,6 +599,8 @@ proc buildTypeMapTestLibCbor(genPy: bool = false) =
     flags.add(" -d:release")
   if genPy:
     flags.add(" -d:BrokerFfiApiGenPy")
+  if genRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
 task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
@@ -590,6 +625,12 @@ task runTypeMapTestLibCborCpp,
   exec "cmake --build " & quoteArg(cmakeDir)
   exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
 
+task runTypeMapTestLibCborRust,
+  "Build the CBOR-mode parity library + Rust wrapper and run the Rust parity test":
+  buildTypeMapTestLibCbor(genRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --features cbor --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
+
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":
   buildTypeMapTestLibCbor(true)
@@ -608,7 +649,9 @@ task runTypeMapTestLibCborPy,
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
-proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
+proc buildTypeMapTestLibrary(
+    mm: string = "orc", release: bool = false, generateRust: bool = false
+) =
   var flags =
     "-d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
     " --path:. --outdir:test/typemappingtestlib/build"
@@ -618,6 +661,8 @@ proc buildTypeMapTestLibrary(mm: string = "orc", release: bool = false) =
   flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
+  if generateRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
 proc typeMapTestCmakeBuildDir(): string =
@@ -749,6 +794,12 @@ proc findPythonForBits(wantBits: int): string =
 task buildTypeMapTestLib, "Build the type mapping test library (C/C++/Python)":
   buildTypeMapTestLibrary()
 
+task runTypeMapTestLibRust,
+  "Build the native typemapping parity library + Rust wrapper and run the Rust parity test":
+  buildTypeMapTestLibrary(generateRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
+
 task testFfiApi,
   "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
   for mm in ["orc", "refc"]:
@@ -849,6 +900,22 @@ task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example
   buildTorpedoExampleLibrary(true)
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
+
+task buildTorpedoExampleRust,
+  "Build the Torpedo Duel FFI library + generated Rust wrapper crate (native mode)":
+  buildTorpedoExampleLibrary(generateRust = true)
+
+task runTorpedoExampleRust,
+  "Build the Torpedo Duel FFI library + run the Rust example (native mode)":
+  buildTorpedoExampleLibrary(generateRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --manifest-path examples/torpedo/rust_example/Cargo.toml"
+
+task runTorpedoExampleCborRust,
+  "Build the Torpedo Duel FFI library (CBOR mode) + run the Rust example with --features cbor":
+  buildTorpedoExampleCborLibrary(generateRust = true)
+  exec quoteArg(findCargoExe()) &
+    " run --features cbor --manifest-path examples/torpedo/rust_example/Cargo.toml"
 
 task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
   buildTorpedoExampleLibrary()

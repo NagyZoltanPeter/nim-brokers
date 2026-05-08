@@ -120,9 +120,13 @@ endif()
 target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)
 
 # CBOR-mode wrapper needs jsoncons headers (header-only).
+# Also exposes USE_CBOR=1 to the test source so it can gate probes that
+# only register in CBOR mode (e.g. obj_param_request — see
+# doc/TYPESUPPORT.md, Section 2).
 if(USE_CBOR)
     target_include_directories(test_typemappingtestlib PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
+    target_compile_definitions(test_typemappingtestlib PRIVATE USE_CBOR=1)
 endif()
 
 # Embed RPATH so the binary finds libtypemappingtestlib next to itself at runtime.
