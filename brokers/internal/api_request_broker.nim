@@ -1947,11 +1947,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               let exName = goExportedField(fName)
               if isSeqType(fType) or isArrayTypeNode(fType):
                 let elem =
-                  if isSeqType(fType): seqItemTypeName(fType) else: arrayNodeElemName(fType)
+                  if isSeqType(fType):
+                    seqItemTypeName(fType)
+                  else:
+                    arrayNodeElemName(fType)
                 let lc = elem.toLowerAscii()
                 let goElem =
-                  if lc in ["string", "cstring"]: "string"
-                  else: nimTypeToGo(ident(elem))
+                  if lc in ["string", "cstring"]:
+                    "string"
+                  else:
+                    nimTypeToGo(ident(elem))
                 goSafe.add("\t" & exName & " []" & goElem & "\n")
               else:
                 goSafe.add("\t" & exName & " " & nimTypeToGo(fType) & "\n")
@@ -1969,8 +1974,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             let exName = goExportedField(fName)
             if isCStringType(fType):
               goConvertCode.add(
-                "\tif r." & fName & " != nil { out." & exName & " = C.GoString(r." & fName &
-                  ") }\n"
+                "\tif r." & fName & " != nil { out." & exName & " = C.GoString(r." &
+                  fName & ") }\n"
               )
             elif fType.kind == nnkIdent and isEnumRegistered($fType):
               goConvertCode.add(
@@ -1984,17 +1989,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               let elem = seqItemTypeName(fType)
               let lc = elem.toLowerAscii()
               if lc in ["string", "cstring"]:
-                goConvertCode.add("\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n")
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
                 goConvertCode.add(
                   "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
                 )
                 goConvertCode.add("\t\tout." & exName & " = make([]string, len(cs))\n")
                 goConvertCode.add("\t\tfor i, p := range cs {\n")
-                goConvertCode.add("\t\t\tif p != nil { out." & exName & "[i] = C.GoString(p) }\n")
+                goConvertCode.add(
+                  "\t\t\tif p != nil { out." & exName & "[i] = C.GoString(p) }\n"
+                )
                 goConvertCode.add("\t\t}\n")
                 goConvertCode.add("\t}\n")
               elif isNimPrimitive(elem):
-                goConvertCode.add("\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n")
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
                 goConvertCode.add(
                   "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
                 )
@@ -2010,11 +2021,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 goConvertCode.add("\t}\n")
               elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
                 let entry = lookupTypeEntry(elem)
-                goConvertCode.add("\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n")
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
                 goConvertCode.add(
                   "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
                 )
-                goConvertCode.add("\t\tout." & exName & " = make([]" & elem & ", len(cs))\n")
+                goConvertCode.add(
+                  "\t\tout." & exName & " = make([]" & elem & ", len(cs))\n"
+                )
                 goConvertCode.add("\t\tfor i := range cs {\n")
                 for f in entry.fields:
                   let lcf = f.nimType.toLowerAscii()
@@ -2034,7 +2049,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             elif isArrayTypeNode(fType):
               let n = arrayNodeSize(fType)
               let elem = arrayNodeElemName(fType)
-              goConvertCode.add("\tout." & exName & " = make([]" & nimTypeToGo(ident(elem)) & ", " & $n & ")\n")
+              goConvertCode.add(
+                "\tout." & exName & " = make([]" & nimTypeToGo(ident(elem)) & ", " & $n &
+                  ")\n"
+              )
               goConvertCode.add("\tfor i := 0; i < " & $n & "; i++ {\n")
               goConvertCode.add(
                 "\t\tout." & exName & "[i] = " & nimTypeToGo(ident(elem)) & "(r." & fName &
@@ -2066,16 +2084,24 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               s.add("\t\t}\n")
               s.add("\t}()\n")
               s.add("\tvar _ptr_" & pName & " **C.char\n")
-              s.add("\tif len(_cs_" & pName & ") > 0 { _ptr_" & pName & " = (**C.char)(unsafe.Pointer(&_cs_" & pName & "[0])) }\n")
+              s.add(
+                "\tif len(_cs_" & pName & ") > 0 { _ptr_" & pName &
+                  " = (**C.char)(unsafe.Pointer(&_cs_" & pName & "[0])) }\n"
+              )
               return s
             if isNimPrimitive(elem):
               let cgoElem = nimTypeToGoCgo(ident(elem))
               var s = "\tvar _ptr_" & pName & " *" & cgoElem & "\n"
-              s.add("\tif len(" & pName & ") > 0 { _ptr_" & pName & " = (*" & cgoElem & ")(unsafe.Pointer(&" & pName & "[0])) }\n")
+              s.add(
+                "\tif len(" & pName & ") > 0 { _ptr_" & pName & " = (*" & cgoElem &
+                  ")(unsafe.Pointer(&" & pName & "[0])) }\n"
+              )
               return s
             if isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
               let entry = lookupTypeEntry(elem)
-              var s = "\t_items_" & pName & " := make([]C." & elem & "CItem, len(" & pName & "))\n"
+              var s =
+                "\t_items_" & pName & " := make([]C." & elem & "CItem, len(" & pName &
+                "))\n"
               s.add("\tvar _strs_" & pName & " []*C.char\n")
               s.add("\tfor i, _it := range " & pName & " {\n")
               for f in entry.fields:
@@ -2084,7 +2110,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 if lcf in ["string", "cstring"]:
                   s.add("\t\t{\n")
                   s.add("\t\t\t_cs := C.CString(_it." & exFf & ")\n")
-                  s.add("\t\t\t_strs_" & pName & " = append(_strs_" & pName & ", _cs)\n")
+                  s.add(
+                    "\t\t\t_strs_" & pName & " = append(_strs_" & pName & ", _cs)\n"
+                  )
                   s.add("\t\t\t_items_" & pName & "[i]." & f.name & " = _cs\n")
                   s.add("\t\t}\n")
                 else:
@@ -2099,7 +2127,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               s.add("\t\t}\n")
               s.add("\t}()\n")
               s.add("\tvar _ptr_" & pName & " *C." & elem & "CItem\n")
-              s.add("\tif len(_items_" & pName & ") > 0 { _ptr_" & pName & " = (*C." & elem & "CItem)(unsafe.Pointer(&_items_" & pName & "[0])) }\n")
+              s.add(
+                "\tif len(_items_" & pName & ") > 0 { _ptr_" & pName & " = (*C." & elem &
+                  "CItem)(unsafe.Pointer(&_items_" & pName & "[0])) }\n"
+              )
               return s
             return ""
           ""
@@ -2118,7 +2149,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               return "_ptr_" & pName & ", C.int32_t(len(_items_" & pName & "))"
             return pName
           if isArrayTypeNode(pType):
-            return "(*" & nimTypeToGoCgo(ident(arrayNodeElemName(pType))) & ")(unsafe.Pointer(&" & pName & "[0]))"
+            return
+              "(*" & nimTypeToGoCgo(ident(arrayNodeElemName(pType))) &
+              ")(unsafe.Pointer(&" & pName & "[0]))"
           if pType.kind == nnkIdent and isEnumRegistered($pType):
             return "C." & $pType & "_C(" & pName & ")"
           if pType.kind == nnkIdent and isAliasOrDistinctRegistered($pType):
@@ -2158,10 +2191,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               let safeTy =
                 if isSeqType(pType) or isArrayTypeNode(pType):
                   let elem =
-                    if isSeqType(pType): seqItemTypeName(pType) else: arrayNodeElemName(pType)
+                    if isSeqType(pType):
+                      seqItemTypeName(pType)
+                    else:
+                      arrayNodeElemName(pType)
                   let lc = elem.toLowerAscii()
-                  if lc in ["string", "cstring"]: "[]string"
-                  else: "[]" & nimTypeToGo(ident(elem))
+                  if lc in ["string", "cstring"]:
+                    "[]string"
+                  else:
+                    "[]" & nimTypeToGo(ident(elem))
                 else:
                   nimTypeToGo(pType)
               goParams.add(", " & pName & " " & safeTy)
@@ -2169,7 +2207,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               goCallArgs.add(", " & goArgPassArgs(pName, pType))
               goSummaryParams.add(pName & " " & safeTy)
           var goMethod =
-            "func (" & goParams & ") " & goExportedName & "(" & ") (" & goResultName & ", error) {\n"
+            "func (" & goParams & ") " & goExportedName & "(" & ") (" & goResultName &
+            ", error) {\n"
           # Reformat to avoid empty paren after method name: rebuild.
           goMethod = "func (l *__LIB_OWNER_CLASS__) " & goExportedName & "("
           var firstParam = true
@@ -2180,10 +2219,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               let safeTy =
                 if isSeqType(pType) or isArrayTypeNode(pType):
                   let elem =
-                    if isSeqType(pType): seqItemTypeName(pType) else: arrayNodeElemName(pType)
+                    if isSeqType(pType):
+                      seqItemTypeName(pType)
+                    else:
+                      arrayNodeElemName(pType)
                   let lc = elem.toLowerAscii()
-                  if lc in ["string", "cstring"]: "[]string"
-                  else: "[]" & nimTypeToGo(ident(elem))
+                  if lc in ["string", "cstring"]:
+                    "[]string"
+                  else:
+                    "[]" & nimTypeToGo(ident(elem))
                 else:
                   nimTypeToGo(pType)
               if not firstParam:

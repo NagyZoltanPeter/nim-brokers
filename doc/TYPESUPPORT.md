@@ -21,62 +21,62 @@ This document is the authoritative reference for which Nim type patterns are sup
 
 The field appears inside the `Result<T>` payload struct returned by a request method.
 
-| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C |
-|---|---|---|---|---|---|---|---|---|
-| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `string` (→ `char*` / `std::string` / `str` / `String`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `cstring` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `distinct intN` (incl. type aliases of primitives) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Object (all primitive/string fields) — used as the *whole result type* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Object (all primitive/string fields) — embedded as an *inline field* of another object | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ |
-| `seq[byte]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[primitive]` (e.g. `seq[int64]`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object]` (Object has prim/string fields only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` (the inner object contains its own `seq[T]`) | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
-| `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
-| `array[N, Object]` | ⚠️ ⁴ | ⚠️ ⁴ | ⚠️ ⁴ | ⚠️ ⁴ | ✅ | ✅ | ❌ ⁵ | ✅ |
-| `Option[T]` | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ |
+| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C | Go–N | Go–C |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `string` (→ `char*` / `std::string` / `str` / `String`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `cstring` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `distinct intN` (incl. type aliases of primitives) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Object (all primitive/string fields) — used as the *whole result type* | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Object (all primitive/string fields) — embedded as an *inline field* of another object | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ |
+| `seq[byte]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[primitive]` (e.g. `seq[int64]`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object]` (Object has prim/string fields only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object<seq>]` (the inner object contains its own `seq[T]`) | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
+| `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
+| `array[N, Object]` | ⚠️ ⁴ | ⚠️ ⁴ | ⚠️ ⁴ | ⚠️ ⁴ | ✅ | ✅ | ❌ ⁵ | ✅ | ❌ ⁵ | ✅ |
+| `Option[T]` | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ |
 
 ## Section 2 — Request PARAMETER types
 
 The type appears in the request method signature on the *caller* side.
 
-| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C |
-|---|---|---|---|---|---|---|---|---|
-| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `string` / `cstring` / `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `distinct intN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Object as param (whole-object pass-by-value) | ❌ ⁷ᵃ | ✅ | ❌ ⁷ᵃ | ✅ | ❌ ⁷ᵇ | ✅ | ❌ ⁷ᶜ | ✅ |
-| `seq[primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object]` (prim/string fields only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
-| `array[N, primitive]` | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ |
-| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
-| `array[N, Object]` | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ |
+| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C | Go–N | Go–C |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `string` / `cstring` / `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `distinct intN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Object as param (whole-object pass-by-value) | ❌ ⁷ᵃ | ✅ | ❌ ⁷ᵃ | ✅ | ❌ ⁷ᵇ | ✅ | ❌ ⁷ᶜ | ✅ | ❌ ⁷ᶜ | ✅ |
+| `seq[primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object]` (prim/string fields only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
+| `array[N, primitive]` | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ |
+| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
+| `array[N, Object]` | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ | ❓ ⁸ |
 
 ## Section 3 — Event PAYLOAD field types
 
 The field appears in an `EventBroker(API)` object — fired by Nim, delivered to a closure registered via `on_<event>`.
 
-| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C |
-|---|---|---|---|---|---|---|---|---|
-| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `string` / `cstring` / `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `distinct intN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object]` (prim/string fields) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
-| `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `array[N, string]` | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ |
-| `array[N, Object]` | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ |
+| Nim type | C–N | C–C | C++–N | C++–C | Py–N | Py–C | Rust–N | Rust–C | Go–N | Go–C |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `bool` / `intN` / `uintN` / `byte` / `floatN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `string` / `cstring` / `char` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Plain `enum` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `distinct intN` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[string]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object]` (prim/string fields) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
+| `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `array[N, string]` | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ |
+| `array[N, Object]` | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ | ❓ ⁹ |
 
 ## Footnotes
 

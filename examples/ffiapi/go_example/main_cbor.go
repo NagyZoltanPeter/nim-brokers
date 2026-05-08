@@ -28,11 +28,10 @@ func runExample() {
 		mu         sync.Mutex
 		discovered []string
 	)
-	hDisc := lib.OnDeviceDiscovered(func(p mylib.DeviceDiscovered) {
+	hDisc := lib.OnDeviceDiscovered(func(deviceId int64, name string, deviceType string, address string) {
 		mu.Lock()
 		discovered = append(discovered, fmt.Sprintf(
-			"id=%d name=%s type=%s addr=%s",
-			p.DeviceId, p.Name, p.DeviceType, p.Address))
+			"id=%d name=%s type=%s addr=%s", deviceId, name, deviceType, address))
 		mu.Unlock()
 	})
 	fmt.Printf("OnDeviceDiscovered handle = %d\n", hDisc)

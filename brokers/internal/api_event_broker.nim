@@ -1534,8 +1534,10 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             let lc = elem.toLowerAscii()
             # C side: T* + int32 count
             let cElem =
-              if lc in ["string", "cstring"]: "const char* const*"
-              elif isEnumRegistered(elem): "int32_t"
+              if lc in ["string", "cstring"]:
+                "const char* const*"
+              elif isEnumRegistered(elem):
+                "int32_t"
               elif isAliasOrDistinctRegistered(elem):
                 "int32_t" # keep simple — distinct/alias on i32-shaped underlying
               elif isNimPrimitive(elem):
@@ -1555,52 +1557,89 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
                 else: "int32_t"
               else:
                 elem & "CItem"
-            cTrampParams.add(", " & cElem & "* " & fName & ", int32_t " & fName & "_count")
+            cTrampParams.add(
+              ", " & cElem & "* " & fName & ", int32_t " & fName & "_count"
+            )
             # Go trampoline signature uses cgo C types
             let cgoElem =
-              if lc in ["string", "cstring"]: "**C.char"
-              elif isEnumRegistered(elem): "*C.int32_t"
-              elif isNimPrimitive(elem): "*" & nimTypeToGoCgo(ident(elem))
-              else: "*C." & elem & "CItem"
-            goTrampParams.add(", " & fName & " " & cgoElem & ", " & fName & "_count C.int32_t")
+              if lc in ["string", "cstring"]:
+                "**C.char"
+              elif isEnumRegistered(elem):
+                "*C.int32_t"
+              elif isNimPrimitive(elem):
+                "*" & nimTypeToGoCgo(ident(elem))
+              else:
+                "*C." & elem & "CItem"
+            goTrampParams.add(
+              ", " & fName & " " & cgoElem & ", " & fName & "_count C.int32_t"
+            )
             let goSafeElem =
-              if lc in ["string", "cstring"]: "string"
-              else: nimTypeToGo(ident(elem))
+              if lc in ["string", "cstring"]:
+                "string"
+              else:
+                nimTypeToGo(ident(elem))
             goHandlerParams.add(fName & " []" & goSafeElem)
             goHandlerSummary.add(fName & " []" & goSafeElem)
             # Conversion lines
             if lc in ["string", "cstring"]:
               goConvLines.add("\tvar " & safeArg & " []string\n")
-              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
-              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+              goConvLines.add(
+                "\tif " & fName & " != nil && " & fName & "_count > 0 {\n"
+              )
+              goConvLines.add(
+                "\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n"
+              )
               goConvLines.add("\t\t" & safeArg & " = make([]string, len(cs))\n")
               goConvLines.add("\t\tfor i, p := range cs {\n")
-              goConvLines.add("\t\t\tif p != nil { " & safeArg & "[i] = C.GoString(p) }\n")
+              goConvLines.add(
+                "\t\t\tif p != nil { " & safeArg & "[i] = C.GoString(p) }\n"
+              )
               goConvLines.add("\t\t}\n")
               goConvLines.add("\t}\n")
             elif isNimPrimitive(elem):
-              goConvLines.add("\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n")
-              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
-              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
-              goConvLines.add("\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) & ", len(cs))\n")
+              goConvLines.add(
+                "\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n"
+              )
+              goConvLines.add(
+                "\tif " & fName & " != nil && " & fName & "_count > 0 {\n"
+              )
+              goConvLines.add(
+                "\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n"
+              )
+              goConvLines.add(
+                "\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) &
+                  ", len(cs))\n"
+              )
               goConvLines.add("\t\tfor i, v := range cs {\n")
-              goConvLines.add("\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n")
+              goConvLines.add(
+                "\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n"
+              )
               goConvLines.add("\t\t}\n")
               goConvLines.add("\t}\n")
             elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
               let entry = lookupTypeEntry(elem)
               goConvLines.add("\tvar " & safeArg & " []" & elem & "\n")
-              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
-              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+              goConvLines.add(
+                "\tif " & fName & " != nil && " & fName & "_count > 0 {\n"
+              )
+              goConvLines.add(
+                "\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n"
+              )
               goConvLines.add("\t\t" & safeArg & " = make([]" & elem & ", len(cs))\n")
               goConvLines.add("\t\tfor i := range cs {\n")
               for f in entry.fields:
                 let lcf = f.nimType.toLowerAscii()
                 let efName = goExpField(f.name)
                 if lcf in ["string", "cstring"]:
-                  goConvLines.add("\t\t\tif cs[i]." & f.name & " != nil { " & safeArg & "[i]." & efName & " = C.GoString(cs[i]." & f.name & ") }\n")
+                  goConvLines.add(
+                    "\t\t\tif cs[i]." & f.name & " != nil { " & safeArg & "[i]." & efName &
+                      " = C.GoString(cs[i]." & f.name & ") }\n"
+                  )
                 else:
-                  goConvLines.add("\t\t\t" & safeArg & "[i]." & efName & " = " & nimTypeToGo(ident(f.nimType)) & "(cs[i]." & f.name & ")\n")
+                  goConvLines.add(
+                    "\t\t\t" & safeArg & "[i]." & efName & " = " &
+                      nimTypeToGo(ident(f.nimType)) & "(cs[i]." & f.name & ")\n"
+                  )
               goConvLines.add("\t\t}\n")
               goConvLines.add("\t}\n")
             goInvokeArgs.add(safeArg)
@@ -1620,16 +1659,29 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
               of "float", "float64": "double"
               of "float32": "float"
               else: "int32_t"
-            cTrampParams.add(", " & cElem & "* " & fName & ", int32_t " & fName & "_count")
-            goTrampParams.add(", " & fName & " *" & nimTypeToGoCgo(ident(elem)) & ", " & fName & "_count C.int32_t")
+            cTrampParams.add(
+              ", " & cElem & "* " & fName & ", int32_t " & fName & "_count"
+            )
+            goTrampParams.add(
+              ", " & fName & " *" & nimTypeToGoCgo(ident(elem)) & ", " & fName &
+                "_count C.int32_t"
+            )
             goHandlerParams.add(fName & " []" & nimTypeToGo(ident(elem)))
             goHandlerSummary.add(fName & " []" & nimTypeToGo(ident(elem)))
-            goConvLines.add("\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n")
+            goConvLines.add(
+              "\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n"
+            )
             goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
-            goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
-            goConvLines.add("\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) & ", len(cs))\n")
+            goConvLines.add(
+              "\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n"
+            )
+            goConvLines.add(
+              "\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) & ", len(cs))\n"
+            )
             goConvLines.add("\t\tfor i, v := range cs {\n")
-            goConvLines.add("\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n")
+            goConvLines.add(
+              "\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n"
+            )
             goConvLines.add("\t\t}\n")
             goConvLines.add("\t}\n")
             goInvokeArgs.add(safeArg)
@@ -1639,7 +1691,10 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             goHandlerParams.add(fName & " string")
             goHandlerSummary.add(fName & " string")
             goConvLines.add("\tvar " & safeArg & " string\n")
-            goConvLines.add("\tif " & fName & " != nil { " & safeArg & " = C.GoString(" & fName & ") }\n")
+            goConvLines.add(
+              "\tif " & fName & " != nil { " & safeArg & " = C.GoString(" & fName &
+                ") }\n"
+            )
             goInvokeArgs.add(safeArg)
           elif fType.kind == nnkIdent and isEnumRegistered($fType):
             cTrampParams.add(", int32_t " & fName)
@@ -1666,20 +1721,18 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       # companion .c file. The body sees cgo's typed Go-trampoline decl
       # via _cgo_export.h, so the typedef cast works without conflict.
       let cbTypedef = typeDisplayName & "CCallback"
-      gApiGoEventCAdapters.add(
-        "uint64_t " & regHelperName & "(uint32_t ctx);"
-      )
-      var cAdapterImpl =
-        "uint64_t " & regHelperName & "(uint32_t ctx) {\n"
+      gApiGoEventCAdapters.add("uint64_t " & regHelperName & "(uint32_t ctx);")
+      var cAdapterImpl = "uint64_t " & regHelperName & "(uint32_t ctx) {\n"
       cAdapterImpl.add(
-        "    return " & publicRegFuncName & "(ctx, (" & cbTypedef & ")" &
-        trampName & ", NULL);\n"
+        "    return " & publicRegFuncName & "(ctx, (" & cbTypedef & ")" & trampName &
+          ", NULL);\n"
       )
       cAdapterImpl.add("}\n")
       gApiGoEventCAdapterImpls.add(cAdapterImpl)
 
       # ---- Per-event dispatcher map + handler type alias --------------
-      var disp = "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n\n"
+      var disp =
+        "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n\n"
       disp.add("var " & mapName & " = make(map[uint64]" & handlerTypeName & ")\n")
       disp.add("var " & muName & " sync.Mutex\n")
       gApiGoEventDispatchers.add(disp)
@@ -1694,7 +1747,9 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       tramp.add(
         "\tsnapshot := make([]" & handlerTypeName & ", 0, len(" & mapName & "))\n"
       )
-      tramp.add("\tfor _, h := range " & mapName & " { snapshot = append(snapshot, h) }\n")
+      tramp.add(
+        "\tfor _, h := range " & mapName & " { snapshot = append(snapshot, h) }\n"
+      )
       tramp.add("\t" & muName & ".Unlock()\n")
       tramp.add("\tfor _, h := range snapshot {\n")
       tramp.add("\t\th(" & goInvokeArgs.join(", ") & ")\n")
@@ -1705,7 +1760,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       # ---- On<Event> method --------------------------------------------
       let onName = "On" & goExportedName
       var onMethod =
-        "func (l *__LIB_OWNER_CLASS__) " & onName & "(cb " & handlerTypeName & ") uint64 {\n"
+        "func (l *__LIB_OWNER_CLASS__) " & onName & "(cb " & handlerTypeName &
+        ") uint64 {\n"
       onMethod.add("\tif l.ctx == 0 { return 0 }\n")
       onMethod.add("\thandle := uint64(C." & regHelperName & "(l.ctx))\n")
       onMethod.add("\tif handle == 0 { return 0 }\n")
@@ -1719,12 +1775,14 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
 
       # ---- Off<Event> method -------------------------------------------
       let offName = "Off" & goExportedName
-      var offMethod =
-        "func (l *__LIB_OWNER_CLASS__) " & offName & "(handle uint64) {\n"
+      var offMethod = "func (l *__LIB_OWNER_CLASS__) " & offName & "(handle uint64) {\n"
       offMethod.add("\tif l.ctx == 0 { return }\n")
       offMethod.add("\tC." & publicDeregFuncName & "(l.ctx, C.uint64_t(handle))\n")
       offMethod.add("\t" & muName & ".Lock()\n")
-      offMethod.add("\tif handle == 0 { " & mapName & " = make(map[uint64]" & handlerTypeName & ") } else { delete(" & mapName & ", handle) }\n")
+      offMethod.add(
+        "\tif handle == 0 { " & mapName & " = make(map[uint64]" & handlerTypeName &
+          ") } else { delete(" & mapName & ", handle) }\n"
+      )
       offMethod.add("\t" & muName & ".Unlock()\n")
       offMethod.add("}")
       gApiGoEventMethods.add(offMethod)

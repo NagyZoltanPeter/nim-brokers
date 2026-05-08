@@ -315,7 +315,9 @@ macro autoRegisterApiType*(T: typed): untyped =
         var goEnum = "type " & typeName & " int32\n\n"
         goEnum.add("const (\n")
         for i, v in apiValues:
-          goEnum.add("\t" & typeName & "_" & v.name & " " & typeName & " = " & $v.ordinal & "\n")
+          goEnum.add(
+            "\t" & typeName & "_" & v.name & " " & typeName & " = " & $v.ordinal & "\n"
+          )
         goEnum.add(")")
         gApiGoEnums.add(goEnum)
 

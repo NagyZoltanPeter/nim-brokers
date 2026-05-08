@@ -158,10 +158,7 @@ proc nimTypeToGoZero*(nimType: NimNode): string {.compileTime.} =
       else:
         $nimType & "{}"
   of nnkBracketExpr:
-    if isSeqType(nimType) or isArrayTypeNode(nimType):
-      "nil"
-    else:
-      "nil"
+    if isSeqType(nimType) or isArrayTypeNode(nimType): "nil" else: "nil"
   else:
     "nil"
 
@@ -184,20 +181,20 @@ var gApiGoEventMethods* {.compileTime.}: seq[string] =
 var gApiGoExports* {.compileTime.}: seq[string] =
   @[] ## //export'd Go callback trampolines (for cgo C->Go calls).
 
-var gApiGoEventCAdapters* {.compileTime.}: seq[string] =
-  @[] ## Forward declarations of the per-event register helpers.
-      ## Goes into the cgo C prelude (visible from Go).
+var gApiGoEventCAdapters* {.compileTime.}: seq[string] = @[]
+  ## Forward declarations of the per-event register helpers.
+  ## Goes into the cgo C prelude (visible from Go).
 
-var gApiGoEventCAdapterImpls* {.compileTime.}: seq[string] =
-  @[] ## Bodies of the per-event register helpers, written into a
-      ## separate `<libname>_callbacks.c` alongside the .go file. That .c
-      ## file `#include`s `_cgo_export.h` so it can use cgo's typed extern
-      ## declarations for the //export'd Go trampolines, avoiding the
-      ## "conflicting types" error you'd hit declaring them in the prelude.
+var gApiGoEventCAdapterImpls* {.compileTime.}: seq[string] = @[]
+  ## Bodies of the per-event register helpers, written into a
+  ## separate `<libname>_callbacks.c` alongside the .go file. That .c
+  ## file `#include`s `_cgo_export.h` so it can use cgo's typed extern
+  ## declarations for the //export'd Go trampolines, avoiding the
+  ## "conflicting types" error you'd hit declaring them in the prelude.
 
-var gApiGoEventDispatchers* {.compileTime.}: seq[string] =
-  @[] ## Per-event Go dispatcher: handler type alias + map[uint64]Handler
-      ## + sync.Mutex. Snapshot-and-fan-out pattern (mirrors Rust).
+var gApiGoEventDispatchers* {.compileTime.}: seq[string] = @[]
+  ## Per-event Go dispatcher: handler type alias + map[uint64]Handler
+  ## + sync.Mutex. Snapshot-and-fan-out pattern (mirrors Rust).
 
 var gApiGoExternFns* {.compileTime.}: seq[string] =
   @[] ## Lines documenting C functions referenced (used as a sanity log).
@@ -217,7 +214,12 @@ proc goPackageName(libName: string): string {.compileTime.} =
   result = ""
   for ch in libName:
     if ch != '_' and ch != '-':
-      result.add(if ch >= 'A' and ch <= 'Z': chr(ord(ch) + 32) else: ch)
+      result.add(
+        if ch >= 'A' and ch <= 'Z':
+          chr(ord(ch) + 32)
+        else:
+          ch
+      )
 
 proc goExportClassName(libName: string): string {.compileTime.} =
   result = ""
@@ -330,7 +332,9 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
       g.add("\n\n")
 
   # ---- Lib struct -------------------------------------------------------
-  g.add("// " & className & " is the high-level handle for the `" & libName & "` library.\n")
+  g.add(
+    "// " & className & " is the high-level handle for the `" & libName & "` library.\n"
+  )
   g.add("type " & className & " struct {\n")
   g.add("\tctx C.uint32_t\n")
   g.add("\tmu  sync.Mutex\n")
@@ -341,7 +345,9 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
   g.add("\treturn C.GoString(C." & apiPrefix & "version())\n")
   g.add("}\n\n")
 
-  g.add("// New constructs a new wrapper. Call CreateContext before any request method.\n")
+  g.add(
+    "// New constructs a new wrapper. Call CreateContext before any request method.\n"
+  )
   g.add("func New() *" & className & " {\n")
   g.add("\tl := &" & className & "{}\n")
   g.add("\truntime.SetFinalizer(l, func(x *" & className & ") { x.Close() })\n")
