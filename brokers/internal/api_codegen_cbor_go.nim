@@ -390,17 +390,20 @@ proc generateCborGoFile*(
       let h = nimTypeToGoCborHint(t)
       let hType = if h.len > 0: h else: "any"
       let exN = goExportedField(n)
+      # Param name stays lowercase (`n`) to avoid colliding with type
+      # names (e.g. `priority Priority` is fine, `Priority Priority`
+      # makes Go report "Priority is not a type" inside the args struct
+      # because the parameter shadows the type in lookup).
       argsStructFields.add("\t\t" & exN & " " & hType & " `cbor:\"" & n & "\"`\n")
-      argsAssign.add("\t\t" & exN & ": " & exN & ",\n")
+      argsAssign.add("\t\t" & exN & ": " & n & ",\n")
       firstNonZero = true
     g.add("func (l *" & className & ") " & methodName & "(")
     var firstP = true
     for (n, t) in e.argFields:
       let h = nimTypeToGoCborHint(t)
       let hType = if h.len > 0: h else: "any"
-      let exN = goExportedField(n)
       if not firstP: g.add(", ")
-      g.add(exN & " " & hType)
+      g.add(n & " " & hType)
       firstP = false
     g.add(") (" & respType & ", error) {\n")
     if firstNonZero:
@@ -450,26 +453,59 @@ proc generateCborGoFile*(
   for ev in eventEntries:
     let exName = snakeToPascal(ev.apiName)
     let payloadType = ev.typeName
-    g.add("func (l *" & className & ") On" & exName & "(cb func(" & payloadType & ")) uint64 {\n")
-    g.add("\tif l.ctx == 0 { return 0 }\n")
-    g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
-    g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
-    g.add("\thandle := uint64(C.go_cbor_subscribe(l.ctx, cName))\n")
-    g.add("\tif handle == 0 { return 0 }\n")
-    g.add("\twrap := func(payload []byte) {\n")
-    g.add("\t\tvar p " & payloadType & "\n")
-    g.add("\t\tif derr := cbor.Unmarshal(payload, &p); derr != nil { return }\n")
-    g.add("\t\tcb(p)\n")
-    g.add("\t}\n")
-    g.add("\tcborEventReg.mu.Lock()\n")
-    g.add("\tperEvent, ok := cborEventReg.byCtx[uint32(l.ctx)]\n")
-    g.add("\tif !ok { perEvent = make(map[string]map[uint64]cborEventHandler); cborEventReg.byCtx[uint32(l.ctx)] = perEvent }\n")
-    g.add("\thandlers, ok := perEvent[\"" & ev.apiName & "\"]\n")
-    g.add("\tif !ok { handlers = make(map[uint64]cborEventHandler); perEvent[\"" & ev.apiName & "\"] = handlers }\n")
-    g.add("\thandlers[handle] = wrap\n")
-    g.add("\tcborEventReg.mu.Unlock()\n")
-    g.add("\treturn handle\n")
-    g.add("}\n\n")
+    # Walk the payload struct fields to build an unpacked-field handler
+    # signature that matches the native build's `func(f1, f2, ...)` shape.
+    var fieldNames: seq[string] = @[]
+    var fieldGoTypes: seq[string] = @[]
+    var fieldExNames: seq[string] = @[]
+    var fieldsOk = true
+    if isTypeRegistered(payloadType):
+      let entry = lookupTypeEntry(payloadType)
+      for f in entry.fields:
+        let h = nimTypeToGoCborHint(f.nimType)
+        if h.len == 0:
+          fieldsOk = false
+          break
+        fieldNames.add(f.name)
+        fieldGoTypes.add(h)
+        fieldExNames.add(goExportedField(f.name))
+    else:
+      fieldsOk = false
+
+    if not fieldsOk:
+      # Fall back to whole-struct callback if the payload has unmappable
+      # fields (no native equivalent — both modes share the same gap).
+      g.add("// TODO(go-codegen-cbor): event '" & payloadType & "' has fields not yet mappable\n")
+      g.add("func (l *" & className & ") On" & exName & "(cb func(" & payloadType & ")) uint64 { _ = cb; return 0 }\n\n")
+    else:
+      var sig = ""
+      for i in 0 ..< fieldNames.len:
+        if i > 0: sig.add(", ")
+        sig.add(fieldNames[i] & " " & fieldGoTypes[i])
+      g.add("func (l *" & className & ") On" & exName & "(cb func(" & sig & ")) uint64 {\n")
+      g.add("\tif l.ctx == 0 { return 0 }\n")
+      g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
+      g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+      g.add("\thandle := uint64(C.go_cbor_subscribe(l.ctx, cName))\n")
+      g.add("\tif handle == 0 { return 0 }\n")
+      g.add("\twrap := func(payload []byte) {\n")
+      g.add("\t\tvar p " & payloadType & "\n")
+      g.add("\t\tif derr := cbor.Unmarshal(payload, &p); derr != nil { return }\n")
+      g.add("\t\tcb(")
+      for i in 0 ..< fieldNames.len:
+        if i > 0: g.add(", ")
+        g.add("p." & fieldExNames[i])
+      g.add(")\n")
+      g.add("\t}\n")
+      g.add("\tcborEventReg.mu.Lock()\n")
+      g.add("\tperEvent, ok := cborEventReg.byCtx[uint32(l.ctx)]\n")
+      g.add("\tif !ok { perEvent = make(map[string]map[uint64]cborEventHandler); cborEventReg.byCtx[uint32(l.ctx)] = perEvent }\n")
+      g.add("\thandlers, ok := perEvent[\"" & ev.apiName & "\"]\n")
+      g.add("\tif !ok { handlers = make(map[uint64]cborEventHandler); perEvent[\"" & ev.apiName & "\"] = handlers }\n")
+      g.add("\thandlers[handle] = wrap\n")
+      g.add("\tcborEventReg.mu.Unlock()\n")
+      g.add("\treturn handle\n")
+      g.add("}\n\n")
 
     g.add("func (l *" & className & ") Off" & exName & "(handle uint64) {\n")
     g.add("\tif l.ctx == 0 { return }\n")

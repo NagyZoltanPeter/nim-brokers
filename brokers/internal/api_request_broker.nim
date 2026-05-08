@@ -2120,7 +2120,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           if isArrayTypeNode(pType):
             return "(*" & nimTypeToGoCgo(ident(arrayNodeElemName(pType))) & ")(unsafe.Pointer(&" & pName & "[0]))"
           if pType.kind == nnkIdent and isEnumRegistered($pType):
-            return "C.int32_t(" & pName & ")"
+            return "C." & $pType & "_C(" & pName & ")"
           if pType.kind == nnkIdent and isAliasOrDistinctRegistered($pType):
             return nimTypeToGoCgo(pType) & "(" & pName & ")"
           if isCStringType(pType):
