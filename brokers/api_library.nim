@@ -31,6 +31,7 @@ import ./internal/api_codegen_cbor_h
 import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
 import ./internal/api_codegen_cbor_rust
+import ./internal/api_codegen_cbor_go
 import ./internal/api_codegen_cbor_cddl
 import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
@@ -2024,6 +2025,8 @@ proc registerBrokerLibraryCborImpl(
     generateCborPyFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenRust):
     generateCborRustFile(outDir, libName, entries, eventEntries)
+  when defined(BrokerFfiApiGenGo):
+    generateCborGoFile(outDir, libName, entries, eventEntries)
 
   generateCMakePackageFiles(
     outDir, libName, config.version, cborMode = true, hasCpp = true
