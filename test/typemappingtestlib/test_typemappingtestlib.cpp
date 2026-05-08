@@ -1148,6 +1148,20 @@ static void test_obj_seq_param_string_encoding() {
     lib.shutdown();
 }
 
+#ifdef USE_CBOR
+// Object-as-request-param probe — exercises whole-struct pass-by-value.
+// The Nim broker is gated to CBOR mode (native C/C++/Python/Rust all fail
+// for this pattern; see doc/TYPESUPPORT.md, Section 2).
+static void test_obj_as_param() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.objParamRequest(makeTag("k", "v"));
+    CHECK(r.isOk());
+    CHECK_EQ(r->summary, std::string("k=v"));
+    lib.shutdown();
+}
+#endif
+
 static void test_obj_seq_result_empty() {
     Typemappingtestlib lib;
     lib.createContext();
@@ -2171,6 +2185,9 @@ int main() {
     RUN(test_obj_seq_param_single);
     RUN(test_obj_seq_param_multiple);
     RUN(test_obj_seq_param_string_encoding);
+#ifdef USE_CBOR
+    RUN(test_obj_as_param);
+#endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);
     RUN(test_obj_seq_result_keys);

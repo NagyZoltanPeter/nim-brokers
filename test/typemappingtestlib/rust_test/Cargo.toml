@@ -1,0 +1,28 @@
+# Cargo manifest for the Rust parity test against typemappingtestlib.
+#
+# Mirrors test_typemappingtestlib.{cpp,py}: verifies the Rust wrapper
+# correctly handles the full Nim → Rust type matrix the codegen aims to
+# support. Two build modes via Cargo features:
+#
+#   cargo run                 # native FFI build  (test/typemappingtestlib/build/)
+#   cargo run --features cbor # CBOR FFI build    (test/typemappingtestlib/build_cbor/)
+
+[package]
+name = "typemappingtestlib_rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[features]
+default = []
+cbor = ["dep:ciborium", "dep:serde", "dep:serde_json", "dep:serde_bytes"]
+
+[dependencies]
+ciborium = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+
+[[bin]]
+name = "test_typemappingtestlib_rust"
+path = "src/main.rs"

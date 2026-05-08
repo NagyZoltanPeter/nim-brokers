@@ -30,6 +30,7 @@ import ./broker_context, ./internal/api_common
 import ./internal/api_codegen_cbor_h
 import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
+import ./internal/api_codegen_cbor_rust
 import ./internal/api_codegen_cbor_cddl
 import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
@@ -1241,6 +1242,10 @@ proc registerBrokerLibraryNativeImpl(
   when defined(BrokerFfiApiGenPy):
     generatePythonFile(outDir, libNameResolved)
 
+  # Generate Rust wrapper crate when requested
+  when defined(BrokerFfiApiGenRust):
+    generateRustFile(outDir, libNameResolved)
+
   generateCMakePackageFiles(
     outDir, libNameResolved, config.version, cborMode = false, hasCpp = true
   )
@@ -2013,6 +2018,8 @@ proc registerBrokerLibraryCborImpl(
   generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries)
+  when defined(BrokerFfiApiGenRust):
+    generateCborRustFile(outDir, libName, entries, eventEntries)
 
   generateCMakePackageFiles(
     outDir, libName, config.version, cborMode = true, hasCpp = true

@@ -173,6 +173,21 @@ jobs:
       - name: Run CBOR C++ parity matrix
         run: nimble runTypeMapTestLibCborCpp -y --verbose
 
+      - name: Set up Rust toolchain (stable, MSRV 1.75)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust FFI example (native mode)
+        run: nimble runFfiExampleRust -y --verbose
+
+      - name: Run Rust FFI example (CBOR mode)
+        run: nimble runFfiExampleCborRust -y --verbose
+
+      - name: Run Rust parity matrix (native mode)
+        run: nimble runTypeMapTestLibRust -y --verbose
+
+      - name: Run Rust parity matrix (CBOR mode)
+        run: nimble runTypeMapTestLibCborRust -y --verbose
+
   nph:
     runs-on: ubuntu-latest
     steps:
