@@ -1445,6 +1445,291 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       gApiRustEventMethods.add(offMethod)
       gApiRustInterfaceSummary.add(offName & "(handle)")
 
+  # Step 11c: Generate Go on/off event methods (when -d:BrokerFfiApiGenGo)
+  when defined(BrokerFfiApiGenGo):
+    proc goScalarMappable(t: NimNode): bool {.compileTime.} =
+      if isCStringType(t):
+        return true
+      if t.kind == nnkIdent:
+        let n = ($t).toLowerAscii()
+        if n in [
+          "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte",
+          "uint16", "uint32", "uint64", "float", "float32", "float64",
+        ]:
+          return true
+        if isEnumRegistered($t):
+          return true
+        if isAliasOrDistinctRegistered($t):
+          return true
+      false
+
+    proc goEventTypeMappable(t: NimNode): bool {.compileTime.} =
+      if goScalarMappable(t):
+        return true
+      if isSeqType(t):
+        let elem = seqItemTypeName(t)
+        if isNimPrimitive(elem):
+          return true
+        if isTypeRegistered(elem):
+          let entry = lookupTypeEntry(elem)
+          if entry.kind == atkObject:
+            for f in entry.fields:
+              let lc = f.nimType.toLowerAscii()
+              if lc notin [
+                "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                "string", "cstring",
+              ]:
+                return false
+            return true
+        return false
+      if isArrayTypeNode(t):
+        let elem = arrayNodeElemName(t)
+        return isNimPrimitive(elem) and elem.toLowerAscii() notin ["string", "cstring"]
+      false
+
+    proc goExpField(name: string): string {.compileTime.} =
+      if name.len > 0 and name[0] >= 'a' and name[0] <= 'z':
+        chr(ord(name[0]) - 32) & name[1 ..^ 1]
+      else:
+        name
+
+    var goAllFieldsMappable = true
+    if hasInlineFields:
+      for i in 0 ..< fieldNames.len:
+        if not goEventTypeMappable(fieldTypes[i]):
+          goAllFieldsMappable = false
+          break
+
+    if not goAllFieldsMappable:
+      gApiGoEventMethods.add(
+        "// TODO(go-codegen): event '" & typeDisplayName &
+          "' uses a Nim type combination not yet mappable to native Go."
+      )
+    else:
+      let goExportedName = typeDisplayName
+      let handlerTypeName = typeDisplayName & "Handler"
+      let mapName = "g_" & typeDisplayName & "_subs"
+      let muName = "g_" & typeDisplayName & "_mu"
+      let trampName = "goTrampoline_" & typeDisplayName
+      let regHelperName = "go_register_" & typeDisplayName
+
+      # ---- Build the C-side trampoline signature and the Go-side
+      # handler signature in lock-step.
+      var cTrampParams = "uint32_t ctx, void* user_data"
+      var goTrampParams = "ctx C.uint32_t, _ud unsafe.Pointer"
+      var goHandlerParams: seq[string] = @[]
+      var goHandlerSummary: seq[string] = @[]
+      var goConvLines = ""
+      var goInvokeArgs: seq[string] = @[]
+
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          let rawName = $fieldNames[i]
+          let fName = rawName
+          let fType = fieldTypes[i]
+          let safeArg = "_" & fName & "_safe"
+          if isSeqType(fType):
+            let elem = seqItemTypeName(fType)
+            let lc = elem.toLowerAscii()
+            # C side: T* + int32 count
+            let cElem =
+              if lc in ["string", "cstring"]: "const char* const*"
+              elif isEnumRegistered(elem): "int32_t"
+              elif isAliasOrDistinctRegistered(elem):
+                "int32_t" # keep simple — distinct/alias on i32-shaped underlying
+              elif isNimPrimitive(elem):
+                # Map Nim primitive to C type literal.
+                case lc
+                of "bool": "bool"
+                of "int8": "int8_t"
+                of "int16": "int16_t"
+                of "int", "int32": "int32_t"
+                of "int64": "int64_t"
+                of "uint8", "byte": "uint8_t"
+                of "uint16": "uint16_t"
+                of "uint", "uint32": "uint32_t"
+                of "uint64": "uint64_t"
+                of "float", "float64": "double"
+                of "float32": "float"
+                else: "int32_t"
+              else:
+                elem & "CItem"
+            cTrampParams.add(", " & cElem & "* " & fName & ", int32_t " & fName & "_count")
+            # Go trampoline signature uses cgo C types
+            let cgoElem =
+              if lc in ["string", "cstring"]: "**C.char"
+              elif isEnumRegistered(elem): "*C.int32_t"
+              elif isNimPrimitive(elem): "*" & nimTypeToGoCgo(ident(elem))
+              else: "*C." & elem & "CItem"
+            goTrampParams.add(", " & fName & " " & cgoElem & ", " & fName & "_count C.int32_t")
+            let goSafeElem =
+              if lc in ["string", "cstring"]: "string"
+              else: nimTypeToGo(ident(elem))
+            goHandlerParams.add(fName & " []" & goSafeElem)
+            goHandlerSummary.add(fName & " []" & goSafeElem)
+            # Conversion lines
+            if lc in ["string", "cstring"]:
+              goConvLines.add("\tvar " & safeArg & " []string\n")
+              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
+              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+              goConvLines.add("\t\t" & safeArg & " = make([]string, len(cs))\n")
+              goConvLines.add("\t\tfor i, p := range cs {\n")
+              goConvLines.add("\t\t\tif p != nil { " & safeArg & "[i] = C.GoString(p) }\n")
+              goConvLines.add("\t\t}\n")
+              goConvLines.add("\t}\n")
+            elif isNimPrimitive(elem):
+              goConvLines.add("\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n")
+              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
+              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+              goConvLines.add("\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) & ", len(cs))\n")
+              goConvLines.add("\t\tfor i, v := range cs {\n")
+              goConvLines.add("\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n")
+              goConvLines.add("\t\t}\n")
+              goConvLines.add("\t}\n")
+            elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              let entry = lookupTypeEntry(elem)
+              goConvLines.add("\tvar " & safeArg & " []" & elem & "\n")
+              goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
+              goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+              goConvLines.add("\t\t" & safeArg & " = make([]" & elem & ", len(cs))\n")
+              goConvLines.add("\t\tfor i := range cs {\n")
+              for f in entry.fields:
+                let lcf = f.nimType.toLowerAscii()
+                let efName = goExpField(f.name)
+                if lcf in ["string", "cstring"]:
+                  goConvLines.add("\t\t\tif cs[i]." & f.name & " != nil { " & safeArg & "[i]." & efName & " = C.GoString(cs[i]." & f.name & ") }\n")
+                else:
+                  goConvLines.add("\t\t\t" & safeArg & "[i]." & efName & " = " & nimTypeToGo(ident(f.nimType)) & "(cs[i]." & f.name & ")\n")
+              goConvLines.add("\t\t}\n")
+              goConvLines.add("\t}\n")
+            goInvokeArgs.add(safeArg)
+          elif isArrayTypeNode(fType):
+            let elem = arrayNodeElemName(fType)
+            let cElem =
+              case elem.toLowerAscii()
+              of "bool": "bool"
+              of "int8": "int8_t"
+              of "int16": "int16_t"
+              of "int", "int32": "int32_t"
+              of "int64": "int64_t"
+              of "uint8", "byte": "uint8_t"
+              of "uint16": "uint16_t"
+              of "uint", "uint32": "uint32_t"
+              of "uint64": "uint64_t"
+              of "float", "float64": "double"
+              of "float32": "float"
+              else: "int32_t"
+            cTrampParams.add(", " & cElem & "* " & fName & ", int32_t " & fName & "_count")
+            goTrampParams.add(", " & fName & " *" & nimTypeToGoCgo(ident(elem)) & ", " & fName & "_count C.int32_t")
+            goHandlerParams.add(fName & " []" & nimTypeToGo(ident(elem)))
+            goHandlerSummary.add(fName & " []" & nimTypeToGo(ident(elem)))
+            goConvLines.add("\tvar " & safeArg & " []" & nimTypeToGo(ident(elem)) & "\n")
+            goConvLines.add("\tif " & fName & " != nil && " & fName & "_count > 0 {\n")
+            goConvLines.add("\t\tcs := unsafe.Slice(" & fName & ", int(" & fName & "_count))\n")
+            goConvLines.add("\t\t" & safeArg & " = make([]" & nimTypeToGo(ident(elem)) & ", len(cs))\n")
+            goConvLines.add("\t\tfor i, v := range cs {\n")
+            goConvLines.add("\t\t\t" & safeArg & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n")
+            goConvLines.add("\t\t}\n")
+            goConvLines.add("\t}\n")
+            goInvokeArgs.add(safeArg)
+          elif isCStringType(fType):
+            cTrampParams.add(", const char* " & fName)
+            goTrampParams.add(", " & fName & " *C.char")
+            goHandlerParams.add(fName & " string")
+            goHandlerSummary.add(fName & " string")
+            goConvLines.add("\tvar " & safeArg & " string\n")
+            goConvLines.add("\tif " & fName & " != nil { " & safeArg & " = C.GoString(" & fName & ") }\n")
+            goInvokeArgs.add(safeArg)
+          elif fType.kind == nnkIdent and isEnumRegistered($fType):
+            cTrampParams.add(", int32_t " & fName)
+            goTrampParams.add(", " & fName & " C.int32_t")
+            goHandlerParams.add(fName & " " & $fType)
+            goHandlerSummary.add(fName & " " & $fType)
+            goInvokeArgs.add($fType & "(int32(" & fName & "))")
+          elif fType.kind == nnkIdent and isAliasOrDistinctRegistered($fType):
+            cTrampParams.add(", " & nimTypeToCSuffix(fType) & " " & fName)
+            goTrampParams.add(", " & fName & " " & nimTypeToGoCgo(fType))
+            goHandlerParams.add(fName & " " & nimTypeToGo(fType))
+            goHandlerSummary.add(fName & " " & nimTypeToGo(fType))
+            goInvokeArgs.add(nimTypeToGo(fType) & "(" & fName & ")")
+          else:
+            # Plain primitive
+            cTrampParams.add(", " & nimTypeToCSuffix(fType) & " " & fName)
+            goTrampParams.add(", " & fName & " " & nimTypeToGoCgo(fType))
+            goHandlerParams.add(fName & " " & nimTypeToGo(fType))
+            goHandlerSummary.add(fName & " " & nimTypeToGo(fType))
+            goInvokeArgs.add(nimTypeToGo(fType) & "(" & fName & ")")
+
+      # ---- C-side adapter ----------------------------------------------
+      # Forward decl visible to Go (in the cgo prelude); body in the
+      # companion .c file. The body sees cgo's typed Go-trampoline decl
+      # via _cgo_export.h, so the typedef cast works without conflict.
+      let cbTypedef = typeDisplayName & "CCallback"
+      gApiGoEventCAdapters.add(
+        "uint64_t " & regHelperName & "(uint32_t ctx);"
+      )
+      var cAdapterImpl =
+        "uint64_t " & regHelperName & "(uint32_t ctx) {\n"
+      cAdapterImpl.add(
+        "    return " & publicRegFuncName & "(ctx, (" & cbTypedef & ")" &
+        trampName & ", NULL);\n"
+      )
+      cAdapterImpl.add("}\n")
+      gApiGoEventCAdapterImpls.add(cAdapterImpl)
+
+      # ---- Per-event dispatcher map + handler type alias --------------
+      var disp = "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n\n"
+      disp.add("var " & mapName & " = make(map[uint64]" & handlerTypeName & ")\n")
+      disp.add("var " & muName & " sync.Mutex\n")
+      gApiGoEventDispatchers.add(disp)
+
+      # ---- //export'd Go trampoline -----------------------------------
+      var tramp = "//export " & trampName & "\n"
+      tramp.add("func " & trampName & "(" & goTrampParams & ") {\n")
+      tramp.add("\t_ = ctx\n")
+      tramp.add("\t_ = _ud\n")
+      tramp.add(goConvLines)
+      tramp.add("\t" & muName & ".Lock()\n")
+      tramp.add(
+        "\tsnapshot := make([]" & handlerTypeName & ", 0, len(" & mapName & "))\n"
+      )
+      tramp.add("\tfor _, h := range " & mapName & " { snapshot = append(snapshot, h) }\n")
+      tramp.add("\t" & muName & ".Unlock()\n")
+      tramp.add("\tfor _, h := range snapshot {\n")
+      tramp.add("\t\th(" & goInvokeArgs.join(", ") & ")\n")
+      tramp.add("\t}\n")
+      tramp.add("}")
+      gApiGoExports.add(tramp)
+
+      # ---- On<Event> method --------------------------------------------
+      let onName = "On" & goExportedName
+      var onMethod =
+        "func (l *__LIB_OWNER_CLASS__) " & onName & "(cb " & handlerTypeName & ") uint64 {\n"
+      onMethod.add("\tif l.ctx == 0 { return 0 }\n")
+      onMethod.add("\thandle := uint64(C." & regHelperName & "(l.ctx))\n")
+      onMethod.add("\tif handle == 0 { return 0 }\n")
+      onMethod.add("\t" & muName & ".Lock()\n")
+      onMethod.add("\t" & mapName & "[handle] = cb\n")
+      onMethod.add("\t" & muName & ".Unlock()\n")
+      onMethod.add("\treturn handle\n")
+      onMethod.add("}")
+      gApiGoEventMethods.add(onMethod)
+      gApiGoInterfaceSummary.add(onName & "(cb " & handlerTypeName & ") uint64")
+
+      # ---- Off<Event> method -------------------------------------------
+      let offName = "Off" & goExportedName
+      var offMethod =
+        "func (l *__LIB_OWNER_CLASS__) " & offName & "(handle uint64) {\n"
+      offMethod.add("\tif l.ctx == 0 { return }\n")
+      offMethod.add("\tC." & publicDeregFuncName & "(l.ctx, C.uint64_t(handle))\n")
+      offMethod.add("\t" & muName & ".Lock()\n")
+      offMethod.add("\tif handle == 0 { " & mapName & " = make(map[uint64]" & handlerTypeName & ") } else { delete(" & mapName & ", handle) }\n")
+      offMethod.add("\t" & muName & ".Unlock()\n")
+      offMethod.add("}")
+      gApiGoEventMethods.add(offMethod)
+      gApiGoInterfaceSummary.add(offName & "(handle uint64)")
+
   # Step 12: Append to compile-time accumulators
   gApiEventHandlerEntries.add((typeId, handlerProcName))
   gApiEventCleanupProcNames.add(cleanupProcName)
