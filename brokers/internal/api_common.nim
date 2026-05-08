@@ -25,6 +25,7 @@ import ./api_codegen_c
 import ./api_codegen_cpp
 import ./api_codegen_python
 import ./api_codegen_rust
+import ./api_codegen_go
 import ./api_codegen_nim
 import ./api_schema
 import ./api_ffi_mode
@@ -33,6 +34,7 @@ export api_codegen_c
 export api_codegen_cpp
 export api_codegen_python
 export api_codegen_rust
+export api_codegen_go
 export api_codegen_nim
 export api_schema
 export api_ffi_mode

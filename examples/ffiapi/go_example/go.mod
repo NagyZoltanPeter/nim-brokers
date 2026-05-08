@@ -1,0 +1,7 @@
+module github.com/status-im/nim-brokers/examples/ffiapi/go_example
+
+go 1.21
+
+require mylib v0.0.0
+
+replace mylib => ../nimlib/build/mylib_go

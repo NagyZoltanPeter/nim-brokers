@@ -157,7 +157,9 @@ proc cmakeWindowsConfigureExtras(): string =
   else:
     ""
 
-proc buildFfiExampleFlags(generatePy = false, generateRust = false): string =
+proc buildFfiExampleFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
@@ -171,16 +173,22 @@ proc buildFfiExampleFlags(generatePy = false, generateRust = false): string =
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildFfiExampleLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildFfiExampleFlags(generatePy, generateRust) &
+proc buildFfiExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildFfiExampleFlags(generatePy, generateRust, generateGo) &
     " examples/ffiapi/nimlib/mylib.nim"
 
 # Parity build: SAME mylib.nim source compiled with the CBOR FFI flag,
 # emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
 # compile against the CBOR-generated mylib.h / mylib.hpp — proves the
 # generated wrapper interface is shape-identical to the native build.
-proc buildFfiExampleCborFlags(generatePy = false, generateRust = false): string =
+proc buildFfiExampleCborFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("mylib"))
@@ -194,9 +202,13 @@ proc buildFfiExampleCborFlags(generatePy = false, generateRust = false): string 
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildFfiExampleCborLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust) &
+proc buildFfiExampleCborLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust, generateGo) &
     " examples/ffiapi/nimlib/mylib.nim"
 
 proc buildTorpedoExampleFlags(generatePy = false, generateRust = false): string =
@@ -517,6 +529,23 @@ task runFfiExampleCborRust,
   buildFfiExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
     " run --features cbor --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+
+proc findGoExe(): string =
+  ## Returns the `go` toolchain invocation token. Like cargo via rustup,
+  ## we rely on PATH lookup at exec time so the user's installed Go is used.
+  if findExe("go").len == 0:
+    quit "Go toolchain not found. Install Go 1.21+ or add `go` to PATH."
+  result = "go"
+
+task buildFfiExampleGo,
+  "Build the FFI API example library + generated Go wrapper module (native mode)":
+  buildFfiExampleLibrary(generateGo = true)
+
+task runFfiExampleGo,
+  "Build the FFI API example library + run the Go example (native mode)":
+  buildFfiExampleLibrary(generateGo = true)
+  withDir "examples/ffiapi/go_example":
+    exec quoteArg(findGoExe()) & " run ."
 
 task testFfiApiCmake,
   "Validate the generated <lib>Config.cmake by building a downstream consumer":

@@ -29,7 +29,7 @@
 
 import std/[macros, strutils]
 import ./api_schema, ./api_type
-import ./api_codegen_c, ./api_codegen_python, ./api_codegen_rust
+import ./api_codegen_c, ./api_codegen_python, ./api_codegen_rust, ./api_codegen_go
 
 export api_schema, api_type
 export api_codegen_c, api_codegen_python
@@ -311,6 +311,14 @@ macro autoRegisterApiType*(T: typed): untyped =
         )
         gApiRustEnums.add(rsEnum)
 
+      when defined(BrokerFfiApiGenGo):
+        var goEnum = "type " & typeName & " int32\n\n"
+        goEnum.add("const (\n")
+        for i, v in apiValues:
+          goEnum.add("\t" & typeName & "_" & v.name & " " & typeName & " = " & $v.ordinal & "\n")
+        goEnum.add(")")
+        gApiGoEnums.add(goEnum)
+
       # Emit recursive calls for nested enum dependencies (rare but possible)
       return result
 
@@ -332,6 +340,10 @@ macro autoRegisterApiType*(T: typed): untyped =
       let rsBase = nimTypeToRust(ident(baseName))
       gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
 
+    when defined(BrokerFfiApiGenGo):
+      let goBase = nimTypeToGo(ident(baseName))
+      gApiGoEnums.add("type " & typeName & " = " & goBase & " // distinct " & baseName)
+
     return result
 
   # Check for alias types (sym that resolves to another sym/primitive)
@@ -346,6 +358,9 @@ macro autoRegisterApiType*(T: typed): untyped =
         when defined(BrokerFfiApiGenRust):
           let rsBase = nimTypeToRust(ident(targetName))
           gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
+        when defined(BrokerFfiApiGenGo):
+          let goBase = nimTypeToGo(ident(targetName))
+          gApiGoEnums.add("type " & typeName & " = " & goBase)
         return result
 
   # Object types — existing behavior

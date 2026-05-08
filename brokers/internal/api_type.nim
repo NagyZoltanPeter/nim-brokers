@@ -209,6 +209,22 @@ proc generateApiType*(
       rsSafe.add("}")
       gApiRustStructs.add(rsSafe)
 
+  # 8. Generate Go struct (when -d:BrokerFfiApiGenGo)
+  when defined(BrokerFfiApiGenGo):
+    block:
+      var goSt = "type " & typeName & " struct {\n"
+      for (fname, ftype) in fields:
+        let goType = nimTypeToGo(ident(ftype))
+        # Capitalize first letter for export
+        let exportedName =
+          if fname.len > 0 and fname[0] >= 'a' and fname[0] <= 'z':
+            chr(ord(fname[0]) - 32) & fname[1 ..^ 1]
+          else:
+            fname
+        goSt.add("\t" & exportedName & " " & goType & "\n")
+      goSt.add("}")
+      gApiGoStructs.add(goSt)
+
   when defined(brokerDebug):
     echo result.repr
 

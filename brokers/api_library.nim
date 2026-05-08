@@ -1246,6 +1246,10 @@ proc registerBrokerLibraryNativeImpl(
   when defined(BrokerFfiApiGenRust):
     generateRustFile(outDir, libNameResolved)
 
+  # Generate Go wrapper module when requested
+  when defined(BrokerFfiApiGenGo):
+    generateGoFile(outDir, libNameResolved)
+
   generateCMakePackageFiles(
     outDir, libNameResolved, config.version, cborMode = false, hasCpp = true
   )
