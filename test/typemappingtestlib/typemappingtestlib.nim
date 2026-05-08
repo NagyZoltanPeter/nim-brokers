@@ -217,7 +217,7 @@ when defined(BrokerFfiApiCBOR):
     proc signature*(tag: Tag): Future[Result[ObjParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
-# Probe negatives (documented; not active brokers). See doc/RUST_FFI_GAPS.md.
+# Probe negatives (documented; not active brokers). See doc/TYPESUPPORT.md.
 #   - array[N, Object]:    C header emits bare 'Inner' which is undeclared
 #                          in C scope; C++ test fails with "unknown type
 #                          name 'Inner'". Native Rust + C/C++ broken;
