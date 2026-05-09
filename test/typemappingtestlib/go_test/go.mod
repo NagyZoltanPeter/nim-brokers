@@ -5,8 +5,4 @@ go 1.21
 
 require typemappingtestlib v0.0.0
 
-require github.com/fxamacker/cbor/v2 v2.7.0 // indirect
-
-require github.com/x448/float16 v0.8.4 // indirect
-
-replace typemappingtestlib => ../build_cbor/typemappingtestlib_go
+replace typemappingtestlib => ../build/typemappingtestlib_go

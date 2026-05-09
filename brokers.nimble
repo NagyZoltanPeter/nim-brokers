@@ -584,11 +584,11 @@ task buildFfiExampleCborGo,
   buildFfiExampleCborLibrary(generateGo = true)
 
 task runFfiExampleCborGo,
-  "Build the FFI API example library (CBOR mode) + run the Go example with -tags cbor":
+  "Build the FFI API example library (CBOR mode) + run the Go example":
   buildFfiExampleCborLibrary(generateGo = true)
   writeFfiGoModFor("build_cbor")
   withDir "examples/ffiapi/go_example":
-    exec quoteArg(findGoExe()) & " run -tags cbor ."
+    exec quoteArg(findGoExe()) & " run ."
 
 task testFfiApiCmake,
   "Validate the generated <lib>Config.cmake by building a downstream consumer":
@@ -726,10 +726,13 @@ proc writeTypeMapGoModFor(buildDir: string) =
       exec quoteArg(findGoExe()) & " mod tidy"
 
 task runTypeMapTestLibCborGo,
-  "Build the CBOR-mode parity library + Go wrapper and run the Go parity test with -tags cbor":
+  "Build the CBOR-mode parity library + Go wrapper and run the Go parity test":
   buildTypeMapTestLibCbor(genGo = true)
   writeTypeMapGoModFor("build_cbor")
   withDir "test/typemappingtestlib/go_test":
+    # The test consumer keeps `-tags cbor` to gate `test_obj_as_param`
+    # in cbor_only_cbor.go (the broker definition is gated to CBOR mode
+    # because object-as-request-param fails on every native backend).
     exec quoteArg(findGoExe()) & " run -tags cbor ."
 
 task runTypeMapTestLibCborPy,
@@ -1058,11 +1061,11 @@ task runTorpedoExampleGo,
     exec quoteArg(findGoExe()) & " run ."
 
 task runTorpedoExampleCborGo,
-  "Build the Torpedo Duel FFI library (CBOR mode) + run the Go example with -tags cbor":
+  "Build the Torpedo Duel FFI library (CBOR mode) + run the Go example":
   buildTorpedoExampleCborLibrary(generateGo = true)
   writeTorpedoGoModFor("build_cbor")
   withDir "examples/torpedo/go_example":
-    exec quoteArg(findGoExe()) & " run -tags cbor ."
+    exec quoteArg(findGoExe()) & " run ."
 
 task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
   buildTorpedoExampleLibrary()
