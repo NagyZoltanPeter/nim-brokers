@@ -4,10 +4,15 @@ package main
 
 import "typemappingtestlib"
 
-func cborOnlyMatrix(t *typemappingtestlib.Typemappingtestlib) {
-	op, err := t.ObjParamRequest(typemappingtestlib.Tag{Key: "k", Value: "v"})
-	check(err == nil, "ObjParamRequest is_ok")
-	if err == nil {
-		check(op.Summary == "k=v", "ObjParamRequest.summary == k=v")
-	}
+func test_obj_as_param() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.ObjParamRequest(typemappingtestlib.Tag{Key: "k", Value: "v"})
+	check(err == nil, "is_ok")
+	checkEq(r.Summary, "k=v", "summary")
+	lib.Close()
+}
+
+func runCborOnly() {
+	runTest("test_obj_as_param", test_obj_as_param)
 }
