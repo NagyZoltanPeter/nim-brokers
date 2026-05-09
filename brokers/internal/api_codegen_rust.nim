@@ -269,7 +269,34 @@ proc generateRustFile*(outDir: string, libName: string) {.compileTime, raises: [
 
   rs.add("use std::ffi::{CStr, CString};\n")
   rs.add("use std::os::raw::{c_char, c_int, c_void};\n")
-  rs.add("use std::sync::Mutex;\n\n")
+  rs.add("use std::sync::{Mutex, OnceLock};\n\n")
+
+  # Central event-holder registry — tracks the Box<Arc<closure>> pointers
+  # leaked by every on_X registration so Drop can free them all when a
+  # context shuts down. We deliberately keep them alive across off_X
+  # calls so in-flight callbacks (which the broker docs say complete
+  # after off_X returns) don't UAF.
+  rs.add("type EventHolderDropper = fn(*mut c_void);\n")
+  rs.add("struct EventHolderEntry { ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper }\n")
+  rs.add("// Send/Sync OK: the raw pointer points at a heap-allocated\n")
+  rs.add("// Arc<dyn Fn(..) + Send + Sync> whose lifetime we control.\n")
+  rs.add("unsafe impl Send for EventHolderEntry {}\n")
+  rs.add("unsafe impl Sync for EventHolderEntry {}\n\n")
+  rs.add("static EVENT_HOLDER_REG: OnceLock<Mutex<Vec<EventHolderEntry>>> = OnceLock::new();\n")
+  rs.add("fn event_holder_reg() -> &'static Mutex<Vec<EventHolderEntry>> {\n")
+  rs.add("    EVENT_HOLDER_REG.get_or_init(|| Mutex::new(Vec::new()))\n")
+  rs.add("}\n\n")
+  rs.add("fn register_event_holder(ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper) {\n")
+  rs.add("    event_holder_reg().lock().unwrap().push(EventHolderEntry { ctx, ptr, dropper });\n")
+  rs.add("}\n\n")
+  rs.add("fn drop_event_holders_for_ctx(ctx: u32) {\n")
+  rs.add("    let mut g = event_holder_reg().lock().unwrap();\n")
+  rs.add("    let mut keep: Vec<EventHolderEntry> = Vec::with_capacity(g.len());\n")
+  rs.add("    for e in g.drain(..) {\n")
+  rs.add("        if e.ctx == ctx { (e.dropper)(e.ptr); } else { keep.push(e); }\n")
+  rs.add("    }\n")
+  rs.add("    *g = keep;\n")
+  rs.add("}\n\n")
 
   # Result envelope mirroring C++ Result<T> and Python Result[T].
   rs.add("/// Mirror of Nim's `Result[T, string]` envelope.\n")
@@ -400,6 +427,10 @@ proc generateRustFile*(outDir: string, libName: string) {.compileTime, raises: [
   rs.add("    pub fn shutdown(&mut self) {\n")
   rs.add("        if self.ctx != 0 {\n")
   rs.add("            unsafe { " & apiPrefix & "shutdown(self.ctx); }\n")
+  rs.add("            // Free every event-callback holder boxed for this ctx.\n")
+  rs.add("            // Done AFTER shutdown so the C broker has finished\n")
+  rs.add("            // dispatching to all listeners before we drop them.\n")
+  rs.add("            drop_event_holders_for_ctx(self.ctx);\n")
   rs.add("            self.ctx = 0;\n")
   rs.add("        }\n")
   rs.add("    }\n\n")

@@ -228,22 +228,43 @@ proc generateCborGoFile*(
   g.add("#include <string.h>\n")
   g.add("#include <stdint.h>\n")
   g.add("#include \"" & libName & ".h\"\n")
-  g.add("uint64_t go_cbor_subscribe(uint32_t ctx, const char* name);\n")
+  g.add("uint64_t go_cbor_subscribe(uint32_t ctx, const char* name, void* user_data);\n")
   g.add("*/\n")
   g.add("import \"C\"\n\n")
 
   g.add("import (\n")
   g.add("\t\"errors\"\n")
   g.add("\t\"runtime\"\n")
+  g.add("\t\"runtime/cgo\"\n")
   g.add("\t\"sync\"\n")
   g.add("\t\"unsafe\"\n")
   g.add("\t\"github.com/fxamacker/cbor/v2\"\n")
   g.add(")\n\n")
   g.add("var _ = errors.New\n")
   g.add("var _ = runtime.SetFinalizer\n")
+  g.add("var _ cgo.Handle\n")
   g.add("var _ sync.Mutex\n")
   g.add("var _ unsafe.Pointer\n")
   g.add("var _ = cbor.Marshal\n\n")
+
+  # Per-context cgo.Handle registry — same UAF-safe pattern as native:
+  # the closure stays alive across Off<Event> until Close() runs.
+  g.add("var cborHandleReg = struct {\n")
+  g.add("\tmu sync.Mutex\n")
+  g.add("\tperCtx map[uint32][]cgo.Handle\n")
+  g.add("}{perCtx: make(map[uint32][]cgo.Handle)}\n\n")
+  g.add("func registerCborHandle(ctx C.uint32_t, h cgo.Handle) {\n")
+  g.add("\tcborHandleReg.mu.Lock()\n")
+  g.add("\tcborHandleReg.perCtx[uint32(ctx)] = append(cborHandleReg.perCtx[uint32(ctx)], h)\n")
+  g.add("\tcborHandleReg.mu.Unlock()\n")
+  g.add("}\n\n")
+  g.add("func dropCborHandlesForCtx(ctx C.uint32_t) {\n")
+  g.add("\tcborHandleReg.mu.Lock()\n")
+  g.add("\thandles := cborHandleReg.perCtx[uint32(ctx)]\n")
+  g.add("\tdelete(cborHandleReg.perCtx, uint32(ctx))\n")
+  g.add("\tcborHandleReg.mu.Unlock()\n")
+  g.add("\tfor _, h := range handles { h.Delete() }\n")
+  g.add("}\n\n")
 
   # ---- Generated payload types ------------------------------------------
   var enumNames: seq[string] = @[]
@@ -300,14 +321,13 @@ proc generateCborGoFile*(
       g.add("\t_ struct{}\n")
     g.add("}\n\n")
 
-  # ---- Lib struct + event registry ---------------------------------------
-  g.add("// -------- Event dispatch registry --------\n\n")
+  # ---- Lib struct + event handler type -----------------------------------
+  g.add("// -------- Event dispatch --------\n\n")
+  g.add("// cborEventHandler is what we anchor on the Go side via cgo.NewHandle.\n")
+  g.add("// Each subscription's user_data is the corresponding cgo.Handle, so\n")
+  g.add("// the trampoline retrieves and invokes exactly that one closure per\n")
+  g.add("// event emit — no global map, no fan-out, no cross-context leakage.\n")
   g.add("type cborEventHandler func([]byte)\n\n")
-  g.add("var cborEventReg = struct {\n")
-  g.add("\tmu sync.Mutex\n")
-  g.add("\t// Per (ctx, eventName) -> map[handle]handler.\n")
-  g.add("\tbyCtx map[uint32]map[string]map[uint64]cborEventHandler\n")
-  g.add("}{byCtx: make(map[uint32]map[string]map[uint64]cborEventHandler)}\n\n")
 
   g.add("// -------- Lib struct --------\n\n")
   g.add("type " & className & " struct {\n")
@@ -340,11 +360,6 @@ proc generateCborGoFile*(
   g.add("\t\treturn errors.New(msg)\n")
   g.add("\t}\n")
   g.add("\tl.ctx = ctx\n")
-  g.add("\tcborEventReg.mu.Lock()\n")
-  g.add(
-    "\tcborEventReg.byCtx[uint32(ctx)] = make(map[string]map[uint64]cborEventHandler)\n"
-  )
-  g.add("\tcborEventReg.mu.Unlock()\n")
   g.add("\treturn nil\n")
   g.add("}\n\n")
 
@@ -355,9 +370,7 @@ proc generateCborGoFile*(
   g.add("\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n")
   g.add("\tif l.ctx != 0 {\n")
   g.add("\t\tC." & p & "shutdown(l.ctx)\n")
-  g.add("\t\tcborEventReg.mu.Lock()\n")
-  g.add("\t\tdelete(cborEventReg.byCtx, uint32(l.ctx))\n")
-  g.add("\t\tcborEventReg.mu.Unlock()\n")
+  g.add("\t\tdropCborHandlesForCtx(l.ctx)\n")
   g.add("\t\tl.ctx = 0\n")
   g.add("\t}\n")
   g.add("}\n\n")
@@ -461,23 +474,19 @@ proc generateCborGoFile*(
     g.add("// -------- CBOR event trampoline --------\n\n")
     g.add("//export goCborEventTrampoline\n")
     g.add(
-      "func goCborEventTrampoline(ctx C.uint32_t, name *C.char, buf unsafe.Pointer, bufLen C.int32_t, _ud unsafe.Pointer) {\n"
+      "func goCborEventTrampoline(ctx C.uint32_t, name *C.char, buf unsafe.Pointer, bufLen C.int32_t, ud unsafe.Pointer) {\n"
     )
-    g.add("\tif name == nil { return }\n")
-    g.add("\tevName := C.GoString(name)\n")
+    g.add("\t_ = ctx\n")
+    g.add("\t_ = name\n")
+    g.add("\tif ud == nil { return }\n")
     g.add("\tvar payload []byte\n")
     g.add("\tif buf != nil && bufLen > 0 {\n")
     g.add("\t\tpayload = C.GoBytes(buf, C.int(bufLen))\n")
     g.add("\t}\n")
-    g.add("\tcborEventReg.mu.Lock()\n")
-    g.add("\tperEvent, ok := cborEventReg.byCtx[uint32(ctx)]\n")
-    g.add("\tif !ok { cborEventReg.mu.Unlock(); return }\n")
-    g.add("\thandlers, ok := perEvent[evName]\n")
-    g.add("\tif !ok || len(handlers) == 0 { cborEventReg.mu.Unlock(); return }\n")
-    g.add("\tsnap := make([]cborEventHandler, 0, len(handlers))\n")
-    g.add("\tfor _, h := range handlers { snap = append(snap, h) }\n")
-    g.add("\tcborEventReg.mu.Unlock()\n")
-    g.add("\tfor _, h := range snap { h(payload) }\n")
+    g.add("\th := cgo.Handle(uintptr(ud))\n")
+    g.add("\tcb, ok := h.Value().(cborEventHandler)\n")
+    g.add("\tif !ok { return }\n")
+    g.add("\tcb(payload)\n")
     g.add("}\n\n")
 
   for ev in eventEntries:
@@ -523,11 +532,7 @@ proc generateCborGoFile*(
         "func (l *" & className & ") On" & exName & "(cb func(" & sig & ")) uint64 {\n"
       )
       g.add("\tif l.ctx == 0 { return 0 }\n")
-      g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
-      g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
-      g.add("\thandle := uint64(C.go_cbor_subscribe(l.ctx, cName))\n")
-      g.add("\tif handle == 0 { return 0 }\n")
-      g.add("\twrap := func(payload []byte) {\n")
+      g.add("\twrap := cborEventHandler(func(payload []byte) {\n")
       g.add("\t\tvar p " & payloadType & "\n")
       g.add("\t\tif derr := cbor.Unmarshal(payload, &p); derr != nil { return }\n")
       g.add("\t\tcb(")
@@ -536,19 +541,18 @@ proc generateCborGoFile*(
           g.add(", ")
         g.add("p." & fieldExNames[i])
       g.add(")\n")
+      g.add("\t})\n")
+      g.add("\th := cgo.NewHandle(wrap)\n")
+      g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
+      g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+      g.add(
+        "\thandle := uint64(C.go_cbor_subscribe(l.ctx, cName, unsafe.Pointer(h)))\n"
+      )
+      g.add("\tif handle == 0 {\n")
+      g.add("\t\th.Delete()\n")
+      g.add("\t\treturn 0\n")
       g.add("\t}\n")
-      g.add("\tcborEventReg.mu.Lock()\n")
-      g.add("\tperEvent, ok := cborEventReg.byCtx[uint32(l.ctx)]\n")
-      g.add(
-        "\tif !ok { perEvent = make(map[string]map[uint64]cborEventHandler); cborEventReg.byCtx[uint32(l.ctx)] = perEvent }\n"
-      )
-      g.add("\thandlers, ok := perEvent[\"" & ev.apiName & "\"]\n")
-      g.add(
-        "\tif !ok { handlers = make(map[uint64]cborEventHandler); perEvent[\"" &
-          ev.apiName & "\"] = handlers }\n"
-      )
-      g.add("\thandlers[handle] = wrap\n")
-      g.add("\tcborEventReg.mu.Unlock()\n")
+      g.add("\tregisterCborHandle(l.ctx, h)\n")
       g.add("\treturn handle\n")
       g.add("}\n\n")
 
@@ -557,16 +561,6 @@ proc generateCborGoFile*(
     g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
     g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
     g.add("\tC." & p & "unsubscribe(l.ctx, cName, C.uint64_t(handle))\n")
-    g.add("\tcborEventReg.mu.Lock()\n")
-    g.add("\tdefer cborEventReg.mu.Unlock()\n")
-    g.add("\tif perEvent, ok := cborEventReg.byCtx[uint32(l.ctx)]; ok {\n")
-    g.add("\t\tif handlers, ok := perEvent[\"" & ev.apiName & "\"]; ok {\n")
-    g.add(
-      "\t\t\tif handle == 0 { delete(perEvent, \"" & ev.apiName &
-        "\") } else { delete(handlers, handle) }\n"
-    )
-    g.add("\t\t}\n")
-    g.add("\t}\n")
     g.add("}\n\n")
 
   try:
@@ -582,10 +576,12 @@ proc generateCborGoFile*(
     c.add("#include <stdlib.h>\n")
     c.add("#include \"" & libName & ".h\"\n")
     c.add("#include \"_cgo_export.h\"\n\n")
-    c.add("uint64_t go_cbor_subscribe(uint32_t ctx, const char* name) {\n")
+    c.add(
+      "uint64_t go_cbor_subscribe(uint32_t ctx, const char* name, void* user_data) {\n"
+    )
     c.add(
       "    return " & p & "subscribe(ctx, name, (" & p &
-        "event_cb_t)goCborEventTrampoline, NULL);\n"
+        "event_cb_t)goCborEventTrampoline, user_data);\n"
     )
     c.add("}\n")
     try:

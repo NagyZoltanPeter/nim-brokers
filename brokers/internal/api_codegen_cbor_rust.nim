@@ -402,20 +402,33 @@ proc generateCborRustFile*(
   # ---- Lib struct ------------------------------------------------------
   rs.add("// -------- Lib struct --------\n\n")
 
-  # Build per-event handler-map type: HashMap<u64, Arc<dyn Fn(...) + Send + Sync + 'static>>
-  rs.add("type EventHandler = Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;\n\n")
-  rs.add("struct EventState {\n")
-  rs.add("    handles_by_event: HashMap<String, HashMap<u64, EventHandler>>,\n")
-  rs.add("}\n\n")
-  rs.add("impl EventState {\n")
-  rs.add("    fn new() -> Self { Self { handles_by_event: HashMap::new() } }\n")
-  rs.add("}\n\n")
-
+  # CBOR event dispatch via user_data. Each on_X registration leaks a
+  # Box<Arc<closure>> via Box::into_raw so its pointer is stable for
+  # the C broker to hold as user_data. The shared trampoline retrieves
+  # and invokes exactly one closure per emit — no global map, no
+  # fan-out, no cross-context leakage. Holders are tracked per-ctx and
+  # dropped together on shutdown (the broker docs say in-flight
+  # callbacks complete after off returns, so eager Drop on off would
+  # UAF; a per-ctx-shutdown free is the safe upper bound).
+  rs.add("type CborEventHandler = Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;\n\n")
+  rs.add("struct CborHolderEntry { ctx: u32, ptr: *mut c_void }\n")
+  rs.add("unsafe impl Send for CborHolderEntry {}\n")
+  rs.add("unsafe impl Sync for CborHolderEntry {}\n\n")
   rs.add(
-    "static EVENT_REGISTRY: OnceLock<Mutex<HashMap<u32, Mutex<EventState>>>> = OnceLock::new();\n\n"
+    "static CBOR_EVENT_HOLDERS: OnceLock<Mutex<Vec<CborHolderEntry>>> = OnceLock::new();\n"
   )
-  rs.add("fn event_registry() -> &'static Mutex<HashMap<u32, Mutex<EventState>>> {\n")
-  rs.add("    EVENT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))\n")
+  rs.add("fn cbor_event_holders() -> &'static Mutex<Vec<CborHolderEntry>> {\n")
+  rs.add("    CBOR_EVENT_HOLDERS.get_or_init(|| Mutex::new(Vec::new()))\n")
+  rs.add("}\n\n")
+  rs.add("fn drop_cbor_event_holders_for_ctx(ctx: u32) {\n")
+  rs.add("    let mut g = cbor_event_holders().lock().unwrap();\n")
+  rs.add("    let mut keep: Vec<CborHolderEntry> = Vec::with_capacity(g.len());\n")
+  rs.add("    for e in g.drain(..) {\n")
+  rs.add("        if e.ctx == ctx {\n")
+  rs.add("            unsafe { drop(Box::from_raw(e.ptr as *mut CborEventHandler)); }\n")
+  rs.add("        } else { keep.push(e); }\n")
+  rs.add("    }\n")
+  rs.add("    *g = keep;\n")
   rs.add("}\n\n")
 
   rs.add(
@@ -461,9 +474,6 @@ proc generateCborRustFile*(
   rs.add("                return Result::err(msg);\n")
   rs.add("            }\n")
   rs.add("            self.ctx = ctx;\n")
-  rs.add(
-    "            event_registry().lock().unwrap().insert(ctx, Mutex::new(EventState::new()));\n"
-  )
   rs.add("            Result::ok(())\n")
   rs.add("        }\n")
   rs.add("    }\n\n")
@@ -474,7 +484,8 @@ proc generateCborRustFile*(
   rs.add("    pub fn shutdown(&mut self) {\n")
   rs.add("        if self.ctx != 0 {\n")
   rs.add("            unsafe { " & p & "shutdown(self.ctx); }\n")
-  rs.add("            event_registry().lock().unwrap().remove(&self.ctx);\n")
+  rs.add("            // C broker has finished dispatching; safe to free closures.\n")
+  rs.add("            drop_cbor_event_holders_for_ctx(self.ctx);\n")
   rs.add("            self.ctx = 0;\n")
   rs.add("        }\n")
   rs.add("    }\n\n")
@@ -642,7 +653,7 @@ proc generateCborRustFile*(
         ") + Send + Sync + 'static {\n"
     )
     rs.add("        if self.ctx == 0 { return 0; }\n")
-    rs.add("        let wrapper: EventHandler = Arc::new(move |raw: &[u8]| {\n")
+    rs.add("        let wrapper: CborEventHandler = Arc::new(move |raw: &[u8]| {\n")
     rs.add(
       "            if let Ok(v) = ciborium::from_reader::<" & ev.typeName &
         ", _>(raw) {\n"
@@ -650,26 +661,20 @@ proc generateCborRustFile*(
     rs.add("                callback(" & destructureArgs.join(", ") & ");\n")
     rs.add("            }\n")
     rs.add("        });\n")
+    rs.add("        let raw: *mut c_void = Box::into_raw(Box::new(wrapper)) as *mut c_void;\n")
     rs.add(
       "        let cname = match CString::new(\"" & ev.apiName &
-        "\") { Ok(s) => s, Err(_) => return 0 };\n"
+        "\") { Ok(s) => s, Err(_) => { unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); } return 0 } };\n"
     )
-    rs.add("        let h = unsafe {\n")
-    rs.add(
-      "            " & p &
-        "subscribe(self.ctx, cname.as_ptr(), trampoline, std::ptr::null_mut())\n"
-    )
-    rs.add("        };\n")
-    rs.add("        if h == 0 || h == 1 { return h; }\n")
-    rs.add("        let reg = event_registry();\n")
-    rs.add("        let map = reg.lock().unwrap();\n")
-    rs.add("        if let Some(state_lock) = map.get(&self.ctx) {\n")
-    rs.add("            let mut state = state_lock.lock().unwrap();\n")
-    rs.add(
-      "            state.handles_by_event.entry(\"" & ev.apiName &
-        "\".to_string()).or_default().insert(h, wrapper);\n"
-    )
+    rs.add("        let h = unsafe { " & p &
+      "subscribe(self.ctx, cname.as_ptr(), cbor_trampoline, raw) };\n")
+    rs.add("        if h == 0 {\n")
+    rs.add("            unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); }\n")
+    rs.add("            return 0;\n")
     rs.add("        }\n")
+    rs.add(
+      "        cbor_event_holders().lock().unwrap().push(CborHolderEntry { ctx: self.ctx, ptr: raw });\n"
+    )
     rs.add("        h\n")
     rs.add("    }\n\n")
 
@@ -682,19 +687,6 @@ proc generateCborRustFile*(
     rs.add(
       "        unsafe { " & p & "unsubscribe(self.ctx, cname.as_ptr(), handle); }\n"
     )
-    rs.add("        let reg = event_registry();\n")
-    rs.add("        let map = reg.lock().unwrap();\n")
-    rs.add("        if let Some(state_lock) = map.get(&self.ctx) {\n")
-    rs.add("            let mut state = state_lock.lock().unwrap();\n")
-    rs.add(
-      "            if let Some(handles) = state.handles_by_event.get_mut(\"" & ev.apiName &
-        "\") {\n"
-    )
-    rs.add(
-      "                if handle == 0 { handles.clear(); } else { handles.remove(&handle); }\n"
-    )
-    rs.add("            }\n")
-    rs.add("        }\n")
     rs.add("    }\n\n")
 
   rs.add("}\n\n")
@@ -707,28 +699,21 @@ proc generateCborRustFile*(
   rs.add("    fn drop(&mut self) { self.shutdown(); }\n")
   rs.add("}\n\n")
 
-  # Trampoline (one shared C callback that demuxes by ctx + event name).
+  # Trampoline: each subscription's user_data points at a leaked
+  # Box<Arc<closure>>. Clone the Arc cheaply (atomic refcount) so
+  # in-flight callbacks survive a concurrent off / shutdown that drops
+  # the holder.
   rs.add(
-    "unsafe extern \"C\" fn trampoline(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, _ud: *mut c_void) {\n"
+    "unsafe extern \"C\" fn cbor_trampoline(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, ud: *mut c_void) {\n"
   )
-  rs.add("    if name.is_null() || buf.is_null() || buf_len <= 0 { return; }\n")
-  rs.add(
-    "    let event_name = match CStr::from_ptr(name).to_str() { Ok(s) => s.to_string(), Err(_) => return };\n"
-  )
+  rs.add("    let _ = ctx;\n")
+  rs.add("    let _ = name;\n")
+  rs.add("    if ud.is_null() || buf.is_null() || buf_len <= 0 { return; }\n")
   rs.add(
     "    let slice = std::slice::from_raw_parts(buf as *const u8, buf_len as usize);\n"
   )
-  rs.add("    let reg = event_registry();\n")
-  rs.add("    let map = reg.lock().unwrap();\n")
-  rs.add("    let state_lock = match map.get(&ctx) { Some(s) => s, None => return };\n")
-  rs.add("    let snapshot: Vec<EventHandler> = {\n")
-  rs.add("        let state = state_lock.lock().unwrap();\n")
-  rs.add(
-    "        state.handles_by_event.get(&event_name).map(|hs| hs.values().cloned().collect()).unwrap_or_default()\n"
-  )
-  rs.add("    };\n")
-  rs.add("    drop(map);\n")
-  rs.add("    for cb in snapshot { cb(slice); }\n")
+  rs.add("    let arc: CborEventHandler = unsafe { (*(ud as *const CborEventHandler)).clone() };\n")
+  rs.add("    arc(slice);\n")
   rs.add("}\n\n")
 
   # Discovery descriptor helper.

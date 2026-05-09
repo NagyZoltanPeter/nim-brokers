@@ -1369,35 +1369,33 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
             trampInvokeArgs.add(fName)
 
       let fnBound = fnSigParts.join(", ")
+      let holderName = typeDisplayName & "Holder"
       gApiRustEventCbAliases.add(
         "pub type " & cbTyName & " = unsafe extern \"C\" fn(" & cbArgs & ");"
       )
+      # Closure holder. The user closure is boxed into a stable Arc so a
+      # mid-flight trampoline call can clone the Arc cheaply and then
+      # invoke without holding any lock — and a concurrent `off_X(handle)`
+      # that drops its tracking entry doesn't pull the rug out from under
+      # the in-flight callback (the cloned Arc keeps it alive).
       gApiRustEventCbAliases.add(
-        "type " & dispatcherName & "Handler = ::std::sync::Arc<dyn Fn(" & fnBound &
+        "type " & holderName & " = ::std::sync::Arc<dyn Fn(" & fnBound &
           ") + Send + Sync + 'static>;"
       )
-      gApiRustEventCbAliases.add(
-        "static " & dispStaticName &
-          ": ::std::sync::OnceLock<::std::sync::Mutex<::std::collections::HashMap<u64, " &
-          dispatcherName & "Handler>>> = ::std::sync::OnceLock::new();"
-      )
-      gApiRustEventCbAliases.add(
-        "fn " & dispStaticName &
-          "_get() -> &'static ::std::sync::Mutex<::std::collections::HashMap<u64, " &
-          dispatcherName & "Handler>> { " & dispStaticName &
-          ".get_or_init(|| ::std::sync::Mutex::new(::std::collections::HashMap::new())) }"
-      )
-      # Trampoline body: convert FFI args to safe values, snapshot handlers,
-      # then fan out by cloning the safe values for each handler invocation.
+      # Trampoline: retrieve the typed Arc<closure> from user_data, clone
+      # the Arc (cheap atomic refcount bump), invoke. No global map, no
+      # fan-out — the C broker only fires THIS user_data's trampoline for
+      # THIS ctx + handle, exactly once per emit.
       let trampolineName = rsSnakeEvent & "_trampoline"
       var tramp = "unsafe extern \"C\" fn " & trampolineName & "(" & cbArgs & ") {\n"
       tramp.add("    let _ = ctx;\n")
+      tramp.add("    if _ud.is_null() { return; }\n")
       tramp.add(trampConvLines)
-      tramp.add("    let snapshot: Vec<" & dispatcherName & "Handler> = {\n")
-      tramp.add("        let g = " & dispStaticName & "_get().lock().unwrap();\n")
-      tramp.add("        g.values().cloned().collect()\n")
-      tramp.add("    };\n")
-      tramp.add("    for cb in snapshot { cb(" & trampInvokeArgs.join(", ") & "); }\n")
+      tramp.add(
+        "    let arc: " & holderName & " = unsafe { (*(_ud as *const " &
+          holderName & ")).clone() };\n"
+      )
+      tramp.add("    arc(" & trampInvokeArgs.join(", ") & ");\n")
       tramp.add("}")
       gApiRustEventCbAliases.add(tramp)
 
@@ -1408,38 +1406,60 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       )
       gApiRustExternFns.add("fn " & publicDeregFuncName & "(ctx: u32, handle: u64);")
 
-      # on_<event> method.
+      # on_<event> method. Each registration: leak a Box<Arc<closure>>
+      # via Box::into_raw so its address is stable for the C side to hold.
+      # Track (ctx, handle, raw_ptr) in the central registry so Drop can
+      # free them. We deliberately do NOT free in off_X — a concurrent
+      # in-flight callback already cloned its Arc and would crash on UAF
+      # if the holder were dropped under it.
       let onName = "on_" & rsSnakeEvent
       var onMethod =
         "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
         ") + Send + Sync + 'static {\n"
       onMethod.add("        if self.ctx == 0 { return 0; }\n")
       onMethod.add(
-        "        let h = unsafe { " & publicRegFuncName & "(self.ctx, " & trampolineName &
-          ", ::std::ptr::null_mut()) };\n"
+        "        let holder: " & holderName & " = ::std::sync::Arc::new(callback);\n"
       )
-      onMethod.add("        if h == 0 { return 0; }\n")
       onMethod.add(
-        "        " & dispStaticName &
-          "_get().lock().unwrap().insert(h, ::std::sync::Arc::new(callback));\n"
+        "        let raw: *mut " & holderName & " = Box::into_raw(Box::new(holder));\n"
+      )
+      onMethod.add(
+        "        let h = unsafe { " & publicRegFuncName & "(self.ctx, " & trampolineName &
+          ", raw as *mut ::std::ffi::c_void) };\n"
+      )
+      onMethod.add("        if h == 0 {\n")
+      onMethod.add(
+        "            unsafe { drop(Box::from_raw(raw)); }\n"
+      )
+      onMethod.add("            return 0;\n")
+      onMethod.add("        }\n")
+      onMethod.add(
+        "        register_event_holder(self.ctx, raw as *mut ::std::ffi::c_void, " &
+          holderName & "_dropper);\n"
       )
       onMethod.add("        h\n")
       onMethod.add("    }")
       gApiRustEventMethods.add(onMethod)
       gApiRustInterfaceSummary.add(onName & "(callback) -> u64")
 
-      # off_<event> method.
+      # Per-event holder dropper used by the central registry on Drop.
+      gApiRustEventCbAliases.add(
+        "fn " & holderName & "_dropper(p: *mut ::std::ffi::c_void) {\n" &
+        "    if p.is_null() { return; }\n" &
+        "    unsafe { drop(Box::from_raw(p as *mut " & holderName & ")); }\n" &
+        "}"
+      )
+
+      # off_<event> method. Tells the C broker to stop dispatching to
+      # this handle. The closure box stays alive in the registry until
+      # the wrapper drops — this is the safest option given the broker
+      # documents that "already-spawned in-flight work completes
+      # regardless" of off_X.
       let offName = "off_" & rsSnakeEvent
       var offMethod = "    pub fn " & offName & "(&self, handle: u64) {\n"
       offMethod.add("        if self.ctx == 0 { return; }\n")
       offMethod.add(
         "        unsafe { " & publicDeregFuncName & "(self.ctx, handle); }\n"
-      )
-      offMethod.add(
-        "        let mut g = " & dispStaticName & "_get().lock().unwrap();\n"
-      )
-      offMethod.add(
-        "        if handle == 0 { g.clear(); } else { g.remove(&handle); }\n"
       )
       offMethod.add("    }")
       gApiRustEventMethods.add(offMethod)
@@ -1721,53 +1741,60 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       # companion .c file. The body sees cgo's typed Go-trampoline decl
       # via _cgo_export.h, so the typedef cast works without conflict.
       let cbTypedef = typeDisplayName & "CCallback"
-      gApiGoEventCAdapters.add("uint64_t " & regHelperName & "(uint32_t ctx);")
-      var cAdapterImpl = "uint64_t " & regHelperName & "(uint32_t ctx) {\n"
+      gApiGoEventCAdapters.add(
+        "uint64_t " & regHelperName & "(uint32_t ctx, void* user_data);"
+      )
+      var cAdapterImpl =
+        "uint64_t " & regHelperName & "(uint32_t ctx, void* user_data) {\n"
       cAdapterImpl.add(
         "    return " & publicRegFuncName & "(ctx, (" & cbTypedef & ")" & trampName &
-          ", NULL);\n"
+          ", user_data);\n"
       )
       cAdapterImpl.add("}\n")
       gApiGoEventCAdapterImpls.add(cAdapterImpl)
 
-      # ---- Per-event dispatcher map + handler type alias --------------
-      var disp =
-        "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n\n"
-      disp.add("var " & mapName & " = make(map[uint64]" & handlerTypeName & ")\n")
-      disp.add("var " & muName & " sync.Mutex\n")
+      # ---- Handler type alias -----------------------------------------
+      # No global dispatcher map any more — each registration's user_data
+      # IS the cgo.Handle for that specific user closure. The trampoline
+      # retrieves and invokes exactly that one handler per emit, so
+      # there's no fan-out and no cross-context leakage.
+      var disp = "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n"
       gApiGoEventDispatchers.add(disp)
 
       # ---- //export'd Go trampoline -----------------------------------
       var tramp = "//export " & trampName & "\n"
       tramp.add("func " & trampName & "(" & goTrampParams & ") {\n")
       tramp.add("\t_ = ctx\n")
-      tramp.add("\t_ = _ud\n")
+      tramp.add("\tif _ud == nil { return }\n")
       tramp.add(goConvLines)
-      tramp.add("\t" & muName & ".Lock()\n")
-      tramp.add(
-        "\tsnapshot := make([]" & handlerTypeName & ", 0, len(" & mapName & "))\n"
-      )
-      tramp.add(
-        "\tfor _, h := range " & mapName & " { snapshot = append(snapshot, h) }\n"
-      )
-      tramp.add("\t" & muName & ".Unlock()\n")
-      tramp.add("\tfor _, h := range snapshot {\n")
-      tramp.add("\t\th(" & goInvokeArgs.join(", ") & ")\n")
-      tramp.add("\t}\n")
+      tramp.add("\th := cgo.Handle(uintptr(_ud))\n")
+      tramp.add("\tcb, ok := h.Value().(" & handlerTypeName & ")\n")
+      tramp.add("\tif !ok { return }\n")
+      tramp.add("\tcb(" & goInvokeArgs.join(", ") & ")\n")
       tramp.add("}")
       gApiGoExports.add(tramp)
 
       # ---- On<Event> method --------------------------------------------
+      # cgo.NewHandle anchors the closure on the Go side; the C broker
+      # stores its uintptr as user_data. We track the handle in the
+      # central registry so Close() can Delete it once the broker has
+      # drained — Off<Event> intentionally doesn't Delete to keep
+      # in-flight callbacks valid (the broker docs say they complete
+      # after Off returns).
       let onName = "On" & goExportedName
       var onMethod =
         "func (l *__LIB_OWNER_CLASS__) " & onName & "(cb " & handlerTypeName &
         ") uint64 {\n"
       onMethod.add("\tif l.ctx == 0 { return 0 }\n")
-      onMethod.add("\thandle := uint64(C." & regHelperName & "(l.ctx))\n")
-      onMethod.add("\tif handle == 0 { return 0 }\n")
-      onMethod.add("\t" & muName & ".Lock()\n")
-      onMethod.add("\t" & mapName & "[handle] = cb\n")
-      onMethod.add("\t" & muName & ".Unlock()\n")
+      onMethod.add("\th := cgo.NewHandle(cb)\n")
+      onMethod.add(
+        "\thandle := uint64(C." & regHelperName & "(l.ctx, unsafe.Pointer(h)))\n"
+      )
+      onMethod.add("\tif handle == 0 {\n")
+      onMethod.add("\t\th.Delete()\n")
+      onMethod.add("\t\treturn 0\n")
+      onMethod.add("\t}\n")
+      onMethod.add("\tregisterEventHandle(l.ctx, h)\n")
       onMethod.add("\treturn handle\n")
       onMethod.add("}")
       gApiGoEventMethods.add(onMethod)
@@ -1778,12 +1805,6 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       var offMethod = "func (l *__LIB_OWNER_CLASS__) " & offName & "(handle uint64) {\n"
       offMethod.add("\tif l.ctx == 0 { return }\n")
       offMethod.add("\tC." & publicDeregFuncName & "(l.ctx, C.uint64_t(handle))\n")
-      offMethod.add("\t" & muName & ".Lock()\n")
-      offMethod.add(
-        "\tif handle == 0 { " & mapName & " = make(map[uint64]" & handlerTypeName &
-          ") } else { delete(" & mapName & ", handle) }\n"
-      )
-      offMethod.add("\t" & muName & ".Unlock()\n")
       offMethod.add("}")
       gApiGoEventMethods.add(offMethod)
       gApiGoInterfaceSummary.add(offName & "(handle uint64)")

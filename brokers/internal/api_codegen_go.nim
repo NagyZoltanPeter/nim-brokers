@@ -307,6 +307,7 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
   g.add("import (\n")
   g.add("\t\"errors\"\n")
   g.add("\t\"runtime\"\n")
+  g.add("\t\"runtime/cgo\"\n")
   g.add("\t\"sync\"\n")
   g.add("\t\"unsafe\"\n")
   g.add(")\n\n")
@@ -314,8 +315,35 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
   g.add("// silence unused-import warnings if some imports aren't used by codegen.\n")
   g.add("var _ = errors.New\n")
   g.add("var _ = runtime.SetFinalizer\n")
+  g.add("var _ cgo.Handle\n")
   g.add("var _ sync.Mutex\n")
   g.add("var _ unsafe.Pointer\n\n")
+
+  # Central event-handle registry — every On<Event> registration leaks
+  # a cgo.Handle whose value is the user's closure. We track those
+  # handles per-context so Close() can Delete them all (releasing the
+  # closures back to the Go GC) once the C broker has drained.
+  # Keeping handles alive across Off<Event> calls is intentional: the
+  # broker docs say in-flight callbacks complete after Off returns, so
+  # eagerly Deleting would risk a use-after-free.
+  g.add("var eventHandleReg = struct {\n")
+  g.add("\tmu      sync.Mutex\n")
+  g.add("\tperCtx  map[uint32][]cgo.Handle\n")
+  g.add("}{perCtx: make(map[uint32][]cgo.Handle)}\n\n")
+  g.add("func registerEventHandle(ctx C.uint32_t, h cgo.Handle) {\n")
+  g.add("\teventHandleReg.mu.Lock()\n")
+  g.add("\teventHandleReg.perCtx[uint32(ctx)] = append(eventHandleReg.perCtx[uint32(ctx)], h)\n")
+  g.add("\teventHandleReg.mu.Unlock()\n")
+  g.add("}\n\n")
+  g.add("func dropEventHandlesForCtx(ctx C.uint32_t) {\n")
+  g.add("\teventHandleReg.mu.Lock()\n")
+  g.add("\thandles := eventHandleReg.perCtx[uint32(ctx)]\n")
+  g.add("\tdelete(eventHandleReg.perCtx, uint32(ctx))\n")
+  g.add("\teventHandleReg.mu.Unlock()\n")
+  g.add("\tfor _, h := range handles {\n")
+  g.add("\t\th.Delete()\n")
+  g.add("\t}\n")
+  g.add("}\n\n")
 
   # ---- Enums and aliases ------------------------------------------------
   if gApiGoEnums.len > 0:
@@ -387,6 +415,10 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
   g.add("\tdefer l.mu.Unlock()\n")
   g.add("\tif l.ctx != 0 {\n")
   g.add("\t\tC." & apiPrefix & "shutdown(l.ctx)\n")
+  g.add("\t\t// Done AFTER shutdown so the C broker has drained every\n")
+  g.add("\t\t// event dispatch before we Delete the cgo.Handles backing\n")
+  g.add("\t\t// the user closures.\n")
+  g.add("\t\tdropEventHandlesForCtx(l.ctx)\n")
   g.add("\t\tl.ctx = 0\n")
   g.add("\t}\n")
   g.add("}\n\n")

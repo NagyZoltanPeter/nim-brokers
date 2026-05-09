@@ -1978,11 +1978,7 @@ func main() {
 	fmt.Println("\n--- TestContextSeparation ---")
 	runTest("test_context_independent_counters", test_context_independent_counters)
 	runTest("test_context_independent_echo", test_context_independent_echo)
-	// SKIPPED: test_context_independent_events — Go wrapper trampolines (e.g.
-	// goTrampoline_CounterChanged) ignore the ctx arg and fan out to all global
-	// subscribers, so events from lib1 reach lib2's handler and vice versa.
-	// Codegen-level limitation; do not fix here.
-	fmt.Printf("  %-60sSKIP (wrapper: global subs ignore ctx)\n", "test_context_independent_events")
+	runTest("test_context_independent_events", test_context_independent_events)
 	runTest("test_context_shutdown_one_does_not_affect_other", test_context_shutdown_one_does_not_affect_other)
 
 	fmt.Println("\n--- TestScalarTypes ---")
@@ -2074,13 +2070,8 @@ func main() {
 	runTest("test_obj_seq_roundtrip", test_obj_seq_roundtrip)
 
 	fmt.Println("\n--- TestMultipleEventListeners ---")
-	// SKIPPED: test_two_scalar_event_listeners and test_remove_one_listener_keeps_other.
-	// Each Go OnXxx registers a fresh C-side subscription; the C broker fans
-	// out one Nim emit to N C subscriptions, the Go trampoline then iterates
-	// all global Go subs once per invocation -> N*N callback delivery instead
-	// of N. Codegen-level limitation; do not fix here.
-	fmt.Printf("  %-60sSKIP (wrapper: N*N callback delivery)\n", "test_two_scalar_event_listeners")
-	fmt.Printf("  %-60sSKIP (wrapper: N*N callback delivery)\n", "test_remove_one_listener_keeps_other")
+	runTest("test_two_scalar_event_listeners", test_two_scalar_event_listeners)
+	runTest("test_remove_one_listener_keeps_other", test_remove_one_listener_keeps_other)
 	runTest("test_concurrent_event_types", test_concurrent_event_types)
 
 	fmt.Println("\n--- TestForeignThreadGcSafety ---")
