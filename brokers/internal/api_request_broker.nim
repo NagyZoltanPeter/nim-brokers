@@ -64,6 +64,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       return ""
     toSnakeCase(sigName["signature".len .. ^1])
 
+  proc signaturePascalSuffix(sigName: string): string {.compileTime.} =
+    ## PascalCase form of the part of `sigName` after the literal `signature`
+    ## prefix. e.g. `signatureWithLabel` -> `WithLabel`, `signatureZero` ->
+    ## `Zero`.
+    if sigName.len <= "signature".len:
+      return ""
+    sigName["signature".len .. ^1]
+
   for stmt in body:
     case stmt.kind
     of nnkProcDef:
@@ -1392,6 +1400,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
       if not argSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(argSigName))
+        let pyArgMethodName =
+          if hasDualSignatures:
+            pySnakeName & "_" & signatureNameSuffix(argSigName)
+          else:
+            pySnakeName
         var pyParams = "self"
         var callArgs = "self._ctx"
         var aliasArgs: seq[string] = @[]
@@ -1434,7 +1447,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
         let pyRetTy = "Result[" & pyResultName & "]"
         var pyMethod =
-          "    def " & pySnakeName & "(" & pyParams & ") -> " & pyRetTy & ":\n"
+          "    def " & pyArgMethodName & "(" & pyParams & ") -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
         pyMethod.add(pyPreCall)
         pyMethod.add(
@@ -1442,18 +1455,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         )
         gApiPyMethods.add(pyMethod)
         gApiPyInterfaceSummary.add(
-          pySnakeName & "(" & summaryParams.join(", ") & ") -> " & pyRetTy
+          pyArgMethodName & "(" & summaryParams.join(", ") & ") -> " & pyRetTy
         )
-      elif not zeroArgSig.isNil():
+      if not zeroArgSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+        let pyZeroMethodName =
+          if hasDualSignatures:
+            pySnakeName & "_" & signatureNameSuffix(zeroArgSigName)
+          else:
+            pySnakeName
         let pyRetTy = "Result[" & pyResultName & "]"
-        var pyMethod = "    def " & pySnakeName & "(self) -> " & pyRetTy & ":\n"
+        var pyMethod = "    def " & pyZeroMethodName & "(self) -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
         pyMethod.add(
           buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
         )
         gApiPyMethods.add(pyMethod)
-        gApiPyInterfaceSummary.add(pySnakeName & "() -> " & pyRetTy)
+        gApiPyInterfaceSummary.add(pyZeroMethodName & "() -> " & pyRetTy)
 
   # Step 6d: Generate Rust wrapper crate entries (when -d:BrokerFfiApiGenRust)
   when defined(BrokerFfiApiGenRust):
@@ -1811,6 +1829,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
         if not argSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(argSigName))
+          let rsArgMethodName =
+            if hasDualSignatures:
+              rsSnakeName & "_" & signatureNameSuffix(argSigName)
+            else:
+              rsSnakeName
           var rsParams = "&self"
           var rsCallArgs = "self.ctx"
           var rsPreCall = ""
@@ -1834,25 +1857,31 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               rsCallArgs.add(", " & rsArgPassArgs(pName, pType))
               rsSummaryParams.add(pName & ": " & safeTy)
           var rsMethod =
-            "    pub fn " & rsSnakeName & "(" & rsParams & ") -> Result<" & rsResultName &
-            "> {\n"
+            "    pub fn " & rsArgMethodName & "(" & rsParams & ") -> Result<" &
+            rsResultName & "> {\n"
           rsMethod.add(rsPreCall)
           rsMethod.add(rsBuildBody(funcName, rsCallArgs))
           rsMethod.add("    }")
           gApiRustMethods.add(rsMethod)
           gApiRustInterfaceSummary.add(
-            rsSnakeName & "(" & rsSummaryParams.join(", ") & ") -> Result<" &
+            rsArgMethodName & "(" & rsSummaryParams.join(", ") & ") -> Result<" &
               rsResultName & ">"
           )
-        elif not zeroArgSig.isNil():
+        if not zeroArgSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          let rsZeroMethodName =
+            if hasDualSignatures:
+              rsSnakeName & "_" & signatureNameSuffix(zeroArgSigName)
+            else:
+              rsSnakeName
           var rsMethod =
-            "    pub fn " & rsSnakeName & "(&self) -> Result<" & rsResultName & "> {\n"
+            "    pub fn " & rsZeroMethodName & "(&self) -> Result<" & rsResultName &
+            "> {\n"
           rsMethod.add(rsBuildBody(funcName, "self.ctx"))
           rsMethod.add("    }")
           gApiRustMethods.add(rsMethod)
           gApiRustInterfaceSummary.add(
-            rsSnakeName & "() -> Result<" & rsResultName & ">"
+            rsZeroMethodName & "() -> Result<" & rsResultName & ">"
           )
 
   # Step 6e: Generate Go wrapper module entries (when -d:BrokerFfiApiGenGo)
@@ -2180,6 +2209,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
         if not argSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(argSigName))
+          let goArgMethodName =
+            if hasDualSignatures:
+              goExportedName & signaturePascalSuffix(argSigName)
+            else:
+              goExportedName
           var goParams = "l *__LIB_OWNER_CLASS__"
           var goCallArgs = "l.ctx"
           var goPreCall = ""
@@ -2207,10 +2241,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               goCallArgs.add(", " & goArgPassArgs(pName, pType))
               goSummaryParams.add(pName & " " & safeTy)
           var goMethod =
-            "func (" & goParams & ") " & goExportedName & "(" & ") (" & goResultName &
+            "func (" & goParams & ") " & goArgMethodName & "(" & ") (" & goResultName &
             ", error) {\n"
           # Reformat to avoid empty paren after method name: rebuild.
-          goMethod = "func (l *__LIB_OWNER_CLASS__) " & goExportedName & "("
+          goMethod = "func (l *__LIB_OWNER_CLASS__) " & goArgMethodName & "("
           var firstParam = true
           for paramDef in argParams:
             for i in 0 ..< paramDef.len - 2:
@@ -2240,19 +2274,24 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           goMethod.add("}")
           gApiGoMethods.add(goMethod)
           gApiGoInterfaceSummary.add(
-            goExportedName & "(" & goSummaryParams.join(", ") & ") (" & goResultName &
+            goArgMethodName & "(" & goSummaryParams.join(", ") & ") (" & goResultName &
               ", error)"
           )
-        elif not zeroArgSig.isNil():
+        if not zeroArgSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          let goZeroMethodName =
+            if hasDualSignatures:
+              goExportedName & signaturePascalSuffix(zeroArgSigName)
+            else:
+              goExportedName
           var goMethod =
-            "func (l *__LIB_OWNER_CLASS__) " & goExportedName & "() (" & goResultName &
+            "func (l *__LIB_OWNER_CLASS__) " & goZeroMethodName & "() (" & goResultName &
             ", error) {\n"
           goMethod.add(goBuildBody(funcName, "l.ctx"))
           goMethod.add("}")
           gApiGoMethods.add(goMethod)
           gApiGoInterfaceSummary.add(
-            goExportedName & "() (" & goResultName & ", error)"
+            goZeroMethodName & "() (" & goResultName & ", error)"
           )
 
   # Step 7: Append free_result header declaration

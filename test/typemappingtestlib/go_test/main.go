@@ -234,6 +234,26 @@ func test_requests_multiple_echo() {
 	lib.Close()
 }
 
+func test_dual_sig_zero() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.DualSigRequestZero()
+	check(err == nil, "dualSigRequestZero is_ok")
+	checkEq(r.Label, "zero", "label")
+	checkEq(r.Counter, int32(0), "counter")
+	lib.Close()
+}
+
+func test_dual_sig_with_label() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.DualSigRequestWithLabel("hello", int32(7))
+	check(err == nil, "dualSigRequestWithLabel is_ok")
+	checkEq(r.Label, "hello", "label")
+	checkEq(r.Counter, int32(7), "counter")
+	lib.Close()
+}
+
 // ============================================================================
 // TestEvents
 // ============================================================================
@@ -1970,6 +1990,8 @@ func main() {
 	runTest("test_requests_echo", test_requests_echo)
 	runTest("test_requests_counter_increments", test_requests_counter_increments)
 	runTest("test_requests_multiple_echo", test_requests_multiple_echo)
+	runTest("test_dual_sig_zero", test_dual_sig_zero)
+	runTest("test_dual_sig_with_label", test_dual_sig_with_label)
 
 	fmt.Println("\n--- TestEvents ---")
 	runTest("test_events_counter_changed", test_events_counter_changed)

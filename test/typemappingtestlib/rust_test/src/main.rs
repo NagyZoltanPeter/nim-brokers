@@ -265,6 +265,30 @@ fn test_requests_multiple_echo() {
     lib.shutdown();
 }
 
+fn test_dual_sig_zero() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.dual_sig_request_zero();
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.label, &"zero".to_string());
+        check_eq!(v.counter, 0);
+    }
+    lib.shutdown();
+}
+
+fn test_dual_sig_with_label() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.dual_sig_request_with_label("hello".to_string(), 7);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.label, &"hello".to_string());
+        check_eq!(v.counter, 7);
+    }
+    lib.shutdown();
+}
+
 // ===========================================================================
 // TestEvents
 // ===========================================================================
@@ -2394,6 +2418,8 @@ fn main() {
     run_test("test_requests_echo", test_requests_echo);
     run_test("test_requests_counter_increments", test_requests_counter_increments);
     run_test("test_requests_multiple_echo", test_requests_multiple_echo);
+    run_test("test_dual_sig_zero", test_dual_sig_zero);
+    run_test("test_dual_sig_with_label", test_dual_sig_with_label);
 
     println!("\n--- TestEvents ---");
     run_test("test_events_counter_changed", test_events_counter_changed);

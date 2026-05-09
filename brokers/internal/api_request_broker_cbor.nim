@@ -87,13 +87,21 @@ type CborApiAdapter* = proc(ctx: BrokerContext, reqBuf: seq[byte]): Future[seq[b
 
 proc collectSignatures(
     body: NimNode
-): tuple[zeroArg: NimNode, argSig: NimNode, argParams: seq[NimNode]] {.compileTime.} =
+): tuple[
+    zeroArg: NimNode,
+    argSig: NimNode,
+    argParams: seq[NimNode],
+    zeroArgName: string,
+    argSigName: string,
+] {.compileTime.} =
   ## Walk the macro body and split the (at most two) `signature*` proc
   ## declarations into the zero-arg and arg-based slots, mirroring
   ## `mt_request_broker` and the native path's handling.
   result.zeroArg = nil
   result.argSig = nil
   result.argParams = @[]
+  result.zeroArgName = ""
+  result.argSigName = ""
 
   for stmt in body:
     if stmt.kind != nnkProcDef:
@@ -114,8 +122,10 @@ proc collectSignatures(
     let paramCount = params.len - 1
     if paramCount == 0:
       result.zeroArg = stmt
+      result.zeroArgName = $procNameIdent
     elif paramCount >= 1:
       result.argSig = stmt
+      result.argSigName = $procNameIdent
       for idx in 1 ..< params.len:
         result.argParams.add(copyNimTree(params[idx]))
 
@@ -307,20 +317,35 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
     registerCborRequestEntry(apiName, $adapterIdent, typeName, @[])
     return
 
+  proc sigNameSuffix(sigName: string): string =
+    if sigName.len <= "signature".len:
+      return ""
+    toSnakeCase(sigName["signature".len .. ^1])
+
   # Zero-arg adapter (suffixed when both signatures coexist on this broker).
   if not sigs.zeroArg.isNil:
-    let zeroSuffix = if not sigs.argSig.isNil: "Zero" else: ""
-    let zeroApiSuffix = if not sigs.argSig.isNil: "_zero" else: ""
-    let adapterIdent = ident(typeName & "CborAdapter" & zeroSuffix)
+    let zeroAdapterTag = if not sigs.argSig.isNil: "Zero" else: ""
+    let zeroApiSuffix =
+      if not sigs.argSig.isNil:
+        let s = sigNameSuffix(sigs.zeroArgName)
+        if s.len > 0: "_" & s else: "_zero"
+      else:
+        ""
+    let adapterIdent = ident(typeName & "CborAdapter" & zeroAdapterTag)
     result.add(emitZeroArgAdapter(typeIdent, adapterIdent))
     registerCborRequestEntry(apiName & zeroApiSuffix, $adapterIdent, typeName, @[])
 
   # Arg-based adapter (suffixed when zero-arg also exists).
   if not sigs.argSig.isNil:
-    let argSuffix = if not sigs.zeroArg.isNil: "Args" else: ""
-    let argApiSuffix = if not sigs.zeroArg.isNil: "_args" else: ""
-    let adapterIdent = ident(typeName & "CborAdapter" & argSuffix)
-    let argsTypeIdent = ident(typeName & "CborArgs" & argSuffix)
+    let argAdapterTag = if not sigs.zeroArg.isNil: "Args" else: ""
+    let argApiSuffix =
+      if not sigs.zeroArg.isNil:
+        let s = sigNameSuffix(sigs.argSigName)
+        if s.len > 0: "_" & s else: "_args"
+      else:
+        ""
+    let adapterIdent = ident(typeName & "CborAdapter" & argAdapterTag)
+    let argsTypeIdent = ident(typeName & "CborArgs" & argAdapterTag)
     result.add(emitArgsType(argsTypeIdent, sigs.argParams))
     result.add(emitArgAdapter(typeIdent, adapterIdent, argsTypeIdent, sigs.argParams))
     let fields = paramFields(sigs.argParams)

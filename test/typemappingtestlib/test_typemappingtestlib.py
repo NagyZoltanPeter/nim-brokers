@@ -147,6 +147,18 @@ class TestRequests(unittest.TestCase):
             self.assertTrue(r.is_ok())
             self.assertEqual(r.value.reply, f"multi:m-{i}")
 
+    def test_dual_sig_zero(self):
+        r = self.lib.dual_sig_request_zero()
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.label, "zero")
+        self.assertEqual(r.value.counter, 0)
+
+    def test_dual_sig_with_label(self):
+        r = self.lib.dual_sig_request_with_label("hello", 7)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.label, "hello")
+        self.assertEqual(r.value.counter, 7)
+
 
 # ---------------------------------------------------------------------------
 # Scalar types
