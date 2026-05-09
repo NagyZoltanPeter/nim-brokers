@@ -277,17 +277,25 @@ proc generateRustFile*(outDir: string, libName: string) {.compileTime, raises: [
   # calls so in-flight callbacks (which the broker docs say complete
   # after off_X returns) don't UAF.
   rs.add("type EventHolderDropper = fn(*mut c_void);\n")
-  rs.add("struct EventHolderEntry { ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper }\n")
+  rs.add(
+    "struct EventHolderEntry { ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper }\n"
+  )
   rs.add("// Send/Sync OK: the raw pointer points at a heap-allocated\n")
   rs.add("// Arc<dyn Fn(..) + Send + Sync> whose lifetime we control.\n")
   rs.add("unsafe impl Send for EventHolderEntry {}\n")
   rs.add("unsafe impl Sync for EventHolderEntry {}\n\n")
-  rs.add("static EVENT_HOLDER_REG: OnceLock<Mutex<Vec<EventHolderEntry>>> = OnceLock::new();\n")
+  rs.add(
+    "static EVENT_HOLDER_REG: OnceLock<Mutex<Vec<EventHolderEntry>>> = OnceLock::new();\n"
+  )
   rs.add("fn event_holder_reg() -> &'static Mutex<Vec<EventHolderEntry>> {\n")
   rs.add("    EVENT_HOLDER_REG.get_or_init(|| Mutex::new(Vec::new()))\n")
   rs.add("}\n\n")
-  rs.add("fn register_event_holder(ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper) {\n")
-  rs.add("    event_holder_reg().lock().unwrap().push(EventHolderEntry { ctx, ptr, dropper });\n")
+  rs.add(
+    "fn register_event_holder(ctx: u32, ptr: *mut c_void, dropper: EventHolderDropper) {\n"
+  )
+  rs.add(
+    "    event_holder_reg().lock().unwrap().push(EventHolderEntry { ctx, ptr, dropper });\n"
+  )
   rs.add("}\n\n")
   rs.add("fn drop_event_holders_for_ctx(ctx: u32) {\n")
   rs.add("    let mut g = event_holder_reg().lock().unwrap();\n")

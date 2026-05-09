@@ -228,7 +228,9 @@ proc generateCborGoFile*(
   g.add("#include <string.h>\n")
   g.add("#include <stdint.h>\n")
   g.add("#include \"" & libName & ".h\"\n")
-  g.add("uint64_t go_cbor_subscribe(uint32_t ctx, const char* name, void* user_data);\n")
+  g.add(
+    "uint64_t go_cbor_subscribe(uint32_t ctx, const char* name, void* user_data);\n"
+  )
   g.add("*/\n")
   g.add("import \"C\"\n\n")
 
@@ -255,7 +257,9 @@ proc generateCborGoFile*(
   g.add("}{perCtx: make(map[uint32][]cgo.Handle)}\n\n")
   g.add("func registerCborHandle(ctx C.uint32_t, h cgo.Handle) {\n")
   g.add("\tcborHandleReg.mu.Lock()\n")
-  g.add("\tcborHandleReg.perCtx[uint32(ctx)] = append(cborHandleReg.perCtx[uint32(ctx)], h)\n")
+  g.add(
+    "\tcborHandleReg.perCtx[uint32(ctx)] = append(cborHandleReg.perCtx[uint32(ctx)], h)\n"
+  )
   g.add("\tcborHandleReg.mu.Unlock()\n")
   g.add("}\n\n")
   g.add("func dropCborHandlesForCtx(ctx C.uint32_t) {\n")

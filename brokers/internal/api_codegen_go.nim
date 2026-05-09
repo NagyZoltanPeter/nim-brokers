@@ -332,7 +332,9 @@ proc generateGoFile*(outDir: string, libName: string) {.compileTime, raises: [].
   g.add("}{perCtx: make(map[uint32][]cgo.Handle)}\n\n")
   g.add("func registerEventHandle(ctx C.uint32_t, h cgo.Handle) {\n")
   g.add("\teventHandleReg.mu.Lock()\n")
-  g.add("\teventHandleReg.perCtx[uint32(ctx)] = append(eventHandleReg.perCtx[uint32(ctx)], h)\n")
+  g.add(
+    "\teventHandleReg.perCtx[uint32(ctx)] = append(eventHandleReg.perCtx[uint32(ctx)], h)\n"
+  )
   g.add("\teventHandleReg.mu.Unlock()\n")
   g.add("}\n\n")
   g.add("func dropEventHandlesForCtx(ctx C.uint32_t) {\n")

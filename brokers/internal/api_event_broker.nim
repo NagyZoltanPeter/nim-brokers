@@ -1392,8 +1392,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       tramp.add("    if _ud.is_null() { return; }\n")
       tramp.add(trampConvLines)
       tramp.add(
-        "    let arc: " & holderName & " = unsafe { (*(_ud as *const " &
-          holderName & ")).clone() };\n"
+        "    let arc: " & holderName & " = unsafe { (*(_ud as *const " & holderName &
+          ")).clone() };\n"
       )
       tramp.add("    arc(" & trampInvokeArgs.join(", ") & ");\n")
       tramp.add("}")
@@ -1428,9 +1428,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
           ", raw as *mut ::std::ffi::c_void) };\n"
       )
       onMethod.add("        if h == 0 {\n")
-      onMethod.add(
-        "            unsafe { drop(Box::from_raw(raw)); }\n"
-      )
+      onMethod.add("            unsafe { drop(Box::from_raw(raw)); }\n")
       onMethod.add("            return 0;\n")
       onMethod.add("        }\n")
       onMethod.add(
@@ -1445,9 +1443,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       # Per-event holder dropper used by the central registry on Drop.
       gApiRustEventCbAliases.add(
         "fn " & holderName & "_dropper(p: *mut ::std::ffi::c_void) {\n" &
-        "    if p.is_null() { return; }\n" &
-        "    unsafe { drop(Box::from_raw(p as *mut " & holderName & ")); }\n" &
-        "}"
+          "    if p.is_null() { return; }\n" &
+          "    unsafe { drop(Box::from_raw(p as *mut " & holderName & ")); }\n" & "}"
       )
 
       # off_<event> method. Tells the C broker to stop dispatching to
@@ -1758,7 +1755,8 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       # IS the cgo.Handle for that specific user closure. The trampoline
       # retrieves and invokes exactly that one handler per emit, so
       # there's no fan-out and no cross-context leakage.
-      var disp = "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n"
+      var disp =
+        "type " & handlerTypeName & " func(" & goHandlerParams.join(", ") & ")\n"
       gApiGoEventDispatchers.add(disp)
 
       # ---- //export'd Go trampoline -----------------------------------

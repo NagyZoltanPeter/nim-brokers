@@ -425,7 +425,9 @@ proc generateCborRustFile*(
   rs.add("    let mut keep: Vec<CborHolderEntry> = Vec::with_capacity(g.len());\n")
   rs.add("    for e in g.drain(..) {\n")
   rs.add("        if e.ctx == ctx {\n")
-  rs.add("            unsafe { drop(Box::from_raw(e.ptr as *mut CborEventHandler)); }\n")
+  rs.add(
+    "            unsafe { drop(Box::from_raw(e.ptr as *mut CborEventHandler)); }\n"
+  )
   rs.add("        } else { keep.push(e); }\n")
   rs.add("    }\n")
   rs.add("    *g = keep;\n")
@@ -661,15 +663,21 @@ proc generateCborRustFile*(
     rs.add("                callback(" & destructureArgs.join(", ") & ");\n")
     rs.add("            }\n")
     rs.add("        });\n")
-    rs.add("        let raw: *mut c_void = Box::into_raw(Box::new(wrapper)) as *mut c_void;\n")
+    rs.add(
+      "        let raw: *mut c_void = Box::into_raw(Box::new(wrapper)) as *mut c_void;\n"
+    )
     rs.add(
       "        let cname = match CString::new(\"" & ev.apiName &
         "\") { Ok(s) => s, Err(_) => { unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); } return 0 } };\n"
     )
-    rs.add("        let h = unsafe { " & p &
-      "subscribe(self.ctx, cname.as_ptr(), cbor_trampoline, raw) };\n")
+    rs.add(
+      "        let h = unsafe { " & p &
+        "subscribe(self.ctx, cname.as_ptr(), cbor_trampoline, raw) };\n"
+    )
     rs.add("        if h == 0 {\n")
-    rs.add("            unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); }\n")
+    rs.add(
+      "            unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); }\n"
+    )
     rs.add("            return 0;\n")
     rs.add("        }\n")
     rs.add(
@@ -712,7 +720,9 @@ proc generateCborRustFile*(
   rs.add(
     "    let slice = std::slice::from_raw_parts(buf as *const u8, buf_len as usize);\n"
   )
-  rs.add("    let arc: CborEventHandler = unsafe { (*(ud as *const CborEventHandler)).clone() };\n")
+  rs.add(
+    "    let arc: CborEventHandler = unsafe { (*(ud as *const CborEventHandler)).clone() };\n"
+  )
   rs.add("    arc(slice);\n")
   rs.add("}\n\n")
 
