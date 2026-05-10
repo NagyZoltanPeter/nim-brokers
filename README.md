@@ -33,10 +33,11 @@ What is nim-brokers?
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
     - [EventBroker (multi-thread)](#eventbroker-multi-thread)
   - [Broker FFI API](#broker-ffi-api)
+    - [FFI\_API detailed documentation](#ffi_api-detailed-documentation)
+    - [Type-support matrix](#type-support-matrix)
     - [FFI API strategies: CBOR vs Native](#ffi-api-strategies-cbor-vs-native)
     - [Native FFI strategy](#native-ffi-strategy)
     - [CBOR FFI strategy](#cbor-ffi-strategy)
-      - [Build with it](#build-with-it)
     - [Comparison](#comparison)
     - [Interface parity of strategies](#interface-parity-of-strategies)
       - [Torpedo Duel — a richer FFI API example](#torpedo-duel--a-richer-ffi-api-example)
@@ -413,9 +414,16 @@ nimble runFfiExampleRust
 nimble runFfiExampleGo
 ```
 
-See [FFI API](doc/FFI_API.md) for architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
+### FFI_API detailed documentation
 
-See [Type-support matrix](doc/TYPESUPPORT.md) for the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go) × each FFI mode (native / CBOR), with footnoted defects, recommended idioms, and a worked example.
+... and guidance is available in the [FFI API document](doc/FFI_API.md) which covers:
+Architecture, threading behavior, lifecycle requirements, generated API surface, and build guidance.
+
+### Type-support matrix
+
+[Type-support matrix](doc/TYPESUPPORT.md) is available in a separate document.
+
+For the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go) × each FFI mode (native / CBOR), with footnoted defects, recommended idioms, and a worked example.
 
 ### FFI API strategies: CBOR vs Native
 
@@ -441,39 +449,9 @@ event-callback typedef, with CBOR as the on-wire format. Wrappers
 carry the typed surface and decode/encode through language specific CBOR libraries like `jsoncons`
 (C++) or `cbor2` (Python). Buffer ownership rule: every `void*` crossing the ABI is allocated by Nim and freed by Nim.
 
-The major difference from the native strategy is that the generated header is C++ and is not self-contained and requires the wrapper's CBOR library as a dependency. The generated API surface is also more uniform.
+The major difference from the native strategy is that the generated header is C++ and is not self-contained and requires the wrapper's CBOR library as a dependency. 
 
-#### Build with it
-
-To be explicit you can also select CBOR with
-`-d:BrokerFfiApiCBOR`. Either strategy flag enables FFI codegen on its
-own — there is no need to combine it with `-d:BrokerFfiApi` (which by
-itself enables FFI codegen and defaults to CBOR).
-
-Each library also emits a `<lib>.cddl` schema next to its `.h`/`.hpp`
-and exposes a runtime discovery API (`<lib>_listApis`,
-`<lib>_getSchema`) returning the same schema as a CBOR-encoded
-`LibraryDescriptor`.
-
-Build and run the CBOR-mode examples. The same `examples/ffiapi/`
-sources are reused — `runFfiExampleCborCpp` compiles `mylib.nim` with
-`-d:BrokerFfiApiCBOR` into `nimlib/build_cbor/` and links the existing
-`cpp_example/main.cpp` against the CBOR-generated header. This proves
-the wrapper interface shape is identical between native and CBOR
-builds.
-
-```sh
-nimble runFfiExampleCborCpp     # parity build: same mylib.nim + cpp_example/main.cpp, CBOR mode
-nimble runTorpedoExampleCborCpp # parity build for the torpedo example
-nimble runTypeMapTestLibCborPy  # full type-mapping parity test (Python)
-nimble runTypeMapTestLibCborCpp # full type-mapping parity test (C++)
-```
-
-The C++ wrapper expects [jsoncons](https://github.com/danielaparker/jsoncons)
-headers under `vendor/jsoncons/include` (header-only, no build step).
-The Python wrapper requires `cbor2` on the active interpreter
-(`pip install --user cbor2`).
-
+> :exclamation:The generated API surface is in parity with the native strategy above the C ABI layer. The same C++ / Python / Rust / Go wrapper interfaces are available regardless of the underlying ABI strategy.
 
 ### Comparison
 | Aspect | Native strategy | CBOR strategy |
