@@ -5,4 +5,8 @@ go 1.21
 
 require mylib v0.0.0
 
-replace mylib => ../nimlib/build/mylib_go
+require github.com/fxamacker/cbor/v2 v2.7.0 // indirect
+
+require github.com/x448/float16 v0.8.4 // indirect
+
+replace mylib => ../nimlib/build_cbor/mylib_go

@@ -1,5 +1,80 @@
 # Broker FFI API
 
+Single Pure Nim library interface to be used from other Nim apps/modules or from foreign languages through a C ABI.
+
+## Table of Contents
+
+- [Broker FFI API](#broker-ffi-api)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+    - [Layered Architecture](#layered-architecture)
+  - [Code Structure](#code-structure)
+    - [Source Layout](#source-layout)
+    - [Module Dependency Graph](#module-dependency-graph)
+    - [Codegen Module Responsibilities](#codegen-module-responsibilities)
+    - [Compile-Time Data Flow](#compile-time-data-flow)
+  - [Type Auto-Resolution](#type-auto-resolution)
+    - [Usage](#usage)
+    - [How It Works](#how-it-works)
+    - [What Is Auto-Discovered](#what-is-auto-discovered)
+    - [Constraints](#constraints)
+  - [Building Blocks](#building-blocks)
+    - [1. `RequestBroker(API)`](#1-requestbrokerapi)
+    - [2. `EventBroker(API)`](#2-eventbrokerapi)
+    - [3. `registerBrokerLibrary`](#3-registerbrokerlibrary)
+  - [Lifecycle Model](#lifecycle-model)
+    - [Per-context creation](#per-context-creation)
+    - [Post-create configuration](#post-create-configuration)
+      - [Dynamic provider registration via `InitializeRequest`](#dynamic-provider-registration-via-initializerequest)
+    - [Shutdown](#shutdown)
+  - [Threading Architecture](#threading-architecture)
+    - [Processing thread](#processing-thread)
+    - [Delivery thread](#delivery-thread)
+    - [Why there are two threads](#why-there-are-two-threads)
+    - [Startup ordering](#startup-ordering)
+    - [Event behavior](#event-behavior)
+    - [Request behavior](#request-behavior)
+  - [Requirements on `InitializeRequest` and `ShutdownRequest`](#requirements-on-initializerequest-and-shutdownrequest)
+  - [Authoring a Broker FFI Library](#authoring-a-broker-ffi-library)
+    - [Minimal structure](#minimal-structure)
+    - [`setupProviders(ctx)` convention](#setupproviderscts-convention)
+    - [Batch request inputs](#batch-request-inputs)
+    - [Event callback ABI](#event-callback-abi)
+    - [Data ownership for request results](#data-ownership-for-request-results)
+  - [Generated Foreign Surfaces](#generated-foreign-surfaces)
+    - [C API](#c-api)
+    - [C++ wrapper](#c-wrapper)
+    - [Python wrapper](#python-wrapper)
+  - [Build Requirements](#build-requirements)
+    - [Required compiler flags](#required-compiler-flags)
+    - [Memory manager](#memory-manager)
+    - [Why `--nimMainPrefix` matters](#why---nimmainprefix-matters)
+    - [Example tasks in this repository](#example-tasks-in-this-repository)
+  - [Operational Expectations](#operational-expectations)
+    - [What `mylib_createContext()` guarantees](#what-mylib_createcontext-guarantees)
+    - [What it does not guarantee](#what-it-does-not-guarantee)
+    - [Callback behavior](#callback-behavior)
+    - [Provider behavior](#provider-behavior)
+  - [Future Phases](#future-phases)
+    - [Phase 3: CBOR Tunnel Surface](#phase-3-cbor-tunnel-surface)
+    - [Phase 4: Rust / Go Codegen](#phase-4-rust--go-codegen)
+    - [Adding a New Language Surface](#adding-a-new-language-surface)
+  - [Type Mapping Reference](#type-mapping-reference)
+    - [Legend](#legend)
+    - [Primitive scalars](#primitive-scalars)
+    - [String types](#string-types)
+    - [Object types](#object-types)
+    - [`seq[T]` — dynamic arrays](#seqt--dynamic-arrays)
+      - [`seq[object]` — sequence of a custom struct](#seqobject--sequence-of-a-custom-struct)
+      - [`seq[string]` — sequence of strings](#seqstring--sequence-of-strings)
+      - [`seq[primitive]` — sequence of a primitive type (e.g. `seq[byte]`)](#seqprimitive--sequence-of-a-primitive-type-eg-seqbyte)
+    - [`array[N, T]` — fixed-size arrays](#arrayn-t--fixed-size-arrays)
+    - [Enum types](#enum-types)
+    - [Distinct types](#distinct-types)
+    - [Composite example: full struct](#composite-example-full-struct)
+    - [Event callback signatures](#event-callback-signatures)
+  - [Related Documents](#related-documents)
+
 ## Overview
 
 The Broker FFI API is the shared-library integration layer built on top of
@@ -17,21 +92,107 @@ Typical consumers are:
 
 The FFI API solution provides:
 
-- C-callable request functions for API request brokers
-- C-callable event registration functions for API event brokers
+- C-callable request functions for API request brokers - for `native` ABI only
+- C-callable event registration functions for API event brokers - for `native` ABI only
 - a generated library lifecycle API
-- a generated C header (`.h`)
-- a generated C++ wrapper header (`.hpp`) that includes the C header
-- an optional generated Python wrapper module (`.py`)
+- a generated C header (`<lib>.h`)
+- a generated C++ wrapper header (`<lib>.hpp`) that includes the C header
+- an optional generated Python wrapper module (`<lib>.py`)
+- an optional generated Rust wrapper module (`<lib>_rs/<lib>.rs`)
+- an optional generated Go wrapper module (`<lib>_go/<lib>.go`)
 
-Generated `CItem` and `CResult` structs use the platform's normal C ABI
-layout. They are not emitted as packed structs, and the generated C header,
-C++ wrapper, and Python `ctypes.Structure` definitions all assume that default
-layout.
 
 The FFI API is designed around a per-library-context runtime model. Each call to
 `<lib>_createContext()` creates one independent broker context with its own worker
 threads and broker registrations.
+
+### Layered Architecture
+
+A single Nim API definition — one library or module written once with
+`RequestBroker(API)`, `EventBroker(API)`, and `registerBrokerLibrary` — can be
+compiled into either of two C ABI flavors. Each flavor produces its own,
+ABI-specific C header, but every supported language binding above sits behind
+**one unified, idiomatic interface** so consumers never have to know which ABI
+their library was built against.
+
+```mermaid
+flowchart TB
+    subgraph App["Consumer Application"]
+        direction LR
+        AppNim["Nim app"]
+        AppC["C app"]
+        AppCpp["C++ app"]
+        AppPy["Python app"]
+        AppRs["Rust app"]
+        AppGo["Go app"]
+    end
+
+    subgraph Wrappers["Unified Language Bindings (single API per language)"]
+        direction LR
+        WCpp["&lt;lib&gt;.hpp<br/>(C++ wrapper class)"]
+        WPy["&lt;lib&gt;.py<br/>(Python ctypes / cbor2)"]
+        WRs["&lt;lib&gt;_rs/<br/>(Rust crate)"]
+        WGo["&lt;lib&gt;_go/<br/>(Go module)"]
+    end
+
+    subgraph CABI["C ABI Surface (build-time choice)"]
+        direction LR
+        Native["<b>Native ABI</b><br/>typed C functions<br/>one export per request/event<br/><i>&lt;lib&gt;.h</i>"]
+        Cbor["<b>CBOR ABI</b><br/>fixed 11-function ABI<br/>CBOR-encoded payloads<br/><i>&lt;lib&gt;.h (CBOR shape)</i>"]
+    end
+
+    subgraph Nim["Nim Library (single source)"]
+        direction TB
+        UserApi["User API definition<br/>RequestBroker(API) / EventBroker(API)<br/>registerBrokerLibrary"]
+        Runtime["Generated runtime<br/>lifecycle • delivery thread • processing thread"]
+        Brokers["MT brokers + chronos<br/>(EventBroker mt / RequestBroker mt)"]
+        UserApi --> Runtime --> Brokers
+    end
+
+    AppNim --> Brokers
+    AppC --> Native
+    AppCpp --> WCpp
+    AppPy --> WPy
+    AppRs --> WRs
+    AppGo --> WGo
+
+    WCpp --> Native
+    WCpp --> Cbor
+    WPy --> Native
+    WPy --> Cbor
+    WRs --> Native
+    WRs --> Cbor
+    WGo --> Native
+    WGo --> Cbor
+
+    Native --> Nim
+    Cbor --> Nim
+
+    classDef abi fill:#fef3c7,stroke:#b45309,color:#000
+    classDef wrap fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef nim fill:#dcfce7,stroke:#15803d,color:#000
+    classDef app fill:#f3f4f6,stroke:#374151,color:#000
+    class Native,Cbor abi
+    class WCpp,WPy,WRs,WGo wrap
+    class UserApi,Runtime,Brokers nim
+    class AppNim,AppC,AppCpp,AppPy,AppRs,AppGo app
+```
+
+**Key invariants of the layering:**
+
+| Layer | Per-library count | What changes per ABI mode | What stays identical |
+|-------|-------------------|----------------------------|-----------------------|
+| Nim source | 1 | nothing — same source compiles both modes | the user API definition |
+| C ABI / `<lib>.h` | 1 (per build) | function shape (typed exports vs. fixed 11-fn CBOR ABI) | header filename |
+| Language wrapper | 1 per language | internal marshaling (direct cgo/ctypes vs. CBOR encode/decode) | the public class/struct, method names, signatures |
+| Consumer code | 1 | nothing | source compiles unchanged against either build |
+
+The CBOR ABI exists for environments where a stable, narrow C surface and
+self-describing wire format are preferable to a typed-but-wide native ABI
+(e.g. for plug-in distribution, language runtimes without good cgo/ctypes
+ergonomics, or schema-evolution requirements). The native ABI exists for
+zero-overhead in-process embedding. The wrapper layer is the abstraction that
+makes this choice invisible to application code.
 
 ---
 
@@ -191,13 +352,9 @@ populated when the codegen needs to look up fields.
 
 - External types must be defined **before** the broker macro call site (standard
   Nim compilation order)
+- All `API` broker must be known and imported where the `registerBrokerLibrary` macro is used!
 - Only `object` types can be fully introspected. Enums, distinct types, etc.
   pass through without field registration.
-
-### ApiType Deprecation
-
-The `ApiType` macro still works but emits a compile-time deprecation warning.
-Existing code continues to compile. New code should use plain types.
 
 ---
 
@@ -222,11 +379,15 @@ RequestBroker(API):
 
 This generates:
 
-- a C result struct
-- a C-exported request function such as `mylib_get_device(...)` once the broker is
-  registered into a library
-- a library-prefixed `mylib_free_*_result(...)` function for result-owned memory
-- C++ and Python wrapper methods built from the same declaration
+- in `native` ABI mode:
+  - a C result struct - in `native` ABI mode.
+  - a C-exported request function such as `mylib_get_device(...)` once the broker is registered into a library
+  - a library-prefixed `mylib_free_*_result(...)` function for result-owned memory
+- in `cbor` ABI mode:
+  - a C-exported ABI is just a tunelling interface that must be used with known semantics.
+  - The actual CBOR ABI is discoverable by '*_listApis' and '*_getApiSchema'.
+  
+- C++ wrapper that shares same public interface across ABI modes. Python/Rust/Go wrapper methods built from the same declaration
 
 ### 2. `EventBroker(API)`
 
@@ -258,6 +419,7 @@ Example:
 ```nim
 registerBrokerLibrary:
   name: "mylib"
+  version: "0.1.0"
   initializeRequest: InitializeRequest
   shutdownRequest: ShutdownRequest
 ```
@@ -266,11 +428,11 @@ This generates:
 
 - `mylib_createContext()`
 - `mylib_shutdown(ctx)`
-- `mylib_free_string(...)`
+- memory management interface
 - the library context registry
 - the delivery and processing threads
 - aggregate event registration routing
-- generated header and optional Python wrapper output
+- generated C and C++ headers
 
 ---
 
@@ -339,6 +501,14 @@ Typical responsibilities:
 - initialize thread-local provider state
 - register additional providers lazily
 - validate environment or external dependencies
+
+#### Dynamic provider registration via `InitializeRequest`
+
+In `setupProviders(ctx)`, the `InitializeRequest` provider and `ShutdownRequest` provider must be registered directly on the context so the generated `mylib_initialize(...)` and `mylib_shutdown(...)` exports are immediately usable.
+
+However, `InitializeRequest` can also be used as a dynamic registration point for other providers.
+This enables configuration-driven provider registration and use different implementations for the same API surface.
+
 
 ### Shutdown
 
@@ -921,6 +1091,8 @@ nim c \
 Optional:
 
 - `-d:BrokerFfiApiGenPy` to generate the Python wrapper
+- `-d:BrokerFfiApiGenRust` to generate the Rust wrapper
+- `-d:BrokerFfiApiGenGo` to generate the Go wrapper
 
 ### Memory manager
 
@@ -1047,14 +1219,13 @@ the C ABI directly.
 - Thin invoke wrappers that serialize arguments to CBOR, call the tunnel, and
   deserialize results
 - Event subscription wrappers with idiomatic Rust callback signatures
-- Estimated ~200-300 LOC — just struct definitions and thin methods
+
 
 **Go (`api_codegen_go.nim`):**
 
 - Generates a `.go` file with CBOR-tagged structs
 - Thin CGo wrapper around the 3 tunnel exports
 - Idiomatic Go error returns instead of result structs
-- Estimated ~200-300 LOC
 
 **Both modules:**
 
@@ -1062,7 +1233,7 @@ the C ABI directly.
   generator
 - Read from the same compile-time type registry (`gApiTypeRegistry`)
 - No changes needed to existing C, C++, or Python codegen modules
-- No changes needed to broker macros — the schema is already available
+
 
 ### Adding a New Language Surface
 
