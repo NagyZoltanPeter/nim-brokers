@@ -109,10 +109,31 @@ jobs:
         run: |
           ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
+          mkdir -p build
+          # nimble >= 0.22 swallows exit codes from `exec` failures inside
+          # task bodies (returns 0 even when the spawned binary aborted).
+          # Grep the captured log for ASAN/abort/exception markers as a
+          # backstop so a green job actually means a green job.
+          rc_overall=0
           for task in $TASKS; do
             echo "=== nimble $task ==="
-            nimble --verbose "$task" -y || exit 1
+            log="build/log_${task}.txt"
+            set -o pipefail
+            nimble --verbose "$task" -y 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set +o pipefail
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::Task $task: nimble exited with code $rc"
+              rc_overall=1
+              continue
+            fi
+            if grep -qE 'AddressSanitizer:|==[0-9]+==ABORTING|Exception raised during nimble script execution' "$log"; then
+              echo "::error::Task $task: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
+              rc_overall=1
+              continue
+            fi
           done
+          exit $rc_overall
 
       - name: Run tasks (Windows)
         if: runner.os == 'Windows'
@@ -126,11 +147,25 @@ jobs:
             "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc"
           )
           $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          # nimble >= 0.22 may swallow exit codes from `exec` failures inside
+          # task bodies. Grep the captured log for ASAN/abort markers as a
+          # backstop so a green job actually means a green job.
+          $rcOverall = 0
           foreach ($task in $taskList) {
             Write-Host "=== nimble $task ==="
-            nimble --verbose $task -y
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "=== FAILED: nimble $task ==="
-              exit $LASTEXITCODE
+            $log = "build/log_$task.txt"
+            nimble --verbose $task -y 2>&1 | Tee-Object -FilePath $log
+            $rc = $LASTEXITCODE
+            if ($rc -ne 0) {
+              Write-Host "::error::Task $task: nimble exited with code $rc"
+              $rcOverall = 1
+              continue
+            }
+            if (Select-String -Path $log -Pattern 'AddressSanitizer:|==\d+==ABORTING|Exception raised during nimble script execution' -Quiet) {
+              Write-Host "::error::Task $task: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
+              $rcOverall = 1
+              continue
             }
           }
+          exit $rcOverall
