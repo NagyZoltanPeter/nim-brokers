@@ -88,11 +88,11 @@ type CborApiAdapter* = proc(ctx: BrokerContext, reqBuf: seq[byte]): Future[seq[b
 proc collectSignatures(
     body: NimNode
 ): tuple[
-    zeroArg: NimNode,
-    argSig: NimNode,
-    argParams: seq[NimNode],
-    zeroArgName: string,
-    argSigName: string,
+  zeroArg: NimNode,
+  argSig: NimNode,
+  argParams: seq[NimNode],
+  zeroArgName: string,
+  argSigName: string,
 ] {.compileTime.} =
   ## Walk the macro body and split the (at most two) `signature*` proc
   ## declarations into the zero-arg and arg-based slots, mirroring
@@ -328,7 +328,10 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
     let zeroApiSuffix =
       if not sigs.argSig.isNil:
         let s = sigNameSuffix(sigs.zeroArgName)
-        if s.len > 0: "_" & s else: "_zero"
+        if s.len > 0:
+          "_" & s
+        else:
+          "_zero"
       else:
         ""
     let adapterIdent = ident(typeName & "CborAdapter" & zeroAdapterTag)
@@ -341,7 +344,10 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
     let argApiSuffix =
       if not sigs.zeroArg.isNil:
         let s = sigNameSuffix(sigs.argSigName)
-        if s.len > 0: "_" & s else: "_args"
+        if s.len > 0:
+          "_" & s
+        else:
+          "_args"
       else:
         ""
     let adapterIdent = ident(typeName & "CborAdapter" & argAdapterTag)
