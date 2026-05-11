@@ -1021,14 +1021,15 @@ task testMtRequestBrokerAsanRefc,
 proc runProbeWinTlsUninit(mm: string) =
   let outBin = "build" / ("probe_win_tls_uninit_" & mm)
   let outBinExe =
-    when defined(windows): outBin & ".exe"
-    else: outBin
+    when defined(windows):
+      outBin & ".exe"
+    else:
+      outBin
   mkDir "build"
   # `--out:` with a path overrides `--outdir:`, so put the path directly on
   # `--out:` to land the binary under build/.
-  exec "nim c --threads:on --mm:" & mm & " -d:release " &
-    "--out:" & quoteArg(outBin) & " " &
-    quoteArg("test/probe_win_tls_uninit.nim")
+  exec "nim c --threads:on --mm:" & mm & " -d:release " & "--out:" & quoteArg(outBin) &
+    " " & quoteArg("test/probe_win_tls_uninit.nim")
   # Run the probe with live stdout+stderr (exec) so a refc crash's Nim/OS
   # backtrace lands in the CI log. exec raises OSError on non-zero exit; we
   # use that to distinguish "exit 0" from "exit non-zero / crash".

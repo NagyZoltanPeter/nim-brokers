@@ -39,7 +39,6 @@
 when not defined(windows):
   echo "SKIP probe_win_tls_uninit: Windows-only"
   quit(77)
-
 else:
   import std/[atomics, os]
 
@@ -52,8 +51,8 @@ else:
     BOOL = int32
     DWORD = uint32
     ULONG = uint32
-    WaitOrTimerCallback = proc (lpParameter: pointer, timerOrWaitFired: BOOL)
-        {.stdcall, gcsafe, raises: [].}
+    WaitOrTimerCallback =
+      proc(lpParameter: pointer, timerOrWaitFired: BOOL) {.stdcall, gcsafe, raises: [].}
 
   const
     WT_EXECUTEONLYONCE: ULONG = 0x00000008
@@ -62,23 +61,34 @@ else:
     EVENT_AUTORESET = false
     EVENT_INITIAL_UNSIGNALED = false
 
-  proc createEventA(lpEventAttributes: pointer, bManualReset, bInitialState: BOOL,
-                    lpName: cstring): HANDLE {.stdcall, dynlib: "kernel32",
-                                               importc: "CreateEventA".}
-  proc setEvent(hEvent: HANDLE): BOOL {.stdcall, dynlib: "kernel32",
-                                        importc: "SetEvent".}
-  proc closeHandle(hObject: HANDLE): BOOL {.stdcall, dynlib: "kernel32",
-                                            importc: "CloseHandle".}
-  proc waitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD): DWORD
-      {.stdcall, dynlib: "kernel32", importc: "WaitForSingleObject".}
-  proc registerWaitForSingleObject(phNewWaitObject: ptr HANDLE, hObject: HANDLE,
-                                   callback: WaitOrTimerCallback,
-                                   context: pointer, milliseconds: ULONG,
-                                   flags: ULONG): BOOL
-      {.stdcall, dynlib: "kernel32", importc: "RegisterWaitForSingleObject".}
-  proc unregisterWaitEx(waitHandle: HANDLE,
-                        completionEvent: HANDLE): BOOL
-      {.stdcall, dynlib: "kernel32", importc: "UnregisterWaitEx".}
+  proc createEventA(
+    lpEventAttributes: pointer, bManualReset, bInitialState: BOOL, lpName: cstring
+  ): HANDLE {.stdcall, dynlib: "kernel32", importc: "CreateEventA".}
+
+  proc setEvent(
+    hEvent: HANDLE
+  ): BOOL {.stdcall, dynlib: "kernel32", importc: "SetEvent".}
+
+  proc closeHandle(
+    hObject: HANDLE
+  ): BOOL {.stdcall, dynlib: "kernel32", importc: "CloseHandle".}
+
+  proc waitForSingleObject(
+    hHandle: HANDLE, dwMilliseconds: DWORD
+  ): DWORD {.stdcall, dynlib: "kernel32", importc: "WaitForSingleObject".}
+
+  proc registerWaitForSingleObject(
+    phNewWaitObject: ptr HANDLE,
+    hObject: HANDLE,
+    callback: WaitOrTimerCallback,
+    context: pointer,
+    milliseconds: ULONG,
+    flags: ULONG,
+  ): BOOL {.stdcall, dynlib: "kernel32", importc: "RegisterWaitForSingleObject".}
+
+  proc unregisterWaitEx(
+    waitHandle: HANDLE, completionEvent: HANDLE
+  ): BOOL {.stdcall, dynlib: "kernel32", importc: "UnregisterWaitEx".}
 
   # ---------------------------------------------------------------------------
   # Callback — runs on the NT thread-pool wait thread. Under refc, the TLS
@@ -94,8 +104,9 @@ else:
   # `doneEvent` is signaled by the callback so the main thread can join cleanly.
   var gDoneEvent: HANDLE
 
-  proc waitCallback(lpParameter: pointer, timerOrWaitFired: BOOL)
-      {.stdcall, gcsafe, raises: [].} =
+  proc waitCallback(
+      lpParameter: pointer, timerOrWaitFired: BOOL
+  ) {.stdcall, gcsafe, raises: [].} =
     # The body of this proc executes on a TppWorkerThread. We deliberately
     # allocate Nim heap objects to reach `rawNewObj` / `system/alloc.nim`,
     # which under refc consults per-thread TLS for the shared-heap allocator's
@@ -125,16 +136,17 @@ else:
     gCallbackDone.store(false)
     gCallbackIterations.store(0)
 
-    let triggerEvent = createEventA(nil,
-        BOOL(EVENT_AUTORESET), BOOL(EVENT_INITIAL_UNSIGNALED), nil)
+    let triggerEvent =
+      createEventA(nil, BOOL(EVENT_AUTORESET), BOOL(EVENT_INITIAL_UNSIGNALED), nil)
     doAssert triggerEvent != nil, "CreateEventA(trigger) failed"
-    gDoneEvent = createEventA(nil,
-        BOOL(EVENT_AUTORESET), BOOL(EVENT_INITIAL_UNSIGNALED), nil)
+    gDoneEvent =
+      createEventA(nil, BOOL(EVENT_AUTORESET), BOOL(EVENT_INITIAL_UNSIGNALED), nil)
     doAssert gDoneEvent != nil, "CreateEventA(done) failed"
 
     var waitHandle: HANDLE = nil
-    let ok = registerWaitForSingleObject(addr waitHandle, triggerEvent,
-        waitCallback, nil, INFINITE, WT_EXECUTEONLYONCE)
+    let ok = registerWaitForSingleObject(
+      addr waitHandle, triggerEvent, waitCallback, nil, INFINITE, WT_EXECUTEONLYONCE
+    )
     doAssert ok != 0, "RegisterWaitForSingleObject failed"
 
     # Fire the event — this causes the NT thread pool to schedule
@@ -152,9 +164,8 @@ else:
     discard closeHandle(gDoneEvent)
     gDoneEvent = nil
 
-    echo "round=", round,
-      " iters=", gCallbackIterations.load(),
-      " done=", gCallbackDone.load()
+    echo "round=",
+      round, " iters=", gCallbackIterations.load(), " done=", gCallbackDone.load()
 
   proc main() =
     # Four rounds × 256 allocations per callback. Empirically: under refc on

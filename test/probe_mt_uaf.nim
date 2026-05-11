@@ -73,8 +73,10 @@ proc run() {.async.} =
     Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
     stop.store(true)
-    for i in 0 ..< threads.len: threads[i].joinThread()
-    for i in 0 ..< ph2.len: ph2[i].joinThread()
+    for i in 0 ..< threads.len:
+      threads[i].joinThread()
+    for i in 0 ..< ph2.len:
+      ph2[i].joinThread()
   elif probeMode == "relistenKeepAlive":
     # Drop/relisten cycle, but emitters never exit until final.
     var stop: Atomic[bool]
@@ -97,9 +99,12 @@ proc run() {.async.} =
     Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
     stop.store(true)
-    t1.joinThread(); t2.joinThread(); t3.joinThread(); t4.joinThread()
+    t1.joinThread()
+    t2.joinThread()
+    t3.joinThread()
+    t4.joinThread()
   elif probeMode == "freshCtx":
-    Evt.dropAllListeners()  # drop the default-ctx listener; we'll use fresh ctxs.
+    Evt.dropAllListeners() # drop the default-ctx listener; we'll use fresh ctxs.
     for round in 0 ..< 8:
       let ctx = NewBrokerContext()
       registerListener(ctx)
@@ -121,7 +126,9 @@ proc run() {.async.} =
     t4.createThread(emitterCtx, ctx2)
     while gReceived.load() < baseline + 3:
       await sleepAsync(milliseconds(1))
-    t2.joinThread(); t3.joinThread(); t4.joinThread()
+    t2.joinThread()
+    t3.joinThread()
+    t4.joinThread()
     Evt.dropAllListeners(ctx2)
     await sleepAsync(milliseconds(50))
   else:
@@ -137,7 +144,8 @@ proc run() {.async.} =
         await Evt.shutdown()
         await sleepAsync(milliseconds(20))
         registerListener()
-      elif probeMode == "relisten" or probeMode == "gcCollect" or probeMode == "gcCollectAll":
+      elif probeMode == "relisten" or probeMode == "gcCollect" or
+          probeMode == "gcCollectAll":
         Evt.dropAllListeners()
         await sleepAsync(milliseconds(20))
         when probeMode == "gcCollectAll":
@@ -151,7 +159,9 @@ proc run() {.async.} =
     t4.createThread(emitter)
     while gReceived.load() < baseline + 3:
       await sleepAsync(milliseconds(1))
-    t2.joinThread(); t3.joinThread(); t4.joinThread()
+    t2.joinThread()
+    t3.joinThread()
+    t4.joinThread()
     Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
 
