@@ -89,12 +89,14 @@ proc mtUnmarshalSeq*[U](
 proc mtMarshalValue*[T](
     buf: ptr UncheckedArray[byte], cap: int, value: T, pos: var int
 ): bool {.gcsafe.} =
-  when T is (ref or ptr or pointer or cstring):
+  when T is ref:
     {.
-      error:
-        "mt broker payload field type is unsupported (ref/ptr/pointer/cstring): " &
-        $T
+      error: "mt broker payload field type is unsupported (ref T): " & $T
     .}
+  # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
+  # below and are marshaled bytewise. Caller is responsible for the
+  # lifetime of what they point to — typically used for shared structures
+  # like chronos' ThreadSignalPtr.
   elif supportsCopyMem(T):
     if pos + sizeof(T) > cap:
       return false
@@ -132,12 +134,14 @@ proc mtMarshalValue*[T](
 proc mtUnmarshalValue*[T](
     buf: ptr UncheckedArray[byte], len: int, value: var T, pos: var int
 ): bool {.gcsafe.} =
-  when T is (ref or ptr or pointer or cstring):
+  when T is ref:
     {.
-      error:
-        "mt broker payload field type is unsupported (ref/ptr/pointer/cstring): " &
-        $T
+      error: "mt broker payload field type is unsupported (ref T): " & $T
     .}
+  # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
+  # below and are marshaled bytewise. Caller is responsible for the
+  # lifetime of what they point to — typically used for shared structures
+  # like chronos' ThreadSignalPtr.
   elif supportsCopyMem(T):
     if pos + sizeof(T) > len:
       return false

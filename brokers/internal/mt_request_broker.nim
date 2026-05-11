@@ -1,27 +1,44 @@
 ## Multi-Thread RequestBroker
 ## --------------------------
-## Generates a multi-thread capable RequestBroker where the provider runs on the
-## thread that called `setProvider` (which must keep its chronos event loop running),
-## and requests from other threads are routed via Channel[T] + per-thread shared signal.
+## Generates a multi-thread capable RequestBroker where the provider runs
+## on the thread that called `setProvider` (which must keep its chronos
+## event loop running), and requests from other threads are routed via
+## a lock-free Vyukov MPSC ring + per-bucket payload slab + response slot
+## pool.
 ##
-## Same-thread requests bypass channels and call the provider directly.
+## Same-thread requests bypass the ring and call the provider directly.
 ##
-## The broker does NOT own or spawn threads — that is the user's responsibility.
-## The global registry uses `createShared` / raw pointers so it is safe under
-## both `--mm:orc` and `--mm:refc`.
+## See `doc/REFACTOR_MT_QUEUE.md` for the full design; this file is the
+## RequestBroker integration of Phase 4 of that plan.
 ##
-## Provider closures are stored in threadvars (GC-managed, per-thread) rather
-## than in the shared bucket, avoiding the need to cast closures to raw pointers.
+## §2.6 safety contract honored by construction (Invariant I0):
+##   - The bucket-owning thread (the provider thread, the one that
+##     called `setProvider`) allocates its ring + request slab +
+##     response slot pool via `createShared`, and frees them via
+##     `clearProvider` on the same thread.
+##   - Sender threads only ever touch atomics + memcpy + signal-fire on
+##     the hot path — never the Nim allocator beyond `claim`/`release`
+##     of pre-allocated slab cells and response slots.
 
 {.push raises: [].}
 
-import std/[macros, strutils, locks, os]
+import std/[macros, strutils, locks, os, atomics]
 import chronos, chronicles
 import results
 import ./helper/broker_utils, ../broker_context
 
-import ./mt_broker_common
+import ./mt_broker_common, ./mt_queue, ./mt_codec
 export results, chronos, chronicles, broker_context, mt_broker_common
+
+# ---------------------------------------------------------------------------
+# Defaults — surface as broker pragmas later if needed.
+# ---------------------------------------------------------------------------
+
+const DefaultMtReqQueueDepth* = 256 ## ring slots per provider bucket
+const DefaultMtReqSlabCapacity* = 64 ## slab cells per provider bucket
+const DefaultMtReqMaxPayloadBytes* = 1024 ## bytes of marshaled ReqMsg per cell
+const DefaultMtReqResponseSlots* = 256 ## response slot pool per bucket
+const DefaultMtReqFreeListShards* = 2'u32
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -112,20 +129,46 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     else:
       error("Unsupported statement inside RequestBroker definition", stmt)
 
-  # If no signatures at all, generate a zero-arg default.
   if zeroArgSig.isNil() and argSig.isNil():
     zeroArgSig = newEmptyNode()
     zeroArgProviderName = ident(typeDisplayName & "ProviderNoArgs")
 
-  # ── Result type ─────────────────────────────────────────────────────
   let returnType = quote:
     Future[Result[`typeIdent`, string]]
 
-  # ── Build type section ──────────────────────────────────────────────
+  # ── Identifier setup ────────────────────────────────────────────────
+  let requestMsgName = ident(typeDisplayName & "MtRequestMsg")
+  let bucketName = ident(typeDisplayName & "MtBucket")
+
+  let globalBucketsIdent = ident("g" & typeDisplayName & "MtBuckets")
+  let globalBucketCountIdent = ident("g" & typeDisplayName & "MtBucketCount")
+  let globalBucketCapIdent = ident("g" & typeDisplayName & "MtBucketCap")
+  let globalLockIdent = ident("g" & typeDisplayName & "MtLock")
+  let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
+  let timeoutVarIdent = ident("g" & typeDisplayName & "MtTimeout")
+
+  let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
+  let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
+  let sendReplyIdent = ident("sendReply" & typeDisplayName)
+  let handleMsgIdent = ident("handleMsg" & typeDisplayName)
+  let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
+  let deferredFreeReqRingIdent = ident("deferredFreeReqRing" & typeDisplayName)
+  let shardHintIdent = ident("shardHint" & typeDisplayName)
+  let marshalIdent = ident(typeDisplayName & "MtMarshal")
+  let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
+
+  let queueDepthLit = newLit(DefaultMtReqQueueDepth)
+  let slabCapacityLit = newLit(DefaultMtReqSlabCapacity)
+  let payloadBytesLit = newLit(DefaultMtReqMaxPayloadBytes)
+  let responseSlotsLit = newLit(DefaultMtReqResponseSlots)
+  let freeListShardsLit = newLit(DefaultMtReqFreeListShards)
+
+  result = newStmtList()
+
+  # ── Type section (typeIdent + provider proc types) ───────────────────
   var typeSection = newTree(nnkTypeSection)
   typeSection.add(newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef))
 
-  # Provider proc types
   proc makeProcType(returnType: NimNode, params: seq[NimNode]): NimNode =
     var formal = newTree(nnkFormalParams)
     formal.add(returnType)
@@ -141,12 +184,11 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     let procType = makeProcType(returnType, cloneParams(argParams))
     typeSection.add(newTree(nnkTypeDef, argProviderName, newEmptyNode(), procType))
 
-  # ── Request message type ────────────────────────────────────────────
-  let requestMsgName = ident(typeDisplayName & "MtRequestMsg")
+  # Request message struct. Carries args inline plus a response-slot
+  # index (the per-bucket pool index where the provider writes the
+  # result) and the requester's signal pointer (so the provider can
+  # wake the requester's dispatcher after writing).
   var msgRecList = newTree(nnkRecList)
-  msgRecList.add(
-    newTree(nnkIdentDefs, ident("isShutdown"), ident("bool"), newEmptyNode())
-  )
   msgRecList.add(
     newTree(nnkIdentDefs, ident("requestKind"), ident("int"), newEmptyNode())
   )
@@ -161,15 +203,16 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               nnkIdentDefs, ident($nameNode), copyNimTree(typeNode), newEmptyNode()
             )
           )
-  let responseChanType = quote:
-    ptr Channel[Result[`typeIdent`, string]]
   msgRecList.add(
-    newTree(nnkIdentDefs, ident("responseChan"), responseChanType, newEmptyNode())
+    newTree(nnkIdentDefs, ident("responseSlotIdx"), ident("uint32"), newEmptyNode())
   )
-  let requesterSignalType = quote:
-    ThreadSignalPtr
   msgRecList.add(
-    newTree(nnkIdentDefs, ident("requesterSignal"), requesterSignalType, newEmptyNode())
+    newTree(
+      nnkIdentDefs,
+      ident("requesterSignal"),
+      ident("ThreadSignalPtr"),
+      newEmptyNode(),
+    )
   )
   typeSection.add(
     newTree(
@@ -180,21 +223,33 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     )
   )
 
-  # ── Bucket type (no provider fields — closures live in threadvars) ──
-  let bucketName = ident(typeDisplayName & "MtBucket")
+  # Bucket struct.
+  let responseSlotPoolType = quote:
+    ptr ResponseSlotPool[Result[`typeIdent`, string]]
+  let requestRingType = quote:
+    ptr VyukovMpscRing[uint32]
+  let requestSlabType = quote:
+    ptr PayloadSlab
+
   var bucketRecList = newTree(nnkRecList)
   bucketRecList.add(
     newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
   )
-  let requestChanPtrType = quote:
-    ptr Channel[`requestMsgName`]
   bucketRecList.add(
-    newTree(nnkIdentDefs, ident("requestChan"), requestChanPtrType, newEmptyNode())
+    newTree(nnkIdentDefs, ident("ring"), requestRingType, newEmptyNode())
   )
-  let providerSignalType = quote:
-    ThreadSignalPtr
   bucketRecList.add(
-    newTree(nnkIdentDefs, ident("providerSignal"), providerSignalType, newEmptyNode())
+    newTree(nnkIdentDefs, ident("slab"), requestSlabType, newEmptyNode())
+  )
+  bucketRecList.add(
+    newTree(
+      nnkIdentDefs, ident("responseSlotPool"), responseSlotPoolType, newEmptyNode()
+    )
+  )
+  bucketRecList.add(
+    newTree(
+      nnkIdentDefs, ident("providerSignal"), ident("ThreadSignalPtr"), newEmptyNode()
+    )
   )
   bucketRecList.add(
     newTree(nnkIdentDefs, ident("threadId"), ident("pointer"), newEmptyNode())
@@ -211,16 +266,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     )
   )
 
-  result = newStmtList()
   result.add(typeSection)
 
-  # ── Global state ────────────────────────────────────────────────────
-  let globalBucketsIdent = ident("g" & typeDisplayName & "MtBuckets")
-  let globalBucketCountIdent = ident("g" & typeDisplayName & "MtBucketCount")
-  let globalBucketCapIdent = ident("g" & typeDisplayName & "MtBucketCap")
-  let globalLockIdent = ident("g" & typeDisplayName & "MtLock")
-  let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
+  # ── Codec procs for ReqMsg ───────────────────────────────────────────
+  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, requestMsgName):
+    result.add(procNode)
 
+  # ── Global state ────────────────────────────────────────────────────
   result.add(
     quote do:
       var `globalBucketsIdent`: ptr UncheckedArray[`bucketName`]
@@ -228,78 +280,54 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       var `globalBucketCapIdent`: int
       var `globalLockIdent`: Lock
       var `globalInitIdent`: Atomic[int]
-        ## 0 = uninitialised, 1 = initialising, 2 = ready.
-        ## CAS(0→1) wins the race; losers spin until 2.
   )
 
-  # ── Init helper (thread-safe via atomic CAS) ─────────────────────────
-  let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
+  # ── Timeout knob (per broker type) ──────────────────────────────────
+  result.add(
+    quote do:
+      var `timeoutVarIdent`*: Duration = chronos.seconds(5)
+        ## Default timeout for cross-thread requests.
+
+      proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
+        `timeoutVarIdent` = timeout
+
+      proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
+        `timeoutVarIdent`
+  )
+
+  # ── Init + grow ──────────────────────────────────────────────────────
   result.add(
     quote do:
       proc `initProcIdent`() =
         if `globalInitIdent`.load(moRelaxed) == 2:
-          return # fast path — already initialised
+          return
         var expected = 0
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
-            `bucketName`, `globalBucketCapIdent`
-          ))
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
+            createShared(`bucketName`, `globalBucketCapIdent`)
+          )
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
-          # Another thread is initialising — spin until ready.
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
 
-  )
-
-  # ── Grow helper ─────────────────────────────────────────────────────
-  let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
-  result.add(
-    quote do:
       proc `growProcIdent`() =
-        ## Must be called under lock.
         let newCap = `globalBucketCapIdent` * 2
         let newBuf =
           cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
-        # Intentional leak: see equivalent comment in mt_event_broker.nim grow.
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
 
-  )
-
-  # ── Cross-thread request timeout ──────────────────────────────────
-  let timeoutVarIdent = ident("g" & typeDisplayName & "MtRequestTimeout")
-  result.add(
-    quote do:
-      var `timeoutVarIdent`*: Duration = chronos.seconds(5)
-        ## Default timeout for cross-thread requests. Same-thread requests
-        ## bypass this (they call the provider directly).
-        ## NOTE: Set during initialization before spawning worker threads.
-        ## Reading from multiple threads is safe on x86-64 (aligned int64),
-        ## but concurrent writes are not guaranteed atomic on all platforms.
-
-      proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
-        ## Set the cross-thread request timeout for this broker type.
-        ## Call this during initialization before spawning worker threads.
-        `timeoutVarIdent` = timeout
-
-      proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
-        ## Get the current cross-thread request timeout for this broker type.
-        `timeoutVarIdent`
-
+      proc `shardHintIdent`(): uint32 {.inline.} =
+        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
   )
 
   # ── Threadvar provider storage ──────────────────────────────────────
-  # Closures are GC-managed, so they must live in threadvars (per-thread,
-  # GC-visible) rather than in createShared memory.  Two parallel seqs
-  # per provider kind: one for BrokerContext keys, one for handlers.
-
   var tvNoArgCtxIdent, tvNoArgHandlerIdent: NimNode
   if not zeroArgSig.isNil():
     tvNoArgCtxIdent = ident("g" & typeDisplayName & "TvNoArgCtxs")
@@ -320,37 +348,30 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         var `tvWithArgHandlerIdent` {.threadvar.}: seq[`argProviderName`]
     )
 
-  # ── Per-message reply helper ────────────────────────────────────────
-  # Sends a response to the requester via Channel[T] and wakes the requester's
-  # dispatcher signal.  No file descriptors consumed — Channel[T] is mutex/condvar.
-  let sendReplyIdent = ident("sendReply" & typeDisplayName)
+  # ── sendReply helper (writes Result into response slot, fires signal) ──
   result.add(
     quote do:
       proc `sendReplyIdent`(
-          responseChan: ptr Channel[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          slotIdx: uint32,
           requesterSignal: ThreadSignalPtr,
           resp: Result[`typeIdent`, string],
       ) {.gcsafe, raises: [].} =
-        {.cast(gcsafe).}:
-          try:
-            responseChan[].send(resp)
-          except Exception:
-            discard
+        if pool.isNil or slotIdx == EmptyIdx:
+          return
+        discard pool[].tryWriteResponse(slotIdx, resp)
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
 
   )
 
-  # ── Handle message async proc ──────────────────────────────────────
-  # Processes a single request message from the request channel.
-  # The dispatch loop calls this via asyncSpawn for each received message.
-  let handleMsgIdent = ident("handleMsg" & typeDisplayName)
+  # ── handleMsg async (provider-side dispatch of a single ReqMsg) ──────
   let msgIdent = ident("msg")
   let loopCtxIdent = ident("loopCtx")
+  let poolIdent = ident("pool")
 
   var handleBody = newStmtList()
 
-  # Handle zero-arg request
   if not zeroArgSig.isNil():
     let handlerIdent0 = ident("handler0")
     handleBody.add(
@@ -363,7 +384,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               break
           if `handlerIdent0`.isNil():
             `sendReplyIdent`(
-              `msgIdent`.responseChan,
+              `poolIdent`,
+              `msgIdent`.responseSlotIdx,
               `msgIdent`.requesterSignal,
               err(
                 Result[`typeIdent`, string],
@@ -375,7 +397,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               await `handlerIdent0`()
             if catchedRes.isErr():
               `sendReplyIdent`(
-                `msgIdent`.responseChan,
+                `poolIdent`,
+                `msgIdent`.responseSlotIdx,
                 `msgIdent`.requesterSignal,
                 err(
                   Result[`typeIdent`, string],
@@ -390,7 +413,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 when compiles(resultValue.isNil()):
                   if resultValue.isNil():
                     `sendReplyIdent`(
-                      `msgIdent`.responseChan,
+                      `poolIdent`,
+                      `msgIdent`.responseSlotIdx,
                       `msgIdent`.requesterSignal,
                       err(
                         Result[`typeIdent`, string],
@@ -400,11 +424,13 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                     )
                     return
               `sendReplyIdent`(
-                `msgIdent`.responseChan, `msgIdent`.requesterSignal, providerRes
+                `poolIdent`,
+                `msgIdent`.responseSlotIdx,
+                `msgIdent`.requesterSignal,
+                providerRes,
               )
     )
 
-  # Handle with-args request
   if not argSig.isNil():
     let argNameIdents = collectParamNames(argParams)
     let handlerIdent1 = ident("handler1")
@@ -422,7 +448,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               break
           if `handlerIdent1`.isNil():
             `sendReplyIdent`(
-              `msgIdent`.responseChan,
+              `poolIdent`,
+              `msgIdent`.responseSlotIdx,
               `msgIdent`.requesterSignal,
               err(
                 Result[`typeIdent`, string],
@@ -435,7 +462,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               await `providerCall`
             if catchedRes.isErr():
               `sendReplyIdent`(
-                `msgIdent`.responseChan,
+                `poolIdent`,
+                `msgIdent`.responseSlotIdx,
                 `msgIdent`.requesterSignal,
                 err(
                   Result[`typeIdent`, string],
@@ -450,7 +478,8 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 when compiles(resultValue.isNil()):
                   if resultValue.isNil():
                     `sendReplyIdent`(
-                      `msgIdent`.responseChan,
+                      `poolIdent`,
+                      `msgIdent`.responseSlotIdx,
                       `msgIdent`.requesterSignal,
                       err(
                         Result[`typeIdent`, string],
@@ -460,69 +489,145 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                     )
                     return
               `sendReplyIdent`(
-                `msgIdent`.responseChan, `msgIdent`.requesterSignal, providerRes
+                `poolIdent`,
+                `msgIdent`.responseSlotIdx,
+                `msgIdent`.requesterSignal,
+                providerRes,
               )
     )
 
   result.add(
     quote do:
       proc `handleMsgIdent`(
-          `msgIdent`: `requestMsgName`, `loopCtxIdent`: BrokerContext
+          `msgIdent`: `requestMsgName`,
+          `loopCtxIdent`: BrokerContext,
+          `poolIdent`: ptr ResponseSlotPool[Result[`typeIdent`, string]],
       ) {.async: (raises: []).} =
         `handleBody`
 
   )
 
   # ── Poll fn maker ────────────────────────────────────────────────────
-  # Returns a ThreadDispatchPollFn closure that drains the request channel.
-  # Return codes: 0 = nothing, 1 = processed (keep), 2 = shutdown (remove).
-  # One poll fn is registered per broker type per provider thread.
-  let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
-  let deferredFreeReqChanIdent = ident("deferredFreeReqChan" & typeDisplayName)
+  # Dequeues cell idx from ring, unmarshals ReqMsg, dispatches.  When the
+  # ring is closed and empty, frees its own resources and returns 2.
   result.add(
     quote do:
-      proc `deferredFreeReqChanIdent`(
-          chanPtr: ptr Channel[`requestMsgName`]
+      proc `deferredFreeReqRingIdent`(
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
       ) {.async: (raises: []).} =
-        # Wait briefly so any cross-thread sender that captured `chanPtr` under
-        # the previous lock state has time to complete its send().  After that
-        # grace window, close + free.  Channel.close() doesn't synchronise with
-        # senders by itself, but the ~50ms delay swallows realistic latencies
-        # while keeping the leak bounded.
+        # Brief grace window so any cross-thread sender that captured
+        # these pointers under the previous lock state can complete its
+        # claim/marshal/push without seeing freed memory.
         let sleepRes = catch:
           await sleepAsync(milliseconds(50))
         if sleepRes.isErr():
           discard
-        {.cast(gcsafe).}:
-          try:
-            chanPtr[].close()
-          except Exception:
-            discard
-        deallocShared(chanPtr)
+        freeVyukovMpscRing(ring)
+        if not slab.isNil:
+          deinitPayloadSlab(slab[])
+          deallocShared(slab)
+        if not pool.isNil:
+          deinitResponseSlotPool(pool[])
+          deallocShared(pool)
 
       proc `pollFnMakerIdent`(
-          spawnChan: ptr Channel[`requestMsgName`], loopCtx: BrokerContext
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          loopCtx: BrokerContext,
       ): ThreadDispatchPollFn =
-        let capturedChan = spawnChan
+        let capturedRing = ring
+        let capturedSlab = slab
+        let capturedPool = pool
         let capturedCtx = loopCtx
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
-            let tryRes =
-              try:
-                capturedChan[].tryRecv()
-              except Exception:
-                return 0
-            if not tryRes.dataAvailable:
+            var cellIdx: uint32
+            if not capturedRing.tryDequeue(cellIdx):
+              if capturedRing.isClosed():
+                asyncSpawn `deferredFreeReqRingIdent`(
+                  capturedRing, capturedSlab, capturedPool
+                )
+                return 2
               return 0
-            let msg = tryRes.msg
-            if msg.isShutdown:
-              # Defer channel teardown so in-flight senders that already passed
-              # the bucket lookup can complete safely.  See deferredFreeReqChan.
-              asyncSpawn `deferredFreeReqChanIdent`(capturedChan)
-              return 2
-            asyncSpawn `handleMsgIdent`(msg, capturedCtx)
+            # Got a cell — unmarshal ReqMsg, dispatch.
+            var msg: `requestMsgName`
+            let cellPtr = capturedSlab[].cellPtr(cellIdx)
+            let payloadPtr = capturedSlab[].cellPayloadPtr(cellIdx)
+            let ok =
+              try:
+                `unmarshalIdent`(payloadPtr, int(cellPtr.payloadSize), msg)
+              except Exception:
+                false
+            if ok:
+              asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
+            else:
+              error "Failed to unmarshal request payload",
+                requestType = `typeNameLit`
+            # Release the cell back to the slab — the unmarshaled msg
+            # holds its own copy on this thread's GC heap.
+            capturedSlab[].release(cellIdx, `shardHintIdent`())
             return 1
 
+  )
+
+  # ── setProvider impl helper (reused by 4 public overloads) ───────────
+  # Allocates ring + slab + pool on the calling thread, registers the
+  # bucket, and starts the poller.  Returns Result[void, string].
+  let setupBucketIdent = ident("setupBucket" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `setupBucketIdent`(brokerCtx: BrokerContext): Result[void, string] =
+        let myThreadId = currentMtThreadId()
+        let myThreadGen = currentMtThreadGen()
+        var ring: ptr VyukovMpscRing[uint32]
+        var slab: ptr PayloadSlab
+        var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+        withLock(`globalLockIdent`):
+          for i in 0 ..< `globalBucketCountIdent`:
+            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+              if `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                return ok() # already set on this thread
+              return err(
+                "RequestBroker(" & `typeNameLit` &
+                  "): provider already set from another thread"
+              )
+          if `globalBucketCountIdent` >= `globalBucketCapIdent`:
+            `growProcIdent`()
+          ring = newVyukovMpscRing[uint32](`queueDepthLit`)
+          slab = cast[ptr PayloadSlab](createShared(PayloadSlab, 1))
+          initPayloadSlab(
+            slab[],
+            capacity = uint32(`slabCapacityLit`),
+            payloadBytes = uint32(`payloadBytesLit`),
+            nShards = `freeListShardsLit`,
+          )
+          pool = cast[ptr ResponseSlotPool[Result[`typeIdent`, string]]](
+            createShared(ResponseSlotPool[Result[`typeIdent`, string]], 1)
+          )
+          initResponseSlotPool[Result[`typeIdent`, string]](
+            pool[],
+            capacity = uint32(`responseSlotsLit`),
+            nShards = `freeListShardsLit`,
+          )
+          let providerSig = getOrInitBrokerSignal()
+          let idx = `globalBucketCountIdent`
+          `globalBucketsIdent`[idx] = `bucketName`(
+            brokerCtx: brokerCtx,
+            ring: ring,
+            slab: slab,
+            responseSlotPool: pool,
+            providerSignal: providerSig,
+            threadId: myThreadId,
+            threadGen: myThreadGen,
+          )
+          `globalBucketCountIdent` += 1
+        registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, brokerCtx))
+        ensureBrokerDispatchStarted()
+        ok()
   )
 
   # ── setProvider (zero-arg) ──────────────────────────────────────────
@@ -530,83 +635,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     result.add(
       quote do:
         proc setProvider*(
-            _: typedesc[`typeIdent`], handler: `zeroArgProviderName`
-        ): Result[void, string] =
-          `initProcIdent`()
-          # Check if already registered on this thread
-          let myThreadGen = currentMtThreadGen()
-          for i in 0 ..< `tvNoArgCtxIdent`.len:
-            if `tvNoArgCtxIdent`[i] == DefaultBrokerContext:
-              # Verify entry is still backed by a global bucket.
-              # If not, it's stale from a cross-thread clearProvider — remove it.
-              var isStale = true
-              withLock(`globalLockIdent`):
-                for j in 0 ..< `globalBucketCountIdent`:
-                  if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                      `globalBucketsIdent`[j].threadGen == myThreadGen:
-                    isStale = false
-                    break
-              if isStale:
-                `tvNoArgCtxIdent`.del(i)
-                `tvNoArgHandlerIdent`.del(i)
-                break # removed stale entry, proceed with registration
-              else:
-                return err("Zero-arg provider already set")
-          # Store in threadvar
-          `tvNoArgCtxIdent`.add(DefaultBrokerContext)
-          `tvNoArgHandlerIdent`.add(handler)
-          var spawnChan: ptr Channel[`requestMsgName`]
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  return ok() # Same thread incarnation, other sig registered first
-                else:
-                  `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
-                  `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
-                  return err(
-                    "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread"
-                  )
-            if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-              `growProcIdent`()
-            spawnChan = cast[ptr Channel[`requestMsgName`]](createShared(
-              Channel[`requestMsgName`], 1
-            ))
-            spawnChan[].open(0)
-            let providerSig = getOrInitBrokerSignal()
-            let idx = `globalBucketCountIdent`
-            `globalBucketsIdent`[idx] = `bucketName`(
-              brokerCtx: DefaultBrokerContext,
-              requestChan: spawnChan,
-              providerSignal: providerSig,
-              threadId: currentMtThreadId(),
-              threadGen: myThreadGen,
-            )
-            `globalBucketCountIdent` += 1
-          # Register poll fn and start dispatcher outside lock.
-          registerBrokerPoller(`pollFnMakerIdent`(spawnChan, DefaultBrokerContext))
-          ensureBrokerDispatchStarted()
-          return ok()
-
-    )
-
-    result.add(
-      quote do:
-        proc setProvider*(
             _: typedesc[`typeIdent`],
             brokerCtx: BrokerContext,
             handler: `zeroArgProviderName`,
         ): Result[void, string] =
-          if brokerCtx == DefaultBrokerContext:
-            return setProvider(`typeIdent`, handler)
           `initProcIdent`()
           let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == brokerCtx:
-              # Verify entry is still backed by a global bucket.
               var isStale = true
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
@@ -622,46 +658,21 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               else:
                 return err(
                   "RequestBroker(" & `typeNameLit` &
-                    "): zero-arg provider already set for broker context " & $brokerCtx
+                    "): provider already set for broker context"
                 )
           `tvNoArgCtxIdent`.add(brokerCtx)
           `tvNoArgHandlerIdent`.add(handler)
-          var spawnChan: ptr Channel[`requestMsgName`]
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  return ok()
-                else:
-                  `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
-                  `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
-                  return err(
-                    "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread for context " &
-                      $brokerCtx
-                  )
-            if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-              `growProcIdent`()
-            spawnChan = cast[ptr Channel[`requestMsgName`]](createShared(
-              Channel[`requestMsgName`], 1
-            ))
-            spawnChan[].open(0)
-            let providerSig = getOrInitBrokerSignal()
-            let idx = `globalBucketCountIdent`
-            `globalBucketsIdent`[idx] = `bucketName`(
-              brokerCtx: brokerCtx,
-              requestChan: spawnChan,
-              providerSignal: providerSig,
-              threadId: currentMtThreadId(),
-              threadGen: myThreadGen,
-            )
-            `globalBucketCountIdent` += 1
-          # Register poll fn and start dispatcher outside lock.
-          registerBrokerPoller(`pollFnMakerIdent`(spawnChan, brokerCtx))
-          ensureBrokerDispatchStarted()
-          return ok()
+          let r = `setupBucketIdent`(brokerCtx)
+          if r.isErr():
+            `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
+            `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
+            return r
+          ok()
 
+        proc setProvider*(
+            _: typedesc[`typeIdent`], handler: `zeroArgProviderName`
+        ): Result[void, string] =
+          setProvider(`typeIdent`, DefaultBrokerContext, handler)
     )
 
   # ── setProvider (with-args) ─────────────────────────────────────────
@@ -669,81 +680,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     result.add(
       quote do:
         proc setProvider*(
-            _: typedesc[`typeIdent`], handler: `argProviderName`
-        ): Result[void, string] =
-          `initProcIdent`()
-          let myThreadGen = currentMtThreadGen()
-          for i in 0 ..< `tvWithArgCtxIdent`.len:
-            if `tvWithArgCtxIdent`[i] == DefaultBrokerContext:
-              # Verify entry is still backed by a global bucket.
-              var isStale = true
-              withLock(`globalLockIdent`):
-                for j in 0 ..< `globalBucketCountIdent`:
-                  if `globalBucketsIdent`[j].brokerCtx == DefaultBrokerContext and
-                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                      `globalBucketsIdent`[j].threadGen == myThreadGen:
-                    isStale = false
-                    break
-              if isStale:
-                `tvWithArgCtxIdent`.del(i)
-                `tvWithArgHandlerIdent`.del(i)
-                break
-              else:
-                return err("Provider already set")
-          `tvWithArgCtxIdent`.add(DefaultBrokerContext)
-          `tvWithArgHandlerIdent`.add(handler)
-          var spawnChan: ptr Channel[`requestMsgName`]
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == DefaultBrokerContext:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  return ok()
-                else:
-                  `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
-                  `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
-                  return err(
-                    "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread"
-                  )
-            if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-              `growProcIdent`()
-            spawnChan = cast[ptr Channel[`requestMsgName`]](createShared(
-              Channel[`requestMsgName`], 1
-            ))
-            spawnChan[].open(0)
-            let providerSig = getOrInitBrokerSignal()
-            let idx = `globalBucketCountIdent`
-            `globalBucketsIdent`[idx] = `bucketName`(
-              brokerCtx: DefaultBrokerContext,
-              requestChan: spawnChan,
-              providerSignal: providerSig,
-              threadId: currentMtThreadId(),
-              threadGen: myThreadGen,
-            )
-            `globalBucketCountIdent` += 1
-          # Register poll fn and start dispatcher outside lock.
-          if not spawnChan.isNil:
-            registerBrokerPoller(`pollFnMakerIdent`(spawnChan, DefaultBrokerContext))
-            ensureBrokerDispatchStarted()
-          return ok()
-
-    )
-
-    result.add(
-      quote do:
-        proc setProvider*(
             _: typedesc[`typeIdent`],
             brokerCtx: BrokerContext,
             handler: `argProviderName`,
         ): Result[void, string] =
-          if brokerCtx == DefaultBrokerContext:
-            return setProvider(`typeIdent`, handler)
           `initProcIdent`()
           let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == brokerCtx:
-              # Verify entry is still backed by a global bucket.
               var isStale = true
               withLock(`globalLockIdent`):
                 for j in 0 ..< `globalBucketCountIdent`:
@@ -759,70 +703,198 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
               else:
                 return err(
                   "RequestBroker(" & `typeNameLit` &
-                    "): provider already set for broker context " & $brokerCtx
+                    "): provider already set for broker context"
                 )
           `tvWithArgCtxIdent`.add(brokerCtx)
           `tvWithArgHandlerIdent`.add(handler)
-          var spawnChan: ptr Channel[`requestMsgName`]
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  return ok()
-                else:
-                  `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
-                  `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
-                  return err(
-                    "RequestBroker(" & `typeNameLit` &
-                      "): provider already set from another thread for context " &
-                      $brokerCtx
-                  )
-            if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-              `growProcIdent`()
-            spawnChan = cast[ptr Channel[`requestMsgName`]](createShared(
-              Channel[`requestMsgName`], 1
-            ))
-            spawnChan[].open(0)
-            let providerSig = getOrInitBrokerSignal()
-            let idx = `globalBucketCountIdent`
-            `globalBucketsIdent`[idx] = `bucketName`(
-              brokerCtx: brokerCtx,
-              requestChan: spawnChan,
-              providerSignal: providerSig,
-              threadId: currentMtThreadId(),
-              threadGen: myThreadGen,
-            )
-            `globalBucketCountIdent` += 1
-          # Register poll fn and start dispatcher outside lock.
-          if not spawnChan.isNil:
-            registerBrokerPoller(`pollFnMakerIdent`(spawnChan, brokerCtx))
-            ensureBrokerDispatchStarted()
-          return ok()
+          let r = `setupBucketIdent`(brokerCtx)
+          if r.isErr():
+            `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
+            `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
+            return r
+          ok()
 
+        proc setProvider*(
+            _: typedesc[`typeIdent`], handler: `argProviderName`
+        ): Result[void, string] =
+          setProvider(`typeIdent`, DefaultBrokerContext, handler)
     )
+
+  # ── request helper: send and await one ReqMsg cross-thread ──────────
+  # Returns the response Result or an err on timeout / queue full.
+  let sendAndAwaitIdent = ident("sendAndAwait" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `sendAndAwaitIdent`(
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          providerSignal: ThreadSignalPtr,
+          msg: sink `requestMsgName`,
+      ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+        ensureBrokerDispatchStarted()
+        let mySignal = getOrInitBrokerSignal()
+        # Reserve the response slot.
+        let slotIdx = pool[].claim(`shardHintIdent`())
+        if slotIdx == EmptyIdx:
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): response slot pool exhausted"
+          )
+        # Reserve a slab cell, marshal ReqMsg into it.
+        let cellIdx = slab[].claim(`shardHintIdent`())
+        if cellIdx == EmptyIdx:
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): request slab exhausted"
+          )
+        let cellPtr = slab[].cellPtr(cellIdx)
+        let payloadPtr = slab[].cellPayloadPtr(cellIdx)
+        var msgCopy = msg
+        msgCopy.responseSlotIdx = slotIdx
+        msgCopy.requesterSignal = mySignal
+        let written =
+          try:
+            `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
+          except Exception:
+            -1
+        if written < 0:
+          slab[].release(cellIdx, `shardHintIdent`())
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): request payload too large"
+          )
+        cellPtr.payloadSize = uint16(written)
+        cellPtr.refcount.store(1, moRelease)
+        if not ring.tryEnqueue(cellIdx):
+          slab[].release(cellIdx, `shardHintIdent`())
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): provider queue full"
+          )
+        fireBrokerSignal(providerSignal)
+        # Register a one-shot response poller for this slot.
+        let responseFut =
+          newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
+        let capturedPool = pool
+        let capturedSlotIdx = slotIdx
+        let capturedResponseFut = responseFut
+        registerBrokerPoller(
+          proc(): int {.gcsafe, raises: [].} =
+            {.cast(gcsafe).}:
+              if not capturedPool[].readyState(capturedSlotIdx):
+                return 0
+              let slot = capturedPool[].slotPtr(capturedSlotIdx)
+              if not capturedResponseFut.finished:
+                capturedResponseFut.complete(slot.payload)
+              capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
+              return 2
+        )
+        let completedRes = catch:
+          await withTimeout(responseFut, `timeoutVarIdent`)
+        if completedRes.isErr():
+          responseFut.cancelSoon()
+          discard capturedPool[].abandon(capturedSlotIdx)
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): recv failed: " &
+              completedRes.error.msg
+          )
+        if not completedRes.get():
+          responseFut.cancelSoon()
+          discard capturedPool[].abandon(capturedSlotIdx)
+          return err(
+            "RequestBroker(" & `typeNameLit` &
+              "): cross-thread request timed out after " & $`timeoutVarIdent`
+          )
+        let recvRes = catch:
+          responseFut.read()
+        if recvRes.isErr():
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): recv failed: " & recvRes.error.msg
+          )
+        recvRes.get()
+
+  )
+
+  # ── blockingRequest helper: same as above but synchronous ────────────
+  let blockingSendAndAwaitIdent = ident("blockingSendAndAwait" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `blockingSendAndAwaitIdent`(
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          providerSignal: ThreadSignalPtr,
+          msg: sink `requestMsgName`,
+      ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+        let slotIdx = pool[].claim(`shardHintIdent`())
+        if slotIdx == EmptyIdx:
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): response slot pool exhausted"
+          )
+        let cellIdx = slab[].claim(`shardHintIdent`())
+        if cellIdx == EmptyIdx:
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): request slab exhausted"
+          )
+        let cellPtr = slab[].cellPtr(cellIdx)
+        let payloadPtr = slab[].cellPayloadPtr(cellIdx)
+        var msgCopy = msg
+        msgCopy.responseSlotIdx = slotIdx
+        msgCopy.requesterSignal = nil # no async loop on this thread
+        let written =
+          try:
+            `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
+          except Exception:
+            -1
+        if written < 0:
+          slab[].release(cellIdx, `shardHintIdent`())
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): request payload too large"
+          )
+        cellPtr.payloadSize = uint16(written)
+        cellPtr.refcount.store(1, moRelease)
+        if not ring.tryEnqueue(cellIdx):
+          slab[].release(cellIdx, `shardHintIdent`())
+          pool[].release(slotIdx, `shardHintIdent`())
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): provider queue full"
+          )
+        fireBrokerSignal(providerSignal)
+        # Busy-poll the response slot until ready or timeout.
+        let deadline = Moment.now() + `timeoutVarIdent`
+        while Moment.now() < deadline:
+          if pool[].readyState(slotIdx):
+            let slot = pool[].slotPtr(slotIdx)
+            let response = slot.payload
+            pool[].release(slotIdx, `shardHintIdent`())
+            return response
+          sleep(1)
+        # Timeout: abandon the slot so a late provider write returns
+        # the slot to the pool instead of leaving it stranded.
+        discard pool[].abandon(slotIdx)
+        return err(
+          "RequestBroker(" & `typeNameLit` &
+            "): cross-thread request timed out after " & $`timeoutVarIdent`
+        )
+
+  )
 
   # ── request (zero-arg) ──────────────────────────────────────────────
   if not zeroArgSig.isNil():
     result.add(
       quote do:
         proc request*(
-            _: typedesc[`typeIdent`]
-        ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
-          return await request(`typeIdent`, DefaultBrokerContext)
-
-    )
-    result.add(
-      quote do:
-        proc request*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
           `initProcIdent`()
-          var reqChan: ptr Channel[`requestMsgName`]
+          var ring: ptr VyukovMpscRing[uint32]
+          var slab: ptr PayloadSlab
+          var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
           var providerSignal: ThreadSignalPtr
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
-
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -830,12 +902,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                     `globalBucketsIdent`[i].threadGen == myThreadGen:
                   sameThread = true
                 else:
-                  reqChan = `globalBucketsIdent`[i].requestChan
+                  ring = `globalBucketsIdent`[i].ring
+                  slab = `globalBucketsIdent`[i].slab
+                  pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
                 break
-
           if sameThread:
-            # Same-thread: read handler from threadvar, call directly.
             var provider: `zeroArgProviderName`
             for i in 0 ..< `tvNoArgCtxIdent`.len:
               if `tvNoArgCtxIdent`[i] == brokerCtx:
@@ -852,107 +924,22 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
                   catchedRes.error.msg
               )
-            let providerRes = catchedRes.get()
-            if providerRes.isOk():
-              let resultValue = providerRes.get()
-              when compiles(resultValue.isNil()):
-                if resultValue.isNil():
-                  return err(
-                    "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
-                  )
-            return providerRes
-          else:
-            if reqChan.isNil():
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): no zero-arg provider registered for broker context " & $brokerCtx
-              )
-            # Set up per-thread dispatcher for the response channel.
-            let mySignal = getOrInitBrokerSignal()
-            ensureBrokerDispatchStarted()
-            let respChan = cast[ptr Channel[Result[`typeIdent`, string]]](createShared(
-              Channel[Result[`typeIdent`, string]], 1
-            ))
-            respChan[].open(0)
-            let responseFut =
-              newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
-            # Register a one-shot response poller.  When the provider sends its
-            # result, the poller completes responseFut and frees respChan.  If
-            # the provider never responds (crashed / hung), the poller still
-            # gives up and frees once the drop-dead deadline elapses, bounding
-            # the leak that previously persisted forever past timeout.
-            let capturedRespChan = respChan
-            let capturedResponseFut = responseFut
-            let respDropDeadDeadline =
-              Moment.now() + `timeoutVarIdent` * 5 + chronos.seconds(60)
-            let capturedRespDeadline = respDropDeadDeadline
-            registerBrokerPoller(
-              proc(): int {.gcsafe, raises: [].} =
-                {.cast(gcsafe).}:
-                  let tryRes =
-                    try:
-                      capturedRespChan[].tryRecv()
-                    except Exception:
-                      return 0
-                  if not tryRes.dataAvailable:
-                    if Moment.now() > capturedRespDeadline:
-                      # Provider never responded within the grace window.
-                      # Close the channel (further sends raise harmlessly) and
-                      # free the memory.  Self-remove the poller.
-                      try:
-                        capturedRespChan[].close()
-                      except Exception:
-                        discard
-                      deallocShared(capturedRespChan)
-                      return 2
-                    return 0
-                  if not capturedResponseFut.finished:
-                    capturedResponseFut.complete(tryRes.msg)
-                  deallocShared(capturedRespChan)
-                  return 2
+            return catchedRes.get()
+          if ring.isNil:
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): no zero-arg provider registered for broker context " & $brokerCtx
             )
-            var msg = `requestMsgName`(
-              isShutdown: false,
-              requestKind: 0,
-              responseChan: respChan,
-              requesterSignal: mySignal,
-            )
-            {.cast(gcsafe).}:
-              try:
-                reqChan[].send(msg)
-              except Exception:
-                discard
-            fireBrokerSignal(providerSignal)
-            let completedRes = catch:
-              await withTimeout(responseFut, `timeoutVarIdent`)
-            if completedRes.isErr():
-              # withTimeout itself threw.  Cancel responseFut so the poller
-              # skips complete() when the provider eventually responds.
-              responseFut.cancelSoon()
-              return err(
-                "RequestBroker(" & `typeNameLit` & "): recv failed: " &
-                  completedRes.error.msg
-              )
-            if not completedRes.get():
-              # Timed out.  Cancel responseFut; the poller stays registered and
-              # will free respChan once the provider eventually responds.
-              responseFut.cancelSoon()
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): cross-thread request timed out after " & $`timeoutVarIdent`
-              )
-            # Success: responseFut completed by the poller, respChan already freed.
-            let recvRes = catch:
-              responseFut.read()
-            if recvRes.isErr():
-              return err(
-                "RequestBroker(" & `typeNameLit` & "): recv failed: " & recvRes.error.msg
-              )
-            return recvRes.get()
+          var msg = `requestMsgName`(requestKind: 0)
+          return await `sendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+
+        proc request*(
+            _: typedesc[`typeIdent`]
+        ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+          return await request(`typeIdent`, DefaultBrokerContext)
 
     )
   else:
-    # Stub zero-arg request (no zero-arg signature declared).
     result.add(
       quote do:
         proc request*(
@@ -960,34 +947,22 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
-
     )
 
   # ── blockingRequest (zero-arg) ──────────────────────────────────────
-  # Synchronous variant for use in FFI callbacks and non-async contexts.
-  # Same-thread path calls the provider directly via blockingAwait.
-  # Cross-thread path busy-polls the response channel with sleep(1) until
-  # the provider sends its result or the timeout expires.
   if not zeroArgSig.isNil():
-    result.add(
-      quote do:
-        proc blockingRequest*(
-            _: typedesc[`typeIdent`]
-        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
-          return blockingRequest(`typeIdent`, DefaultBrokerContext)
-
-    )
     result.add(
       quote do:
         proc blockingRequest*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
         ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
           `initProcIdent`()
-          var reqChan: ptr Channel[`requestMsgName`]
+          var ring: ptr VyukovMpscRing[uint32]
+          var slab: ptr PayloadSlab
+          var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
           var providerSignal: ThreadSignalPtr
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
-
           withLock(`globalLockIdent`):
             for i in 0 ..< `globalBucketCountIdent`:
               if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -995,10 +970,11 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                     `globalBucketsIdent`[i].threadGen == myThreadGen:
                   sameThread = true
                 else:
-                  reqChan = `globalBucketsIdent`[i].requestChan
+                  ring = `globalBucketsIdent`[i].ring
+                  slab = `globalBucketsIdent`[i].slab
+                  pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
                 break
-
           if sameThread:
             var provider: `zeroArgProviderName`
             for i in 0 ..< `tvNoArgCtxIdent`.len:
@@ -1016,63 +992,19 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
                 "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
                   catchedRes.error.msg
               )
-            let providerRes = catchedRes.get()
-            if providerRes.isOk():
-              let resultValue = providerRes.get()
-              when compiles(resultValue.isNil()):
-                if resultValue.isNil():
-                  return err(
-                    "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
-                  )
-            return providerRes
-          else:
-            if reqChan.isNil():
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): no zero-arg provider registered for broker context " & $brokerCtx
-              )
-            let respChan = cast[ptr Channel[Result[`typeIdent`, string]]](createShared(
-              Channel[Result[`typeIdent`, string]], 1
-            ))
-            respChan[].open(0)
-            var msg = `requestMsgName`(
-              isShutdown: false,
-              requestKind: 0,
-              responseChan: respChan,
-              requesterSignal: nil, # no async loop on this thread
+            return catchedRes.get()
+          if ring.isNil:
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): no zero-arg provider registered for broker context " & $brokerCtx
             )
-            {.cast(gcsafe).}:
-              try:
-                reqChan[].send(msg)
-              except Exception:
-                discard
-            fireBrokerSignal(providerSignal)
-            let deadline = Moment.now() + `timeoutVarIdent`
-            var gotResponse = false
-            var response: Result[`typeIdent`, string]
-            while Moment.now() < deadline:
-              let tryRes =
-                try:
-                  {.cast(gcsafe).}:
-                    respChan[].tryRecv()
-                except Exception:
-                  (dataAvailable: false, msg: response)
-              if tryRes.dataAvailable:
-                response = tryRes.msg
-                gotResponse = true
-                break
-              sleep(1)
-            if not gotResponse:
-              # Intentional leak on timeout: provider may still hold respChan and
-              # will send its result eventually.  Channel[T] costs only memory
-              # (mutex + condvar), no OS file descriptors.
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): cross-thread request timed out after " & $`timeoutVarIdent`
-              )
-            deallocShared(respChan)
-            return response
+          var msg = `requestMsgName`(requestKind: 0)
+          `blockingSendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
 
+        proc blockingRequest*(
+            _: typedesc[`typeIdent`]
+        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+          blockingRequest(`typeIdent`, DefaultBrokerContext)
     )
   else:
     result.add(
@@ -1082,7 +1014,6 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
-
     )
 
   # ── request (with-args) ─────────────────────────────────────────────
@@ -1090,33 +1021,108 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
     let requestParamDefs = cloneParams(argParams)
     let argNameIdents = collectParamNames(requestParamDefs)
 
-    # Non-keyed variant: forward to default context.
-    var formalParams = newTree(nnkFormalParams)
-    formalParams.add(copyNimTree(returnType))
-    formalParams.add(
-      newTree(
-        nnkIdentDefs,
-        ident("_"),
-        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
-        newEmptyNode(),
-      )
+    # Build the keyed (ctx-explicit) request proc.
+    let reqPragmas = quote:
+      {.async: (raises: []).}
+    let typedescParam = newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
+
+    var keyedFormalParams = newTree(nnkFormalParams)
+    keyedFormalParams.add(copyNimTree(returnType))
+    keyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), typedescParam, newEmptyNode())
+    )
+    keyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
     )
     for paramDef in requestParamDefs:
-      formalParams.add(paramDef)
+      keyedFormalParams.add(paramDef)
+
+    let providerSym = genSym(nskVar, "provider")
+    var providerCall = newCall(providerSym)
+    for argName in argNameIdents:
+      providerCall.add(argName)
+
+    var msgCtor = newTree(nnkObjConstr, requestMsgName)
+    msgCtor.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
+    for argName in argNameIdents:
+      msgCtor.add(newTree(nnkExprColonExpr, argName, argName))
+
+    let keyedBody = quote do:
+      `initProcIdent`()
+      var ring: ptr VyukovMpscRing[uint32]
+      var slab: ptr PayloadSlab
+      var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+      var providerSignal: ThreadSignalPtr
+      var sameThread = false
+      let myThreadGen = currentMtThreadGen()
+      withLock(`globalLockIdent`):
+        for i in 0 ..< `globalBucketCountIdent`:
+          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                `globalBucketsIdent`[i].threadGen == myThreadGen:
+              sameThread = true
+            else:
+              ring = `globalBucketsIdent`[i].ring
+              slab = `globalBucketsIdent`[i].slab
+              pool = `globalBucketsIdent`[i].responseSlotPool
+              providerSignal = `globalBucketsIdent`[i].providerSignal
+            break
+      if sameThread:
+        var `providerSym`: `argProviderName`
+        for i in 0 ..< `tvWithArgCtxIdent`.len:
+          if `tvWithArgCtxIdent`[i] == brokerCtx:
+            `providerSym` = `tvWithArgHandlerIdent`[i]
+            break
+        if `providerSym`.isNil():
+          return err(
+            "RequestBroker(" & `typeNameLit` &
+              "): no provider registered for input signature"
+          )
+        let catchedRes = catch:
+          await `providerCall`
+        if catchedRes.isErr():
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+              catchedRes.error.msg
+          )
+        return catchedRes.get()
+      if ring.isNil:
+        return err(
+          "RequestBroker(" & `typeNameLit` &
+            "): no provider registered for broker context " & $brokerCtx
+        )
+      var msg = `msgCtor`
+      return await `sendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("request"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        keyedFormalParams,
+        reqPragmas,
+        newEmptyNode(),
+        keyedBody,
+      )
+    )
+
+    # Non-keyed forwarder.
+    var nonKeyedFormalParams = newTree(nnkFormalParams)
+    nonKeyedFormalParams.add(copyNimTree(returnType))
+    nonKeyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), typedescParam, newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      nonKeyedFormalParams.add(paramDef)
 
     var forwardCall = newCall(ident("request"))
     forwardCall.add(copyNimTree(typeIdent))
     forwardCall.add(ident("DefaultBrokerContext"))
     for argName in argNameIdents:
       forwardCall.add(argName)
-
-    let requestPragmas = quote:
-      {.async: (raises: []).}
-
-    let forwardBody = newStmtList(
-      quote do:
-        return await `forwardCall`
-    )
+    let forwardBody = quote do:
+      return await `forwardCall`
 
     result.add(
       newTree(
@@ -1124,218 +1130,122 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         postfix(ident("request"), "*"),
         newEmptyNode(),
         newEmptyNode(),
-        formalParams,
-        requestPragmas,
+        nonKeyedFormalParams,
+        reqPragmas,
         newEmptyNode(),
         forwardBody,
       )
     )
 
-    # Keyed variant with same-thread optimization.
-    let requestParamDefsKeyed = cloneParams(argParams)
-    let argNameIdentsKeyed = collectParamNames(requestParamDefsKeyed)
-    var formalParamsKeyed = newTree(nnkFormalParams)
-    formalParamsKeyed.add(copyNimTree(returnType))
-    formalParamsKeyed.add(
-      newTree(
-        nnkIdentDefs,
-        ident("_"),
-        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
-        newEmptyNode(),
-      )
-    )
-    formalParamsKeyed.add(
-      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
-    )
-    for paramDef in requestParamDefsKeyed:
-      formalParamsKeyed.add(paramDef)
-
-    # Build the provider call for same-thread path.
-    let providerSymKeyed = genSym(nskVar, "provider")
-    var providerCallKeyed = newCall(providerSymKeyed)
-    for argName in argNameIdentsKeyed:
-      providerCallKeyed.add(argName)
-
-    # Shared idents for cross-thread path.
-    let respChanIdent = ident("respChan")
-    let reqChanIdent = ident("reqChan")
-    let sameThreadIdent = ident("sameThread")
-    let providerSignalIdent = ident("providerSignal")
-    let mySignalIdent = ident("mySignal")
-
-    # Build request message construction for cross-thread path.
-    var msgConstruction = newTree(nnkObjConstr, requestMsgName)
-    msgConstruction.add(newTree(nnkExprColonExpr, ident("isShutdown"), newLit(false)))
-    msgConstruction.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
-    for argName in argNameIdentsKeyed:
-      msgConstruction.add(newTree(nnkExprColonExpr, argName, argName))
-    msgConstruction.add(newTree(nnkExprColonExpr, ident("responseChan"), respChanIdent))
-    msgConstruction.add(
-      newTree(nnkExprColonExpr, ident("requesterSignal"), mySignalIdent)
-    )
-
-    var requestBodyKeyed = newStmtList()
-    requestBodyKeyed.add(
-      quote do:
-        `initProcIdent`()
-        var `reqChanIdent`: ptr Channel[`requestMsgName`]
-        var `providerSignalIdent`: ThreadSignalPtr
-        var `sameThreadIdent` = false
-        let myThreadGen = currentMtThreadGen()
-
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-              if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                `sameThreadIdent` = true
-              else:
-                `reqChanIdent` = `globalBucketsIdent`[i].requestChan
-                `providerSignalIdent` = `globalBucketsIdent`[i].providerSignal
-              break
-
-        if `sameThreadIdent`:
-          # Same-thread: read handler from threadvar, call directly.
-          var `providerSymKeyed`: `argProviderName`
-          for i in 0 ..< `tvWithArgCtxIdent`.len:
-            if `tvWithArgCtxIdent`[i] == brokerCtx:
-              `providerSymKeyed` = `tvWithArgHandlerIdent`[i]
-              break
-          if `providerSymKeyed`.isNil():
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): no provider registered for input signature"
-            )
-          let catchedRes = catch:
-            await `providerCallKeyed`
-          if catchedRes.isErr():
-            return err(
-              "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
-                catchedRes.error.msg
-            )
-          let providerRes = catchedRes.get()
-          if providerRes.isOk():
-            let resultValue = providerRes.get()
-            when compiles(resultValue.isNil()):
-              if resultValue.isNil():
-                return err(
-                  "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
-                )
-          return providerRes
-        else:
-          if `reqChanIdent`.isNil():
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): no provider registered for broker context " & $brokerCtx
-            )
-          let `mySignalIdent` = getOrInitBrokerSignal()
-          ensureBrokerDispatchStarted()
-          let `respChanIdent` = cast[ptr Channel[Result[`typeIdent`, string]]](createShared(
-            Channel[Result[`typeIdent`, string]], 1
-          ))
-          `respChanIdent`[].open(0)
-          let responseFut =
-            newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
-          let capturedRespChan = `respChanIdent`
-          let capturedResponseFut = responseFut
-          let respDropDeadDeadline =
-            Moment.now() + `timeoutVarIdent` * 5 + chronos.seconds(60)
-          let capturedRespDeadline = respDropDeadDeadline
-          registerBrokerPoller(
-            proc(): int {.gcsafe, raises: [].} =
-              {.cast(gcsafe).}:
-                let tryRes =
-                  try:
-                    capturedRespChan[].tryRecv()
-                  except Exception:
-                    return 0
-                if not tryRes.dataAvailable:
-                  if Moment.now() > capturedRespDeadline:
-                    try:
-                      capturedRespChan[].close()
-                    except Exception:
-                      discard
-                    deallocShared(capturedRespChan)
-                    return 2
-                  return 0
-                if not capturedResponseFut.finished:
-                  capturedResponseFut.complete(tryRes.msg)
-                deallocShared(capturedRespChan)
-                return 2
-          )
-          var msg = `msgConstruction`
-          {.cast(gcsafe).}:
-            try:
-              `reqChanIdent`[].send(msg)
-            except Exception:
-              discard
-          fireBrokerSignal(`providerSignalIdent`)
-          let completedRes = catch:
-            await withTimeout(responseFut, `timeoutVarIdent`)
-          if completedRes.isErr():
-            responseFut.cancelSoon()
-            return err(
-              "RequestBroker(" & `typeNameLit` & "): recv failed: " &
-                completedRes.error.msg
-            )
-          if not completedRes.get():
-            responseFut.cancelSoon()
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): cross-thread request timed out after " & $`timeoutVarIdent`
-            )
-          # Success: responseFut completed by the poller, respChan already freed.
-          let recvRes = catch:
-            responseFut.read()
-          if recvRes.isErr():
-            return err(
-              "RequestBroker(" & `typeNameLit` & "): recv failed: " & recvRes.error.msg
-            )
-          return recvRes.get()
-    )
-
-    result.add(
-      newTree(
-        nnkProcDef,
-        postfix(ident("request"), "*"),
-        newEmptyNode(),
-        newEmptyNode(),
-        formalParamsKeyed,
-        requestPragmas,
-        newEmptyNode(),
-        requestBodyKeyed,
-      )
-    )
-
   # ── blockingRequest (with-args) ─────────────────────────────────────
-  # Synchronous variant for use in FFI callbacks and non-async contexts.
   if not argSig.isNil():
     let brParamDefs = cloneParams(argParams)
     let brArgNameIdents = collectParamNames(brParamDefs)
     let brPragmas = quote:
       {.gcsafe, raises: [].}
+    let typedescParam = newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
 
-    # Non-keyed forward proc.
-    var brFormalParams = newTree(nnkFormalParams)
-    brFormalParams.add(
+    var brKeyedFormalParams = newTree(nnkFormalParams)
+    brKeyedFormalParams.add(
       newTree(nnkBracketExpr, ident("Result"), copyNimTree(typeIdent), ident("string"))
     )
-    brFormalParams.add(
-      newTree(
-        nnkIdentDefs,
-        ident("_"),
-        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
-        newEmptyNode(),
-      )
+    brKeyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), typedescParam, newEmptyNode())
+    )
+    brKeyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
     )
     for paramDef in brParamDefs:
-      brFormalParams.add(paramDef)
+      brKeyedFormalParams.add(paramDef)
+
+    let brProviderSym = genSym(nskVar, "provider")
+    var brProviderCall = newCall(brProviderSym)
+    for argName in brArgNameIdents:
+      brProviderCall.add(argName)
+
+    var brMsgCtor = newTree(nnkObjConstr, requestMsgName)
+    brMsgCtor.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
+    for argName in brArgNameIdents:
+      brMsgCtor.add(newTree(nnkExprColonExpr, argName, argName))
+
+    let brKeyedBody = quote do:
+      `initProcIdent`()
+      var ring: ptr VyukovMpscRing[uint32]
+      var slab: ptr PayloadSlab
+      var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+      var providerSignal: ThreadSignalPtr
+      var sameThread = false
+      let myThreadGen = currentMtThreadGen()
+      withLock(`globalLockIdent`):
+        for i in 0 ..< `globalBucketCountIdent`:
+          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                `globalBucketsIdent`[i].threadGen == myThreadGen:
+              sameThread = true
+            else:
+              ring = `globalBucketsIdent`[i].ring
+              slab = `globalBucketsIdent`[i].slab
+              pool = `globalBucketsIdent`[i].responseSlotPool
+              providerSignal = `globalBucketsIdent`[i].providerSignal
+            break
+      if sameThread:
+        var `brProviderSym`: `argProviderName`
+        for i in 0 ..< `tvWithArgCtxIdent`.len:
+          if `tvWithArgCtxIdent`[i] == brokerCtx:
+            `brProviderSym` = `tvWithArgHandlerIdent`[i]
+            break
+        if `brProviderSym`.isNil():
+          return err(
+            "RequestBroker(" & `typeNameLit` &
+              "): no provider registered for input signature"
+          )
+        let catchedRes = catch:
+          blockingAwait(`brProviderCall`)
+        if catchedRes.isErr():
+          return err(
+            "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
+              catchedRes.error.msg
+          )
+        return catchedRes.get()
+      if ring.isNil:
+        return err(
+          "RequestBroker(" & `typeNameLit` &
+            "): no provider registered for broker context " & $brokerCtx
+        )
+      var msg = `brMsgCtor`
+      `blockingSendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("blockingRequest"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        brKeyedFormalParams,
+        brPragmas,
+        newEmptyNode(),
+        brKeyedBody,
+      )
+    )
+
+    # Non-keyed forwarder.
+    var brNonKeyedFormalParams = newTree(nnkFormalParams)
+    brNonKeyedFormalParams.add(
+      newTree(nnkBracketExpr, ident("Result"), copyNimTree(typeIdent), ident("string"))
+    )
+    brNonKeyedFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), typedescParam, newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      brNonKeyedFormalParams.add(paramDef)
 
     var brForwardCall = newCall(ident("blockingRequest"))
     brForwardCall.add(copyNimTree(typeIdent))
     brForwardCall.add(ident("DefaultBrokerContext"))
     for argName in brArgNameIdents:
       brForwardCall.add(argName)
+    let brForwardBody = quote do:
+      `brForwardCall`
 
     result.add(
       newTree(
@@ -1343,168 +1253,15 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         postfix(ident("blockingRequest"), "*"),
         newEmptyNode(),
         newEmptyNode(),
-        brFormalParams,
+        brNonKeyedFormalParams,
         brPragmas,
         newEmptyNode(),
-        newStmtList(newTree(nnkReturnStmt, brForwardCall)),
-      )
-    )
-
-    # Keyed blockingRequest with same-thread optimization.
-    let brParamDefsKeyed = cloneParams(argParams)
-    let brArgNameIdentsKeyed = collectParamNames(brParamDefsKeyed)
-    var brFormalParamsKeyed = newTree(nnkFormalParams)
-    brFormalParamsKeyed.add(
-      newTree(nnkBracketExpr, ident("Result"), copyNimTree(typeIdent), ident("string"))
-    )
-    brFormalParamsKeyed.add(
-      newTree(
-        nnkIdentDefs,
-        ident("_"),
-        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
-        newEmptyNode(),
-      )
-    )
-    brFormalParamsKeyed.add(
-      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
-    )
-    for paramDef in brParamDefsKeyed:
-      brFormalParamsKeyed.add(paramDef)
-
-    let brProviderSymKeyed = genSym(nskVar, "provider")
-    var brProviderCallKeyed = newCall(brProviderSymKeyed)
-    for argName in brArgNameIdentsKeyed:
-      brProviderCallKeyed.add(argName)
-
-    let brRespChanIdent = ident("respChan")
-    let brReqChanIdent = ident("reqChan")
-    let brSameThreadIdent = ident("sameThread")
-    let brProviderSignalIdent = ident("providerSignal")
-
-    var brMsgConstruction = newTree(nnkObjConstr, requestMsgName)
-    brMsgConstruction.add(newTree(nnkExprColonExpr, ident("isShutdown"), newLit(false)))
-    brMsgConstruction.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
-    for argName in brArgNameIdentsKeyed:
-      brMsgConstruction.add(newTree(nnkExprColonExpr, argName, argName))
-    brMsgConstruction.add(
-      newTree(nnkExprColonExpr, ident("responseChan"), brRespChanIdent)
-    )
-    brMsgConstruction.add(
-      newTree(
-        nnkExprColonExpr,
-        ident("requesterSignal"),
-        newNilLit(), # no async loop on this thread
-      )
-    )
-
-    var brRequestBodyKeyed = newStmtList()
-    brRequestBodyKeyed.add(
-      quote do:
-        `initProcIdent`()
-        var `brReqChanIdent`: ptr Channel[`requestMsgName`]
-        var `brProviderSignalIdent`: ThreadSignalPtr
-        var `brSameThreadIdent` = false
-        let myThreadGen = currentMtThreadGen()
-
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-              if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                `brSameThreadIdent` = true
-              else:
-                `brReqChanIdent` = `globalBucketsIdent`[i].requestChan
-                `brProviderSignalIdent` = `globalBucketsIdent`[i].providerSignal
-              break
-
-        if `brSameThreadIdent`:
-          var `brProviderSymKeyed`: `argProviderName`
-          for i in 0 ..< `tvWithArgCtxIdent`.len:
-            if `tvWithArgCtxIdent`[i] == brokerCtx:
-              `brProviderSymKeyed` = `tvWithArgHandlerIdent`[i]
-              break
-          if `brProviderSymKeyed`.isNil():
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): no provider registered for input signature"
-            )
-          let catchedRes = catch:
-            blockingAwait(`brProviderCallKeyed`)
-          if catchedRes.isErr():
-            return err(
-              "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
-                catchedRes.error.msg
-            )
-          let providerRes = catchedRes.get()
-          if providerRes.isOk():
-            let resultValue = providerRes.get()
-            when compiles(resultValue.isNil()):
-              if resultValue.isNil():
-                return err(
-                  "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
-                )
-          return providerRes
-        else:
-          if `brReqChanIdent`.isNil():
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): no provider registered for broker context " & $brokerCtx
-            )
-          let `brRespChanIdent` = cast[ptr Channel[Result[`typeIdent`, string]]](createShared(
-            Channel[Result[`typeIdent`, string]], 1
-          ))
-          `brRespChanIdent`[].open(0)
-          var msg = `brMsgConstruction`
-          {.cast(gcsafe).}:
-            try:
-              `brReqChanIdent`[].send(msg)
-            except Exception:
-              discard
-          fireBrokerSignal(`brProviderSignalIdent`)
-          let deadline = Moment.now() + `timeoutVarIdent`
-          var gotResponse = false
-          var response: Result[`typeIdent`, string]
-          while Moment.now() < deadline:
-            let tryRes =
-              try:
-                {.cast(gcsafe).}:
-                  `brRespChanIdent`[].tryRecv()
-              except Exception:
-                (dataAvailable: false, msg: response)
-            if tryRes.dataAvailable:
-              response = tryRes.msg
-              gotResponse = true
-              break
-            sleep(1)
-          if not gotResponse:
-            # Intentional leak on timeout — same rationale as async request().
-            # Channel[T] costs only memory (mutex + condvar), no OS file descriptors.
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): cross-thread request timed out after " & $`timeoutVarIdent`
-            )
-          deallocShared(`brRespChanIdent`)
-          return response
-    )
-
-    result.add(
-      newTree(
-        nnkProcDef,
-        postfix(ident("blockingRequest"), "*"),
-        newEmptyNode(),
-        newEmptyNode(),
-        brFormalParamsKeyed,
-        brPragmas,
-        newEmptyNode(),
-        brRequestBodyKeyed,
+        brForwardBody,
       )
     )
 
   # ── clearProvider ───────────────────────────────────────────────────
   let brokerCtxParam = ident("brokerCtx")
-  var clearBody = newStmtList()
-
-  # Build threadvar cleanup statements.
   var tvCleanup = newStmtList()
   if not zeroArgSig.isNil():
     tvCleanup.add(
@@ -1525,49 +1282,33 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             break
     )
 
-  clearBody.add(
-    quote do:
-      `initProcIdent`()
-      var reqChan: ptr Channel[`requestMsgName`]
-      var providerSignal: ThreadSignalPtr
-      var isProviderThread = false
-      let myThreadGen = currentMtThreadGen()
-      withLock(`globalLockIdent`):
-        var foundIdx = -1
-        for i in 0 ..< `globalBucketCountIdent`:
-          if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
-            reqChan = `globalBucketsIdent`[i].requestChan
-            providerSignal = `globalBucketsIdent`[i].providerSignal
-            isProviderThread = (
-              `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-              `globalBucketsIdent`[i].threadGen == myThreadGen
-            )
-            foundIdx = i
-            break
-        if foundIdx >= 0:
-          # Remove bucket by shifting.
-          for i in foundIdx ..< `globalBucketCountIdent` - 1:
-            `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
-          `globalBucketCountIdent` -= 1
-      # Only clean threadvar entries if called from the provider thread.
-      # If called from another thread, the poll fn will self-remove when it
-      # receives the shutdown message.
-      if isProviderThread:
-        `tvCleanup`
-      elif not reqChan.isNil():
-        trace "clearProvider called from non-provider thread; " &
-          "threadvar entries on provider thread are stale but harmless " &
-          "(next setProvider will detect and clean them)", brokerType = `typeNameLit`
-      if not reqChan.isNil():
-        # Send shutdown; the poll fn returns 2 (removes itself) on isShutdown.
-        var shutdownMsg = `requestMsgName`(isShutdown: true, requesterSignal: nil)
-        {.cast(gcsafe).}:
-          try:
-            reqChan[].send(shutdownMsg)
-          except Exception:
-            discard
-        fireBrokerSignal(providerSignal)
-  )
+  let clearBody = quote do:
+    `initProcIdent`()
+    var ring: ptr VyukovMpscRing[uint32]
+    var providerSignal: ThreadSignalPtr
+    var isProviderThread = false
+    let myThreadGen = currentMtThreadGen()
+    withLock(`globalLockIdent`):
+      var foundIdx = -1
+      for i in 0 ..< `globalBucketCountIdent`:
+        if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
+          ring = `globalBucketsIdent`[i].ring
+          providerSignal = `globalBucketsIdent`[i].providerSignal
+          isProviderThread = (
+            `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+            `globalBucketsIdent`[i].threadGen == myThreadGen
+          )
+          foundIdx = i
+          break
+      if foundIdx >= 0:
+        for i in foundIdx ..< `globalBucketCountIdent` - 1:
+          `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
+        `globalBucketCountIdent` -= 1
+    if isProviderThread:
+      `tvCleanup`
+    if not ring.isNil:
+      ring.close()
+      fireBrokerSignal(providerSignal)
 
   var formalParamsClear = newTree(nnkFormalParams)
   formalParamsClear.add(newEmptyNode())
