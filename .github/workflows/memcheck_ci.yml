@@ -36,6 +36,8 @@ on:
           - testMtEventBrokerAsanRefc
           - testMtRequestBrokerAsanOrc
           - testMtRequestBrokerAsanRefc
+          - probeWinTlsUninitOrc
+          - probeWinTlsUninitRefc
 
 permissions:
   contents: read
@@ -107,7 +109,7 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc"
+          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -144,7 +146,8 @@ jobs:
           $all = @(
             "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
             "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
-            "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc"
+            "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
+            "probeWinTlsUninitOrc", "probeWinTlsUninitRefc"
           )
           $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }
           New-Item -ItemType Directory -Force -Path build | Out-Null

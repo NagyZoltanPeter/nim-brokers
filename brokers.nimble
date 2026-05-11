@@ -1005,6 +1005,69 @@ task testMtRequestBrokerAsanRefc,
     return
   testAsan("refc", "test_multi_thread_request_broker")
 
+# ----------------------------------------------------------------------------
+# probeWinTlsUninit — minimal repro for LIMITATION.md §2.1
+# ----------------------------------------------------------------------------
+# Demonstrates that a Win32 RegisterWaitForSingleObject completion callback
+# allocating Nim memory crashes under --mm:refc on Windows (uninitialized TLS
+# on the NT thread-pool wait thread) and passes under --mm:orc. No chronos,
+# no brokers — see test/probe_win_tls_uninit.nim for full discussion.
+#
+# Expected exit codes:
+#   * Non-Windows hosts             → 77 (skip)
+#   * Windows + orc                 → 0
+#   * Windows + refc                → non-zero (crash); task asserts this and
+#                                     exits 0 to signal "hypothesis reproduced".
+proc runProbeWinTlsUninit(mm: string) =
+  let outBin = "build" / ("probe_win_tls_uninit_" & mm)
+  let outBinExe =
+    when defined(windows): outBin & ".exe"
+    else: outBin
+  mkDir "build"
+  # `--out:` with a path overrides `--outdir:`, so put the path directly on
+  # `--out:` to land the binary under build/.
+  exec "nim c --threads:on --mm:" & mm & " -d:release " &
+    "--out:" & quoteArg(outBin) & " " &
+    quoteArg("test/probe_win_tls_uninit.nim")
+  # Run the probe with live stdout+stderr (exec) so a refc crash's Nim/OS
+  # backtrace lands in the CI log. exec raises OSError on non-zero exit; we
+  # use that to distinguish "exit 0" from "exit non-zero / crash".
+  var exitedNonZero = false
+  try:
+    exec quoteArg(outBinExe)
+  except OSError:
+    exitedNonZero = true
+  when defined(windows):
+    if mm == "orc":
+      if exitedNonZero:
+        echo "::error::probeWinTlsUninit/orc: probe must succeed under ORC"
+        quit(1)
+      echo "probeWinTlsUninit/orc: PASS"
+    else:
+      # refc on Windows: we *expect* the probe to crash. If it exits 0, the
+      # §2.1 hypothesis no longer reproduces and the doc needs revisiting.
+      if not exitedNonZero:
+        echo "::warning::probeWinTlsUninit/refc exited 0 — §2.1 hypothesis " &
+          "no longer reproduces. Review doc/LIMITATION.md §2.1."
+        quit(1)
+      echo "probeWinTlsUninit/refc: hypothesis reproduced (probe crashed " &
+        "as expected)"
+  else:
+    # Non-Windows hosts: probe exits 77 (skip). exec sees that as non-zero
+    # → OSError → exitedNonZero=true is the success path here.
+    if not exitedNonZero:
+      echo "::error::probeWinTlsUninit on non-Windows: expected skip exit"
+      quit(1)
+    echo "probeWinTlsUninit: skipped (non-Windows host)"
+
+task probeWinTlsUninitOrc,
+  "Run the §2.1 TLS-uninit probe under --mm:orc (must pass on Windows)":
+  runProbeWinTlsUninit("orc")
+
+task probeWinTlsUninitRefc,
+  "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
+  runProbeWinTlsUninit("refc")
+
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
 

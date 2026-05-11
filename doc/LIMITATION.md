@@ -142,6 +142,16 @@ worthwhile.
 the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers
 remain fully refc-compatible on Windows.
 
+**Minimal repro.** [`test/probe_win_tls_uninit.nim`](../test/probe_win_tls_uninit.nim)
+isolates the hazard from chronos: it calls `RegisterWaitForSingleObject`
+directly and has the resulting wait-thread callback allocate Nim memory in
+a tight loop. Driven via the nimble tasks `probeWinTlsUninitOrc` and
+`probeWinTlsUninitRefc` (also exposed through the `memcheck_ci.yml`
+workflow_dispatch matrix), the probe is expected to exit 0 under
+`--mm:orc` and to crash under `--mm:refc` on Windows; non-Windows hosts
+skip with exit 77. If the refc job ever exits 0, the hypothesis above no
+longer reproduces and this section must be revisited.
+
 ---
 
 ### 2.2 macOS + Nim 2.2.4 + `--mm:refc` + debug: stdlib `Channel[T].send` regression
