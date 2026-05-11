@@ -37,8 +37,8 @@ issues touch them.
 | OS / arch | Nim 2.2.4 + orc | Nim 2.2.4 + refc | Nim 2.2.10 + orc | Nim 2.2.10 + refc | Nim devel + orc | Nim devel + refc |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Linux amd64** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **macOS arm64** | ✅ | ⚠️ debug only — see §2.2 | ✅ | ✅ | ✅ | ⚠️ release only — see §2.3 |
-| **macOS amd64** | ✅ | ⚠️ likely same as arm64 — see §2.2 | ✅ | ✅ | ✅ | likely ⚠️ same as arm64 — see §2.3 |
+| **macOS arm64** | ⚠️ transient-thread carve-out — see §2.6 | ⚠️ debug only — see §2.2 | ⚠️ transient-thread carve-out — see §2.6 | ✅ | ⚠️ likely same as 2.2.10 — see §2.6 | ⚠️ release only — see §2.3 |
+| **macOS amd64** | ⚠️ likely same as arm64 — see §2.6 | ⚠️ likely same as arm64 — see §2.2 | ⚠️ likely same as arm64 — see §2.6 | ✅ | ⚠️ likely same as arm64 — see §2.6 | likely ⚠️ same as arm64 — see §2.3 |
 | **Windows amd64** | ✅ | ❌ — see §2.1 | ✅ | ❌ — see §2.1 | ✅ | ❌ — see §2.1 (devel install also unsupported by setup-nim-action) |
 
 Nim versions older than 2.2.0 are **not supported** (see §2.4).
@@ -46,9 +46,17 @@ Nim versions older than 2.2.0 are **not supported** (see §2.4).
 ### 1.3 Recommendation
 
 Build any nim-brokers code that uses `(mt)` brokers or the Broker FFI API
-with **`--mm:orc`** and **Nim ≥ 2.2.10** for the smoothest experience. The
-refc carve-outs are real but narrow; orc has no known limitations on any
-supported platform.
+with **`--mm:orc`** and **Nim ≥ 2.2.10** for the smoothest experience.
+The refc carve-outs are real but narrow. ORC has one carve-out that
+applies on **macOS** (any arch, any Nim version we tested): threads that
+send to or receive from a broker channel must not exit before broker
+teardown — see §2.6. On Linux and Windows, ORC has no known limitations.
+
+If your application uses persistent worker threads (thread pools, an
+event-loop thread, FFI callers that stay alive across the library's
+lifetime), the §2.6 carve-out does not apply to you. It only matters for
+code that creates short-lived threads which `joinThread` while the broker
+they emitted on is still in use.
 
 ---
 
@@ -65,16 +73,46 @@ on Windows (with a clear log line). ORC is fully supported.
 **Root cause.** Both the `(mt)` brokers and the Broker FFI API runtime use
 chronos' `ThreadSignalPtr.wait()` to receive cross-thread wakeups. On
 Windows the chronos implementation registers a completion callback through
-the Win32 `RegisterWaitForSingleObject` API, and the OS fires that callback
-on a **Windows thread-pool thread** — a thread that is not a Nim thread and
-is therefore invisible to refc's stop-the-world garbage collector.
+the Win32 [`RegisterWaitForSingleObject`][rwfso] API. Per Microsoft's
+documentation, when the waited-on event is signaled the callback is
+invoked on a **wait thread owned by the legacy NT thread pool**
+(`ntdll!TppWorkerThread`). That thread is created by the OS, not by Nim's
+`system/threads.nim`, and the application has no hook to initialize it
+before the callback runs.
 
-Refc's GC is stop-the-world: it pauses every *known* Nim thread before
-scanning the heap. Because the thread-pool thread is unknown, refc can free
-futures and wait-handles that the callback is still referencing, producing
-access violations and use-after-free bugs. ORC has no stop-the-world
-phase — its reference counting is fully atomic and its cycle collector
-runs in-thread — so the same thread-pool callback is safe.
+[rwfso]: https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-registerwaitforsingleobject
+
+Nim's refc runtime is **per-thread local-heap**, not a global
+stop-the-world collector — there is no SuspendThread sweep across sibling
+threads. The hazard on Windows is therefore not "the GC freed memory the
+callback was reading"; it is **uninitialized thread-local runtime state on
+the OS-owned wait thread**:
+
+1. Refc relies on TLS for the GC frame stack (`framePtr`, `gch`), the
+   thread's local heap pointer, and exception state. These slots are
+   populated by `nimGC_setStackBottom` / the per-thread initializer in
+   `lib/system/threadlocalstorage.nim`, which only runs on threads
+   created via `system/threads.nim` or explicitly attached.
+2. A thread-pool wait callback fires on a thread that has never executed
+   that init. Any allocation, `GC_ref`, string/seq grow, or even an
+   exception-frame push from that callback touches null/garbage TLS.
+3. Even when the callback only signals a `Channel[T]`, `Channel.send`
+   under refc dispatches through `system/channels_builtin.nim`'s
+   `storeAux` → `rawNewObj` on the *shared* heap, whose chunk-cache and
+   freelist bookkeeping in `system/alloc.nim` still consult per-thread
+   TLS for the owning allocator. The result is heap corruption with the
+   same `c.freeList = c.freeList.next` crash signature documented in
+   §2.2 — but reached through TLS-not-initialized rather than through a
+   freelist race.
+
+ORC sidesteps this because its allocation path on shared, atomically
+ref-counted cells (`nimRawNewObj` / `nimNewObj` in the ORC runtime) does
+not depend on the same per-thread GC-frame TLS for correctness:
+ref-count adjustment is `atomicInc`/`atomicDec` on the cell header, and
+the cycle collector is in-thread on Nim-owned threads only. A foreign
+wait-thread callback that allocates a shared cell under ORC therefore
+reaches a self-contained code path; the same callback under refc reaches
+TLS-dependent allocator state that was never set up.
 
 **Why `(mt)` brokers are also affected on Windows.** Earlier project notes
 said `(mt)` refc tests pass on Windows because their workloads tend to
@@ -83,8 +121,9 @@ sometimes short-circuiting the `RegisterWaitForSingleObject` slow path.
 That is true for the existing test suite under light load, but it is a
 property of the test patterns — not a guarantee. Sustained idle periods,
 foreign-thread attaches, and stress workloads such as ASAN's
-`test_foreign_thread_concurrent_lifecycle` all reach the slow path and
-expose the same use-after-free deterministically.
+`test_foreign_thread_concurrent_lifecycle` all reach the slow path,
+hand control to a non-Nim wait thread, and expose the same TLS-uninit
+hazard deterministically.
 
 **Why the FFI API cannot work around it.** The FFI API runtime spawns
 dedicated processing and delivery threads that block on
@@ -102,6 +141,16 @@ worthwhile.
 **Recommendation.** Build any nim-brokers code that uses `(mt)` brokers or
 the Broker FFI API on Windows with `--mm:orc`. Single-thread brokers
 remain fully refc-compatible on Windows.
+
+**Minimal repro.** [`test/probe_win_tls_uninit.nim`](../test/probe_win_tls_uninit.nim)
+isolates the hazard from chronos: it calls `RegisterWaitForSingleObject`
+directly and has the resulting wait-thread callback allocate Nim memory in
+a tight loop. Driven via the nimble tasks `probeWinTlsUninitOrc` and
+`probeWinTlsUninitRefc` (also exposed through the `memcheck_ci.yml`
+workflow_dispatch matrix), the probe is expected to exit 0 under
+`--mm:orc` and to crash under `--mm:refc` on Windows; non-Windows hosts
+skip with exit 77. If the refc job ever exits 0, the hypothesis above no
+longer reproduces and this section must be revisited.
 
 ---
 
@@ -240,6 +289,116 @@ which both clang and GCC reject as a hard error
 
 ---
 
+### 2.6 macOS + `--mm:orc`: `Channel[T]` slot-payload UAF after sender thread exit
+
+**Scope.** Affects `(mt)` brokers and the Broker FFI API on **macOS**
+(arm64 confirmed locally and in Memcheck CI; amd64 untested but expected
+to behave the same — same dyld TLV mechanism). Both **Nim 2.2.4** and
+**Nim 2.2.10** are affected; the bug is *not* fixed by upgrading Nim.
+The Memcheck CI run that originally appeared to "pass" on 2.2.10 was
+hiding the same crash behind a nimble 0.22 exit-code regression — the
+workflow now greps the log for ASAN markers as a backstop, so future
+runs report failure honestly.
+
+The crash only manifests when **both** of the following hold:
+
+1. A thread that emitted (or sent a request) on the broker's channel
+   has exited (`pthread_exit`, including via `joinThread`).
+2. The broker's bucket / channel for that context is **walked again
+   afterwards** — by another emit, by `Channel.close()` during a
+   shutdown path, or by recv on the listener side.
+
+If either condition is removed (transient threads but no channel
+reuse, OR channel reuse but persistent threads), no crash. Linux,
+Windows, and macOS + refc are all unaffected.
+
+**Symptom.** ASAN heap-use-after-free in
+`system::addToSharedFreeList` (`alloc.nim:796` on 2.2.10, `alloc.nim:1052`
+on 2.2.4) reached through `rawDealloc`. Two top-of-stack shapes are
+observed depending on which code path next walks the channel:
+
+```
+# Path A — next emit on a reused channel.
+Channel.send → rawSend → deallocShared → addToSharedFreeList   (UAF)
+
+# Path B — explicit broker teardown that closes the channel.
+Channel.close → deinitRawChannel → rawDealloc                   (UAF)
+```
+
+The freed memory is a ~13 KiB region originally `calloc`'d by
+`dyld::ThreadLocalVariables::instantiateVariable` for the exited thread's
+threadvars (Nim's `nimErrorFlag`, `MemRegion`, etc.) and then `free()`'d
+by macOS' `_pthread_tsd_cleanup` on `pthread_exit`.
+
+**Root cause.** On macOS, dyld backs each module's TLVs with a per-thread
+`calloc`'d block, and pthread's TSD cleanup `free()`s that block in one
+shot at thread exit. Nim's allocator stores `MemRegion` (the per-thread
+chunk arena) as a `{.threadvar.}` inside that block. `Channel[T].send`
+deep-copies its payload through `allocShared` paths whose chunk metadata
+ends up referenced by the channel's slot ring. Once the sender exits and
+dyld frees its TLV block, the slot-ring's free-list links into that
+block dangle. Whichever code path next iterates the ring trips the fault.
+
+Linux's glibc TLS lives in static thread-stack slots that
+`pthread_exit` does not free, so the analogous chunk references stay
+valid through the channel's lifetime. Windows uses PE TLS / `TlsAlloc`,
+which similarly does not free Nim's `MemRegion` as a single block. macOS
++ refc uses different chunk metadata layout that does not retain
+TLV-anchored references in the ring under the workloads we tested.
+
+**Why we can't fix this in the broker layer.** Three candidate
+mitigations were probed against an isolated repro
+(`test/probe_mt_uaf.nim`), all on macOS arm64 + Nim 2.2.10 + ORC + ASAN:
+
+| Probe mode | What it does | Result |
+|---|---|---|
+| `gcCollect`, `gcCollectAll` | `GC_fullCollect()` from the leaving thread before `pthread_exit`, plus extra collects between rounds | UAF — does not return the thread's arena chunks to a "shared safe" pool |
+| `shutdownEach` | Adds a public `shutdown()` that fully tears down the bucket and `Channel.close()`s it between rounds | UAF — `Channel.close()` itself walks the corrupted ring and trips ASAN |
+| `keepAlive`, `relistenKeepAlive` | Threads that emitted stay alive until program teardown | **OK** — the only mitigation that works |
+
+The corruption is inside `Channel[T]`'s slot ring, written by
+`Channel.send` from a thread whose TLV-anchored allocator state then
+disappears. The Nim stdlib offers no API to scrub the ring; iterating
+it is exactly what triggers the fault. We therefore cannot offer a
+broker-level workaround.
+
+**The mitigation that works.** Threads that send to or receive from an
+`(mt)` broker channel **must not exit before broker teardown**:
+
+- For application code: use a thread pool with persistent workers, or
+  pin emitter threads to the lifetime of the chronos event loop they
+  feed. Avoid `createThread` / `joinThread` patterns where the thread's
+  whole purpose is to send a few events and exit.
+- For tests: prefer one long-lived sender thread (or pool) per scenario
+  set over creating a fresh thread per scenario.
+
+**Test gating.** The `concurrent emitters from multiple threads`
+(`test/test_multi_thread_event_broker.nim`) and `concurrent requests
+from multiple threads` (`test/test_multi_thread_request_broker.nim`)
+scenarios that trip this UAF are already gated by the
+`brokerTestsSkipFragileRefcBursts` predicate — but only when the
+predicate matches macOS + 2.2.4 + refc + debug (see §3). The same gating
+needs to extend to macOS + ORC at any Nim version. Pending that
+extension, those scenarios will fail Memcheck CI on the macOS-ORC matrix
+cell. Until the predicate is widened, the only honest options are:
+gate the tests, replace the transient-thread pattern with a persistent
+emitter thread, or accept the failure.
+
+**Comment fix-up.** The pre-`when` comment in
+`test/test_multi_thread_event_broker.nim` ("the exact pattern the Nim
+2.2.4 macOS refc debug stdlib regression trips on") describes only one
+of the two distinct issues this scenario exposes. The second is the
+present one (any macOS + ORC build). When the predicate is widened, that
+comment should be updated to reference §2.2 *and* §2.6.
+
+**Upstream report.** Pending. The minimal repro at
+`test/probe_mt_uaf.nim` is suitable to file as a Nim issue: ~70 lines,
+no chronos-internal magic beyond what `(mt)` brokers already use, and
+selects six distinct probe modes via `-d:probeMode=...` that demonstrate
+the necessary-and-sufficient conditions.
+
+---
+
 ## 3. Compile-time test exclusion mechanism (§2.2 carve-out)
 
 The macOS + Nim 2.2.4 + refc + debug carve-out is implemented as a
@@ -296,6 +455,14 @@ is reduced.
 - `test_multi_thread_event_broker.nim` → `"concurrent emitters from multiple threads"`
 - `test_multi_thread_request_broker.nim` → `"concurrent requests from multiple threads"`
 
+> Note: these two scenarios *also* trip §2.6 on macOS + ORC at any Nim
+> version we tested. The current predicate
+> (`isNim224MacosRefcDebug`) does not gate them on that combo, so
+> Memcheck CI on the macOS-ORC cell will currently fail at these
+> scenarios. The predicate needs widening (or a sibling predicate added)
+> to cover macOS + ORC; until then, these tests should be considered
+> known-failing on macOS + ORC.
+
 **Nimble tasks gated at task level (no per-test selection):**
 
 - `nimble perftest` — perf tests are stress-by-design; the entire task
@@ -311,7 +478,12 @@ honestly tested.
 
 ---
 
-## 4. Quick reference: refc reliability profile (cross-thread / FFI paths)
+## 4. Quick reference: reliability profile (cross-thread / FFI paths)
+
+The table below applies to **refc** in particular; the **macOS + ORC**
+transient-thread carve-out from §2.6 cuts orthogonally across all rows
+that involve cross-thread channel sends — its mitigation (persistent
+sender threads) is independent of payload shape or pacing.
 
 | Pattern | Reliability on supported cells |
 |---|---|

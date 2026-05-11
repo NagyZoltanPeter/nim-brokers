@@ -241,6 +241,34 @@ static void test_requests_multiple_echo() {
     lib.shutdown();
 }
 
+static void test_dual_sig_zero() {
+    Typemappingtestlib lib;
+    lib.createContext();
+#ifdef USE_CBOR
+    auto r = lib.dualSigRequestZero();
+#else
+    auto r = lib.dualSigRequest();
+#endif
+    CHECK(r.isOk());
+    CHECK_EQ(r->label, std::string("zero"));
+    CHECK_EQ(r->counter, 0);
+    lib.shutdown();
+}
+
+static void test_dual_sig_with_label() {
+    Typemappingtestlib lib;
+    lib.createContext();
+#ifdef USE_CBOR
+    auto r = lib.dualSigRequestWithLabel("hello", 7);
+#else
+    auto r = lib.dualSigRequest("hello", 7);
+#endif
+    CHECK(r.isOk());
+    CHECK_EQ(r->label, std::string("hello"));
+    CHECK_EQ(r->counter, 7);
+    lib.shutdown();
+}
+
 // ============================================================================
 // TestEvents
 // ============================================================================
@@ -2094,6 +2122,8 @@ int main() {
     RUN(test_requests_echo);
     RUN(test_requests_counter_increments);
     RUN(test_requests_multiple_echo);
+    RUN(test_dual_sig_zero);
+    RUN(test_dual_sig_with_label);
 
     printf("\n--- TestEvents ---\n");
     RUN(test_events_counter_changed);

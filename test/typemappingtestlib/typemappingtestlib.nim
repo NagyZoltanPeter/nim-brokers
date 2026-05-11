@@ -72,6 +72,21 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[CounterRequest, string]] {.async.}
 
+## DualSigRequest: same broker exposes BOTH a zero-arg and an N-arg
+## signature. Each one becomes a separate C export plus a separate
+## method on every language wrapper, with a suffix derived from the
+## proc name (after the literal "signature" prefix). This covers the
+## documented "two signatures in one broker" feature for every wrapper.
+RequestBroker(API):
+  type DualSigRequest = object
+    label*: string
+    counter*: int32
+
+  proc signatureZero*(): Future[Result[DualSigRequest, string]] {.async.}
+  proc signatureWithLabel*(
+    label: string, bump: int32
+  ): Future[Result[DualSigRequest, string]] {.async.}
+
 # ---------------------------------------------------------------------------
 # Request Brokers — extended scalar type coverage
 # ---------------------------------------------------------------------------
@@ -318,6 +333,23 @@ proc setupProviders(ctx: BrokerContext) =
       inc gCounter
       await CounterChanged.emit(gProviderCtx, CounterChanged(value: gCounter))
       return ok(CounterRequest(value: gCounter)),
+  )
+
+  # DualSigRequest — a broker with both a zero-arg and an N-arg signature.
+  # Each provider serves its respective signature; both coexist on the same
+  # broker type. The zero-arg variant returns the sentinel ("zero", 0); the
+  # N-arg variant echoes the supplied label and bump.
+  discard DualSigRequest.setProvider(
+    ctx,
+    proc(): Future[Result[DualSigRequest, string]] {.closure, async.} =
+      return ok(DualSigRequest(label: "zero", counter: 0)),
+  )
+  discard DualSigRequest.setProvider(
+    ctx,
+    proc(
+        label: string, bump: int32
+    ): Future[Result[DualSigRequest, string]] {.closure, async.} =
+      return ok(DualSigRequest(label: label, counter: bump)),
   )
 
   # --- Scalar type providers ---

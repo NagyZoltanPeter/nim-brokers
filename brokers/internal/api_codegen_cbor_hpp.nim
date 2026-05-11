@@ -469,7 +469,9 @@ proc generateCborCppHeaderFile*(
       continue
     if e.responseTypeName notin emittablePayloads:
       continue
-    envelopeNames.add(e.responseTypeName & "Envelope")
+    let envName = e.responseTypeName & "Envelope"
+    if envName notin envelopeNames:
+      envelopeNames.add(envName)
 
   var argsStructByApi: seq[(string, string)] = @[] # (apiName, argsStructName)
   var argsMethodSupported: seq[(string, bool)] = @[] # (apiName, allMapped)
@@ -633,11 +635,15 @@ proc generateCborCppHeaderFile*(
   # ==================================================================
   # Section 3: Envelope + args structs (internal plumbing, after class)
   # ==================================================================
+  var emittedEnvelopes: seq[string] = @[]
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
     if e.responseTypeName notin emittablePayloads:
       continue
+    if e.responseTypeName in emittedEnvelopes:
+      continue
+    emittedEnvelopes.add(e.responseTypeName)
     let envName = e.responseTypeName & "Envelope"
     h.add("struct " & envName & " {\n")
     h.add("  std::optional<" & e.responseTypeName & "> ok;\n")

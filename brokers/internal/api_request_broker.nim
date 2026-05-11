@@ -64,6 +64,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
       return ""
     toSnakeCase(sigName["signature".len .. ^1])
 
+  proc signaturePascalSuffix(sigName: string): string {.compileTime.} =
+    ## PascalCase form of the part of `sigName` after the literal `signature`
+    ## prefix. e.g. `signatureWithLabel` -> `WithLabel`, `signatureZero` ->
+    ## `Zero`.
+    if sigName.len <= "signature".len:
+      return ""
+    sigName["signature".len .. ^1]
+
   for stmt in body:
     case stmt.kind
     of nnkProcDef:
@@ -1392,6 +1400,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
       if not argSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(argSigName))
+        let pyArgMethodName =
+          if hasDualSignatures:
+            pySnakeName & "_" & signatureNameSuffix(argSigName)
+          else:
+            pySnakeName
         var pyParams = "self"
         var callArgs = "self._ctx"
         var aliasArgs: seq[string] = @[]
@@ -1434,7 +1447,7 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
         let pyRetTy = "Result[" & pyResultName & "]"
         var pyMethod =
-          "    def " & pySnakeName & "(" & pyParams & ") -> " & pyRetTy & ":\n"
+          "    def " & pyArgMethodName & "(" & pyParams & ") -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
         pyMethod.add(pyPreCall)
         pyMethod.add(
@@ -1442,18 +1455,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         )
         gApiPyMethods.add(pyMethod)
         gApiPyInterfaceSummary.add(
-          pySnakeName & "(" & summaryParams.join(", ") & ") -> " & pyRetTy
+          pyArgMethodName & "(" & summaryParams.join(", ") & ") -> " & pyRetTy
         )
-      elif not zeroArgSig.isNil():
+      if not zeroArgSig.isNil():
         let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+        let pyZeroMethodName =
+          if hasDualSignatures:
+            pySnakeName & "_" & signatureNameSuffix(zeroArgSigName)
+          else:
+            pySnakeName
         let pyRetTy = "Result[" & pyResultName & "]"
-        var pyMethod = "    def " & pySnakeName & "(self) -> " & pyRetTy & ":\n"
+        var pyMethod = "    def " & pyZeroMethodName & "(self) -> " & pyRetTy & ":\n"
         pyMethod.add("        \"\"\"" & typeDisplayName & " request.\"\"\"\n")
         pyMethod.add(
           buildPyMethodBody(funcName, "self._ctx", pyResultName, pyFreeFuncName)
         )
         gApiPyMethods.add(pyMethod)
-        gApiPyInterfaceSummary.add(pySnakeName & "() -> " & pyRetTy)
+        gApiPyInterfaceSummary.add(pyZeroMethodName & "() -> " & pyRetTy)
 
   # Step 6d: Generate Rust wrapper crate entries (when -d:BrokerFfiApiGenRust)
   when defined(BrokerFfiApiGenRust):
@@ -1811,6 +1829,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
         if not argSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(argSigName))
+          let rsArgMethodName =
+            if hasDualSignatures:
+              rsSnakeName & "_" & signatureNameSuffix(argSigName)
+            else:
+              rsSnakeName
           var rsParams = "&self"
           var rsCallArgs = "self.ctx"
           var rsPreCall = ""
@@ -1834,25 +1857,441 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               rsCallArgs.add(", " & rsArgPassArgs(pName, pType))
               rsSummaryParams.add(pName & ": " & safeTy)
           var rsMethod =
-            "    pub fn " & rsSnakeName & "(" & rsParams & ") -> Result<" & rsResultName &
-            "> {\n"
+            "    pub fn " & rsArgMethodName & "(" & rsParams & ") -> Result<" &
+            rsResultName & "> {\n"
           rsMethod.add(rsPreCall)
           rsMethod.add(rsBuildBody(funcName, rsCallArgs))
           rsMethod.add("    }")
           gApiRustMethods.add(rsMethod)
           gApiRustInterfaceSummary.add(
-            rsSnakeName & "(" & rsSummaryParams.join(", ") & ") -> Result<" &
+            rsArgMethodName & "(" & rsSummaryParams.join(", ") & ") -> Result<" &
               rsResultName & ">"
           )
-        elif not zeroArgSig.isNil():
+        if not zeroArgSig.isNil():
           let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          let rsZeroMethodName =
+            if hasDualSignatures:
+              rsSnakeName & "_" & signatureNameSuffix(zeroArgSigName)
+            else:
+              rsSnakeName
           var rsMethod =
-            "    pub fn " & rsSnakeName & "(&self) -> Result<" & rsResultName & "> {\n"
+            "    pub fn " & rsZeroMethodName & "(&self) -> Result<" & rsResultName &
+            "> {\n"
           rsMethod.add(rsBuildBody(funcName, "self.ctx"))
           rsMethod.add("    }")
           gApiRustMethods.add(rsMethod)
           gApiRustInterfaceSummary.add(
-            rsSnakeName & "() -> Result<" & rsResultName & ">"
+            rsZeroMethodName & "() -> Result<" & rsResultName & ">"
+          )
+
+  # Step 6e: Generate Go wrapper module entries (when -d:BrokerFfiApiGenGo)
+  when defined(BrokerFfiApiGenGo):
+    if not hideFromForeignSurface:
+      let goExportedName = typeDisplayName
+      let goFreeFuncName = apiPublicCName("free_" & baseExportName & "_result")
+      let goResultName = typeDisplayName
+      let goCResultName = "C." & typeDisplayName & "CResult"
+
+      proc goScalarMappable(t: NimNode): bool {.compileTime.} =
+        if isCStringType(t):
+          return true
+        if t.kind == nnkIdent:
+          let n = ($t).toLowerAscii()
+          if n in [
+            "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "byte",
+            "uint16", "uint32", "uint64", "float", "float32", "float64",
+          ]:
+            return true
+          if isEnumRegistered($t):
+            return true
+          if isAliasOrDistinctRegistered($t):
+            return true
+        false
+
+      proc goTypeMappable(t: NimNode): bool {.compileTime.} =
+        if goScalarMappable(t):
+          return true
+        if isSeqType(t):
+          let elem = seqItemTypeName(t)
+          if isNimPrimitive(elem):
+            return true
+          if isTypeRegistered(elem):
+            let entry = lookupTypeEntry(elem)
+            if entry.kind == atkObject:
+              for f in entry.fields:
+                let lc = f.nimType.toLowerAscii()
+                if lc notin [
+                  "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                  "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                  "string", "cstring",
+                ]:
+                  return false
+              return true
+          return false
+        if isArrayTypeNode(t):
+          let elem = arrayNodeElemName(t)
+          return
+            isNimPrimitive(elem) and elem.toLowerAscii() notin ["string", "cstring"]
+        false
+
+      proc goExportedField(name: string): string {.compileTime.} =
+        if name.len > 0 and name[0] >= 'a' and name[0] <= 'z':
+          chr(ord(name[0]) - 32) & name[1 ..^ 1]
+        else:
+          name
+
+      proc goCgoFieldType(t: NimNode): string {.compileTime.} =
+        ## Type of the field as it appears in the cgo C struct.
+        nimTypeToGoCgo(t)
+
+      var goAnyUnmappable = false
+      if hasInlineFields:
+        for i in 0 ..< fieldNames.len:
+          if not goTypeMappable(fieldTypes[i]):
+            goAnyUnmappable = true
+            break
+      if not goAnyUnmappable and not argSig.isNil():
+        for paramDef in argParams:
+          for i in 0 ..< paramDef.len - 2:
+            let pType = paramDef[paramDef.len - 2]
+            if not goTypeMappable(pType):
+              goAnyUnmappable = true
+              break
+          if goAnyUnmappable:
+            break
+
+      if goAnyUnmappable:
+        gApiGoMethods.add(
+          "// TODO(go-codegen): request '" & typeDisplayName &
+            "' uses a Nim type combination not yet mappable to native Go."
+        )
+      else:
+        # ---- Result struct ----------------------------------------------
+        block:
+          var goSafe = "type " & goResultName & " struct {\n"
+          if hasInlineFields:
+            for i in 0 ..< fieldNames.len:
+              let fName = $fieldNames[i]
+              let fType = fieldTypes[i]
+              let exName = goExportedField(fName)
+              if isSeqType(fType) or isArrayTypeNode(fType):
+                let elem =
+                  if isSeqType(fType):
+                    seqItemTypeName(fType)
+                  else:
+                    arrayNodeElemName(fType)
+                let lc = elem.toLowerAscii()
+                let goElem =
+                  if lc in ["string", "cstring"]:
+                    "string"
+                  else:
+                    nimTypeToGo(ident(elem))
+                goSafe.add("\t" & exName & " []" & goElem & "\n")
+              else:
+                goSafe.add("\t" & exName & " " & nimTypeToGo(fType) & "\n")
+          else:
+            goSafe.add("\t// (no fields)\n")
+          goSafe.add("}")
+          gApiGoStructs.add(goSafe)
+
+        # ---- The request method (one per signature) ----------------------
+        var goConvertCode = ""
+        if hasInlineFields:
+          for i in 0 ..< fieldNames.len:
+            let fName = $fieldNames[i]
+            let fType = fieldTypes[i]
+            let exName = goExportedField(fName)
+            if isCStringType(fType):
+              goConvertCode.add(
+                "\tif r." & fName & " != nil { out." & exName & " = C.GoString(r." &
+                  fName & ") }\n"
+              )
+            elif fType.kind == nnkIdent and isEnumRegistered($fType):
+              goConvertCode.add(
+                "\tout." & exName & " = " & $fType & "(int32(r." & fName & "))\n"
+              )
+            elif fType.kind == nnkIdent and isAliasOrDistinctRegistered($fType):
+              goConvertCode.add(
+                "\tout." & exName & " = " & nimTypeToGo(fType) & "(r." & fName & ")\n"
+              )
+            elif isSeqType(fType):
+              let elem = seqItemTypeName(fType)
+              let lc = elem.toLowerAscii()
+              if lc in ["string", "cstring"]:
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
+                goConvertCode.add(
+                  "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
+                )
+                goConvertCode.add("\t\tout." & exName & " = make([]string, len(cs))\n")
+                goConvertCode.add("\t\tfor i, p := range cs {\n")
+                goConvertCode.add(
+                  "\t\t\tif p != nil { out." & exName & "[i] = C.GoString(p) }\n"
+                )
+                goConvertCode.add("\t\t}\n")
+                goConvertCode.add("\t}\n")
+              elif isNimPrimitive(elem):
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
+                goConvertCode.add(
+                  "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
+                )
+                goConvertCode.add(
+                  "\t\tout." & exName & " = make([]" & nimTypeToGo(ident(elem)) &
+                    ", len(cs))\n"
+                )
+                goConvertCode.add("\t\tfor i, v := range cs {\n")
+                goConvertCode.add(
+                  "\t\t\tout." & exName & "[i] = " & nimTypeToGo(ident(elem)) & "(v)\n"
+                )
+                goConvertCode.add("\t\t}\n")
+                goConvertCode.add("\t}\n")
+              elif isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+                let entry = lookupTypeEntry(elem)
+                goConvertCode.add(
+                  "\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
+                goConvertCode.add(
+                  "\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName & "_count))\n"
+                )
+                goConvertCode.add(
+                  "\t\tout." & exName & " = make([]" & elem & ", len(cs))\n"
+                )
+                goConvertCode.add("\t\tfor i := range cs {\n")
+                for f in entry.fields:
+                  let lcf = f.nimType.toLowerAscii()
+                  let efName = goExportedField(f.name)
+                  if lcf in ["string", "cstring"]:
+                    goConvertCode.add(
+                      "\t\t\tif cs[i]." & f.name & " != nil { out." & exName & "[i]." &
+                        efName & " = C.GoString(cs[i]." & f.name & ") }\n"
+                    )
+                  else:
+                    goConvertCode.add(
+                      "\t\t\tout." & exName & "[i]." & efName & " = " &
+                        nimTypeToGo(ident(f.nimType)) & "(cs[i]." & f.name & ")\n"
+                    )
+                goConvertCode.add("\t\t}\n")
+                goConvertCode.add("\t}\n")
+            elif isArrayTypeNode(fType):
+              let n = arrayNodeSize(fType)
+              let elem = arrayNodeElemName(fType)
+              goConvertCode.add(
+                "\tout." & exName & " = make([]" & nimTypeToGo(ident(elem)) & ", " & $n &
+                  ")\n"
+              )
+              goConvertCode.add("\tfor i := 0; i < " & $n & "; i++ {\n")
+              goConvertCode.add(
+                "\t\tout." & exName & "[i] = " & nimTypeToGo(ident(elem)) & "(r." & fName &
+                  "[i])\n"
+              )
+              goConvertCode.add("\t}\n")
+            else:
+              # Plain scalar field. Convert via Go primitive type conversion.
+              goConvertCode.add(
+                "\tout." & exName & " = " & nimTypeToGo(fType) & "(r." & fName & ")\n"
+              )
+
+        proc goArgPreCall(pName: string, pType: NimNode): string {.compileTime.} =
+          if isCStringType(pType):
+            return
+              "\t_c_" & pName & " := C.CString(" & pName & ")\n" &
+              "\tdefer C.free(unsafe.Pointer(_c_" & pName & "))\n"
+          if isSeqType(pType):
+            let elem = seqItemTypeName(pType)
+            let lc = elem.toLowerAscii()
+            if lc in ["string", "cstring"]:
+              var s = "\t_cs_" & pName & " := make([]*C.char, len(" & pName & "))\n"
+              s.add("\tfor i, sv := range " & pName & " {\n")
+              s.add("\t\t_cs_" & pName & "[i] = C.CString(sv)\n")
+              s.add("\t}\n")
+              s.add("\tdefer func() {\n")
+              s.add("\t\tfor _, p := range _cs_" & pName & " {\n")
+              s.add("\t\t\tC.free(unsafe.Pointer(p))\n")
+              s.add("\t\t}\n")
+              s.add("\t}()\n")
+              s.add("\tvar _ptr_" & pName & " **C.char\n")
+              s.add(
+                "\tif len(_cs_" & pName & ") > 0 { _ptr_" & pName &
+                  " = (**C.char)(unsafe.Pointer(&_cs_" & pName & "[0])) }\n"
+              )
+              return s
+            if isNimPrimitive(elem):
+              let cgoElem = nimTypeToGoCgo(ident(elem))
+              var s = "\tvar _ptr_" & pName & " *" & cgoElem & "\n"
+              s.add(
+                "\tif len(" & pName & ") > 0 { _ptr_" & pName & " = (*" & cgoElem &
+                  ")(unsafe.Pointer(&" & pName & "[0])) }\n"
+              )
+              return s
+            if isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              let entry = lookupTypeEntry(elem)
+              var s =
+                "\t_items_" & pName & " := make([]C." & elem & "CItem, len(" & pName &
+                "))\n"
+              s.add("\tvar _strs_" & pName & " []*C.char\n")
+              s.add("\tfor i, _it := range " & pName & " {\n")
+              for f in entry.fields:
+                let lcf = f.nimType.toLowerAscii()
+                let exFf = goExportedField(f.name)
+                if lcf in ["string", "cstring"]:
+                  s.add("\t\t{\n")
+                  s.add("\t\t\t_cs := C.CString(_it." & exFf & ")\n")
+                  s.add(
+                    "\t\t\t_strs_" & pName & " = append(_strs_" & pName & ", _cs)\n"
+                  )
+                  s.add("\t\t\t_items_" & pName & "[i]." & f.name & " = _cs\n")
+                  s.add("\t\t}\n")
+                else:
+                  s.add(
+                    "\t\t_items_" & pName & "[i]." & f.name & " = " &
+                      nimTypeToGoCgo(ident(f.nimType)) & "(_it." & exFf & ")\n"
+                  )
+              s.add("\t}\n")
+              s.add("\tdefer func() {\n")
+              s.add("\t\tfor _, p := range _strs_" & pName & " {\n")
+              s.add("\t\t\tC.free(unsafe.Pointer(p))\n")
+              s.add("\t\t}\n")
+              s.add("\t}()\n")
+              s.add("\tvar _ptr_" & pName & " *C." & elem & "CItem\n")
+              s.add(
+                "\tif len(_items_" & pName & ") > 0 { _ptr_" & pName & " = (*C." & elem &
+                  "CItem)(unsafe.Pointer(&_items_" & pName & "[0])) }\n"
+              )
+              return s
+            return ""
+          ""
+
+        proc goArgPassArgs(pName: string, pType: NimNode): string {.compileTime.} =
+          if isCStringType(pType):
+            return "_c_" & pName
+          if isSeqType(pType):
+            let elem = seqItemTypeName(pType)
+            let lc = elem.toLowerAscii()
+            if lc in ["string", "cstring"]:
+              return "_ptr_" & pName & ", C.int32_t(len(_cs_" & pName & "))"
+            if isNimPrimitive(elem):
+              return "_ptr_" & pName & ", C.int32_t(len(" & pName & "))"
+            if isTypeRegistered(elem) and lookupTypeEntry(elem).kind == atkObject:
+              return "_ptr_" & pName & ", C.int32_t(len(_items_" & pName & "))"
+            return pName
+          if isArrayTypeNode(pType):
+            return
+              "(*" & nimTypeToGoCgo(ident(arrayNodeElemName(pType))) &
+              ")(unsafe.Pointer(&" & pName & "[0]))"
+          if pType.kind == nnkIdent and isEnumRegistered($pType):
+            return "C." & $pType & "_C(" & pName & ")"
+          if pType.kind == nnkIdent and isAliasOrDistinctRegistered($pType):
+            return nimTypeToGoCgo(pType) & "(" & pName & ")"
+          if isCStringType(pType):
+            return "_c_" & pName
+          # Plain scalar
+          nimTypeToGoCgo(pType) & "(" & pName & ")"
+
+        proc goBuildBody(funcName, callArgs: string): string {.compileTime.} =
+          result = ""
+          result.add(
+            "\tif l.ctx == 0 { return " & goResultName &
+              "{}, errors.New(\"library context is not created\") }\n"
+          )
+          result.add("\tr := C." & funcName & "(" & callArgs & ")\n")
+          result.add("\tif r.error_message != nil {\n")
+          result.add("\t\tmsg := C.GoString(r.error_message)\n")
+          result.add("\t\tC." & goFreeFuncName & "(&r)\n")
+          result.add("\t\treturn " & goResultName & "{}, errors.New(msg)\n")
+          result.add("\t}\n")
+          result.add("\tvar out " & goResultName & "\n")
+          result.add(goConvertCode)
+          result.add("\tC." & goFreeFuncName & "(&r)\n")
+          result.add("\treturn out, nil\n")
+
+        if not argSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(argSigName))
+          let goArgMethodName =
+            if hasDualSignatures:
+              goExportedName & signaturePascalSuffix(argSigName)
+            else:
+              goExportedName
+          var goParams = "l *__LIB_OWNER_CLASS__"
+          var goCallArgs = "l.ctx"
+          var goPreCall = ""
+          var goSummaryParams: seq[string] = @[]
+          for paramDef in argParams:
+            for i in 0 ..< paramDef.len - 2:
+              let pName = $paramDef[i]
+              let pType = paramDef[paramDef.len - 2]
+              let safeTy =
+                if isSeqType(pType) or isArrayTypeNode(pType):
+                  let elem =
+                    if isSeqType(pType):
+                      seqItemTypeName(pType)
+                    else:
+                      arrayNodeElemName(pType)
+                  let lc = elem.toLowerAscii()
+                  if lc in ["string", "cstring"]:
+                    "[]string"
+                  else:
+                    "[]" & nimTypeToGo(ident(elem))
+                else:
+                  nimTypeToGo(pType)
+              goParams.add(", " & pName & " " & safeTy)
+              goPreCall.add(goArgPreCall(pName, pType))
+              goCallArgs.add(", " & goArgPassArgs(pName, pType))
+              goSummaryParams.add(pName & " " & safeTy)
+          var goMethod =
+            "func (" & goParams & ") " & goArgMethodName & "(" & ") (" & goResultName &
+            ", error) {\n"
+          # Reformat to avoid empty paren after method name: rebuild.
+          goMethod = "func (l *__LIB_OWNER_CLASS__) " & goArgMethodName & "("
+          var firstParam = true
+          for paramDef in argParams:
+            for i in 0 ..< paramDef.len - 2:
+              let pName = $paramDef[i]
+              let pType = paramDef[paramDef.len - 2]
+              let safeTy =
+                if isSeqType(pType) or isArrayTypeNode(pType):
+                  let elem =
+                    if isSeqType(pType):
+                      seqItemTypeName(pType)
+                    else:
+                      arrayNodeElemName(pType)
+                  let lc = elem.toLowerAscii()
+                  if lc in ["string", "cstring"]:
+                    "[]string"
+                  else:
+                    "[]" & nimTypeToGo(ident(elem))
+                else:
+                  nimTypeToGo(pType)
+              if not firstParam:
+                goMethod.add(", ")
+              goMethod.add(pName & " " & safeTy)
+              firstParam = false
+          goMethod.add(") (" & goResultName & ", error) {\n")
+          goMethod.add(goPreCall)
+          goMethod.add(goBuildBody(funcName, goCallArgs))
+          goMethod.add("}")
+          gApiGoMethods.add(goMethod)
+          gApiGoInterfaceSummary.add(
+            goArgMethodName & "(" & goSummaryParams.join(", ") & ") (" & goResultName &
+              ", error)"
+          )
+        if not zeroArgSig.isNil():
+          let funcName = apiPublicCName(exportedFuncName(zeroArgSigName))
+          let goZeroMethodName =
+            if hasDualSignatures:
+              goExportedName & signaturePascalSuffix(zeroArgSigName)
+            else:
+              goExportedName
+          var goMethod =
+            "func (l *__LIB_OWNER_CLASS__) " & goZeroMethodName & "() (" & goResultName &
+            ", error) {\n"
+          goMethod.add(goBuildBody(funcName, "l.ctx"))
+          goMethod.add("}")
+          gApiGoMethods.add(goMethod)
+          gApiGoInterfaceSummary.add(
+            goZeroMethodName & "() (" & goResultName & ", error)"
           )
 
   # Step 7: Append free_result header declaration

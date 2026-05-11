@@ -39,8 +39,8 @@ jobs:
         platform:
           - { id: linux-amd64,  runs-on: ubuntu-latest }
           - { id: win-amd64,    runs-on: windows-latest }
-          - { id: macos-arm64,  runs-on: macos-14 }
-          - { id: macos-amd64,  runs-on: macos-13 }
+          - { id: macos-arm64,  runs-on: macos-latest }
+          - { id: macos-amd64,  runs-on: macos-15-intel  }
         exclude:
           # jiro4989/setup-nim-action does not support installing Nim devel
           # on Windows. Manual devel verification on Windows stays available
@@ -187,6 +187,23 @@ jobs:
 
       - name: Run Rust parity matrix (CBOR mode)
         run: nimble runTypeMapTestLibCborRust -y --verbose
+
+      - name: Set up Go toolchain (1.21)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run Go FFI example (native mode)
+        run: nimble runFfiExampleGo -y --verbose
+
+      - name: Run Go FFI example (CBOR mode)
+        run: nimble runFfiExampleCborGo -y --verbose
+
+      - name: Run Go parity matrix (native mode)
+        run: nimble runTypeMapTestLibGo -y --verbose
+
+      - name: Run Go parity matrix (CBOR mode)
+        run: nimble runTypeMapTestLibCborGo -y --verbose
 
   nph:
     runs-on: ubuntu-latest

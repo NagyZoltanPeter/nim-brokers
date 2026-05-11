@@ -157,7 +157,9 @@ proc cmakeWindowsConfigureExtras(): string =
   else:
     ""
 
-proc buildFfiExampleFlags(generatePy = false, generateRust = false): string =
+proc buildFfiExampleFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
@@ -171,16 +173,22 @@ proc buildFfiExampleFlags(generatePy = false, generateRust = false): string =
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildFfiExampleLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildFfiExampleFlags(generatePy, generateRust) &
+proc buildFfiExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildFfiExampleFlags(generatePy, generateRust, generateGo) &
     " examples/ffiapi/nimlib/mylib.nim"
 
 # Parity build: SAME mylib.nim source compiled with the CBOR FFI flag,
 # emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
 # compile against the CBOR-generated mylib.h / mylib.hpp — proves the
 # generated wrapper interface is shape-identical to the native build.
-proc buildFfiExampleCborFlags(generatePy = false, generateRust = false): string =
+proc buildFfiExampleCborFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("mylib"))
@@ -194,12 +202,18 @@ proc buildFfiExampleCborFlags(generatePy = false, generateRust = false): string 
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildFfiExampleCborLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust) &
+proc buildFfiExampleCborLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust, generateGo) &
     " examples/ffiapi/nimlib/mylib.nim"
 
-proc buildTorpedoExampleFlags(generatePy = false, generateRust = false): string =
+proc buildTorpedoExampleFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
@@ -213,12 +227,18 @@ proc buildTorpedoExampleFlags(generatePy = false, generateRust = false): string 
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildTorpedoExampleLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildTorpedoExampleFlags(generatePy, generateRust) &
+proc buildTorpedoExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildTorpedoExampleFlags(generatePy, generateRust, generateGo) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc buildTorpedoExampleCborFlags(generatePy = false, generateRust = false): string =
+proc buildTorpedoExampleCborFlags(
+    generatePy = false, generateRust = false, generateGo = false
+): string =
   result =
     "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("torpedolib"))
@@ -232,9 +252,13 @@ proc buildTorpedoExampleCborFlags(generatePy = false, generateRust = false): str
     result.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
     result.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    result.add(" -d:BrokerFfiApiGenGo")
 
-proc buildTorpedoExampleCborLibrary(generatePy = false, generateRust = false) =
-  exec "nim c " & buildTorpedoExampleCborFlags(generatePy, generateRust) &
+proc buildTorpedoExampleCborLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  exec "nim c " & buildTorpedoExampleCborFlags(generatePy, generateRust, generateGo) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
 proc ffiExamplesBuildDir(useCbor = false): string =
@@ -518,6 +542,54 @@ task runFfiExampleCborRust,
   exec quoteArg(findCargoExe()) &
     " run --features cbor --manifest-path examples/ffiapi/rust_example/Cargo.toml"
 
+proc findGoExe(): string =
+  ## Returns the `go` toolchain invocation token. Like cargo via rustup,
+  ## we rely on PATH lookup at exec time so the user's installed Go is used.
+  if findExe("go").len == 0:
+    quit "Go toolchain not found. Install Go 1.21+ or add `go` to PATH."
+  result = "go"
+
+proc writeFfiGoModFor(buildDir: string) =
+  ## The generated Go module is emitted into either `nimlib/build/mylib_go`
+  ## or `nimlib/build_cbor/mylib_go`. Go can't conditionally pick a
+  ## `replace` target by build tag, so we rewrite the example's go.mod
+  ## per mode before invoking the Go toolchain.
+  let modPath = "examples/ffiapi/go_example/go.mod"
+  var contents = "// Generated by nim-brokers test harness — do not edit.\n"
+  contents.add("module github.com/status-im/nim-brokers/examples/ffiapi/go_example\n\n")
+  contents.add("go 1.21\n\n")
+  contents.add("require mylib v0.0.0\n")
+  if buildDir == "build_cbor":
+    contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
+  contents.add("\nreplace mylib => ../nimlib/" & buildDir & "/mylib_go\n")
+  writeFile(modPath, contents)
+  # Sync go.sum + transitive deps for the cbor case.
+  if buildDir == "build_cbor":
+    withDir "examples/ffiapi/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+
+task buildFfiExampleGo,
+  "Build the FFI API example library + generated Go wrapper module (native mode)":
+  buildFfiExampleLibrary(generateGo = true)
+
+task runFfiExampleGo,
+  "Build the FFI API example library + run the Go example (native mode)":
+  buildFfiExampleLibrary(generateGo = true)
+  writeFfiGoModFor("build")
+  withDir "examples/ffiapi/go_example":
+    exec quoteArg(findGoExe()) & " run ."
+
+task buildFfiExampleCborGo,
+  "Build the FFI API example library (CBOR mode) + generated Go wrapper":
+  buildFfiExampleCborLibrary(generateGo = true)
+
+task runFfiExampleCborGo,
+  "Build the FFI API example library (CBOR mode) + run the Go example":
+  buildFfiExampleCborLibrary(generateGo = true)
+  writeFfiGoModFor("build_cbor")
+  withDir "examples/ffiapi/go_example":
+    exec quoteArg(findGoExe()) & " run ."
+
 task testFfiApiCmake,
   "Validate the generated <lib>Config.cmake by building a downstream consumer":
   ## Builds the native FFI example (which emits mylibConfig.cmake next to
@@ -579,7 +651,9 @@ task runFfiExampleCborPy,
 # -d:BrokerFfiApiCBOR into build_cbor/ and drives the SAME
 # test_typemappingtestlib.{cpp,py} test code against that build (via the
 # CMake project's USE_CBOR=ON toggle for C++).
-proc buildTypeMapTestLibCbor(genPy: bool = false, genRust: bool = false) =
+proc buildTypeMapTestLibCbor(
+    genPy: bool = false, genRust: bool = false, genGo: bool = false
+) =
   let mm =
     if existsEnv("MM"):
       getEnv("MM")
@@ -601,6 +675,8 @@ proc buildTypeMapTestLibCbor(genPy: bool = false, genRust: bool = false) =
     flags.add(" -d:BrokerFfiApiGenPy")
   if genRust or existsEnv("GEN_RUST"):
     flags.add(" -d:BrokerFfiApiGenRust")
+  if genGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
 task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
@@ -631,6 +707,34 @@ task runTypeMapTestLibCborRust,
   exec quoteArg(findCargoExe()) &
     " run --features cbor --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
 
+proc writeTypeMapGoModFor(buildDir: string) =
+  let modPath = "test/typemappingtestlib/go_test/go.mod"
+  var contents = "// Generated by nim-brokers test harness — do not edit.\n"
+  contents.add(
+    "module github.com/status-im/nim-brokers/test/typemappingtestlib/go_test\n\n"
+  )
+  contents.add("go 1.21\n\n")
+  contents.add("require typemappingtestlib v0.0.0\n")
+  if buildDir == "build_cbor":
+    contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
+  contents.add(
+    "\nreplace typemappingtestlib => ../" & buildDir & "/typemappingtestlib_go\n"
+  )
+  writeFile(modPath, contents)
+  if buildDir == "build_cbor":
+    withDir "test/typemappingtestlib/go_test":
+      exec quoteArg(findGoExe()) & " mod tidy"
+
+task runTypeMapTestLibCborGo,
+  "Build the CBOR-mode parity library + Go wrapper and run the Go parity test":
+  buildTypeMapTestLibCbor(genGo = true)
+  writeTypeMapGoModFor("build_cbor")
+  withDir "test/typemappingtestlib/go_test":
+    # The test consumer keeps `-tags cbor` to gate `test_obj_as_param`
+    # in cbor_only_cbor.go (the broker definition is gated to CBOR mode
+    # because object-as-request-param fails on every native backend).
+    exec quoteArg(findGoExe()) & " run -tags cbor ."
+
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":
   buildTypeMapTestLibCbor(true)
@@ -650,7 +754,10 @@ task runTypeMapTestLibCborPy,
     quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
 proc buildTypeMapTestLibrary(
-    mm: string = "orc", release: bool = false, generateRust: bool = false
+    mm: string = "orc",
+    release: bool = false,
+    generateRust: bool = false,
+    generateGo: bool = false,
 ) =
   var flags =
     "-d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
@@ -663,6 +770,8 @@ proc buildTypeMapTestLibrary(
     flags.add(" -d:release")
   if generateRust or existsEnv("GEN_RUST"):
     flags.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
 proc typeMapTestCmakeBuildDir(): string =
@@ -800,6 +909,13 @@ task runTypeMapTestLibRust,
   exec quoteArg(findCargoExe()) &
     " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
 
+task runTypeMapTestLibGo,
+  "Build the native typemapping parity library + Go wrapper and run the Go parity test":
+  buildTypeMapTestLibrary(generateGo = true)
+  writeTypeMapGoModFor("build")
+  withDir "test/typemappingtestlib/go_test":
+    exec quoteArg(findGoExe()) & " run ."
+
 task testFfiApi,
   "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
   for mm in ["orc", "refc"]:
@@ -889,6 +1005,70 @@ task testMtRequestBrokerAsanRefc,
     return
   testAsan("refc", "test_multi_thread_request_broker")
 
+# ----------------------------------------------------------------------------
+# probeWinTlsUninit — minimal repro for LIMITATION.md §2.1
+# ----------------------------------------------------------------------------
+# Demonstrates that a Win32 RegisterWaitForSingleObject completion callback
+# allocating Nim memory crashes under --mm:refc on Windows (uninitialized TLS
+# on the NT thread-pool wait thread) and passes under --mm:orc. No chronos,
+# no brokers — see test/probe_win_tls_uninit.nim for full discussion.
+#
+# Expected exit codes:
+#   * Non-Windows hosts             → 77 (skip)
+#   * Windows + orc                 → 0
+#   * Windows + refc                → non-zero (crash); task asserts this and
+#                                     exits 0 to signal "hypothesis reproduced".
+proc runProbeWinTlsUninit(mm: string) =
+  let outBin = "build" / ("probe_win_tls_uninit_" & mm)
+  let outBinExe =
+    when defined(windows):
+      outBin & ".exe"
+    else:
+      outBin
+  mkDir "build"
+  # `--out:` with a path overrides `--outdir:`, so put the path directly on
+  # `--out:` to land the binary under build/.
+  exec "nim c --threads:on --mm:" & mm & " -d:release " & "--out:" & quoteArg(outBin) &
+    " " & quoteArg("test/probe_win_tls_uninit.nim")
+  # Run the probe with live stdout+stderr (exec) so a refc crash's Nim/OS
+  # backtrace lands in the CI log. exec raises OSError on non-zero exit; we
+  # use that to distinguish "exit 0" from "exit non-zero / crash".
+  var exitedNonZero = false
+  try:
+    exec quoteArg(outBinExe)
+  except OSError:
+    exitedNonZero = true
+  when defined(windows):
+    if mm == "orc":
+      if exitedNonZero:
+        echo "::error::probeWinTlsUninit/orc: probe must succeed under ORC"
+        quit(1)
+      echo "probeWinTlsUninit/orc: PASS"
+    else:
+      # refc on Windows: we *expect* the probe to crash. If it exits 0, the
+      # §2.1 hypothesis no longer reproduces and the doc needs revisiting.
+      if not exitedNonZero:
+        echo "::warning::probeWinTlsUninit/refc exited 0 — §2.1 hypothesis " &
+          "no longer reproduces. Review doc/LIMITATION.md §2.1."
+        quit(1)
+      echo "probeWinTlsUninit/refc: hypothesis reproduced (probe crashed " &
+        "as expected)"
+  else:
+    # Non-Windows hosts: probe exits 77 (skip). exec sees that as non-zero
+    # → OSError → exitedNonZero=true is the success path here.
+    if not exitedNonZero:
+      echo "::error::probeWinTlsUninit on non-Windows: expected skip exit"
+      quit(1)
+    echo "probeWinTlsUninit: skipped (non-Windows host)"
+
+task probeWinTlsUninitOrc,
+  "Run the §2.1 TLS-uninit probe under --mm:orc (must pass on Windows)":
+  runProbeWinTlsUninit("orc")
+
+task probeWinTlsUninitRefc,
+  "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
+  runProbeWinTlsUninit("refc")
+
 task buildTorpedoExample, "Build the torpedo FFI example library":
   buildTorpedoExampleLibrary()
 
@@ -916,6 +1096,40 @@ task runTorpedoExampleCborRust,
   buildTorpedoExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
     " run --features cbor --manifest-path examples/torpedo/rust_example/Cargo.toml"
+
+proc writeTorpedoGoModFor(buildDir: string) =
+  let modPath = "examples/torpedo/go_example/go.mod"
+  var contents = "// Generated by nim-brokers test harness — do not edit.\n"
+  contents.add(
+    "module github.com/status-im/nim-brokers/examples/torpedo/go_example\n\n"
+  )
+  contents.add("go 1.21\n\n")
+  contents.add("require torpedolib v0.0.0\n")
+  if buildDir == "build_cbor":
+    contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
+  contents.add("\nreplace torpedolib => ../nimlib/" & buildDir & "/torpedolib_go\n")
+  writeFile(modPath, contents)
+  if buildDir == "build_cbor":
+    withDir "examples/torpedo/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+
+task buildTorpedoExampleGo,
+  "Build the Torpedo Duel FFI library + generated Go wrapper module (native mode)":
+  buildTorpedoExampleLibrary(generateGo = true)
+
+task runTorpedoExampleGo,
+  "Build the Torpedo Duel FFI library + run the Go example (native mode)":
+  buildTorpedoExampleLibrary(generateGo = true)
+  writeTorpedoGoModFor("build")
+  withDir "examples/torpedo/go_example":
+    exec quoteArg(findGoExe()) & " run ."
+
+task runTorpedoExampleCborGo,
+  "Build the Torpedo Duel FFI library (CBOR mode) + run the Go example":
+  buildTorpedoExampleCborLibrary(generateGo = true)
+  writeTorpedoGoModFor("build_cbor")
+  withDir "examples/torpedo/go_example":
+    exec quoteArg(findGoExe()) & " run ."
 
 task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
   buildTorpedoExampleLibrary()
