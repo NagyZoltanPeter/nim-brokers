@@ -1,31 +1,59 @@
 ## Multi-Thread EventBroker
-## -----------------------
-## Generates a multi-thread capable EventBroker where listeners can be registered
-## on any thread and events can be emitted from any thread. Events are delivered
-## to all registered listeners across all threads (broadcast fan-out).
+## ------------------------
+## Generates a multi-thread capable EventBroker where listeners can be
+## registered on any thread and events can be emitted from any thread.
+## Events are delivered to all registered listeners across all threads
+## (broadcast fan-out).
 ##
-## Same-thread listeners bypass channels and are dispatched directly via asyncSpawn.
-## Cross-thread delivery uses Channel[T] + per-thread shared signal (0 fds).
+## Same-thread emit→listener dispatch bypasses the ring and is delivered
+## directly via `asyncSpawn`. Cross-thread delivery uses a lock-free
+## Vyukov MPSC ring + a global per-broker-type slab with refcounted
+## payload cells (so one emit shares one cell across N listener threads
+## via atomic refcount, rather than N deep-copies).
 ##
-## The broker does NOT own or spawn threads — that is the user's responsibility.
-## The global registry uses `createShared` / raw pointers so it is safe under
-## both `--mm:orc` and `--mm:refc`.
+## See `doc/REFACTOR_MT_QUEUE.md` for the full design; this file is the
+## EventBroker integration of Phase 2+3 of that plan.
 ##
-## Listener closures are stored in threadvars (GC-managed, per-thread) rather
-## than in the shared bucket, avoiding the need to cast closures to raw pointers.
-##
-## `dropListener` must be called from the thread that registered the listener.
-## `dropAllListeners` can be called from any thread — it sends emkClearListeners
-## to all listener threads for the context.
+## §2.6 safety contract honored by construction (Invariant I0):
+##   - The bucket-owning thread (the listener thread) allocates its ring
+##     via `createShared` and frees it via `shutdown(ctx)` on the same
+##     thread.
+##   - The global event slab is allocated lazily, by whichever thread
+##     first calls `listen()` or `emit()`. That thread MUST outlive the
+##     slab.
+##   - Sender threads only ever touch atomics + memcpy + signal-fire —
+##     never the Nim allocator on the hot path.
 
 {.push raises: [].}
 
-import std/[macros, locks, tables]
+import std/[macros, locks, tables, atomics]
 import chronos, chronicles
 import results
-import ./helper/broker_utils, ../broker_context, ./mt_broker_common
+import
+  ./helper/broker_utils,
+  ../broker_context,
+  ./mt_broker_common,
+  ./mt_queue,
+  ./mt_codec
 
 export results, chronos, broker_context, chronicles, mt_broker_common
+
+# Ring-slot sentinel: a slot's payload `uint32` is normally a slab cell
+# index, but this reserved value carries a "clear local tvHandlers"
+# control signal instead.  Shutdown is communicated via the ring's
+# `closed` flag, not a sentinel, because `tryEnqueue` rejects when
+# closed and we don't want shutdown to compete with that.
+#
+# The sentinel lives in the same namespace as cell indices and MUST be
+# larger than any legal slab capacity (bounded by uint32 in practice).
+const CtrlClearListeners*: uint32 = high(uint32) - 1
+
+# Default broker pragma values (override via `EventBroker(mt, ...)`
+# arguments in a later phase — for now the defaults are baked in).
+const DefaultMtEvtQueueDepth* = 256 ## ring slots per bucket
+const DefaultMtEvtSlabCapacity* = 1024 ## global slab cell count
+const DefaultMtEvtMaxPayloadBytes* = 1024 ## Tier B cell payload bytes
+const DefaultMtEvtFreeListShards* = 4'u32
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -53,8 +81,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   let exportedHandlerProcIdent = postfix(copyNimTree(handlerProcIdent), "*")
   let exportedListenerHandleIdent = postfix(copyNimTree(listenerHandleIdent), "*")
 
-  let eventMsgKindName = ident(typeDisplayName & "MtEventMsgKind")
-  let eventMsgName = ident(typeDisplayName & "MtEventMsg")
   let bucketName = ident(typeDisplayName & "MtEventBucket")
 
   let globalBucketsIdent = ident("g" & typeDisplayName & "MtBuckets")
@@ -63,12 +89,20 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   let globalLockIdent = ident("g" & typeDisplayName & "MtLock")
   let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
 
+  let globalSlabIdent = ident("g" & typeDisplayName & "MtSlab")
+  let globalSlabInitIdent = ident("g" & typeDisplayName & "MtSlabInit")
+
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
+  let initSlabProcIdent = ident("ensureSlab" & typeDisplayName & "MtBroker")
   let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
   let listenerTaskIdent = ident("notify" & typeDisplayName & "Listener")
-  let handleEventMsgIdent = ident("handleEventMsg" & typeDisplayName)
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
   let clearListenersIdent = ident("clearListeners" & typeDisplayName)
+  let releaseCellIdent = ident("releaseCell" & typeDisplayName)
+  let shardHintIdent = ident("shardHint" & typeDisplayName)
+
+  let marshalIdent = ident(typeDisplayName & "MtMarshal")
+  let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
 
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
@@ -83,6 +117,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   let shutdownProcessLoopsForCtxIdent =
     ident("shutdownProcessLoopsForCtx" & typeDisplayName)
 
+  let queueDepthLit = newLit(DefaultMtEvtQueueDepth)
+  let slabCapacityLit = newLit(DefaultMtEvtSlabCapacity)
+  let payloadBytesLit = newLit(DefaultMtEvtMaxPayloadBytes)
+  let freeListShardsLit = newLit(DefaultMtEvtFreeListShards)
+
   result = newStmtList()
 
   # ── Type section ──────────────────────────────────────────────────────
@@ -92,31 +131,25 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
         `exportedTypeIdent` = `objectDef`
         `exportedListenerHandleIdent` = object
           id*: uint64
-          threadId*: pointer
-            ## Thread that registered this listener (for validation on drop).
+          threadId*: pointer ## Thread that registered this listener.
 
         `exportedHandlerProcIdent` =
           proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-        `eventMsgKindName` {.pure.} = enum
-          emkEvent ## Normal event delivery
-          emkClearListeners ## Clear threadvar handlers, keep poll fn alive
-          emkShutdown ## Exit poll fn (no drain — in-flight futures run naturally)
-
-        `eventMsgName` = object
-          kind: `eventMsgKindName`
-          event: `typeIdent`
-
         `bucketName` = object
           brokerCtx: BrokerContext
-          eventChan: ptr Channel[`eventMsgName`]
+          ring: ptr VyukovMpscRing[uint32]
           listenerSignal: ThreadSignalPtr
           threadId: pointer
-          threadGen: uint64 ## Disambiguates reused threadvar addresses
+          threadGen: uint64 ## disambiguates reused threadvar addresses
           active: bool
           hasListeners: bool
 
   )
+
+  # ── Codec procs (marshal / unmarshal) ─────────────────────────────────
+  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):
+    result.add(procNode)
 
   # ── Global shared state ───────────────────────────────────────────────
   result.add(
@@ -126,30 +159,53 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       var `globalBucketCapIdent`: int
       var `globalLockIdent`: Lock
       var `globalInitIdent`: Atomic[int]
-        ## 0 = uninitialised, 1 = initialising, 2 = ready.
-        ## CAS(0→1) wins the race; losers spin until 2.
+        ## 0 = uninitialised, 1 = initialising, 2 = ready. CAS(0→1) wins;
+        ## losers spin until 2.
+      var `globalSlabIdent`: PayloadSlab
+      var `globalSlabInitIdent`: Atomic[int]
+        ## same protocol as `globalInitIdent`, gating the global slab.
   )
 
-  # ── Init helper (thread-safe via atomic CAS) ───────────────────────────
+  # ── Init helpers ──────────────────────────────────────────────────────
   result.add(
     quote do:
+      proc `initSlabProcIdent`() =
+        ## Lazy-init the global event slab on first listen() or emit().
+        ## The caller's thread becomes the slab's owner (must outlive it).
+        if `globalSlabInitIdent`.load(moRelaxed) == 2:
+          return
+        var expected = 0
+        if `globalSlabInitIdent`.compareExchange(
+          expected, 1, moAcquire, moRelaxed
+        ):
+          initPayloadSlab(
+            `globalSlabIdent`,
+            capacity = uint32(`slabCapacityLit`),
+            payloadBytes = uint32(`payloadBytesLit`),
+            nShards = `freeListShardsLit`,
+          )
+          `globalSlabInitIdent`.store(2, moRelease)
+        else:
+          while `globalSlabInitIdent`.load(moAcquire) != 2:
+            discard
+
       proc `initProcIdent`() =
         if `globalInitIdent`.load(moRelaxed) == 2:
-          return # fast path — already initialised
+          `initSlabProcIdent`()
+          return
         var expected = 0
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          # We won the init race.
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
-            `bucketName`, `globalBucketCapIdent`
-          ))
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
+            createShared(`bucketName`, `globalBucketCapIdent`)
+          )
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
-          # Another thread is initialising — spin until ready.
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
+        `initSlabProcIdent`()
 
   )
 
@@ -163,16 +219,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
         for i in 0 ..< `globalBucketCountIdent`:
           newBuf[i] = `globalBucketsIdent`[i]
-        # Intentional leak: see equivalent comment in mt_request_broker.nim grow.
+        # Intentional leak of the old buffer: see mt_request_broker.nim.
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
 
   )
 
   # ── Threadvar listener storage ────────────────────────────────────────
-  # Parallel seqs: contexts, handler tables, next-ID counters.
-  # tvListenerFutsIdent: in-flight listener callback futures (for shutdown drain).
-  # tvShutdownFutsIdent: per-bucket shutdown futures (completed by poll fn on emkShutdown).
   result.add(
     quote do:
       var `tvListenerCtxIdent` {.threadvar.}: seq[BrokerContext]
@@ -183,7 +236,7 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       var `tvShutdownFutsIdent` {.threadvar.}: seq[(BrokerContext, Future[void])]
   )
 
-  # ── Listener notify wrapper ───────────────────────────────────────────
+  # ── Listener task ─────────────────────────────────────────────────────
   result.add(
     quote do:
       proc `listenerTaskIdent`(
@@ -199,11 +252,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
   )
 
-  # ── Clear listeners helper ────────────────────────────────────────────
-  # Removes the handler table entry for the given context from all threadvars.
-  # Safe to call from within {.cast(gcsafe).} because it only touches threadvars.
+  # ── Local helpers used by both same-thread emit and cross-thread poll
   result.add(
     quote do:
+      proc `shardHintIdent`(): uint32 {.inline.} =
+        ## Hash of the calling thread's TLS marker → free-list shard.
+        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
+
       proc `clearListenersIdent`(loopCtx: BrokerContext) {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
           for i in 0 ..< `tvListenerCtxIdent`.len:
@@ -214,99 +269,68 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               `tvNextIdsIdent`.del(i)
               break
 
-  )
-
-  # ── Handle event message async proc ──────────────────────────────────
-  # Dispatches a single emkEvent to all local listeners.
-  # Tracks spawned futures in tvListenerFutsIdent for clean shutdown.
-  result.add(
-    quote do:
-      proc `handleEventMsgIdent`(
-          event: `typeIdent`, loopCtx: BrokerContext
-      ) {.async: (raises: []).} =
-        # Prune completed in-flight futures for this context.
-        var i = 0
-        while i < `tvListenerFutsIdent`.len:
-          if `tvListenerFutsIdent`[i][0] == loopCtx and
-              `tvListenerFutsIdent`[i][1].finished():
-            `tvListenerFutsIdent`.del(i)
-          else:
-            inc i
-
-        # Dispatch to all local listeners for this context.
-        var idx = -1
-        for j in 0 ..< `tvListenerCtxIdent`.len:
-          if `tvListenerCtxIdent`[j] == loopCtx:
-            idx = j
-            break
-        if idx >= 0:
-          var callbacks: seq[`handlerProcIdent`] = @[]
-          for cb in `tvListenerHandlersIdent`[idx].values:
-            callbacks.add(cb)
-          for cb in callbacks:
-            let fut: Future[void] = `listenerTaskIdent`(cb, event)
-            `tvListenerFutsIdent`.add((loopCtx, fut))
-            asyncSpawn fut
+      proc `releaseCellIdent`(cellIdx: uint32) {.inline, gcsafe.} =
+        if `globalSlabIdent`.decRefAndCheck(cellIdx):
+          `globalSlabIdent`.release(cellIdx, `shardHintIdent`())
 
   )
 
   # ── Poll fn maker ─────────────────────────────────────────────────────
-  # Returns a ThreadDispatchPollFn closure that drains the event channel.
-  # Return codes: 0 = nothing, 1 = processed (keep), 2 = shutdown (remove).
-  let deferredFreeEventChanIdent = ident("deferredFreeEventChan" & typeDisplayName)
   result.add(
     quote do:
-      proc `deferredFreeEventChanIdent`(
-          chanPtr: ptr Channel[`eventMsgName`]
-      ) {.async: (raises: []).} =
-        # Brief grace window so any cross-thread emitter that captured
-        # `chanPtr` under the previous lock state can complete its send().
-        # Channel.close() doesn't synchronise with senders by itself; the
-        # ~50ms delay swallows realistic latencies while keeping the leak
-        # bounded.  See mt_request_broker for the equivalent rationale.
-        let sleepRes = catch:
-          await sleepAsync(milliseconds(50))
-        if sleepRes.isErr():
-          discard
-        {.cast(gcsafe).}:
-          try:
-            chanPtr[].close()
-          except Exception:
-            discard
-        deallocShared(chanPtr)
-
       proc `pollFnMakerIdent`(
-          eventChan: ptr Channel[`eventMsgName`],
+          ring: ptr VyukovMpscRing[uint32],
           loopCtx: BrokerContext,
           shutdownFut: Future[void],
       ): ThreadDispatchPollFn =
-        let capturedChan = eventChan
+        let capturedRing = ring
         let capturedCtx = loopCtx
         let capturedShutdownFut = shutdownFut
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
-            let tryRes =
-              try:
-                capturedChan[].tryRecv()
-              except Exception:
-                return 0
-            if not tryRes.dataAvailable:
+            var cellIdx: uint32
+            if not capturedRing.tryDequeue(cellIdx):
+              # Empty.  If the ring has been closed by shutdown, this is
+              # the definitive "drained" point (no more producers can
+              # enqueue past `closed=true`).  Complete the shutdown
+              # future and self-unregister.
+              if capturedRing.isClosed():
+                if not capturedShutdownFut.finished:
+                  capturedShutdownFut.complete()
+                return 2
               return 0
-            let msg = tryRes.msg
-            case msg.kind
-            of `eventMsgKindName`.emkShutdown:
-              `clearListenersIdent`(capturedCtx)
-              if not capturedShutdownFut.finished:
-                capturedShutdownFut.complete()
-              # Defer channel teardown so in-flight emitters that already
-              # passed the bucket lookup can complete safely.
-              asyncSpawn `deferredFreeEventChanIdent`(capturedChan)
-              return 2
-            of `eventMsgKindName`.emkClearListeners:
+            case cellIdx
+            of CtrlClearListeners:
               `clearListenersIdent`(capturedCtx)
               return 1
-            of `eventMsgKindName`.emkEvent:
-              asyncSpawn `handleEventMsgIdent`(msg.event, capturedCtx)
+            else:
+              # Normal cell: decode, dispatch, decRef.
+              var ev: `typeIdent`
+              let cellPtr = `globalSlabIdent`.cellPtr(cellIdx)
+              let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
+              let ok =
+                try:
+                  `unmarshalIdent`(payloadPtr, int(cellPtr.payloadSize), ev)
+                except Exception:
+                  false
+              if ok:
+                var idx = -1
+                for i in 0 ..< `tvListenerCtxIdent`.len:
+                  if `tvListenerCtxIdent`[i] == capturedCtx:
+                    idx = i
+                    break
+                if idx >= 0:
+                  var callbacks: seq[`handlerProcIdent`] = @[]
+                  for cb in `tvListenerHandlersIdent`[idx].values:
+                    callbacks.add(cb)
+                  for cb in callbacks:
+                    let fut: Future[void] = `listenerTaskIdent`(cb, ev)
+                    `tvListenerFutsIdent`.add((capturedCtx, fut))
+                    asyncSpawn fut
+              else:
+                error "Failed to unmarshal event payload",
+                  eventType = `typeNameLit`
+              `releaseCellIdent`(cellIdx)
               return 1
 
   )
@@ -321,7 +345,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           return err("Must provide a non-nil event handler")
         `initProcIdent`()
 
-        # Find or create threadvar entry for this context
         var tvIdx = -1
         for i in 0 ..< `tvListenerCtxIdent`.len:
           if `tvListenerCtxIdent`[i] == brokerCtx:
@@ -333,38 +356,35 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           `tvNextIdsIdent`.add(1'u64)
           tvIdx = `tvListenerCtxIdent`.len - 1
 
-        # Allocate listener ID
         if `tvNextIdsIdent`[tvIdx] == high(uint64):
           return err("Cannot add more listeners: ID space exhausted")
         let newId = `tvNextIdsIdent`[tvIdx]
         `tvNextIdsIdent`[tvIdx] += 1
         `tvListenerHandlersIdent`[tvIdx][newId] = handler
 
-        # Ensure a bucket + channel exists for (brokerCtx, this thread).
+        # Ensure a bucket + ring exists for (brokerCtx, this thread).
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
         var bucketExists = false
-        var spawnChan: ptr Channel[`eventMsgName`]
+        var spawnRing: ptr VyukovMpscRing[uint32]
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
                 `globalBucketsIdent`[i].threadId == myThreadId and
                 `globalBucketsIdent`[i].threadGen == myThreadGen:
               `globalBucketsIdent`[i].hasListeners = true
+              `globalBucketsIdent`[i].active = true
               bucketExists = true
               break
           if not bucketExists:
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
-            let chan = cast[ptr Channel[`eventMsgName`]](createShared(
-              Channel[`eventMsgName`], 1
-            ))
-            chan[].open(0)
+            let ring = newVyukovMpscRing[uint32](`queueDepthLit`)
             let listenerSig = getOrInitBrokerSignal()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
-              eventChan: chan,
+              ring: ring,
               listenerSignal: listenerSig,
               threadId: myThreadId,
               threadGen: myThreadGen,
@@ -372,13 +392,13 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
               hasListeners: true,
             )
             `globalBucketCountIdent` += 1
-            spawnChan = chan
-        # Register poll fn and dispatcher outside lock.
-        if not bucketExists and not spawnChan.isNil:
+            spawnRing = ring
+
+        if not bucketExists and not spawnRing.isNil:
           let shutdownFut =
             newFuture[void]("eventBroker." & `typeNameLit` & ".shutdown")
           `tvShutdownFutsIdent`.add((brokerCtx, shutdownFut))
-          registerBrokerPoller(`pollFnMakerIdent`(spawnChan, brokerCtx, shutdownFut))
+          registerBrokerPoller(`pollFnMakerIdent`(spawnRing, brokerCtx, shutdownFut))
           ensureBrokerDispatchStarted()
 
         return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
@@ -415,53 +435,80 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             error "Cannot emit uninitialized event object", eventType = `typeNameLit`
             return
 
-        # Collect targets under lock
-        type EvTarget = object
-          eventChan: ptr Channel[`eventMsgName`]
-          listenerSignal: ThreadSignalPtr
-          isSameThread: bool
+        type CrossTarget = object
+          ring: ptr VyukovMpscRing[uint32]
+          signal: ThreadSignalPtr
 
-        var targets: seq[EvTarget] = @[]
+        var crossTargets: seq[CrossTarget] = @[]
+        var hasSameThread = false
         let myThreadId = currentMtThreadId()
+        let myThreadGen = currentMtThreadGen()
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
                 `globalBucketsIdent`[i].active and `globalBucketsIdent`[i].hasListeners:
-              targets.add(
-                EvTarget(
-                  eventChan: `globalBucketsIdent`[i].eventChan,
-                  listenerSignal: `globalBucketsIdent`[i].listenerSignal,
-                  isSameThread: `globalBucketsIdent`[i].threadId == myThreadId,
+              if `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                hasSameThread = true
+              else:
+                crossTargets.add(
+                  CrossTarget(
+                    ring: `globalBucketsIdent`[i].ring,
+                    signal: `globalBucketsIdent`[i].listenerSignal,
+                  )
                 )
-              )
 
-        if targets.len == 0:
+        # Same-thread fast path: bypass ring entirely.
+        if hasSameThread:
+          var idx = -1
+          for i in 0 ..< `tvListenerCtxIdent`.len:
+            if `tvListenerCtxIdent`[i] == brokerCtx:
+              idx = i
+              break
+          if idx >= 0:
+            var callbacks: seq[`handlerProcIdent`] = @[]
+            for cb in `tvListenerHandlersIdent`[idx].values:
+              callbacks.add(cb)
+            for cb in callbacks:
+              let fut: Future[void] = `listenerTaskIdent`(cb, event)
+              `tvListenerFutsIdent`.add((brokerCtx, fut))
+              asyncSpawn fut
+
+        if crossTargets.len == 0:
           return
 
-        for target in targets:
-          if target.isSameThread:
-            # Same-thread: dispatch directly to local listeners via asyncSpawn
-            var idx = -1
-            for i in 0 ..< `tvListenerCtxIdent`.len:
-              if `tvListenerCtxIdent`[i] == brokerCtx:
-                idx = i
-                break
-            if idx >= 0:
-              var callbacks: seq[`handlerProcIdent`] = @[]
-              for cb in `tvListenerHandlersIdent`[idx].values:
-                callbacks.add(cb)
-              for cb in callbacks:
-                asyncSpawn `listenerTaskIdent`(cb, event)
+        # Cross-thread fan-out via shared refcounted cell.
+        let shardHint = `shardHintIdent`()
+        let cellIdx = `globalSlabIdent`.claim(shardHint)
+        if cellIdx == EmptyIdx:
+          warn "event dropped: slab exhausted",
+            eventType = `typeNameLit`, targets = crossTargets.len
+          return
+
+        let cell = `globalSlabIdent`.cellPtr(cellIdx)
+        let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
+        let written =
+          try:
+            `marshalIdent`(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
+          except Exception:
+            -1
+        if written < 0:
+          error "event payload exceeds maxPayloadBytes",
+            eventType = `typeNameLit`,
+            cap = `globalSlabIdent`.cellPayloadCap
+          `globalSlabIdent`.release(cellIdx, shardHint)
+          return
+        cell.payloadSize = uint16(written)
+        cell.refcount.store(crossTargets.len, moRelease)
+
+        for target in crossTargets:
+          if not target.ring.tryEnqueue(cellIdx):
+            warn "event dropped: listener queue full",
+              eventType = `typeNameLit`
+            `releaseCellIdent`(cellIdx)
           else:
-            # Cross-thread: send via Channel[T] and wake the listener's dispatcher.
-            let msg = `eventMsgName`(kind: `eventMsgKindName`.emkEvent, event: event)
-            {.cast(gcsafe).}:
-              try:
-                target.eventChan[].send(msg)
-              except Exception:
-                discard
-            fireBrokerSignal(target.listenerSignal)
+            fireBrokerSignal(target.signal)
 
   )
 
@@ -498,7 +545,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       ),
     )
 
-    # Default context
     var emitCtorParams = newTree(nnkFormalParams, newEmptyNode())
     emitCtorParams.add(
       newTree(nnkIdentDefs, ident("_"), typedescParamType, newEmptyNode())
@@ -538,7 +584,6 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
     )
     result.add(typedescEmitProcDefault)
 
-    # With BrokerContext
     var emitCtorParamsCtx = newTree(nnkFormalParams, newEmptyNode())
     emitCtorParamsCtx.add(
       newTree(nnkIdentDefs, ident("_"), typedescParamType, newEmptyNode())
@@ -616,13 +661,17 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   )
 
   # ── dropAllListeners impl ─────────────────────────────────────────────
+  # Same-thread: clears tvHandlers immediately + flips flag under lock.
+  # Cross-thread: flips flag + pushes a CtrlClearListeners sentinel into
+  # the bucket's ring so the listener thread clears its tvHandlers on
+  # the next poll cycle.
   result.add(
     quote do:
       proc `dropAllListenersImplIdent`(brokerCtx: BrokerContext) =
         `initProcIdent`()
 
         let myThreadId = currentMtThreadId()
-        var chansToClear: seq[(ptr Channel[`eventMsgName`], ThreadSignalPtr)] = @[]
+        var crossRings: seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
@@ -630,14 +679,14 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
                 `globalBucketsIdent`[i].hasListeners:
               `globalBucketsIdent`[i].hasListeners = false
               if `globalBucketsIdent`[i].threadId != myThreadId:
-                chansToClear.add(
+                crossRings.add(
                   (
-                    `globalBucketsIdent`[i].eventChan,
+                    `globalBucketsIdent`[i].ring,
                     `globalBucketsIdent`[i].listenerSignal,
                   )
                 )
 
-        # Clean local threadvar entries
+        # Same-thread tv clear.
         var tvIdx = -1
         for i in 0 ..< `tvListenerCtxIdent`.len:
           if `tvListenerCtxIdent`[i] == brokerCtx:
@@ -649,13 +698,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
           `tvListenerHandlersIdent`.del(tvIdx)
           `tvNextIdsIdent`.del(tvIdx)
 
-        # Send emkClearListeners to remote-thread channels.
-        for (chan, sig) in chansToClear:
-          {.cast(gcsafe).}:
-            try:
-              chan[].send(`eventMsgName`(kind: `eventMsgKindName`.emkClearListeners))
-            except Exception:
-              discard
+        # Cross-thread: send control sentinel.
+        for (ring, sig) in crossRings:
+          discard ring.tryEnqueue(CtrlClearListeners)
           fireBrokerSignal(sig)
 
   )
@@ -681,10 +726,11 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
 
   )
 
-  # ── shutdownProcessLoopsForCtx (used by API teardown) ─────────────────
-  # Sends emkShutdown to all poll fns for the given context on the current thread,
-  # awaits their shutdown futures, then drains any in-flight listener futures.
-  # Must be called from the same thread that registered the listeners.
+  # ── shutdownProcessLoopsForCtx (internal; used by API teardown) ───────
+  # Must run on the bucket-owning thread. Drains the bucket's ring,
+  # decRefs remaining cells, removes the bucket from the registry, and
+  # deallocs its ring. The owner thread is the only safe deallocator
+  # (Invariant I0).
   result.add(
     quote do:
       proc `shutdownProcessLoopsForCtxIdent`(
@@ -692,14 +738,8 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
       ) {.async: (raises: []).} =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
-        var chansToShutdown: seq[(ptr Channel[`eventMsgName`], ThreadSignalPtr)] = @[]
-        # Remove matching buckets entirely (shift-down).  Marking active=false
-        # was insufficient: a subsequent listen() on the same (ctx, thread,
-        # threadGen) tuple would find the dead bucket, set hasListeners=true
-        # and skip registerBrokerPoller — emits would silently never fire.
-        # Removing the slot forces listen() to allocate a fresh channel and
-        # poll fn.  The captured chanPtr is freed by the poll fn's deferred
-        # free path so in-flight emitters can complete safely.
+        var ringsToShutdown:
+          seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
         withLock(`globalLockIdent`):
           var i = 0
           while i < `globalBucketCountIdent`:
@@ -707,9 +747,9 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
                 `globalBucketsIdent`[i].threadId == myThreadId and
                 `globalBucketsIdent`[i].threadGen == myThreadGen and
                 `globalBucketsIdent`[i].active:
-              chansToShutdown.add(
+              ringsToShutdown.add(
                 (
-                  `globalBucketsIdent`[i].eventChan,
+                  `globalBucketsIdent`[i].ring,
                   `globalBucketsIdent`[i].listenerSignal,
                 )
               )
@@ -719,26 +759,22 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             else:
               inc i
 
-        # Collect shutdown futures BEFORE sending (they're in tvShutdownFutsIdent).
         var shutdownFuts: seq[Future[void]] = @[]
-        var i = 0
-        while i < `tvShutdownFutsIdent`.len:
-          if `tvShutdownFutsIdent`[i][0] == ctx:
-            shutdownFuts.add(`tvShutdownFutsIdent`[i][1])
-            `tvShutdownFutsIdent`.del(i)
+        var k = 0
+        while k < `tvShutdownFutsIdent`.len:
+          if `tvShutdownFutsIdent`[k][0] == ctx:
+            shutdownFuts.add(`tvShutdownFutsIdent`[k][1])
+            `tvShutdownFutsIdent`.del(k)
           else:
-            inc i
+            inc k
 
-        # Send emkShutdown and wake the listener thread's dispatcher.
-        for (chan, sig) in chansToShutdown:
-          {.cast(gcsafe).}:
-            try:
-              chan[].send(`eventMsgName`(kind: `eventMsgKindName`.emkShutdown))
-            except Exception:
-              discard
+        # Close each ring; the poll fn observes `closed && empty` and
+        # self-unregisters via return-code 2 + completes shutdownFut.
+        # Signal the dispatcher so the poll fn actually runs.
+        for (ring, sig) in ringsToShutdown:
+          ring.close()
           fireBrokerSignal(sig)
 
-        # Await shutdown confirmation (poll fn processed emkShutdown).
         for fut in shutdownFuts:
           if not fut.finished():
             try:
@@ -759,6 +795,35 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
             `tvListenerFutsIdent`.del(j)
           else:
             inc j
+
+        # Grace window: an emit that captured ring pointers under lock
+        # before we removed the bucket may still be mid-`tryEnqueue`.
+        # The poll fn has already self-unregistered (return 2), and the
+        # ring is closed, so any new tryEnqueue gets rejected — but we
+        # need a brief delay before deallocShared so the in-flight
+        # callers can complete their access. 50ms matches the original
+        # `deferredFreeEventChan` window.
+        try:
+          await sleepAsync(chronos.milliseconds(50))
+        except CatchableError:
+          discard
+        for (ring, _) in ringsToShutdown:
+          freeVyukovMpscRing(ring)
+
+  )
+
+  # ── Public shutdown ───────────────────────────────────────────────────
+  result.add(
+    quote do:
+      proc shutdown*(
+          _: typedesc[`typeIdent`]
+      ): Future[void] {.async: (raises: []).} =
+        await `shutdownProcessLoopsForCtxIdent`(DefaultBrokerContext)
+
+      proc shutdown*(
+          _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+      ): Future[void] {.async: (raises: []).} =
+        await `shutdownProcessLoopsForCtxIdent`(brokerCtx)
 
   )
 
