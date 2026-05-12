@@ -764,8 +764,11 @@ proc asanLinkFlags(sharedLib: bool = false): string =
     result.add(" -Wl,/debug")
 
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
+  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
+  # fires on memory faults inside the .dylib. Without this, Nim prints its own
+  # traceback and exits before ASAN can report the underlying heap error.
   var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy -d:noSignalHandler --threads:on --app:lib --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"
@@ -895,8 +898,11 @@ task testFfiApiCpp,
 proc testAsan(mm: string, path: string) =
   let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
   let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
+  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
+  # fires on memory faults. Without this, Nim prints its own traceback and
+  # exits before ASAN can report the underlying heap error.
   let flags =
-    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" &
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE -d:noSignalHandler --threads:on --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
   exec "nim c " & flags & " test/" & path & ".nim"
