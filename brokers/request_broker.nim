@@ -846,14 +846,14 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
   return result
 
-macro RequestBroker*(body: untyped): untyped =
-  ## Default (async) mode.
-  generateRequestBroker(body, rbAsync)
-
-macro RequestBroker*(mode: untyped, args: varargs[untyped]): untyped =
-  ## Explicit mode selector, with optional kwargs for `mt` mode.
+macro RequestBroker*(args: varargs[untyped]): untyped =
+  ## Default (async) mode, or explicit mode selector with optional kwargs.
   ##
   ## Examples:
+  ##   RequestBroker:
+  ##     type Foo = object
+  ##     proc signature*(): Result[Foo, string]
+  ##
   ##   RequestBroker(sync):
   ##     type Foo = object
   ##     proc signature*(): Result[Foo, string]
@@ -866,9 +866,23 @@ macro RequestBroker*(mode: untyped, args: varargs[untyped]): untyped =
   ##                 maxResponseBytes = 4096):
   ##     type Foo = object
   ##     proc signature*(arg: string): Future[Result[Foo, string]] {.async.}
+  if args.len == 0:
+    macros.error("RequestBroker requires a body block")
+  if args.len == 1:
+    return generateRequestBroker(args[0], rbAsync)
+  let mode = args[0]
+  let body = args[^1]
+  if body.kind notin {nnkStmtList, nnkTypeDef, nnkTypeSection}:
+    error(
+      "RequestBroker(" & mode.repr &
+        ") body must be a `:` block of type definitions (got " & $body.kind & ")",
+      body,
+    )
+  var kwargs: seq[NimNode]
+  for i in 1 ..< args.len - 1:
+    kwargs.add(args[i])
   let m = parseMode(mode)
-  let split = splitMtArgs(args, "RequestBroker(" & mode.repr & ")")
-  let body = split.body
+  let split = (kwargs: kwargs, body: body)
   case m
   of rbMultiThread:
     when not compileOption("threads"):

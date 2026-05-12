@@ -506,14 +506,14 @@ proc generateEventBroker(body: NimNode): NimNode =
   when defined(brokerDebug):
     echo result.repr
 
-macro EventBroker*(body: untyped): untyped =
-  ## Default (single-thread) mode.
-  generateEventBroker(body)
-
-macro EventBroker*(mode: untyped, args: varargs[untyped]): untyped =
-  ## Explicit mode selector, with optional kwargs for `mt` mode.
+macro EventBroker*(args: varargs[untyped]): untyped =
+  ## Single-thread default mode, or explicit mode selector with optional kwargs.
   ##
   ## Examples:
+  ##   EventBroker:
+  ##     type MyEvent = object
+  ##       value*: int
+  ##
   ##   EventBroker(mt):
   ##     type MyEvent = object
   ##       value*: int
@@ -521,9 +521,23 @@ macro EventBroker*(mode: untyped, args: varargs[untyped]): untyped =
   ##   EventBroker(mt, queueDepth = 1024, slabCapacity = 4096):
   ##     type MyEvent = object
   ##       value*: int
+  if args.len == 0:
+    macros.error("EventBroker requires a body block")
+  if args.len == 1:
+    return generateEventBroker(args[0])
+  let mode = args[0]
+  let body = args[^1]
+  if body.kind notin {nnkStmtList, nnkTypeDef, nnkTypeSection}:
+    error(
+      "EventBroker(" & mode.repr & ") body must be a `:` block of type definitions (got " &
+        $body.kind & ")",
+      body,
+    )
+  var kwargs: seq[NimNode]
+  for i in 1 ..< args.len - 1:
+    kwargs.add(args[i])
   let m = parseEventBrokerMode(mode)
-  let split = splitMtArgs(args, "EventBroker(" & mode.repr & ")")
-  let body = split.body
+  let split = (kwargs: kwargs, body: body)
   case m
   of ebMultiThread:
     when not compileOption("threads"):
