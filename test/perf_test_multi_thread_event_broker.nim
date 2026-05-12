@@ -33,11 +33,13 @@ const
 # ---------------------------------------------------------------------------
 
 # Tuned for burst: defaults (queueDepth=256, slabCapacity=1024) overflow
-# under 5×500 emitter bursts; we bump both. Memory cost:
+# under 5×500 emitter bursts. The `fastBurst` preset bumps both with a
+# small per-cell payload size. Memory cost (PayloadSize = 512 B fits in
+# fastBurst's 256 B cap? — no; bump maxPayloadBytes to 1024 for our test).
 #   ring  =  4096 slots × ~24 B   ≈   96 KB
 #   slab  =  8192 cells × ~1056 B ≈  8.4 MB
 #   total ≈ ~8.5 MB (vs ~1.1 MB at defaults).
-EventBroker(mt, queueDepth = 4096, slabCapacity = 8192):
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
   type PerfEvt = object
     tag*: string
     payload*: seq[byte]

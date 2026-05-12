@@ -61,6 +61,104 @@ const
   DefaultMtReqMaxResponseBytes* = 64 * 1024
   DefaultMtReqFreeListShards* = 2
 
+# ---------------------------------------------------------------------------
+# Built-in presets
+# ---------------------------------------------------------------------------
+#
+# Named shorthand for capacity profiles. Recognised in the macro as
+# `preset = <name>`.
+#
+#   defaultBalanced  same as omitting `preset`
+#   fastBurst        bursty emit/request, small payload — wide ring/slab
+#   largePayload    infrequent traffic with big payloads
+#   tinyFootprint    rare traffic, embedded / memory-constrained
+#
+# Individual kwargs supplied alongside `preset =` override the preset's
+# values (so you can pick a profile and tweak one field).
+
+type BuiltinPreset* = enum
+  bpDefaultBalanced = "defaultBalanced"
+  bpFastBurst = "fastBurst"
+  bpLargePayload = "largePayload"
+  bpTinyFootprint = "tinyFootprint"
+
+proc parseBuiltinPreset(name: string, n: NimNode): BuiltinPreset =
+  case name
+  of "defaultBalanced":
+    bpDefaultBalanced
+  of "fastBurst":
+    bpFastBurst
+  of "largePayload":
+    bpLargePayload
+  of "tinyFootprint":
+    bpTinyFootprint
+  else:
+    error(
+      "Unknown preset '" & name &
+        "'. Built-in presets: defaultBalanced, fastBurst, largePayload, " &
+        "tinyFootprint. (User-defined presets are not yet supported.)",
+      n,
+    )
+    bpDefaultBalanced
+
+proc applyEvtPreset(cfg: var MtEvtCfg, p: BuiltinPreset) =
+  let tag = "preset:" & $p
+  case p
+  of bpDefaultBalanced:
+    discard # already the default
+  of bpFastBurst:
+    cfg.queueDepth = 4096
+    cfg.slabCapacity = 8192
+    cfg.maxPayloadBytes = 256
+    cfg.freeListShards = 8
+  of bpLargePayload:
+    cfg.queueDepth = 64
+    cfg.slabCapacity = 128
+    cfg.maxPayloadBytes = 64 * 1024
+    cfg.freeListShards = 2
+  of bpTinyFootprint:
+    cfg.queueDepth = 32
+    cfg.slabCapacity = 32
+    cfg.maxPayloadBytes = 256
+    cfg.freeListShards = 1
+  cfg.queueDepthOrigin = tag
+  cfg.slabCapacityOrigin = tag
+  cfg.maxPayloadBytesOrigin = tag
+  cfg.freeListShardsOrigin = tag
+
+proc applyReqPreset(cfg: var MtReqCfg, p: BuiltinPreset) =
+  let tag = "preset:" & $p
+  case p
+  of bpDefaultBalanced:
+    discard
+  of bpFastBurst:
+    cfg.queueDepth = 4096
+    cfg.slabCapacity = 256
+    cfg.maxPayloadBytes = 256
+    cfg.responseSlots = 1024
+    cfg.maxResponseBytes = 4 * 1024
+    cfg.freeListShards = 4
+  of bpLargePayload:
+    cfg.queueDepth = 64
+    cfg.slabCapacity = 32
+    cfg.maxPayloadBytes = 64 * 1024
+    cfg.responseSlots = 64
+    cfg.maxResponseBytes = 256 * 1024
+    cfg.freeListShards = 2
+  of bpTinyFootprint:
+    cfg.queueDepth = 16
+    cfg.slabCapacity = 8
+    cfg.maxPayloadBytes = 256
+    cfg.responseSlots = 16
+    cfg.maxResponseBytes = 1024
+    cfg.freeListShards = 1
+  cfg.queueDepthOrigin = tag
+  cfg.slabCapacityOrigin = tag
+  cfg.maxPayloadBytesOrigin = tag
+  cfg.responseSlotsOrigin = tag
+  cfg.maxResponseBytesOrigin = tag
+  cfg.freeListShardsOrigin = tag
+
 proc defaultMtEvtCfg*(): MtEvtCfg =
   MtEvtCfg(
     queueDepth: DefaultMtEvtQueueDepth,
@@ -152,9 +250,26 @@ proc applyEvtKwarg(cfg: var MtEvtCfg, kw: string, n: NimNode) =
       n,
     )
 
+proc presetFromKwargRhs(rhs: NimNode): BuiltinPreset =
+  ## Extracts a built-in preset name from a kwarg RHS. Accepts identifier
+  ## form (`preset = fastBurst`).
+  if rhs.kind != nnkIdent:
+    error(
+      "preset value must be one of the built-in preset names " &
+        "(defaultBalanced, fastBurst, largePayload, tinyFootprint), got " &
+        $rhs.kind & " — " & rhs.repr,
+      rhs,
+    )
+  parseBuiltinPreset($rhs, rhs)
+
 proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
   ## Parses kwarg nodes (everything between `mt` and the trailing body).
   ## Each node must be of shape `nnkExprEqExpr` (`name = value`).
+  ##
+  ## Order of application:
+  ##   1. defaultMtEvtCfg()
+  ##   2. `preset = <name>` if present (overrides defaults)
+  ##   3. individual kwargs (override the preset)
   result = defaultMtEvtCfg()
   for n in kwargs:
     if n.kind != nnkExprEqExpr:
@@ -166,7 +281,13 @@ proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
     let nameNode = n[0]
     if nameNode.kind != nnkIdent:
       error("EventBroker(mt) kwarg name must be an identifier", nameNode)
-    applyEvtKwarg(result, $nameNode, n[1])
+    if $nameNode == "preset":
+      applyEvtPreset(result, presetFromKwargRhs(n[1]))
+  for n in kwargs:
+    let name = $n[0]
+    if name == "preset":
+      continue
+    applyEvtKwarg(result, name, n[1])
 
 # ---------------------------------------------------------------------------
 # Kwarg parsing — RequestBroker(mt)
@@ -225,6 +346,7 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
     )
 
 proc parseMtReqKwargs*(kwargs: openArray[NimNode]): MtReqCfg =
+  ## See `parseMtEvtKwargs` for order-of-application rules.
   result = defaultMtReqCfg()
   for n in kwargs:
     if n.kind != nnkExprEqExpr:
@@ -236,7 +358,13 @@ proc parseMtReqKwargs*(kwargs: openArray[NimNode]): MtReqCfg =
     let nameNode = n[0]
     if nameNode.kind != nnkIdent:
       error("RequestBroker(mt) kwarg name must be an identifier", nameNode)
-    applyReqKwarg(result, $nameNode, n[1])
+    if $nameNode == "preset":
+      applyReqPreset(result, presetFromKwargRhs(n[1]))
+  for n in kwargs:
+    let name = $n[0]
+    if name == "preset":
+      continue
+    applyReqKwarg(result, name, n[1])
 
 # ---------------------------------------------------------------------------
 # Splitting varargs into kwargs + body
