@@ -352,34 +352,36 @@ suite "RequestBroker macro (multi-thread mode)":
 
   # ── Concurrency ──
 
-  when not defined(brokerTestsSkipFragileRefcBursts):
-    # Multiple requester threads racing on the same provider channel hits
-    # the Nim 2.2.4 macOS refc debug stdlib regression. See LIMITATION.md.
-    asyncTest "concurrent requests from multiple threads":
-      check MTReq
-        .setProvider(
-          proc(input: string): Future[Result[MTReq, string]] {.async.} =
-            ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
-        )
-        .isOk()
+  asyncTest "concurrent requests from multiple threads":
+    # Historically this scenario tripped two distinct hazards depending on
+    # the build mode: §2.2 (Nim 2.2.4 macOS refc-debug `Channel[T].send`
+    # race) and §2.6 (macOS+ORC channel slot-payload UAF after sender
+    # exit). Both are closed by the channel-dispatch refactor since broker
+    # transport no longer uses `Channel[T]`. See doc/LIMITATION.md.
+    check MTReq
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: "echo:" & input, numValue: input.len, boolValue: true))
+      )
+      .isOk()
 
-      gThreadRes1.store(false)
-      gThreadRes2.store(false)
-      gThreadRes3.store(false)
+    gThreadRes1.store(false)
+    gThreadRes2.store(false)
+    gThreadRes3.store(false)
 
-      var t1, t2, t3: Thread[void]
-      t1.createThread(concurrentRequester1)
-      t2.createThread(concurrentRequester2)
-      t3.createThread(concurrentRequester3)
+    var t1, t2, t3: Thread[void]
+    t1.createThread(concurrentRequester1)
+    t2.createThread(concurrentRequester2)
+    t3.createThread(concurrentRequester3)
 
-      while not (gThreadRes1.load() and gThreadRes2.load() and gThreadRes3.load()):
-        await sleepAsync(10.milliseconds)
+    while not (gThreadRes1.load() and gThreadRes2.load() and gThreadRes3.load()):
+      await sleepAsync(10.milliseconds)
 
-      t1.joinThread()
-      t2.joinThread()
-      t3.joinThread()
+    t1.joinThread()
+    t2.joinThread()
+    t3.joinThread()
 
-      MTReq.clearProvider()
+    MTReq.clearProvider()
 
   asyncTest "zero-arg request returns error (no zero-arg signature)":
     check MTReq

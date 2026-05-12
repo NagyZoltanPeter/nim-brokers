@@ -353,37 +353,38 @@ suite "EventBroker macro (multi-thread mode)":
     MtEvt.dropAllListeners(gCtxB)
     await sleepAsync(chronos.milliseconds(50))
 
-  when not defined(brokerTestsSkipFragileRefcBursts):
-    # Multiple emitter threads racing on the same listener-thread channel
-    # is the exact pattern the Nim 2.2.4 macOS refc debug stdlib regression
-    # trips on. See LIMITATION.md.
-    asyncTest "concurrent emitters from multiple threads":
-      gReceivedCount.store(0)
-      gReceivedSum.store(0)
+  asyncTest "concurrent emitters from multiple threads":
+    # Historically this scenario tripped two distinct hazards depending on
+    # the build mode: §2.2 (Nim 2.2.4 macOS refc-debug `Channel[T].send`
+    # race) and §2.6 (macOS+ORC channel slot-payload UAF after sender
+    # exit). Both are closed by the channel-dispatch refactor since broker
+    # transport no longer uses `Channel[T]`. See doc/LIMITATION.md.
+    gReceivedCount.store(0)
+    gReceivedSum.store(0)
 
-      let handle = MtEvt.listen(
-        proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
-          discard gReceivedCount.fetchAdd(1)
-          discard gReceivedSum.fetchAdd(evt.value)
-      )
-      check handle.isOk()
+    let handle = MtEvt.listen(
+      proc(evt: MtEvt): Future[void] {.async: (raises: []).} =
+        discard gReceivedCount.fetchAdd(1)
+        discard gReceivedSum.fetchAdd(evt.value)
+    )
+    check handle.isOk()
 
-      var t1, t2, t3: Thread[void]
-      t1.createThread(concurrentEmitter1)
-      t2.createThread(concurrentEmitter2)
-      t3.createThread(concurrentEmitter3)
+    var t1, t2, t3: Thread[void]
+    t1.createThread(concurrentEmitter1)
+    t2.createThread(concurrentEmitter2)
+    t3.createThread(concurrentEmitter3)
 
-      while gReceivedCount.load() < 3:
-        await sleepAsync(chronos.milliseconds(1))
+    while gReceivedCount.load() < 3:
+      await sleepAsync(chronos.milliseconds(1))
 
-      t1.joinThread()
-      t2.joinThread()
-      t3.joinThread()
+    t1.joinThread()
+    t2.joinThread()
+    t3.joinThread()
 
-      check gReceivedCount.load() == 3
-      check gReceivedSum.load() == 60 # 10 + 20 + 30
-      MtEvt.dropAllListeners()
-      await sleepAsync(chronos.milliseconds(50))
+    check gReceivedCount.load() == 3
+    check gReceivedSum.load() == 60 # 10 + 20 + 30
+    MtEvt.dropAllListeners()
+    await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "field-constructor emit syntax":
     gReceivedCount.store(0)

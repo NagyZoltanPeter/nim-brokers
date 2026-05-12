@@ -2396,12 +2396,6 @@ fn test_seq_object_event_concurrent_listeners_and_requesters() {
 // main
 // ===========================================================================
 
-fn skip_fragile() -> bool {
-    std::env::var("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS")
-        .map(|v| !v.is_empty() && v != "0" && v != "OFF" && v != "off")
-        .unwrap_or(false)
-}
-
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -2523,28 +2517,22 @@ fn main() {
     println!("\n--- TestMultipleEventListeners ---");
     run_test("test_two_scalar_event_listeners", test_two_scalar_event_listeners);
     run_test("test_remove_one_listener_keeps_other", test_remove_one_listener_keeps_other);
-    if !skip_fragile() {
-        run_test("test_concurrent_event_types", test_concurrent_event_types);
-    }
+    run_test("test_concurrent_event_types", test_concurrent_event_types);
 
     println!("\n--- TestForeignThreadGcSafety ---");
-    if !skip_fragile() {
-        run_test("test_foreign_thread_concurrent_requests", test_foreign_thread_concurrent_requests);
-        run_test("test_foreign_thread_concurrent_seq_string_requests", test_foreign_thread_concurrent_seq_string_requests);
-        run_test("test_foreign_thread_concurrent_seq_prim_requests", test_foreign_thread_concurrent_seq_prim_requests);
-        run_test("test_foreign_thread_concurrent_seq_object_requests", test_foreign_thread_concurrent_seq_object_requests);
-        run_test("test_foreign_thread_concurrent_seq_object_param_requests", test_foreign_thread_concurrent_seq_object_param_requests);
-        run_test("test_foreign_thread_concurrent_lifecycle", test_foreign_thread_concurrent_lifecycle);
-        run_test("test_foreign_thread_mixed_request_types", test_foreign_thread_mixed_request_types);
-        run_test("test_foreign_thread_stress_all_types", test_foreign_thread_stress_all_types);
-    }
+    run_test("test_foreign_thread_concurrent_requests", test_foreign_thread_concurrent_requests);
+    run_test("test_foreign_thread_concurrent_seq_string_requests", test_foreign_thread_concurrent_seq_string_requests);
+    run_test("test_foreign_thread_concurrent_seq_prim_requests", test_foreign_thread_concurrent_seq_prim_requests);
+    run_test("test_foreign_thread_concurrent_seq_object_requests", test_foreign_thread_concurrent_seq_object_requests);
+    run_test("test_foreign_thread_concurrent_seq_object_param_requests", test_foreign_thread_concurrent_seq_object_param_requests);
+    run_test("test_foreign_thread_concurrent_lifecycle", test_foreign_thread_concurrent_lifecycle);
+    run_test("test_foreign_thread_mixed_request_types", test_foreign_thread_mixed_request_types);
+    run_test("test_foreign_thread_stress_all_types", test_foreign_thread_stress_all_types);
 
     println!("\n--- TestSeqObjectEventMemorySafety ---");
     run_test("test_seq_object_event_callback_data_correctness", test_seq_object_event_callback_data_correctness);
-    if !skip_fragile() {
-        run_test("test_seq_object_event_rapid_fire_no_leak", test_seq_object_event_rapid_fire_no_leak);
-        run_test("test_seq_object_event_concurrent_listeners_and_requesters", test_seq_object_event_concurrent_listeners_and_requesters);
-    }
+    run_test("test_seq_object_event_rapid_fire_no_leak", test_seq_object_event_rapid_fire_no_leak);
+    run_test("test_seq_object_event_concurrent_listeners_and_requesters", test_seq_object_event_concurrent_listeners_and_requesters);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);
