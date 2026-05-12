@@ -27,21 +27,12 @@ import chronos, chronicles
 import results
 import ./helper/broker_utils, ../broker_context
 
-import ./mt_broker_common, ./mt_queue, ./mt_codec
-export results, chronos, chronicles, broker_context, mt_broker_common
+import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
+export results, chronos, chronicles, broker_context, mt_broker_common, mt_config
 
-# ---------------------------------------------------------------------------
-# Defaults — surface as broker pragmas later if needed.
-# ---------------------------------------------------------------------------
-
-const DefaultMtReqQueueDepth* = 256 ## ring slots per provider bucket
-const DefaultMtReqSlabCapacity* = 64 ## slab cells per provider bucket
-const DefaultMtReqMaxPayloadBytes* = 1024 ## bytes of marshaled ReqMsg per cell
-const DefaultMtReqResponseSlots* = 256 ## response slot pool per bucket
-const DefaultMtReqMaxResponseBytes* = 64 * 1024
-  ## bytes of marshaled Result per slot. Default sized for typical
-  ## complex responses (full board state, large seq[byte], etc.).
-const DefaultMtReqFreeListShards* = 2'u32
+# Capacity defaults moved to `mt_config.nim` and re-exported via the
+# `mt_config` module so existing references to `DefaultMtReq*` constants
+# continue to resolve.
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -61,7 +52,9 @@ proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
     return false
   inner[2].kind == nnkIdent and inner[2].eqIdent("string")
 
-proc generateMtRequestBroker*(body: NimNode): NimNode =
+proc generateMtRequestBroker*(
+    body: NimNode, cfg: MtReqCfg = defaultMtReqCfg()
+): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: mt"
@@ -162,12 +155,12 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   let marshalRespIdent = ident(typeDisplayName & "MtMarshalResp")
   let unmarshalRespIdent = ident(typeDisplayName & "MtUnmarshalResp")
 
-  let queueDepthLit = newLit(DefaultMtReqQueueDepth)
-  let slabCapacityLit = newLit(DefaultMtReqSlabCapacity)
-  let payloadBytesLit = newLit(DefaultMtReqMaxPayloadBytes)
-  let responseSlotsLit = newLit(DefaultMtReqResponseSlots)
-  let responseBytesLit = newLit(DefaultMtReqMaxResponseBytes)
-  let freeListShardsLit = newLit(DefaultMtReqFreeListShards)
+  let queueDepthLit = newLit(cfg.queueDepth)
+  let slabCapacityLit = newLit(cfg.slabCapacity)
+  let payloadBytesLit = newLit(cfg.maxPayloadBytes)
+  let responseSlotsLit = newLit(cfg.responseSlots)
+  let responseBytesLit = newLit(cfg.maxResponseBytes)
+  let freeListShardsLit = newLit(uint32(cfg.freeListShards))
 
   result = newStmtList()
 

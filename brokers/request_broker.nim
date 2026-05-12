@@ -163,8 +163,8 @@ import results
 import ./internal/helper/broker_utils, ./broker_context
 
 when compileOption("threads"):
-  import ./internal/mt_request_broker
-  export mt_request_broker
+  import ./internal/mt_config, ./internal/mt_request_broker
+  export mt_config, mt_request_broker
 
 when compileOption("threads") and
     (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
@@ -850,16 +850,25 @@ macro RequestBroker*(body: untyped): untyped =
   ## Default (async) mode.
   generateRequestBroker(body, rbAsync)
 
-macro RequestBroker*(mode: untyped, body: untyped): untyped =
-  ## Explicit mode selector.
-  ## Example:
+macro RequestBroker*(mode: untyped, args: varargs[untyped]): untyped =
+  ## Explicit mode selector, with optional kwargs for `mt` mode.
+  ##
+  ## Examples:
   ##   RequestBroker(sync):
   ##     type Foo = object
   ##     proc signature*(): Result[Foo, string]
+  ##
   ##   RequestBroker(mt):
   ##     type Foo = object
   ##     proc signature*(arg: string): Future[Result[Foo, string]] {.async.}
+  ##
+  ##   RequestBroker(mt, queueDepth = 1024, responseSlots = 64,
+  ##                 maxResponseBytes = 4096):
+  ##     type Foo = object
+  ##     proc signature*(arg: string): Future[Result[Foo, string]] {.async.}
   let m = parseMode(mode)
+  let split = splitMtArgs(args, "RequestBroker(" & mode.repr & ")")
+  let body = split.body
   case m
   of rbMultiThread:
     when not compileOption("threads"):
@@ -869,8 +878,15 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
           "Compile with `--threads:on` to use multi-thread RequestBroker."
       .}
     else:
-      generateMtRequestBroker(body)
+      let cfg = parseMtReqKwargs(split.kwargs)
+      generateMtRequestBroker(body, cfg)
   of rbApi:
+    if split.kwargs.len > 0:
+      error(
+        "RequestBroker(API) does not accept kwargs (got: " &
+          split.kwargs[0].repr & ")",
+        split.kwargs[0],
+      )
     when not compileOption("threads"):
       {.
         error:
@@ -885,6 +901,12 @@ macro RequestBroker*(mode: untyped, body: untyped): untyped =
         else:
           generateApiRequestBroker(body)
       else:
-        generateMtRequestBroker(body)
+        generateMtRequestBroker(body, defaultMtReqCfg())
   of rbAsync, rbSync:
+    if split.kwargs.len > 0:
+      error(
+        "RequestBroker(" & mode.repr &
+          ") does not accept kwargs (kwargs are mt-only)",
+        split.kwargs[0],
+      )
     generateRequestBroker(body, m)
