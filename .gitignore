@@ -6,6 +6,7 @@ build/
 **/cmake-build*/*
 **/target/*
 .gitnexus
+.claude/
 
 # Python __pycache__ from running the generated wrapper
 __pycache__/
