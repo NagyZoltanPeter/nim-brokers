@@ -26,7 +26,7 @@
 
 {.push raises: [].}
 
-import std/[macros, locks, tables, atomics]
+import std/[macros, strutils, locks, tables, atomics]
 import chronos, chronicles
 import results
 import
@@ -58,7 +58,7 @@ const CtrlClearListeners*: uint32 = high(uint32) - 1
 # ---------------------------------------------------------------------------
 
 proc generateMtEventBroker*(
-    body: NimNode, cfg: MtEvtCfg = defaultMtEvtCfg()
+    body: NimNode, cfgIn: MtEvtCfg = defaultMtEvtCfg()
 ): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
@@ -74,6 +74,22 @@ proc generateMtEventBroker*(
   let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
+
+  # Apply type-driven default for maxPayloadBytes when neither a kwarg
+  # nor a preset set it. Warn if the type is unclassifiable so the user
+  # knows to provide an explicit override.
+  var cfg = cfgIn
+  if cfg.maxPayloadBytesOrigin == "default" and fieldTypes.len > 0:
+    let cls = classifyFieldsMax(fieldTypes)
+    cfg.maxPayloadBytes = cls.bytes
+    cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
+    if cls.reason.startsWith("unclassifiable"):
+      warning(
+        "[brokers] EventBroker(" & typeDisplayName &
+          ") could not auto-size payload (" & cls.reason &
+          "); falling back to " & $cls.bytes &
+          " B. Override with `maxPayloadBytes = N`."
+      )
 
   when not defined(brokerConfigSilent):
     hint(fmtEvtCfgSummary(typeDisplayName, cfg))

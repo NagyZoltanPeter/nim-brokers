@@ -53,22 +53,28 @@ proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
   inner[2].kind == nnkIdent and inner[2].eqIdent("string")
 
 proc generateMtRequestBroker*(
-    body: NimNode, cfg: MtReqCfg = defaultMtReqCfg()
+    body: NimNode, cfgIn: MtReqCfg = defaultMtReqCfg()
 ): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: mt"
 
-  let parsed = parseSingleTypeDef(body, "RequestBroker", allowRefToNonObject = true)
+  let parsed = parseSingleTypeDef(
+    body,
+    "RequestBroker",
+    allowRefToNonObject = true,
+    collectFieldInfo = true,
+  )
   let typeIdent = parsed.typeIdent
   let objectDef = parsed.objectDef
+  let responseFieldTypes = parsed.fieldTypes
 
   let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
 
-  when not defined(brokerConfigSilent):
-    hint(fmtReqCfgSummary(typeDisplayName, cfg))
+  # The hint() / auto-classification happens AFTER signature parsing so
+  # that the cfg the user sees reflects type-driven defaults.
 
   # ── Parse signatures ────────────────────────────────────────────────
   var zeroArgSig: NimNode = nil
@@ -134,6 +140,37 @@ proc generateMtRequestBroker*(
 
   let returnType = quote:
     Future[Result[`typeIdent`, string]]
+
+  # ── Type-driven auto-defaults ───────────────────────────────────────
+  var cfg = cfgIn
+  if cfg.maxResponseBytesOrigin == "default" and responseFieldTypes.len > 0:
+    let cls = classifyFieldsMax(responseFieldTypes)
+    cfg.maxResponseBytes = cls.bytes
+    cfg.maxResponseBytesOrigin = "auto:" & cls.reason
+    if cls.reason.startsWith("unclassifiable"):
+      warning(
+        "[brokers] RequestBroker(" & typeDisplayName &
+          ") could not auto-size response (" & cls.reason &
+          "); falling back to " & $cls.bytes &
+          " B. Override with `maxResponseBytes = N`."
+      )
+  if cfg.maxPayloadBytesOrigin == "default" and argParams.len > 0:
+    var argTypes = newSeqOfCap[NimNode](argParams.len)
+    for p in argParams:
+      argTypes.add(p[p.len - 2])
+    let cls = classifyFieldsMax(argTypes)
+    cfg.maxPayloadBytes = cls.bytes
+    cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
+    if cls.reason.startsWith("unclassifiable"):
+      warning(
+        "[brokers] RequestBroker(" & typeDisplayName &
+          ") could not auto-size request payload (" & cls.reason &
+          "); falling back to " & $cls.bytes &
+          " B. Override with `maxPayloadBytes = N`."
+      )
+
+  when not defined(brokerConfigSilent):
+    hint(fmtReqCfgSummary(typeDisplayName, cfg))
 
   # ── Identifier setup ────────────────────────────────────────────────
   let requestMsgName = ident(typeDisplayName & "MtRequestMsg")

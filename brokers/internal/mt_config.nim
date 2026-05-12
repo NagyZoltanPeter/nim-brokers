@@ -12,6 +12,7 @@
 ## `mt_event_broker.nim` / `mt_request_broker.nim` are used unchanged.
 
 {.push raises: [].}
+{.push warning[UnreachableCode]: off.}
 
 import std/[macros, strutils]
 
@@ -345,6 +346,99 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
       n,
     )
 
+# ---------------------------------------------------------------------------
+# Type-driven default sizing
+# ---------------------------------------------------------------------------
+#
+# Walks a Nim type AST at macro time and recommends a cell payload size.
+# Triggered when the user did NOT provide an explicit `maxPayloadBytes`
+# / `maxResponseBytes` kwarg, AND a preset did not set those fields.
+#
+# Sizing table (matches doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md §8):
+#
+#   scalar (bool/intN/uintN/floatN/byte/char/enum/distinct of scalar)  64 B
+#   string (or object whose largest field is string)                   4 KB
+#   seq[string] / object containing seq[string]                        16 KB
+#   seq[byte]  / object containing seq[byte]                           64 KB
+#   anything else (alias / external type / unknown ident)              8 KB + warning
+
+const
+  ScalarBytes* = 64
+  StringBytes* = 4 * 1024
+  SeqStringBytes* = 16 * 1024
+  SeqByteBytes* = 64 * 1024
+  UnclassifiableBytes* = 8 * 1024
+
+proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
+  ## Classifies a type AST into a recommended payload-cell size.
+  ## Caller decides what to do with "unclassifiable" (typically: use
+  ## the value + emit a warning so the user knows to override).
+  if t.kind == nnkIdent:
+    let name = $t
+    case name
+    of "bool", "char", "byte", "uint", "int",
+        "uint8", "int8", "uint16", "int16",
+        "uint32", "int32", "uint64", "int64",
+        "float", "float32", "float64":
+      (ScalarBytes, "scalar:" & name)
+    of "string":
+      (StringBytes, "string")
+    else:
+      # enum / distinct / alias / external object — can't tell at macro
+      # time without resolving the symbol. Fall back to safe size.
+      (UnclassifiableBytes, "unclassifiable:" & name)
+  elif t.kind == nnkBracketExpr and t.len >= 2 and t[0].kind == nnkIdent:
+    let outer = $t[0]
+    if outer == "seq":
+      let inner = t[1]
+      if inner.kind == nnkIdent:
+        let n = $inner
+        if n == "byte" or n == "uint8":
+          (SeqByteBytes, "seq[byte]")
+        elif n == "string":
+          (SeqStringBytes, "seq[string]")
+        else:
+          # seq[<other>] — assume short list of small items.
+          (StringBytes, "seq[" & n & "]")
+      else:
+        (UnclassifiableBytes, "unclassifiable:" & t.repr)
+    elif outer == "array":
+      # array[N, T] — bounded; treat as the underlying T classification.
+      if t.len >= 3:
+        classifyTypeSize(t[2])
+      else:
+        (UnclassifiableBytes, "unclassifiable:" & t.repr)
+    else:
+      (UnclassifiableBytes, "unclassifiable:" & outer)
+  else:
+    (UnclassifiableBytes, "unclassifiable:" & $t.kind)
+
+proc classifyFieldsMax*(
+    fieldTypes: openArray[NimNode]
+): tuple[bytes: int, reason: string] =
+  ## Returns the maximum-size classification across a collection of
+  ## field-type ASTs. Used to size the cell for an inline object.
+  var bestBytes = ScalarBytes
+  var bestReason = "scalar"
+  for ft in fieldTypes:
+    let c = classifyTypeSize(ft)
+    if c.bytes > bestBytes:
+      bestBytes = c.bytes
+      bestReason = c.reason
+  (bestBytes, bestReason)
+
+proc peelFutureResult*(t: NimNode): NimNode =
+  ## Walks `Future[Result[T, E]]` and returns T. Returns nil if the
+  ## shape doesn't match.
+  var cur = t
+  if cur.kind == nnkBracketExpr and cur.len >= 2 and
+      cur[0].kind == nnkIdent and $cur[0] == "Future":
+    cur = cur[1]
+  if cur.kind == nnkBracketExpr and cur.len >= 2 and
+      cur[0].kind == nnkIdent and ($cur[0] == "Result" or $cur[0] == "results.Result"):
+    return cur[1]
+  nil
+
   # ---------------------------------------------------------------------------
   # Compile-time summary formatting
   # ---------------------------------------------------------------------------
@@ -450,3 +544,6 @@ proc splitMtArgs*(
   for i in 0 ..< args.len - 1:
     kw.add(args[i])
   (kw, bodyNode)
+
+{.pop.} # warning[UnreachableCode]
+{.pop.} # raises: []
