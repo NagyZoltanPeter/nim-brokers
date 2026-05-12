@@ -216,10 +216,14 @@ when threads exit and new ones are created. Each bucket stores a `threadGen`
 both `threadId` and `threadGen`.
 
 **`clearProvider` on a dead provider thread:** If the provider thread exits
-without calling `clearProvider`, a cross-thread `clearProvider` call sends a
-shutdown message into the orphaned request `Channel[T]`. `send` returns
-immediately (unbounded channel) — the message sits unread. This is a small
-harmless memory leak (~80 bytes, no OS resources), not a hang.
+without calling `clearProvider`, a cross-thread `clearProvider` call sets
+the bucket's `ring.closed` flag and fires the provider's signal. The
+provider thread is gone, so nothing drains the ring — the ring + slab +
+response slot pool sit unreclaimed. This is a small bounded memory leak
+(per Invariant I0: the only safe deallocator is the bucket-owning
+thread; if that thread is gone, freeing from another thread would
+violate macOS+ORC's TLV-allocator hazard documented in `LIMITATION.md`
+§2.6's historical context). No OS resources held; no hang.
 
 ### 7. Cross-thread request timeout
 
@@ -247,13 +251,15 @@ if res.isErr() and "timed out" in res.error():
   the provider directly and are not affected by the timeout setting.
 - The timeout variable is per-type, module-level — it is shared across all threads
   and all `BrokerContext` instances for that broker type.
-- When a timeout occurs, the one-shot response `Channel[T]` is **left allocated and not
-  deallocated** — this is an intentional, safe leak. The one-shot poller on the
-  requester thread is removed (returns 2), but the channel pointer stays alive so the
-  provider's eventual `send` writes into it harmlessly — nothing reads it, nothing
-  crashes. Because `Channel[T]` holds no OS file descriptors, this is a pure memory
-  leak of ~80 bytes per timed-out request. The same intentional-leak strategy is used
-  for request channels at teardown.
+- When a timeout occurs, the requester calls `pool.abandon(slotIdx)` —
+  CAS `Empty → Abandoned` on the response slot's state. If the abandon
+  succeeds, the provider's eventual `beginWrite` CAS will fail (state is
+  Abandoned, not Empty); the provider releases the slot back to the
+  pool without writing. If the abandon CAS fails (provider already in
+  `Writing` or `Ready` state), the requester's response poller may still
+  process the late response normally — but its future has been
+  cancelled, so it just decRefs the slot and discards. Either way the
+  slot returns to the pool cleanly; no leak per timed-out request.
 
 ### 8. Compile with `--threads:on`
 
@@ -276,42 +282,49 @@ sequenceDiagram
         participant RT as Requester Thread
         participant RDL as requester dispatchLoop
     end
-  participant RC as requestChan<br/>Channel T
-  participant RSP as responseChan<br/>one shot Channel T
+  participant R as ring<br/>Vyukov MPSC
+  participant SL as request slab<br/>(per-bucket)
+  participant SP as response slot pool<br/>(per-bucket)
 
   Note over PT: setProvider handler already called<br/>Poll fn registered in provider thread<br/>brokerDispatchLoop
 
-  DL ->> RC: tryRecv no message yet returns 0
+  DL ->> R: tryDequeue no item yet returns 0
   Note right of DL: Yields and waits for shared signal
 
   RT ->> RT: Lock find bucket unlock
-  RT ->> RSP: createShared Channel T
-    activate RSP
-  Note right of RSP: ad hoc response channel<br/>0 OS fds
-
-  RT ->> RDL: register one shot response poller
-  RT ->> RC: send requestMsg
+  RT ->> SP: claim response slot
+    activate SP
+  RT ->> SL: claim slab cell
+    activate SL
+  RT ->> SL: marshal ReqMsg into cell bytes<br/>(includes responseSlotIdx + requesterSignal)
+  RT ->> R: tryEnqueue cellIdx
   RT ->> PT: fireBrokerSignal providerSignal
 
-  DL ->> RC: tryRecv msg received
-    DL ->> DL: look up handler from threadvar
+  RT ->> RDL: register one-shot response poller for slotIdx
+
+  DL ->> R: tryDequeue returns cellIdx
+  DL ->> SL: read+unmarshal cell into ReqMsg on provider heap
+  DL ->> SL: release cell
+    deactivate SL
   DL ->> H: asyncSpawn handleMsg
     activate H
   Note over H: NON BLOCKING<br/>runs on provider thread<br/>event loop
 
-  RT ->> RSP: waitFor withTimeout responseFut timeout
+  RT ->> RT: waitFor withTimeout responseFut timeout
     activate RT
   Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout default 5s
 
   H -->> DL: Result T string
     deactivate H
 
-  DL ->> RSP: send result
+  DL ->> SP: beginWrite slot (CAS Empty→Writing)
+  DL ->> SP: marshal Result into slot bytes; commitWrite
   DL ->> RT: fireBrokerSignal requesterSignal
 
-  RDL ->> RSP: tryRecv result received
-  RDL ->> RDL: complete responseFut and deallocShared RSP
-    deactivate RSP
+  RDL ->> SP: readyState true → unmarshal Result onto requester heap
+  RDL ->> SP: release slot
+    deactivate SP
+  RDL ->> RDL: complete responseFut
 
   RT -->> RT: return Result T string
     deactivate RT
@@ -321,12 +334,13 @@ sequenceDiagram
 
 | Operation | Thread | Blocking? | Duration |
 |-----------|--------|-----------|----------|
-| `send(requestMsg)` | Requester | Near-instant | Channel[T] is unbounded, send never blocks |
+| `slab.claim(cell)` + `pool.claim(slot)` | Requester | Near-instant | Atomic free-list pop; fails only on exhaustion (back-pressure) |
+| `marshalReqMsg(...) + ring.tryEnqueue` | Requester | Near-instant | Memcpy/marshal + atomic CAS into ring slot; fails on ring full (back-pressure) |
 | `fireBrokerSignal(providerSignal)` | Requester | Near-instant | Fires OS fd |
 | `waitFor withTimeout(responseFut, timeout)` | Requester | **Blocks** | Until provider responds or timeout (default 5s) |
-| `tryRecv(requestChan)` | Provider | Non-blocking | Returns 0 if empty; called from dispatchLoop |
+| `ring.tryDequeue` | Provider | Non-blocking | Returns false if empty; called from dispatchLoop |
 | `asyncSpawn handleMsg(...)` | Provider | Non-blocking | Dispatched on provider's event loop |
-| `send(result)` | Provider | Near-instant | Channel[T] unbounded |
+| `pool.beginWrite + marshal + commitWrite` | Provider | Near-instant | Atomic CAS + memcpy + atomic release-store on state |
 
 
 ### Same-Thread Request (fast path)
@@ -344,13 +358,13 @@ sequenceDiagram
 
     T ->> H: await handler("hello")
     activate H
-    Note over H: Direct call — NO channels<br/>Runs on same event loop<br/>NON-BLOCKING (async)
+    Note over H: Direct call — NO ring, NO slab, NO pool<br/>Runs on same event loop<br/>NON-BLOCKING (async)
     H -->> T: Result[T, string]
     deactivate H
 
     T ->> T: return Result[T, string]
 
-    Note over T: Zero channel allocations.<br/>Zero signal fires.<br/>Zero additional threads.
+    Note over T: Zero allocations on hot path.<br/>Zero signal fires.<br/>Zero additional threads.
 ```
 
 
@@ -362,7 +376,7 @@ sequenceDiagram
     participant TV as threadvar seqs
     participant GL as globalLock
     participant B as Shared Buckets
-    participant CH as Channel[T]<br/>(request, 0 fds)
+    participant CH as ring + slab + slot pool<br/>(per-bucket, 0 fds)
     participant EL as Event Loop
 
     CT ->> CT: ensureInit()
@@ -392,10 +406,10 @@ sequenceDiagram
         CT ->> GL: unlock
         CT ->> CT: return err("already set from another thread")
     else not found
-        CT ->> B: createShared Channel[T] (request channel, 0 OS fds)
-        CT ->> B: store bucket {brokerCtx, chan, providerSignal, threadId, threadGen}
+        CT ->> B: createShared ring + slab + response-slot pool (per-bucket, 0 OS fds)
+        CT ->> B: store bucket {brokerCtx, ring, slab, responseSlotPool, providerSignal, threadId, threadGen}
         CT ->> B: bucketCount += 1
-        CT ->> EL: registerBrokerPoller(makePollFn(chan, brokerCtx))
+        CT ->> EL: registerBrokerPoller(makePollFn(ring, slab, pool, brokerCtx))
         CT ->> EL: ensureBrokerDispatchStarted()
         Note over EL: shared brokerDispatchLoop<br/>already running or just started
         CT ->> GL: unlock
@@ -480,32 +494,46 @@ sequenceDiagram
 ## Memory Layout
 
 ```
-                 SHARED MEMORY (createShared)              THREAD-LOCAL (threadvar)
-                ┌───────────────────────────────┐           ┌──────────────────────────┐
-                │  gBuckets: ptr UncheckedArray │           │ Thread A:                │
-                │  ┌─────────────────────────┐  │           │  tvCtxs:     [ctx0,ctx1] │
-                │  │ [0] brokerCtx: ctx0     │  │           │  tvHandlers: [h0,  h1  ] │
-                │  │     requestChan: ──────►│──│──►chan0   │                          │
-                │  │     threadId: addrA     │  │           ├──────────────────────────┤
-                │  │     threadGen: 0        │  │           │ Thread B:                │
-                │  ├─────────────────────────┤  │           │  tvCtxs:     [ctx2]      │
-                │  │ [1] brokerCtx: ctx1     │  │           │  tvHandlers: [h2  ]      │
-                │  │     requestChan: ──────►│──│──►chan0   │                          │
-                │  │     threadId: addrA     │  │  (shared) └──────────────────────────┘
-                │  │     threadGen: 0        │  │
-                │  ├─────────────────────────┤  │
-                │  │ [2] brokerCtx: ctx2     │  │
-                │  │     requestChan: ──────►│──│──►chan2
-                │  │     threadId: addrB     │  │
-                │  │     threadGen: 1        │  │
-                │  └─────────────────────────┘  │
-                │  gBucketCount: 3              │
-                │  gBucketCap: 4                │
-                │  gLock: Lock                  │
-                └───────────────────────────────┘
+                 SHARED MEMORY (createShared)                      THREAD-LOCAL (threadvar)
+                ┌─────────────────────────────────────┐             ┌──────────────────────────┐
+                │  gBuckets: ptr UncheckedArray       │             │ Thread A:                │
+                │  ┌───────────────────────────────┐  │             │  tvCtxs:     [ctx0,ctx1] │
+                │  │ [0] brokerCtx: ctx0           │  │             │  tvHandlers: [h0,  h1  ] │
+                │  │     ring:             ───────►│──│─►ring0      │                          │
+                │  │     slab:             ───────►│──│─►slab0      │                          │
+                │  │     responseSlotPool: ───────►│──│─►pool0      ├──────────────────────────┤
+                │  │     threadId: addrA           │  │             │ Thread B:                │
+                │  │     threadGen: 0              │  │             │  tvCtxs:     [ctx2]      │
+                │  ├───────────────────────────────┤  │             │  tvHandlers: [h2  ]      │
+                │  │ [1] brokerCtx: ctx1           │  │             │                          │
+                │  │     ring:             ───────►│──│─►ring0 ◄┐   │                          │
+                │  │     slab:             ───────►│──│─►slab0 ◄┤   │                          │
+                │  │     responseSlotPool: ───────►│──│─►pool0 ◄┘   │                          │
+                │  │     threadId: addrA           │  │ (shared)    └──────────────────────────┘
+                │  │     threadGen: 0              │  │
+                │  ├───────────────────────────────┤  │
+                │  │ [2] brokerCtx: ctx2           │  │
+                │  │     ring:             ───────►│──│─►ring2
+                │  │     slab:             ───────►│──│─►slab2
+                │  │     responseSlotPool: ───────►│──│─►pool2
+                │  │     threadId: addrB           │  │
+                │  │     threadGen: 1              │  │
+                │  └───────────────────────────────┘  │
+                │  gBucketCount: 3                    │
+                │  gBucketCap: 4                      │
+                │  gLock: Lock                        │
+                └─────────────────────────────────────┘
 
-Note: ctx0 and ctx1 are on the same thread (Thread A), so they share the
-same requestChan. Each context has its own handler in the threadvar seqs.
+Each bucket owns its own `ring` (Vyukov MPSC), `slab` (per-bucket
+payload-cell pool for marshaled ReqMsg), and `responseSlotPool`
+(per-bucket pool of byte-buffer response slots). Bucket-owning thread
+allocates and frees these via `createShared`; other threads use them
+only via atomic claim/release on pre-allocated cells.
+
+When two contexts run on the same thread (ctx0 and ctx1 on Thread A
+above) they nonetheless get **independent** bucket entries — each with
+its own ring/slab/pool. (Past behavior shared one request channel per
+thread; the new design isolates per-bucket to keep ownership clean.)
 ```
 
 ---
@@ -516,20 +544,25 @@ same requestChan. Each context has its own handler in the threadvar seqs.
 
 | Component | Size | Lifetime |
 |-----------|------|----------|
-| Global bucket array | `4 * sizeof(MtBucket)` initially (~128 bytes), doubles on growth | Process lifetime |
+| Global bucket array | `4 * sizeof(MtBucket)` initially (~256 bytes), doubles on growth | Process lifetime |
 | `Lock` (OS mutex) | ~40-64 bytes (platform-dependent) | Process lifetime |
 | Init + count + cap vars | 3 `int` + 1 `bool` = ~25 bytes | Process lifetime |
-| `Channel[RequestMsg]` per context | ~80 bytes (`createShared`, 0 OS fds) | Intentionally leaked on clearProvider (no OS resource cost) |
+| `VyukovMpscRing[uint32]` per bucket | ring header (~256 B w/ cache padding) + `maxQueueDepth × 16 B` slots | Until `clearProvider` (deferred-free with 50ms grace) |
+| `PayloadSlab` per bucket (request side) | `slabCapacity × (16 + maxPayloadBytes)` bytes + free-list (~1 KB) | Until `clearProvider` |
+| `ResponseSlotPool` per bucket | `responseSlots × (16 + maxResponseBytes)` bytes + free-list (~1 KB) | Until `clearProvider` |
 | `ThreadSignalPtr` (providerSignal) | ~2 OS fds (macOS), shared by all broker types on the thread | Thread lifetime |
 | Threadvar seqs (per provider thread) | 2 `seq` headers (~32 bytes) + entries | Thread lifetime |
 | Poll fn closure | Registered in `gBrokerThreadPollers` (~32 bytes) | Until `clearProvider` (returns 2 → removed) |
 | `brokerDispatchLoop` coroutine | One shared `Future` per thread (~128 bytes) | Thread lifetime (shared by all broker types) |
 
-**Total per-context registration: ~280-320 bytes.**
+**Default sizing per bucket:**
+- `maxQueueDepth = 256` → ring ~4.3 KB
+- `slabCapacity = 64`, `maxPayloadBytes = 1024` → slab ~67 KB
+- `responseSlots = 256`, `maxResponseBytes = 64 KB` → pool ~16.5 MB
 
-Contexts on the same thread share the `brokerDispatchLoop` and `ThreadSignalPtr`,
-so the marginal cost of a second context on the same thread is only the
-`Channel[T]` + poll fn + threadvar seq entry (~120 bytes total).
+The pool default is sized for typical complex responses (full board
+state, large `seq[byte]`, etc.); tune via the broker-declaration
+defaults if your responses are small (e.g. POD scalars).
 
 ### Per-Request Overhead
 
@@ -543,38 +576,43 @@ so the marginal cost of a second context on the same thread is only the
 
 **Total: equivalent to a virtual function call + mutex.**
 
-No channel allocations. No data copying beyond normal parameter passing.
+No allocations. No data copying beyond normal parameter passing.
 
 #### Cross-thread request
 
 | Operation | Cost |
 |-----------|------|
 | Lock acquire + bucket scan + unlock | ~50-200 ns |
-| `createShared(Channel[Result])` | ~80 bytes allocation, 0 OS fds |
-| `open(responseChan)` | Channel initialization (mutex+condvar init only) |
-| `send(requestMsg)` to requestChan | Copies the `RequestMsg` struct into channel buffer. Near-instant (unbounded). Under `--mm:refc`, string fields are deep-copied. |
+| `pool.claim` (atomic free-list pop) | ~10-30 ns; fails on pool exhaustion (back-pressure) |
+| `slab.claim` (atomic free-list pop) | ~10-30 ns; fails on slab exhaustion (back-pressure) |
+| Marshal `ReqMsg` into cell bytes | ~10-100 ns depending on payload shape (POD memcpy vs recursive `seq[Obj]` marshal) |
+| `ring.tryEnqueue` (atomic CAS into ring slot) | ~20-50 ns |
 | `fireBrokerSignal(providerSignal)` | Wakes provider's `brokerDispatchLoop` |
-| `register one-shot response poller` | Appends closure to requester's `gBrokerThreadPollers` |
+| Register one-shot response poller | Appends closure to requester's `gBrokerThreadPollers` |
 | `await withTimeout(responseFut, timeout)` | Requester blocks (via `waitFor` spinning a temporary event loop) |
-| `send(result)` from provider | Copies the `Result[T, string]` into response channel. Under `--mm:refc`, result type fields are deep-copied. |
+| Provider unmarshal request, run handler | Handler-dominated; broker overhead is a memcpy + a few branches |
+| Provider `pool.beginWrite + marshal Result + commitWrite` | ~30-150 ns (atomic CAS + marshal + atomic release-store) |
 | `fireBrokerSignal(requesterSignal)` | Wakes requester's `brokerDispatchLoop` |
-| `deallocShared(responseChan)` | Done by one-shot poller on success; leaked on timeout (no OS resource cost) |
+| Requester unmarshal Result on requester heap | Symmetric to marshal cost |
+| Slot/cell release back to pool/slab | Atomic free-list push, ~10-30 ns each |
 
-**Total: ~2-5 us per cross-thread request** (dominated by channel alloc/dealloc and
-context switches).
+**Total broker overhead per cross-thread request: ~200-800 ns + handler runtime**
+(dominated by signal-fire round-trip and chronos Future allocation; both
+are outside the broker layer's control).
 
-### Deep-Copy Cost under `--mm:refc`
+### Allocation profile
 
-Under `refc`, `Channel[T].send` performs a **deep copy** of the message. If your
-request type contains large strings, sequences, or ref objects, each
-cross-thread request copies that data twice (request message + response
-message).
+**No allocator on the hot path.** Slab cells and response slots are
+pre-allocated at `setProvider` time. Senders only:
+- atomic pop from the slab/pool free-list (CAS on a 64-bit tagged head),
+- memcpy/marshal into pre-allocated bytes,
+- atomic enqueue into the ring (CAS on the slot's sequence atomic),
+- fire the per-thread shared signal.
 
-Under `--mm:orc`, move semantics reduce this to near-zero for most cases.
-
-**Recommendation:** For large payloads, prefer `--mm:orc`. For small value
-types (ints, short strings, fixed-size objects), both memory managers
-perform similarly.
+This is the §2.6/§2.2 fix in practice: under both `--mm:orc` and
+`--mm:refc`, the broker no longer touches the Nim allocator's per-thread
+arena on the cross-thread hot path, so sender-thread exit cannot strand
+any allocator state. See `doc/LIMITATION.md` for the historical context.
 
 ### Lock Contention
 
@@ -588,28 +626,39 @@ typical usage (1-4 contexts, rare provider changes), contention is
 negligible. The lock acquisition is the standard OS mutex fast path
 (~20-50 ns uncontended).
 
-### Channel Allocation Strategy
+### Response Slot Strategy
 
-Each cross-thread request allocates a one-shot `Channel[T]` for the
-response. This is a deliberate tradeoff:
+Each cross-thread request claims a one-shot **response slot** from the
+provider bucket's pre-allocated `ResponseSlotPool` (claim is a single
+atomic free-list pop; no allocator call). The provider writes the
+marshaled `Result[T, string]` bytes into the slot and atomically flips
+its state to `Ready`; the requester reads the bytes, unmarshals into a
+local `Result` on its own GC heap, and releases the slot back to the
+pool.
 
-- **Pro:** Simple, no response routing needed, no shared response queue
+- **Pro:** Zero allocator interaction on the hot path — pool cells are
+  pre-allocated at `setProvider`, claimed and released via atomic
+  free-list ops.
 - **Pro:** No risk of response mismatch between concurrent requesters
-- **Pro:** `Channel[T]` uses zero OS file descriptors — no fd exhaustion risk
-- **Con:** `createShared` + `deallocShared` per request (~80 bytes)
-
-For high-throughput scenarios (>10,000 requests/sec), we may consider pooling
-response channels or batching requests at the application level.
-This is certainly an optimization point, as we can expect requests from one thread to be sequential for RequestBroker- and broker-context-wise, so we can reuse the same channel for multiple requests.
+  (each owns its slot index).
+- **Pro:** Response payload is marshaled to bytes by the provider and
+  unmarshaled by the requester, so strings/seqs inside the `Result`
+  live on the consumer thread's heap — no cross-thread Nim `=copy`.
+- **Con:** Pool size (`responseSlots`) caps concurrent in-flight
+  requests per provider. Default 256 is sufficient for most workloads;
+  back-pressure (err return) on exhaustion.
+- **Con:** Each pool slot reserves `maxResponseBytes` regardless of
+  actual response size. Default 64 KB × 256 slots = ~16 MB per bucket;
+  tune `maxResponseBytes` down for small-response brokers.
 
 ### Scaling Characteristics
 
 | Dimension | Scaling |
 |-----------|---------|
 | Number of contexts | Linear bucket scan under lock. Practical limit: ~100 contexts (scan is ~microseconds) |
-| Number of concurrent requesters | Each gets its own response channel. Provider serves sequentially via event loop. Throughput limited by handler execution time. |
+| Number of concurrent requesters | Each gets its own response slot from the per-bucket pool. Provider serves sequentially via event loop. Throughput limited by handler execution time. |
 | Number of provider threads | Each owns independent contexts. No cross-provider contention. |
-| Message size | Linear with `Channel[T].send` copy cost. Affects refc more than ORC. |
+| Message size | Linear with marshal cost (memcpy for POD, recursive walk for non-POD). MM-agnostic — the marshaler does its own bytewise work regardless of `--mm:orc` vs `--mm:refc`. |
 
 ### Comparison with Single-Thread RequestBroker
 
