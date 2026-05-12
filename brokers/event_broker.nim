@@ -89,8 +89,8 @@ import chronos, chronicles, results
 import ./internal/helper/broker_utils, ./broker_context
 
 when compileOption("threads"):
-  import ./internal/mt_event_broker
-  export mt_event_broker
+  import ./internal/mt_config, ./internal/mt_event_broker
+  export mt_config, mt_event_broker
 
 when compileOption("threads") and
     (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
@@ -510,13 +510,20 @@ macro EventBroker*(body: untyped): untyped =
   ## Default (single-thread) mode.
   generateEventBroker(body)
 
-macro EventBroker*(mode: untyped, body: untyped): untyped =
-  ## Explicit mode selector.
-  ## Example:
+macro EventBroker*(mode: untyped, args: varargs[untyped]): untyped =
+  ## Explicit mode selector, with optional kwargs for `mt` mode.
+  ##
+  ## Examples:
   ##   EventBroker(mt):
   ##     type MyEvent = object
   ##       value*: int
+  ##
+  ##   EventBroker(mt, queueDepth = 1024, slabCapacity = 4096):
+  ##     type MyEvent = object
+  ##       value*: int
   let m = parseEventBrokerMode(mode)
+  let split = splitMtArgs(args, "EventBroker(" & mode.repr & ")")
+  let body = split.body
   case m
   of ebMultiThread:
     when not compileOption("threads"):
@@ -526,8 +533,15 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
           "Compile with `--threads:on` to use multi-thread EventBroker."
       .}
     else:
-      generateMtEventBroker(body)
+      let cfg = parseMtEvtKwargs(split.kwargs)
+      generateMtEventBroker(body, cfg)
   of ebApi:
+    if split.kwargs.len > 0:
+      error(
+        "EventBroker(API) does not accept kwargs (got: " &
+          split.kwargs[0].repr & ")",
+        split.kwargs[0],
+      )
     when not compileOption("threads"):
       {.
         error:
@@ -542,6 +556,12 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
         else:
           generateApiEventBroker(body)
       else:
-        generateMtEventBroker(body)
+        generateMtEventBroker(body, defaultMtEvtCfg())
   of ebDefault:
+    if split.kwargs.len > 0:
+      error(
+        "EventBroker(" & mode.repr &
+          ") does not accept kwargs (kwargs are mt-only)",
+        split.kwargs[0],
+      )
     generateEventBroker(body)

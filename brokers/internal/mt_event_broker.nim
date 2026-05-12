@@ -34,9 +34,10 @@ import
   ../broker_context,
   ./mt_broker_common,
   ./mt_queue,
-  ./mt_codec
+  ./mt_codec,
+  ./mt_config
 
-export results, chronos, broker_context, chronicles, mt_broker_common
+export results, chronos, broker_context, chronicles, mt_broker_common, mt_config
 
 # Ring-slot sentinel: a slot's payload `uint32` is normally a slab cell
 # index, but this reserved value carries a "clear local tvHandlers"
@@ -48,18 +49,17 @@ export results, chronos, broker_context, chronicles, mt_broker_common
 # larger than any legal slab capacity (bounded by uint32 in practice).
 const CtrlClearListeners*: uint32 = high(uint32) - 1
 
-# Default broker pragma values (override via `EventBroker(mt, ...)`
-# arguments in a later phase — for now the defaults are baked in).
-const DefaultMtEvtQueueDepth* = 256 ## ring slots per bucket
-const DefaultMtEvtSlabCapacity* = 1024 ## global slab cell count
-const DefaultMtEvtMaxPayloadBytes* = 1024 ## Tier B cell payload bytes
-const DefaultMtEvtFreeListShards* = 4'u32
+# Capacity defaults moved to `mt_config.nim`; they remain re-exported via
+# the `mt_config` module so external code referencing
+# `DefaultMtEvtQueueDepth` etc. still resolves.
 
 # ---------------------------------------------------------------------------
 # Macro code generator
 # ---------------------------------------------------------------------------
 
-proc generateMtEventBroker*(body: NimNode): NimNode =
+proc generateMtEventBroker*(
+    body: NimNode, cfg: MtEvtCfg = defaultMtEvtCfg()
+): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "EventBroker mode: mt"
@@ -117,10 +117,10 @@ proc generateMtEventBroker*(body: NimNode): NimNode =
   let shutdownProcessLoopsForCtxIdent =
     ident("shutdownProcessLoopsForCtx" & typeDisplayName)
 
-  let queueDepthLit = newLit(DefaultMtEvtQueueDepth)
-  let slabCapacityLit = newLit(DefaultMtEvtSlabCapacity)
-  let payloadBytesLit = newLit(DefaultMtEvtMaxPayloadBytes)
-  let freeListShardsLit = newLit(DefaultMtEvtFreeListShards)
+  let queueDepthLit = newLit(cfg.queueDepth)
+  let slabCapacityLit = newLit(cfg.slabCapacity)
+  let payloadBytesLit = newLit(cfg.maxPayloadBytes)
+  let freeListShardsLit = newLit(uint32(cfg.freeListShards))
 
   result = newStmtList()
 
