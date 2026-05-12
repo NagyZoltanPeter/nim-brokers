@@ -345,6 +345,68 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
       n,
     )
 
+  # ---------------------------------------------------------------------------
+  # Compile-time summary formatting
+  # ---------------------------------------------------------------------------
+
+proc fmtBytes(n: int): string =
+  if n >= 1024 * 1024:
+    $(n div (1024 * 1024)) & "." & align($((n mod (1024 * 1024)) div (102 * 1024)), 1, '0') &
+      " MB"
+  elif n >= 1024:
+    $(n div 1024) & "." & align($((n mod 1024) div 102), 1, '0') & " KB"
+  else:
+    $n & " B"
+
+# Approximate per-element bytes — match the runtime layouts in mt_queue.nim.
+# Exact figures don't matter; this is a sizing-guidance number for the user.
+const
+  RingSlotBytes = 24 # Slot[uint32] = idx u32 + seq u64 + pad
+  CellHeaderBytes = 32 # CellHeader (refcount, length, prev/next idx)
+  RespSlotHeaderBytes = 48 # ResponseSlot header
+
+proc alignUp8(n: int): int {.inline.} =
+  (n + 7) and (not 7)
+
+proc estEvtIdleBytes(cfg: MtEvtCfg): tuple[ring, slab, total: int] =
+  let ring = cfg.queueDepth * RingSlotBytes
+  let cellStride = alignUp8(CellHeaderBytes + cfg.maxPayloadBytes)
+  let slab = cfg.slabCapacity * cellStride
+  (ring, slab, ring + slab)
+
+proc estReqIdleBytes(
+    cfg: MtReqCfg
+): tuple[ring, slab, respPool, total: int] =
+  let ring = cfg.queueDepth * RingSlotBytes
+  let cellStride = alignUp8(CellHeaderBytes + cfg.maxPayloadBytes)
+  let slab = cfg.slabCapacity * cellStride
+  let slotStride = alignUp8(RespSlotHeaderBytes + cfg.maxResponseBytes)
+  let respPool = cfg.responseSlots * slotStride
+  (ring, slab, respPool, ring + slab + respPool)
+
+proc fmtEvtCfgSummary*(typeName: string, cfg: MtEvtCfg): string =
+  let est = estEvtIdleBytes(cfg)
+  "[brokers] EventBroker(" & typeName & "): " &
+    "queueDepth=" & $cfg.queueDepth & " [" & cfg.queueDepthOrigin & "], " &
+    "slabCapacity=" & $cfg.slabCapacity & " [" & cfg.slabCapacityOrigin & "], " &
+    "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" & cfg.maxPayloadBytesOrigin &
+    "], freeListShards=" & $cfg.freeListShards & " [" & cfg.freeListShardsOrigin &
+    "] — idle RAM: ring≈" & fmtBytes(est.ring) & ", slab≈" & fmtBytes(est.slab) &
+    ", total≈" & fmtBytes(est.total)
+
+proc fmtReqCfgSummary*(typeName: string, cfg: MtReqCfg): string =
+  let est = estReqIdleBytes(cfg)
+  "[brokers] RequestBroker(" & typeName & "): " &
+    "queueDepth=" & $cfg.queueDepth & " [" & cfg.queueDepthOrigin & "], " &
+    "slabCapacity=" & $cfg.slabCapacity & " [" & cfg.slabCapacityOrigin & "], " &
+    "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" & cfg.maxPayloadBytesOrigin &
+    "], responseSlots=" & $cfg.responseSlots & " [" & cfg.responseSlotsOrigin &
+    "], maxResponseBytes=" & $cfg.maxResponseBytes & " [" &
+    cfg.maxResponseBytesOrigin & "], freeListShards=" & $cfg.freeListShards & " [" &
+    cfg.freeListShardsOrigin & "] — idle RAM: ring≈" & fmtBytes(est.ring) &
+    ", slab≈" & fmtBytes(est.slab) & ", respPool≈" & fmtBytes(est.respPool) &
+    ", total≈" & fmtBytes(est.total)
+
 proc parseMtReqKwargs*(kwargs: openArray[NimNode]): MtReqCfg =
   ## See `parseMtEvtKwargs` for order-of-application rules.
   result = defaultMtReqCfg()

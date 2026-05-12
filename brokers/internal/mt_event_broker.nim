@@ -75,6 +75,9 @@ proc generateMtEventBroker*(
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
 
+  when not defined(brokerConfigSilent):
+    hint(fmtEvtCfgSummary(typeDisplayName, cfg))
+
   # ── Identifier setup ──────────────────────────────────────────────────
   let handlerProcIdent = ident(typeDisplayName & "ListenerProc")
   let listenerHandleIdent = ident(typeDisplayName & "Listener")

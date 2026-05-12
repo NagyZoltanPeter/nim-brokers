@@ -67,6 +67,9 @@ proc generateMtRequestBroker*(
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
 
+  when not defined(brokerConfigSilent):
+    hint(fmtReqCfgSummary(typeDisplayName, cfg))
+
   # ── Parse signatures ────────────────────────────────────────────────
   var zeroArgSig: NimNode = nil
   var zeroArgProviderName: NimNode = nil
