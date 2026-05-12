@@ -38,6 +38,9 @@ const DefaultMtReqQueueDepth* = 256 ## ring slots per provider bucket
 const DefaultMtReqSlabCapacity* = 64 ## slab cells per provider bucket
 const DefaultMtReqMaxPayloadBytes* = 1024 ## bytes of marshaled ReqMsg per cell
 const DefaultMtReqResponseSlots* = 256 ## response slot pool per bucket
+const DefaultMtReqMaxResponseBytes* = 64 * 1024
+  ## bytes of marshaled Result per slot. Default sized for typical
+  ## complex responses (full board state, large seq[byte], etc.).
 const DefaultMtReqFreeListShards* = 2'u32
 
 # ---------------------------------------------------------------------------
@@ -156,11 +159,14 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   let shardHintIdent = ident("shardHint" & typeDisplayName)
   let marshalIdent = ident(typeDisplayName & "MtMarshal")
   let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
+  let marshalRespIdent = ident(typeDisplayName & "MtMarshalResp")
+  let unmarshalRespIdent = ident(typeDisplayName & "MtUnmarshalResp")
 
   let queueDepthLit = newLit(DefaultMtReqQueueDepth)
   let slabCapacityLit = newLit(DefaultMtReqSlabCapacity)
   let payloadBytesLit = newLit(DefaultMtReqMaxPayloadBytes)
   let responseSlotsLit = newLit(DefaultMtReqResponseSlots)
+  let responseBytesLit = newLit(DefaultMtReqMaxResponseBytes)
   let freeListShardsLit = newLit(DefaultMtReqFreeListShards)
 
   result = newStmtList()
@@ -225,7 +231,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
 
   # Bucket struct.
   let responseSlotPoolType = quote:
-    ptr ResponseSlotPool[Result[`typeIdent`, string]]
+    ptr ResponseSlotPool
   let requestRingType = quote:
     ptr VyukovMpscRing[uint32]
   let requestSlabType = quote:
@@ -271,6 +277,56 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
   # ── Codec procs for ReqMsg ───────────────────────────────────────────
   for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, requestMsgName):
     result.add(procNode)
+
+  # ── Codec procs for Result[typeIdent, string] ───────────────────────
+  # Custom — `Result` is a case object on `oResultPrivate`; the generic
+  # `fieldPairs`-based marshaler would touch the wrong-tag fields. We
+  # encode an explicit `isOk` byte followed by either the value (T) or
+  # the error (string), recursively via mtMarshalValue/Unmarshal.
+  result.add(
+    quote do:
+      proc `marshalRespIdent`(
+          buf: ptr UncheckedArray[byte]; cap: int;
+          res: Result[`typeIdent`, string]
+      ): int {.gcsafe, raises: [].} =
+        var pos = 0
+        if pos + 1 > cap:
+          return -1
+        let isOk = byte(if res.isOk: 1 else: 0)
+        buf[pos] = isOk
+        pos += 1
+        if res.isOk:
+          let val = res.value
+          if not mtMarshalValue(buf, cap, val, pos):
+            return -1
+        else:
+          let errMsg = res.error
+          if not mtMarshalValue(buf, cap, errMsg, pos):
+            return -1
+        return pos
+
+      proc `unmarshalRespIdent`(
+          buf: ptr UncheckedArray[byte]; len: int;
+          dst: var Result[`typeIdent`, string]
+      ): bool {.gcsafe, raises: [].} =
+        var pos = 0
+        if pos + 1 > len:
+          return false
+        let isOk = buf[pos]
+        pos += 1
+        if isOk == 1'u8:
+          var val: `typeIdent`
+          if not mtUnmarshalValue(buf, len, val, pos):
+            return false
+          dst = ok(Result[`typeIdent`, string], val)
+        else:
+          var errMsg: string
+          if not mtUnmarshalValue(buf, len, errMsg, pos):
+            return false
+          dst = err(Result[`typeIdent`, string], errMsg)
+        return true
+
+  )
 
   # ── Global state ────────────────────────────────────────────────────
   result.add(
@@ -348,18 +404,55 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         var `tvWithArgHandlerIdent` {.threadvar.}: seq[`argProviderName`]
     )
 
-  # ── sendReply helper (writes Result into response slot, fires signal) ──
+  # ── sendReply helper (marshals Result into response slot bytes) ──────
+  # Protocol:
+  #   1. CAS Empty→Writing via pool.beginWrite. If it fails the
+  #      requester abandoned; release the slot without writing.
+  #   2. Marshal `resp` into slotPayloadPtr(idx).
+  #   3. commitWrite (stores size + flips state to Ready, release-ordered).
+  #   4. Fire requester's signal.
   result.add(
     quote do:
       proc `sendReplyIdent`(
-          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool,
           slotIdx: uint32,
           requesterSignal: ThreadSignalPtr,
           resp: Result[`typeIdent`, string],
       ) {.gcsafe, raises: [].} =
         if pool.isNil or slotIdx == EmptyIdx:
           return
-        discard pool[].tryWriteResponse(slotIdx, resp)
+        if not pool[].beginWrite(slotIdx):
+          # Requester already abandoned — provider owns the release.
+          pool[].release(slotIdx, `shardHintIdent`())
+          return
+        let payloadPtr = pool[].slotPayloadPtr(slotIdx)
+        let written =
+          try:
+            `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), resp)
+          except Exception:
+            -1
+        if written < 0:
+          # Marshal overflow — record an err via commitWrite of an err
+          # message into the slot, then fall through.  In practice this
+          # path is rare: the response would only overflow if the broker
+          # type and error message are both unusually large.
+          let fallback =
+            err(Result[`typeIdent`, string], "response too large to marshal")
+          let writtenFb =
+            try:
+              `marshalRespIdent`(
+                payloadPtr, int(pool[].slotPayloadCap), fallback
+              )
+            except Exception:
+              -1
+          if writtenFb < 0:
+            # Last resort: commit zero bytes; requester will see an err on
+            # unmarshal failure path.
+            pool[].commitWrite(slotIdx, 0'u16)
+          else:
+            pool[].commitWrite(slotIdx, uint16(writtenFb))
+        else:
+          pool[].commitWrite(slotIdx, uint16(written))
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
 
@@ -501,7 +594,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `handleMsgIdent`(
           `msgIdent`: `requestMsgName`,
           `loopCtxIdent`: BrokerContext,
-          `poolIdent`: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          `poolIdent`: ptr ResponseSlotPool,
       ) {.async: (raises: []).} =
         `handleBody`
 
@@ -515,7 +608,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `deferredFreeReqRingIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool,
       ) {.async: (raises: []).} =
         # Brief grace window so any cross-thread sender that captured
         # these pointers under the previous lock state can complete its
@@ -535,7 +628,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `pollFnMakerIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool,
           loopCtx: BrokerContext,
       ): ThreadDispatchPollFn =
         let capturedRing = ring
@@ -584,7 +677,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         let myThreadGen = currentMtThreadGen()
         var ring: ptr VyukovMpscRing[uint32]
         var slab: ptr PayloadSlab
-        var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+        var pool: ptr ResponseSlotPool
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -605,12 +698,11 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             payloadBytes = uint32(`payloadBytesLit`),
             nShards = `freeListShardsLit`,
           )
-          pool = cast[ptr ResponseSlotPool[Result[`typeIdent`, string]]](
-            createShared(ResponseSlotPool[Result[`typeIdent`, string]], 1)
-          )
-          initResponseSlotPool[Result[`typeIdent`, string]](
+          pool = cast[ptr ResponseSlotPool](createShared(ResponseSlotPool, 1))
+          initResponseSlotPool(
             pool[],
             capacity = uint32(`responseSlotsLit`),
+            maxPayloadBytes = uint32(`responseBytesLit`),
             nShards = `freeListShardsLit`,
           )
           let providerSig = getOrInitBrokerSignal()
@@ -728,7 +820,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `sendAndAwaitIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool,
           providerSignal: ThreadSignalPtr,
           msg: sink `requestMsgName`,
       ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
@@ -783,9 +875,26 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
             {.cast(gcsafe).}:
               if not capturedPool[].readyState(capturedSlotIdx):
                 return 0
-              let slot = capturedPool[].slotPtr(capturedSlotIdx)
+              # Unmarshal Result from slot bytes on THIS (requester) thread,
+              # so any string/seq inside lives on this thread's GC heap.
+              # This is the §2.2 fix: no cross-thread `=copy` of the typed
+              # Result value.
+              var decoded: Result[`typeIdent`, string]
+              let payloadPtr = capturedPool[].slotPayloadPtr(capturedSlotIdx)
+              let payloadSize = capturedPool[].payloadSize(capturedSlotIdx)
+              let ok =
+                try:
+                  `unmarshalRespIdent`(payloadPtr, int(payloadSize), decoded)
+                except Exception:
+                  false
+              if not ok:
+                decoded = err(
+                  Result[`typeIdent`, string],
+                  "RequestBroker(" & `typeNameLit` &
+                    "): response unmarshal failed",
+                )
               if not capturedResponseFut.finished:
-                capturedResponseFut.complete(slot.payload)
+                capturedResponseFut.complete(decoded)
               capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
               return 2
         )
@@ -822,7 +931,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       proc `blockingSendAndAwaitIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool[Result[`typeIdent`, string]],
+          pool: ptr ResponseSlotPool,
           providerSignal: ThreadSignalPtr,
           msg: sink `requestMsgName`,
       ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
@@ -866,10 +975,21 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
         let deadline = Moment.now() + `timeoutVarIdent`
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx):
-            let slot = pool[].slotPtr(slotIdx)
-            let response = slot.payload
+            var decoded: Result[`typeIdent`, string]
+            let payloadPtr = pool[].slotPayloadPtr(slotIdx)
+            let payloadSize = pool[].payloadSize(slotIdx)
+            let ok =
+              try:
+                `unmarshalRespIdent`(payloadPtr, int(payloadSize), decoded)
+              except Exception:
+                false
             pool[].release(slotIdx, `shardHintIdent`())
-            return response
+            if ok:
+              return decoded
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): response unmarshal failed"
+            )
           sleep(1)
         # Timeout: abandon the slot so a late provider write returns
         # the slot to the pool instead of leaving it stranded.
@@ -891,7 +1011,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+          var pool: ptr ResponseSlotPool
           var providerSignal: ThreadSignalPtr
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
@@ -959,7 +1079,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
           `initProcIdent`()
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+          var pool: ptr ResponseSlotPool
           var providerSignal: ThreadSignalPtr
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
@@ -1051,7 +1171,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       `initProcIdent`()
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+      var pool: ptr ResponseSlotPool
       var providerSignal: ThreadSignalPtr
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
@@ -1172,7 +1292,7 @@ proc generateMtRequestBroker*(body: NimNode): NimNode =
       `initProcIdent`()
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool[Result[`typeIdent`, string]]
+      var pool: ptr ResponseSlotPool
       var providerSignal: ThreadSignalPtr
       var sameThread = false
       let myThreadGen = currentMtThreadGen()

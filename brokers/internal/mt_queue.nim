@@ -371,78 +371,108 @@ proc decRefAndCheck*(slab: PayloadSlab, idx: uint32): bool {.gcsafe.} =
 type
   ResponseState* {.pure.} = enum
     Empty = 0'u8
-    Ready = 1'u8
-    Abandoned = 2'u8
+    Writing = 1'u8 ## reserved by provider; bytes in flight
+    Ready = 2'u8
+    Abandoned = 3'u8
 
-  ResponseSlot*[T] = object
+  ResponseSlotHeader = object
     state: Atomic[uint8]
-    payload*: T
+    payloadSize: uint16
+    pad: array[5, byte] ## align payload bytes to 8
 
-  ResponseSlotPool*[T] = object
+  ResponseSlotPool* = object
     capacity*: uint32
-    storage: ptr UncheckedArray[ResponseSlot[T]]
+    slotPayloadCap*: uint32
+    slotStride: uint32
+    storage: ptr UncheckedArray[byte]
     freeList: ShardedFreeList
 
-proc initResponseSlotPool*[T](
-    pool: var ResponseSlotPool[T], capacity: uint32, nShards: uint32
+proc respSlotHeaderSize(): uint32 {.compileTime.} =
+  uint32(sizeof(ResponseSlotHeader))
+
+proc slotHeaderPtr(
+    pool: ResponseSlotPool, idx: uint32
+): ptr ResponseSlotHeader {.gcsafe.} =
+  cast[ptr ResponseSlotHeader](addr pool.storage[int(idx) * int(pool.slotStride)])
+
+proc slotPayloadPtr*(
+    pool: ResponseSlotPool, idx: uint32
+): ptr UncheckedArray[byte] {.gcsafe.} =
+  cast[ptr UncheckedArray[byte]](
+    cast[uint](addr pool.storage[int(idx) * int(pool.slotStride)]) +
+      uint(sizeof(ResponseSlotHeader))
+  )
+
+proc initResponseSlotPool*(
+    pool: var ResponseSlotPool,
+    capacity: uint32,
+    maxPayloadBytes: uint32,
+    nShards: uint32,
 ) {.gcsafe.} =
   pool.capacity = capacity
-  pool.storage =
-    cast[ptr UncheckedArray[ResponseSlot[T]]](createShared(ResponseSlot[T], capacity.int))
+  pool.slotPayloadCap = maxPayloadBytes
+  pool.slotStride = alignUp(respSlotHeaderSize() + maxPayloadBytes, 8'u32)
+  pool.storage = cast[ptr UncheckedArray[byte]](
+    createShared(byte, int(capacity) * int(pool.slotStride))
+  )
   initShardedFreeList(pool.freeList, nShards, capacity)
   for i in 0 ..< capacity:
-    pool.storage[i].state.store(uint8(ResponseState.Empty), moRelaxed)
+    let hdr = pool.slotHeaderPtr(i)
+    hdr.state.store(uint8(ResponseState.Empty), moRelaxed)
+    hdr.payloadSize = 0
     push(pool.freeList, i, i)
 
-proc deinitResponseSlotPool*[T](pool: var ResponseSlotPool[T]) {.gcsafe.} =
+proc deinitResponseSlotPool*(pool: var ResponseSlotPool) {.gcsafe.} =
   deinitShardedFreeList(pool.freeList)
   if not pool.storage.isNil:
     deallocShared(pool.storage)
     pool.storage = nil
 
-proc claim*[T](
-    pool: var ResponseSlotPool[T], shardHint: uint32
-): uint32 {.gcsafe.} =
+proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
   let idx = pop(pool.freeList, shardHint)
   if idx != EmptyIdx:
-    pool.storage[idx].state.store(uint8(ResponseState.Empty), moRelease)
+    let hdr = pool.slotHeaderPtr(idx)
+    hdr.payloadSize = 0
+    hdr.state.store(uint8(ResponseState.Empty), moRelease)
   idx
 
-proc release*[T](
-    pool: var ResponseSlotPool[T], idx: uint32, shardHint: uint32
+proc release*(
+    pool: var ResponseSlotPool, idx: uint32, shardHint: uint32
 ) {.gcsafe.} =
   push(pool.freeList, idx, shardHint)
 
-proc slotPtr*[T](pool: ResponseSlotPool[T], idx: uint32): ptr ResponseSlot[T] {.gcsafe.} =
-  addr pool.storage[idx]
-
-proc tryWriteResponse*[T](
-    pool: ResponseSlotPool[T], idx: uint32, value: sink T
-): bool {.gcsafe.} =
-  ## Provider side: attempt to write the response. Returns false if the
-  ## requester already abandoned (caller should NOT signal and should
-  ## release the slot).
-  let slot = pool.slotPtr(idx)
+proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
+  ## Provider: CAS Empty→Writing. Returns false if the requester abandoned
+  ## the slot first (caller should release without writing).
+  let hdr = pool.slotHeaderPtr(idx)
   var expected = uint8(ResponseState.Empty)
-  if slot.state.compareExchange(
-    expected, uint8(ResponseState.Ready), moAcquireRelease, moAcquire
-  ):
-    slot.payload = value
-    # Re-store state with release to ensure payload write is visible.
-    slot.state.store(uint8(ResponseState.Ready), moRelease)
-    return true
-  return false # was Abandoned
+  hdr.state.compareExchange(
+    expected, uint8(ResponseState.Writing), moAcquireRelease, moAcquire
+  )
 
-proc abandon*[T](pool: ResponseSlotPool[T], idx: uint32): bool {.gcsafe.} =
-  ## Requester side (timeout): mark the slot as abandoned. Returns true
-  ## if abandonment took effect (provider hadn't written yet); false if
-  ## the provider had already written Ready (the requester should then
-  ## read the payload normally).
-  let slot = pool.slotPtr(idx)
+proc commitWrite*(
+    pool: ResponseSlotPool, idx: uint32, payloadSize: uint16
+) {.gcsafe.} =
+  ## Provider: finalize after writing payload bytes. Stores size + flips
+  ## state to Ready (release-ordered, so the bytes-write is visible to
+  ## any acquire-loader on the state).
+  let hdr = pool.slotHeaderPtr(idx)
+  hdr.payloadSize = payloadSize
+  hdr.state.store(uint8(ResponseState.Ready), moRelease)
+
+proc abandon*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
+  ## Requester: CAS Empty→Abandoned. Returns true if abandonment took
+  ## effect (provider hadn't started writing yet). If false, requester
+  ## must still wait for state==Ready and consume normally — provider
+  ## is mid-write or already done.
+  let hdr = pool.slotHeaderPtr(idx)
   var expected = uint8(ResponseState.Empty)
-  slot.state.compareExchange(
+  hdr.state.compareExchange(
     expected, uint8(ResponseState.Abandoned), moAcquireRelease, moAcquire
   )
 
-proc readyState*[T](pool: ResponseSlotPool[T], idx: uint32): bool {.gcsafe.} =
-  pool.slotPtr(idx).state.load(moAcquire) == uint8(ResponseState.Ready)
+proc readyState*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
+  pool.slotHeaderPtr(idx).state.load(moAcquire) == uint8(ResponseState.Ready)
+
+proc payloadSize*(pool: ResponseSlotPool, idx: uint32): uint16 {.gcsafe.} =
+  pool.slotHeaderPtr(idx).payloadSize
