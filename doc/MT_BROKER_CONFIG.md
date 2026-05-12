@@ -227,3 +227,78 @@ EventBroker(mt, preset = tinyFootprint):
 | `RequestBroker(...): no response slot available` error | More concurrent in-flight requests than `responseSlots` | bump `responseSlots` to match your concurrency ceiling |
 | Compile-time `unclassifiable:<name>` warning | Type classifier couldn't introspect an alias / external type | provide explicit `maxPayloadBytes = N` / `maxResponseBytes = N` |
 | Idle RAM higher than expected | Auto-classified large field (e.g. `seq[byte]` → 64 KB cells × 1024 slab) | use `preset = largePayload` (narrows slab) or explicit `slabCapacity` |
+
+## 9. Planned: Tier-A scalar inline (not yet implemented)
+
+A future optimization for brokers whose entire payload fits in a single
+ring slot — typically the "tick / heartbeat / counter / flag" pattern
+that makes up an estimated 40–50 % of real-world MT brokers.
+
+### Idea
+
+For event types whose payload is one scalar field (≤ 16 B — `int64`,
+`uint32`, `bool`, enum, `distinct` of a scalar), the value would live
+**directly in the ring slot**, with no payload slab and no marshaler
+involvement.
+
+### Today vs. Tier-A
+
+| Step | Today (slab path) | Tier-A (inline) |
+|---|---|---|
+| Send | alloc slab cell → marshal into cell → enqueue `cellIdx: uint32` → bump refcount | tryEnqueue value into ring |
+| Receive | dequeue idx → load cell → unmarshal → call handler → decRef → release to slab | tryDequeue value → call handler |
+| Idle RAM | ring + slab (~100 KB at defaults) | ring only (~6 KB at defaults) |
+| Per-event cost | ~5 atomics + 2 memcpy + slab claim/release | 1 enqueue + 1 dequeue |
+
+### Why it's not free to implement
+
+The `VyukovMpscRing[T]` primitive in [mt_queue.nim](../brokers/internal/mt_queue.nim) is
+already generic over `T`, so the queue itself supports Tier-A. The
+implementation cost is in the **broker generator**, which today is
+~700 LOC tightly coupled to the slab/refcount model:
+
+- The `CtrlClearListeners = high(uint32) - 1` sentinel is multiplexed
+  onto the same ring as event payloads
+  ([mt_event_broker.nim:50](../brokers/internal/mt_event_broker.nim)). When the
+  ring's `T` is the event type instead of `uint32`, the sentinel must
+  move to a separate `Atomic[bool] needsClear` channel.
+- Emit / listener / drop code paths all assume cell allocation,
+  marshal/unmarshal, and refcounted release; each would need a parallel
+  inline-mode body.
+
+Cleanest approach: a parallel `generateMtEventBrokerTierA(body, cfg)`
+generator (~350–450 LOC), with the existing macro dispatching to it
+when `cfg.tierA` is set.
+
+### Detection
+
+At macro time, set `cfg.tierA = true` when:
+
+- The broker type is an `object` with exactly one scalar field, **or**
+- The broker type is a `distinct` / alias of a scalar, **or**
+- (Optional, broader) The broker type is a small object whose total
+  size is ≤ 16 B and every field is scalar.
+
+When detected, also force `slabCapacity` / `maxPayloadBytes` / related
+slab-only knobs to be moot (and surface that in the compile-time hint
+as `[tier-a:inline]`).
+
+### Estimated impact
+
+For an event broker carrying a single `int64`:
+
+| | Defaults today | Tier-A |
+|---|---|---|
+| Idle RAM | ~98 KB | ~6 KB (16×) |
+| Per-event allocator interaction | slab claim + release | none |
+| Per-event atomics | ~5 | ~2 |
+
+Cross-thread throughput would benefit by an estimated 2–3× on
+purely-scalar brokers (no measurement yet — predictive based on
+removing the slab claim / refcount round-trip from the hot path).
+
+### Status
+
+Deferred. The detection + flag wiring is a small follow-on; the
+generator work is a dedicated mini-project of its own and should be
+scoped + reviewed separately. No timeline committed.
