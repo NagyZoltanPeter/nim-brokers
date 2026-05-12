@@ -1100,6 +1100,14 @@ proc registerBrokerLibraryNativeImpl(
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
 
+        # FFI-caller teardown: stop the per-thread brokerDispatchLoop that the
+        # waitFor above started (via ensureBrokerDispatchStarted in
+        # sendAndAwait). On a foreign caller's thread the loop has no joiner
+        # and would otherwise persist across calls, accumulating chronos
+        # pending-state and refc ZCT entries until collectZCT walks a freed
+        # cell (PR #13: macos-amd64 refc crash at ~51 ctx).
+        stopBrokerDispatchHere()
+
         # Drain residual callSoon callbacks left pending on the calling thread.
         # Under --mm:refc, each waitFor leaves callbacks after the poll sentinel;
         # without draining, the ZCT grows across context lifecycles and eventually

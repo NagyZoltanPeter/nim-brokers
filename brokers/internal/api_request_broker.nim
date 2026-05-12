@@ -763,6 +763,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           ensureForeignThreadGc()
           let brokerCtx = BrokerContext(ctx)
           let res = waitFor `typeIdent`.request(brokerCtx)
+          # FFI-caller teardown: see brokers/internal/mt_broker_common.nim
+          # stopBrokerDispatchHere docstring. The waitFor above transparently
+          # started a persistent brokerDispatchLoop on the foreign caller's
+          # thread; without teardown its chronos pending-state accumulates
+          # across calls and eventually corrupts the refc ZCT (PR #13).
+          stopBrokerDispatchHere()
           if res.isOk():
             return `encodeProcIdent`(res.get())
           else:

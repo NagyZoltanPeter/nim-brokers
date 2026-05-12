@@ -77,6 +77,13 @@ type ThreadDispatchPollFn* = proc(): int {.gcsafe, raises: [].}
 var gBrokerThreadSignal* {.threadvar.}: ThreadSignalPtr
 var gBrokerThreadPollers* {.threadvar.}: seq[ThreadDispatchPollFn]
 var gBrokerDispatchStarted* {.threadvar.}: bool
+var gBrokerDispatchStopRequested* {.threadvar.}: bool
+  ## Set by stopBrokerDispatchHere() to ask the loop to exit on its next
+  ## drain pass. Used by FFI entry points so that transient foreign threads
+  ## (e.g. the C++ caller of <lib>_request_*/<lib>_shutdown) don't accumulate
+  ## a persistent suspended coroutine and its associated chronos/GC state
+  ## across calls. The flag is cleared by stopBrokerDispatchHere() after the
+  ## loop confirms exit.
 
 proc getOrInitBrokerSignal*(): ThreadSignalPtr =
   ## Get (or lazily create) the per-thread signal shared by all broker types.
@@ -120,11 +127,19 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
           inc i
         else:
           inc i
+    # FFI-caller teardown hook: an external caller (stopBrokerDispatchHere)
+    # asked the loop to exit. Drain pass is complete, exit cleanly.
+    if gBrokerDispatchStopRequested:
+      dispatchTrace "brokerDispatchLoop:stopRequested"
+      break
     # Wait for next signal.
     let waitRes = catch:
       await signal.wait()
     if waitRes.isErr():
       dispatchTrace "brokerDispatchLoop:waitErr", err = waitRes.error.msg
+      break
+    if gBrokerDispatchStopRequested:
+      dispatchTrace "brokerDispatchLoop:stopRequestedAfterWait"
       break
   # Dispatcher is exiting (e.g. thread shutting down).  Close the per-thread
   # signal so its OS handle (eventfd on Linux, pipe pair on macOS) is reclaimed
@@ -152,3 +167,40 @@ proc ensureBrokerDispatchStarted*() =
   else:
     dispatchTrace "ensureBrokerDispatchStarted:already",
       pollersLen = gBrokerThreadPollers.len
+
+proc stopBrokerDispatchHere*() =
+  ## Tear down the per-thread brokerDispatchLoop on the calling thread.
+  ##
+  ## Intended for **FFI entry points** (procs exported with `cdecl, dynlib`
+  ## that run on a foreign caller's thread). The dispatch loop was designed
+  ## for chronos-loop-owning threads (processing/delivery threads), which
+  ## are torn down via joinThread. An FFI caller's thread instead lives for
+  ## the entire process and re-enters Nim per call; without teardown its
+  ## suspended `await signal.wait()` future, registered pollers seq, and
+  ## chronos pending-callback list accumulate across calls and eventually
+  ## drag the thread's refc ZCT/heap into corruption (PR #13).
+  ##
+  ## Safe to call from sync context (after `waitFor` returns). No-op if the
+  ## loop was never started on this thread. Drives chronos via an internal
+  ## `waitFor` until the loop's coroutine actually exits.
+  if not gBrokerDispatchStarted:
+    return
+  dispatchTrace "stopBrokerDispatchHere:requesting",
+    pollersLen = gBrokerThreadPollers.len
+  gBrokerDispatchStopRequested = true
+  let sig = gBrokerThreadSignal
+  if not sig.isNil:
+    discard sig.fireSync()
+
+  proc awaitLoopExit() {.async: (raises: []).} =
+    let deadline = Moment.now() + chronos.seconds(2)
+    while gBrokerDispatchStarted and Moment.now() < deadline:
+      let sleepRes = catch:
+        await sleepAsync(milliseconds(1))
+      if sleepRes.isErr():
+        break
+
+  waitFor awaitLoopExit()
+  gBrokerDispatchStopRequested = false
+  dispatchTrace "stopBrokerDispatchHere:done",
+    stillStarted = gBrokerDispatchStarted
