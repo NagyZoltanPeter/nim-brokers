@@ -186,21 +186,108 @@ RPC than averages.
 | **+~430 LOC of subtle lock-free code** in `mt_queue.nim` | Vyukov MPSC + ABA-tagged sharded free-list + slot state machine | One-time cost; isolated; well-commented invariants |
 | **Per-RPC marshal+unmarshal of `Result[T,string]`** in response path | Required to remove the last cross-thread refc `=copy` (Phase 4b) | Inherent to the design |
 
-## 8. What's next
+## 8. Memory footprint mitigation
 
-Configuration is currently baked-in module-level `const`. Per-broker
-tuning is the natural next step:
+The "fixed memory at init" property is the main cost of the refactor. A
+naive port of master's behavior would have meant every broker reserving
+default-sized rings/slabs (≈ 1.1 MB per EventBroker, ≈ 16.9 MB per
+RequestBroker — dominated by the 256-slot × 64 KB response pool) even
+for trivial payloads. Three layered heuristics close that gap. They are
+all opt-out, applied in this order, and the result is reported at compile
+time per broker.
 
-- Phase B — Macro-arg kwargs and named presets (`fastBurst`, `largePayload`,
-  `tinyFootprint`, `defaultBalanced` + user presets).
-- Type-driven defaults — codegen inspects request args / response type at
-  compile time and picks a size class (scalar → 64 B, string → 4 KB,
-  seq[string] → 16 KB, seq[byte] → 64 KB, unknown → 8 KB + compile-time
-  warning).
-- Tier-A scalar inlining — for purely-scalar payloads (~40–50 % of real-
-  world brokers), inline the value into the ring slot itself; skip slab
-  allocation entirely.
-- Compile-time printout of effective config per broker, so users see what
-  the auto-defaults picked and what RAM that implies.
+### 8.1 Capacity kwargs
 
-Tracking work: see `doc/MT_BROKER_CONFIG.md` (to be added in Phase D).
+Every `EventBroker(mt)` / `RequestBroker(mt)` macro call accepts
+optional kwargs to tune the ring + slab + response-pool dimensions:
+
+```nim
+EventBroker(mt, queueDepth = 1024, slabCapacity = 4096,
+            maxPayloadBytes = 2048):
+  type MyEvt = ...
+
+RequestBroker(mt, responseSlots = 64, maxResponseBytes = 4 * 1024):
+  type Foo = ...
+  proc fetch*(arg: string): Future[Result[Foo, string]] {.async.}
+```
+
+| Knob | Drives |
+|---|---|
+| `queueDepth` | ring slots per listener / provider bucket (power-of-2). Higher = absorbs larger emit bursts before drop. |
+| `slabCapacity` | total cells (concurrent in-flight payloads). Lifetime ≈ cross-thread hop. |
+| `maxPayloadBytes` | per-cell payload buffer. Overflow → drop / err. |
+| `responseSlots` (req) | concurrent in-flight requests (RTT-bound). |
+| `maxResponseBytes` (req) | per-response marshal buffer. |
+| `freeListShards` | slab free-list partitions (CAS contention reducer). |
+
+Compile-time validation: `queueDepth` must be power-of-2; positivity
+checks on the rest; unknown kwarg names error with the valid list.
+
+### 8.2 Named presets
+
+Four built-in presets bundle the knobs into a profile, selectable via
+`preset = <name>`. Individual kwargs supplied alongside override the
+preset's fields, so you can pick a shape and tweak one value:
+
+```nim
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
+  type MyEvt = ...
+```
+
+| Preset | Profile | When to use |
+|---|---|---|
+| `defaultBalanced` | unchanged defaults | general use; matches the original constants |
+| `fastBurst` | wide ring/slab, small per-cell payload, more shards | bursty emit, small payload |
+| `largePayload` | narrow ring/slab, big per-cell payload | infrequent traffic with big payloads |
+| `tinyFootprint` | tiny everything | embedded / memory-constrained |
+
+### 8.3 Type-driven defaults
+
+When neither a kwarg nor a preset sets `maxPayloadBytes` /
+`maxResponseBytes`, the macro inspects the type AST at compile time
+and picks a size class. Eliminates the most common over-provisioning —
+a scalar-returning RequestBroker no longer reserves 64 KB per response
+slot.
+
+| Type shape | Default cell size |
+|---|---|
+| scalar (bool/intN/uintN/floatN/byte/char) | **64 B** |
+| string | **4 KB** |
+| seq[string] | **16 KB** |
+| seq[byte] / seq[uint8] | **64 KB** |
+| array[N, T] | classified by T |
+| seq[other primitive] | 4 KB |
+| alias / external / unresolvable | **8 KB + compile-time warning** |
+
+For an object the cell is sized to fit the largest classified field.
+For RequestBroker the request-side payload is auto-sized from the proc
+parameters, and the response cell from the broker's type fields.
+
+Concrete impact: the RequestBroker example test (`MTReq`, two `string`
+fields) goes from **16.9 MB** idle (blanket 64 KB response default) to
+**1.2 MB** idle — a 14× reduction with no user action.
+
+### 8.4 Compile-time inspection
+
+Every `EventBroker(mt)` / `RequestBroker(mt)` callsite emits a `hint`
+line showing the resolved configuration with provenance per field, plus
+estimated idle RAM breakdown:
+
+```
+Hint: [brokers] RequestBroker(MTReq):
+      queueDepth=256 [default],
+      slabCapacity=64 [default],
+      maxPayloadBytes=4096 [auto:string],
+      responseSlots=256 [default],
+      maxResponseBytes=4096 [auto:string],
+      freeListShards=2 [default]
+      — idle RAM: ring≈6.0 KB, slab≈258.0 KB, respPool≈1.0 MB, total≈1.2 MB
+```
+
+The provenance tag (`default` / `kwarg` / `preset:<name>` / `auto:<reason>`)
+makes it visible at a glance whether a chosen value came from the user,
+a preset, the type classifier, or the unchanged default. Opt out per
+build with `-d:brokerConfigSilent`, or per category with
+`--hint[User]:off`.
+
+See [MT_BROKER_CONFIG.md](MT_BROKER_CONFIG.md) for the full reference.

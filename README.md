@@ -365,6 +365,39 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
 
+### Tuning multi-thread brokers
+
+Both `EventBroker(mt)` and `RequestBroker(mt)` accept optional kwargs to
+size the cross-thread dispatch ring, payload slab, and (for requests)
+the response slot pool. Sensible defaults are auto-selected from the
+broker's type shape — see the type-driven sizing table — but bursty,
+large-payload, or memory-constrained deployments will want to override.
+
+```nim
+# Wide ring + slab for bursty broadcast; uses a built-in preset.
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
+  type WireEvent = object
+    payload*: seq[byte]
+
+# Memory-constrained, fully manual:
+RequestBroker(mt, queueDepth = 16, responseSlots = 8,
+              maxResponseBytes = 512):
+  type LedState = object
+  proc query*(id: uint8): Future[Result[LedState, string]] {.async.}
+```
+
+Every MT broker callsite emits a compile-time `hint` line showing the
+resolved capacity values, their origin (`default` / `kwarg` /
+`preset:<name>` / `auto:<reason>`), and an idle-RAM estimate — so you
+can see at build time what the broker reserves.
+
+- [doc/MT_BROKER_CONFIG.md](doc/MT_BROKER_CONFIG.md) — full reference:
+  knobs, presets, type-driven defaults, compile-time inspection,
+  failure-mode troubleshooting.
+- [doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md](doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md)
+  — design rationale, perf comparison (Channel[T] vs ring+slab+pool),
+  and the memory-footprint mitigation strategy.
+
 ## Broker FFI API
 
 nim-brokers also includes a macro-based FFI API layer for exposing broker-shaped API as a shared library with generated C, C++, and optional Python / Rust / Go bindings.
