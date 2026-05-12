@@ -365,7 +365,11 @@ task test, "Run all single and multi-threaded broker tests":
     ]:
       test opt, f
 
-  let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
+  let mtTests = [
+    "test_multi_thread_request_broker",
+    "test_multi_thread_event_broker",
+    "test_multi_thread_broker_configs",
+  ]
   for f in mtTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
