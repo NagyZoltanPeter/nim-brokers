@@ -9,6 +9,15 @@ import chronos, chronos/threadsync
 import std/atomics
 export chronos, threadsync, atomics
 
+when defined(brokerDispatchTrace):
+  import chronicles
+  import std/typedthreads
+
+template dispatchTrace*(msg: string, args: varargs[untyped]) =
+  when defined(brokerDispatchTrace):
+    {.cast(gcsafe).}:
+      info msg, tid = getThreadId(), args
+
 # ---------------------------------------------------------------------------
 # Thread identity
 # ---------------------------------------------------------------------------
@@ -86,10 +95,12 @@ proc registerBrokerPoller*(fn: ThreadDispatchPollFn) =
   ## Register a poll function with this thread's dispatcher.
   ## Must be called from the owning thread.
   gBrokerThreadPollers.add(fn)
+  dispatchTrace "registerBrokerPoller", pollersLen = gBrokerThreadPollers.len
 
 proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
   ## Single dispatch loop per chronos thread.  Drains all registered broker
   ## channel pollers whenever the shared signal fires.
+  dispatchTrace "brokerDispatchLoop:start"
   while true:
     # Drain: keep polling until every channel is empty.
     var anyWork = true
@@ -102,6 +113,8 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
         of 2:
           # Poller is done — remove it.
           gBrokerThreadPollers.del(i)
+          dispatchTrace "brokerDispatchLoop:pollerDone",
+            pollersLen = gBrokerThreadPollers.len
         of 1:
           anyWork = true
           inc i
@@ -111,6 +124,7 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
     let waitRes = catch:
       await signal.wait()
     if waitRes.isErr():
+      dispatchTrace "brokerDispatchLoop:waitErr", err = waitRes.error.msg
       break
   # Dispatcher is exiting (e.g. thread shutting down).  Close the per-thread
   # signal so its OS handle (eventfd on Linux, pipe pair on macOS) is reclaimed
@@ -124,10 +138,17 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
     let closeRes = sig.close()
     if closeRes.isErr():
       discard
+  dispatchTrace "brokerDispatchLoop:exit",
+    pollersLen = gBrokerThreadPollers.len, sigWasNil = sig.isNil
 
 proc ensureBrokerDispatchStarted*() =
   ## Start the per-thread dispatch loop if not already running.
   ## Must be called from within a chronos async context.
   if not gBrokerDispatchStarted:
     gBrokerDispatchStarted = true
+    dispatchTrace "ensureBrokerDispatchStarted:spawning",
+      pollersLen = gBrokerThreadPollers.len
     asyncSpawn brokerDispatchLoop(getOrInitBrokerSignal())
+  else:
+    dispatchTrace "ensureBrokerDispatchStarted:already",
+      pollersLen = gBrokerThreadPollers.len

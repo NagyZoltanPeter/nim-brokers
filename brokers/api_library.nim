@@ -1089,7 +1089,13 @@ proc registerBrokerLibraryNativeImpl(
         if entryPtr.isNil:
           return
 
+        when defined(brokerDispatchTrace):
+          info "shutdown:beforeShutdownRequest",
+            library = `libNameLit`, ctx = ctx
         let shutdownRes = waitFor `shutdownReqIdent`.request(brokerCtx)
+        when defined(brokerDispatchTrace):
+          info "shutdown:afterShutdownRequest",
+            library = `libNameLit`, ctx = ctx, ok = shutdownRes.isOk()
         if shutdownRes.isErr():
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
@@ -1105,7 +1111,11 @@ proc registerBrokerLibraryNativeImpl(
             if sleepRes.isErr():
               discard
 
+          when defined(brokerDispatchTrace):
+            info "shutdown:beforeDrain", library = `libNameLit`, ctx = ctx
           waitFor drainCallerCallbacks()
+          when defined(brokerDispatchTrace):
+            info "shutdown:afterDrain", library = `libNameLit`, ctx = ctx
 
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
