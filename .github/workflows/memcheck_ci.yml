@@ -36,6 +36,8 @@ on:
           - testMtEventBrokerAsanRefc
           - testMtRequestBrokerAsanOrc
           - testMtRequestBrokerAsanRefc
+          - testMtBrokerConfigsAsanOrc
+          - testMtBrokerConfigsAsanRefc
           - probeWinTlsUninitOrc
           - probeWinTlsUninitRefc
 
@@ -109,7 +111,7 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
+          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -147,6 +149,7 @@ jobs:
             "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
             "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
             "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
+            "testMtBrokerConfigsAsanOrc", "testMtBrokerConfigsAsanRefc",
             "probeWinTlsUninitOrc", "probeWinTlsUninitRefc"
           )
           $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }

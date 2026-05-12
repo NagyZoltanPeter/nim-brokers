@@ -943,6 +943,16 @@ task testMtRequestBrokerAsanRefc,
     return
   testAsan("refc", "test_multi_thread_request_broker")
 
+task testMtBrokerConfigsAsanOrc,
+  "Run multi-thread broker config showcase under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_broker_configs")
+
+task testMtBrokerConfigsAsanRefc,
+  "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtBrokerConfigsAsanRefc"):
+    return
+  testAsan("refc", "test_multi_thread_broker_configs")
+
 # ----------------------------------------------------------------------------
 # probeWinTlsUninit — minimal repro for LIMITATION.md §2.1
 # ----------------------------------------------------------------------------
