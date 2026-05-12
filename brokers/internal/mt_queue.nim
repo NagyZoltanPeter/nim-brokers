@@ -76,8 +76,7 @@ proc initShardedFreeList*(
     cast[ptr UncheckedArray[FreeListShard]](createShared(FreeListShard, nShards.int))
   for i in 0 ..< nShards.int:
     fl.shards[i].head.store(makeHead(EmptyIdx, 0), moRelaxed)
-  fl.nextLinks =
-    cast[ptr UncheckedArray[uint32]](createShared(uint32, capacity.int))
+  fl.nextLinks = cast[ptr UncheckedArray[uint32]](createShared(uint32, capacity.int))
   for i in 0 ..< capacity.int:
     fl.nextLinks[i] = EmptyIdx
 
@@ -217,9 +216,7 @@ proc tryEnqueue*[T](ring: ptr VyukovMpscRing[T], item: sink T): bool {.gcsafe.} 
     let diff = cast[int64](seqV) - cast[int64](pos)
     if diff == 0:
       var expected = pos
-      if ring.enqPos.compareExchangeWeak(
-        expected, pos + 1, moAcquireRelease, moAcquire
-      ):
+      if ring.enqPos.compareExchangeWeak(expected, pos + 1, moAcquireRelease, moAcquire):
         # We own slot[pos]. Re-check closed for the "closed after our
         # initial check but before CAS" race; if closed, we must still
         # publish so the consumer can observe and drain it. The drain
@@ -301,9 +298,9 @@ proc initPayloadSlab*(
   slab.capacity = capacity
   slab.cellPayloadCap = payloadBytes
   slab.cellStride = alignUp(cellHeaderSize() + payloadBytes, 8'u32)
-  slab.storage = cast[ptr UncheckedArray[byte]](
-    createShared(byte, int(capacity) * int(slab.cellStride))
-  )
+  slab.storage = cast[ptr UncheckedArray[byte]](createShared(
+    byte, int(capacity) * int(slab.cellStride)
+  ))
   initShardedFreeList(slab.freeList, nShards, capacity)
   # Seed the free-list with every cell.
   for i in 0 ..< capacity:
@@ -327,10 +324,9 @@ proc cellPtr*(slab: PayloadSlab, idx: uint32): ptr CellHeader {.gcsafe.} =
 proc cellPayloadPtr*(
     slab: PayloadSlab, idx: uint32
 ): ptr UncheckedArray[byte] {.gcsafe.} =
-  cast[ptr UncheckedArray[byte]](
-    cast[uint](addr slab.storage[int(idx) * int(slab.cellStride)]) +
-      uint(sizeof(CellHeader))
-  )
+  cast[ptr UncheckedArray[byte]](cast[uint](addr slab.storage[
+    int(idx) * int(slab.cellStride)
+  ]) + uint(sizeof(CellHeader)))
 
 proc claim*(slab: var PayloadSlab, shardHint: uint32): uint32 {.gcsafe.} =
   ## Returns a cell index or `EmptyIdx` if the slab is exhausted.
@@ -398,10 +394,9 @@ proc slotHeaderPtr(
 proc slotPayloadPtr*(
     pool: ResponseSlotPool, idx: uint32
 ): ptr UncheckedArray[byte] {.gcsafe.} =
-  cast[ptr UncheckedArray[byte]](
-    cast[uint](addr pool.storage[int(idx) * int(pool.slotStride)]) +
-      uint(sizeof(ResponseSlotHeader))
-  )
+  cast[ptr UncheckedArray[byte]](cast[uint](addr pool.storage[
+    int(idx) * int(pool.slotStride)
+  ]) + uint(sizeof(ResponseSlotHeader)))
 
 proc initResponseSlotPool*(
     pool: var ResponseSlotPool,
@@ -412,9 +407,9 @@ proc initResponseSlotPool*(
   pool.capacity = capacity
   pool.slotPayloadCap = maxPayloadBytes
   pool.slotStride = alignUp(respSlotHeaderSize() + maxPayloadBytes, 8'u32)
-  pool.storage = cast[ptr UncheckedArray[byte]](
-    createShared(byte, int(capacity) * int(pool.slotStride))
-  )
+  pool.storage = cast[ptr UncheckedArray[byte]](createShared(
+    byte, int(capacity) * int(pool.slotStride)
+  ))
   initShardedFreeList(pool.freeList, nShards, capacity)
   for i in 0 ..< capacity:
     let hdr = pool.slotHeaderPtr(i)
@@ -436,9 +431,7 @@ proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
     hdr.state.store(uint8(ResponseState.Empty), moRelease)
   idx
 
-proc release*(
-    pool: var ResponseSlotPool, idx: uint32, shardHint: uint32
-) {.gcsafe.} =
+proc release*(pool: var ResponseSlotPool, idx: uint32, shardHint: uint32) {.gcsafe.} =
   push(pool.freeList, idx, shardHint)
 
 proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
@@ -450,9 +443,7 @@ proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
     expected, uint8(ResponseState.Writing), moAcquireRelease, moAcquire
   )
 
-proc commitWrite*(
-    pool: ResponseSlotPool, idx: uint32, payloadSize: uint16
-) {.gcsafe.} =
+proc commitWrite*(pool: ResponseSlotPool, idx: uint32, payloadSize: uint16) {.gcsafe.} =
   ## Provider: finalize after writing payload bytes. Stores size + flips
   ## state to Ready (release-ordered, so the bytes-write is visible to
   ## any acquire-loader on the state).

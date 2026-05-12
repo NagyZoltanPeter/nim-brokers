@@ -60,10 +60,7 @@ proc generateMtRequestBroker*(
     echo "RequestBroker mode: mt"
 
   let parsed = parseSingleTypeDef(
-    body,
-    "RequestBroker",
-    allowRefToNonObject = true,
-    collectFieldInfo = true,
+    body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
   )
   let typeIdent = parsed.typeIdent
   let objectDef = parsed.objectDef
@@ -149,9 +146,8 @@ proc generateMtRequestBroker*(
     cfg.maxResponseBytesOrigin = "auto:" & cls.reason
     if cls.reason.startsWith("unclassifiable"):
       warning(
-        "[brokers] RequestBroker(" & typeDisplayName &
-          ") could not auto-size response (" & cls.reason &
-          "); falling back to " & $cls.bytes &
+        "[brokers] RequestBroker(" & typeDisplayName & ") could not auto-size response (" &
+          cls.reason & "); falling back to " & $cls.bytes &
           " B. Override with `maxResponseBytes = N`."
       )
   if cfg.maxPayloadBytesOrigin == "default" and argParams.len > 0:
@@ -164,9 +160,8 @@ proc generateMtRequestBroker*(
     if cls.reason.startsWith("unclassifiable"):
       warning(
         "[brokers] RequestBroker(" & typeDisplayName &
-          ") could not auto-size request payload (" & cls.reason &
-          "); falling back to " & $cls.bytes &
-          " B. Override with `maxPayloadBytes = N`."
+          ") could not auto-size request payload (" & cls.reason & "); falling back to " &
+          $cls.bytes & " B. Override with `maxPayloadBytes = N`."
       )
 
   when not defined(brokerConfigSilent):
@@ -247,10 +242,7 @@ proc generateMtRequestBroker*(
   )
   msgRecList.add(
     newTree(
-      nnkIdentDefs,
-      ident("requesterSignal"),
-      ident("ThreadSignalPtr"),
-      newEmptyNode(),
+      nnkIdentDefs, ident("requesterSignal"), ident("ThreadSignalPtr"), newEmptyNode()
     )
   )
   typeSection.add(
@@ -319,8 +311,7 @@ proc generateMtRequestBroker*(
   result.add(
     quote do:
       proc `marshalRespIdent`(
-          buf: ptr UncheckedArray[byte]; cap: int;
-          res: Result[`typeIdent`, string]
+          buf: ptr UncheckedArray[byte], cap: int, res: Result[`typeIdent`, string]
       ): int {.gcsafe, raises: [].} =
         var pos = 0
         if pos + 1 > cap:
@@ -339,8 +330,7 @@ proc generateMtRequestBroker*(
         return pos
 
       proc `unmarshalRespIdent`(
-          buf: ptr UncheckedArray[byte]; len: int;
-          dst: var Result[`typeIdent`, string]
+          buf: ptr UncheckedArray[byte], len: int, dst: var Result[`typeIdent`, string]
       ): bool {.gcsafe, raises: [].} =
         var pos = 0
         if pos + 1 > len:
@@ -382,6 +372,7 @@ proc generateMtRequestBroker*(
 
       proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
         `timeoutVarIdent`
+
   )
 
   # ── Init + grow ──────────────────────────────────────────────────────
@@ -394,9 +385,9 @@ proc generateMtRequestBroker*(
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
-            createShared(`bucketName`, `globalBucketCapIdent`)
-          )
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
+            `bucketName`, `globalBucketCapIdent`
+          ))
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
@@ -414,6 +405,7 @@ proc generateMtRequestBroker*(
 
       proc `shardHintIdent`(): uint32 {.inline.} =
         cast[uint32](cast[uint](currentMtThreadId()) shr 4)
+
   )
 
   # ── Threadvar provider storage ──────────────────────────────────────
@@ -473,9 +465,7 @@ proc generateMtRequestBroker*(
             err(Result[`typeIdent`, string], "response too large to marshal")
           let writtenFb =
             try:
-              `marshalRespIdent`(
-                payloadPtr, int(pool[].slotPayloadCap), fallback
-              )
+              `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), fallback)
             except Exception:
               -1
           if writtenFb < 0:
@@ -550,9 +540,7 @@ proc generateMtRequestBroker*(
                     )
                     return
               `sendReplyIdent`(
-                `poolIdent`,
-                `msgIdent`.responseSlotIdx,
-                `msgIdent`.requesterSignal,
+                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
               )
     )
@@ -615,9 +603,7 @@ proc generateMtRequestBroker*(
                     )
                     return
               `sendReplyIdent`(
-                `poolIdent`,
-                `msgIdent`.responseSlotIdx,
-                `msgIdent`.requesterSignal,
+                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
               )
     )
@@ -690,8 +676,7 @@ proc generateMtRequestBroker*(
             if ok:
               asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
             else:
-              error "Failed to unmarshal request payload",
-                requestType = `typeNameLit`
+              error "Failed to unmarshal request payload", requestType = `typeNameLit`
             # Release the cell back to the slab — the unmarshaled msg
             # holds its own copy on this thread's GC heap.
             capturedSlab[].release(cellIdx, `shardHintIdent`())
@@ -753,6 +738,7 @@ proc generateMtRequestBroker*(
         registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, brokerCtx))
         ensureBrokerDispatchStarted()
         ok()
+
   )
 
   # ── setProvider (zero-arg) ──────────────────────────────────────────
@@ -798,6 +784,7 @@ proc generateMtRequestBroker*(
             _: typedesc[`typeIdent`], handler: `zeroArgProviderName`
         ): Result[void, string] =
           setProvider(`typeIdent`, DefaultBrokerContext, handler)
+
     )
 
   # ── setProvider (with-args) ─────────────────────────────────────────
@@ -843,6 +830,7 @@ proc generateMtRequestBroker*(
             _: typedesc[`typeIdent`], handler: `argProviderName`
         ): Result[void, string] =
           setProvider(`typeIdent`, DefaultBrokerContext, handler)
+
     )
 
   # ── request helper: send and await one ReqMsg cross-thread ──────────
@@ -862,16 +850,13 @@ proc generateMtRequestBroker*(
         # Reserve the response slot.
         let slotIdx = pool[].claim(`shardHintIdent`())
         if slotIdx == EmptyIdx:
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): response slot pool exhausted"
-          )
+          return
+            err("RequestBroker(" & `typeNameLit` & "): response slot pool exhausted")
         # Reserve a slab cell, marshal ReqMsg into it.
         let cellIdx = slab[].claim(`shardHintIdent`())
         if cellIdx == EmptyIdx:
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): request slab exhausted"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): request slab exhausted")
         let cellPtr = slab[].cellPtr(cellIdx)
         let payloadPtr = slab[].cellPayloadPtr(cellIdx)
         var msgCopy = msg
@@ -885,17 +870,13 @@ proc generateMtRequestBroker*(
         if written < 0:
           slab[].release(cellIdx, `shardHintIdent`())
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): request payload too large"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): request payload too large")
         cellPtr.payloadSize = uint16(written)
         cellPtr.refcount.store(1, moRelease)
         if not ring.tryEnqueue(cellIdx):
           slab[].release(cellIdx, `shardHintIdent`())
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): provider queue full"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): provider queue full")
         fireBrokerSignal(providerSignal)
         # Register a one-shot response poller for this slot.
         let responseFut =
@@ -923,8 +904,7 @@ proc generateMtRequestBroker*(
               if not ok:
                 decoded = err(
                   Result[`typeIdent`, string],
-                  "RequestBroker(" & `typeNameLit` &
-                    "): response unmarshal failed",
+                  "RequestBroker(" & `typeNameLit` & "): response unmarshal failed",
                 )
               if not capturedResponseFut.finished:
                 capturedResponseFut.complete(decoded)
@@ -944,8 +924,8 @@ proc generateMtRequestBroker*(
           responseFut.cancelSoon()
           discard capturedPool[].abandon(capturedSlotIdx)
           return err(
-            "RequestBroker(" & `typeNameLit` &
-              "): cross-thread request timed out after " & $`timeoutVarIdent`
+            "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
+              $`timeoutVarIdent`
           )
         let recvRes = catch:
           responseFut.read()
@@ -970,15 +950,12 @@ proc generateMtRequestBroker*(
       ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
         let slotIdx = pool[].claim(`shardHintIdent`())
         if slotIdx == EmptyIdx:
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): response slot pool exhausted"
-          )
+          return
+            err("RequestBroker(" & `typeNameLit` & "): response slot pool exhausted")
         let cellIdx = slab[].claim(`shardHintIdent`())
         if cellIdx == EmptyIdx:
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): request slab exhausted"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): request slab exhausted")
         let cellPtr = slab[].cellPtr(cellIdx)
         let payloadPtr = slab[].cellPayloadPtr(cellIdx)
         var msgCopy = msg
@@ -992,17 +969,13 @@ proc generateMtRequestBroker*(
         if written < 0:
           slab[].release(cellIdx, `shardHintIdent`())
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): request payload too large"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): request payload too large")
         cellPtr.payloadSize = uint16(written)
         cellPtr.refcount.store(1, moRelease)
         if not ring.tryEnqueue(cellIdx):
           slab[].release(cellIdx, `shardHintIdent`())
           pool[].release(slotIdx, `shardHintIdent`())
-          return err(
-            "RequestBroker(" & `typeNameLit` & "): provider queue full"
-          )
+          return err("RequestBroker(" & `typeNameLit` & "): provider queue full")
         fireBrokerSignal(providerSignal)
         # Busy-poll the response slot until ready or timeout.
         let deadline = Moment.now() + `timeoutVarIdent`
@@ -1019,17 +992,15 @@ proc generateMtRequestBroker*(
             pool[].release(slotIdx, `shardHintIdent`())
             if ok:
               return decoded
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): response unmarshal failed"
-            )
+            return
+              err("RequestBroker(" & `typeNameLit` & "): response unmarshal failed")
           sleep(1)
         # Timeout: abandon the slot so a late provider write returns
         # the slot to the pool instead of leaving it stranded.
         discard pool[].abandon(slotIdx)
         return err(
-          "RequestBroker(" & `typeNameLit` &
-            "): cross-thread request timed out after " & $`timeoutVarIdent`
+          "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
+            $`timeoutVarIdent`
         )
 
   )
@@ -1100,6 +1071,7 @@ proc generateMtRequestBroker*(
         ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
+
     )
 
   # ── blockingRequest (zero-arg) ──────────────────────────────────────
@@ -1158,6 +1130,7 @@ proc generateMtRequestBroker*(
             _: typedesc[`typeIdent`]
         ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
           blockingRequest(`typeIdent`, DefaultBrokerContext)
+
     )
   else:
     result.add(
@@ -1167,6 +1140,7 @@ proc generateMtRequestBroker*(
         ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
+
     )
 
   # ── request (with-args) ─────────────────────────────────────────────
@@ -1177,7 +1151,8 @@ proc generateMtRequestBroker*(
     # Build the keyed (ctx-explicit) request proc.
     let reqPragmas = quote:
       {.async: (raises: []).}
-    let typedescParam = newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
+    let typedescParam =
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
 
     var keyedFormalParams = newTree(nnkFormalParams)
     keyedFormalParams.add(copyNimTree(returnType))
@@ -1200,7 +1175,7 @@ proc generateMtRequestBroker*(
     for argName in argNameIdents:
       msgCtor.add(newTree(nnkExprColonExpr, argName, argName))
 
-    let keyedBody = quote do:
+    let keyedBody = quote:
       `initProcIdent`()
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
@@ -1274,7 +1249,7 @@ proc generateMtRequestBroker*(
     forwardCall.add(ident("DefaultBrokerContext"))
     for argName in argNameIdents:
       forwardCall.add(argName)
-    let forwardBody = quote do:
+    let forwardBody = quote:
       return await `forwardCall`
 
     result.add(
@@ -1296,7 +1271,8 @@ proc generateMtRequestBroker*(
     let brArgNameIdents = collectParamNames(brParamDefs)
     let brPragmas = quote:
       {.gcsafe, raises: [].}
-    let typedescParam = newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
+    let typedescParam =
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
 
     var brKeyedFormalParams = newTree(nnkFormalParams)
     brKeyedFormalParams.add(
@@ -1321,7 +1297,7 @@ proc generateMtRequestBroker*(
     for argName in brArgNameIdents:
       brMsgCtor.add(newTree(nnkExprColonExpr, argName, argName))
 
-    let brKeyedBody = quote do:
+    let brKeyedBody = quote:
       `initProcIdent`()
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
@@ -1397,7 +1373,7 @@ proc generateMtRequestBroker*(
     brForwardCall.add(ident("DefaultBrokerContext"))
     for argName in brArgNameIdents:
       brForwardCall.add(argName)
-    let brForwardBody = quote do:
+    let brForwardBody = quote:
       `brForwardCall`
 
     result.add(
@@ -1435,7 +1411,7 @@ proc generateMtRequestBroker*(
             break
     )
 
-  let clearBody = quote do:
+  let clearBody = quote:
     `initProcIdent`()
     var ring: ptr VyukovMpscRing[uint32]
     var providerSignal: ThreadSignalPtr

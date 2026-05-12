@@ -85,9 +85,8 @@ proc generateMtEventBroker*(
     cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
     if cls.reason.startsWith("unclassifiable"):
       warning(
-        "[brokers] EventBroker(" & typeDisplayName &
-          ") could not auto-size payload (" & cls.reason &
-          "); falling back to " & $cls.bytes &
+        "[brokers] EventBroker(" & typeDisplayName & ") could not auto-size payload (" &
+          cls.reason & "); falling back to " & $cls.bytes &
           " B. Override with `maxPayloadBytes = N`."
       )
 
@@ -194,9 +193,7 @@ proc generateMtEventBroker*(
         if `globalSlabInitIdent`.load(moRelaxed) == 2:
           return
         var expected = 0
-        if `globalSlabInitIdent`.compareExchange(
-          expected, 1, moAcquire, moRelaxed
-        ):
+        if `globalSlabInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
           initPayloadSlab(
             `globalSlabIdent`,
             capacity = uint32(`slabCapacityLit`),
@@ -216,9 +213,9 @@ proc generateMtEventBroker*(
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
           initLock(`globalLockIdent`)
           `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](
-            createShared(`bucketName`, `globalBucketCapIdent`)
-          )
+          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
+            `bucketName`, `globalBucketCapIdent`
+          ))
           `globalBucketCountIdent` = 0
           `globalInitIdent`.store(2, moRelease)
         else:
@@ -347,8 +344,7 @@ proc generateMtEventBroker*(
                     `tvListenerFutsIdent`.add((capturedCtx, fut))
                     asyncSpawn fut
               else:
-                error "Failed to unmarshal event payload",
-                  eventType = `typeNameLit`
+                error "Failed to unmarshal event payload", eventType = `typeNameLit`
               `releaseCellIdent`(cellIdx)
               return 1
 
@@ -514,8 +510,7 @@ proc generateMtEventBroker*(
             -1
         if written < 0:
           error "event payload exceeds maxPayloadBytes",
-            eventType = `typeNameLit`,
-            cap = `globalSlabIdent`.cellPayloadCap
+            eventType = `typeNameLit`, cap = `globalSlabIdent`.cellPayloadCap
           `globalSlabIdent`.release(cellIdx, shardHint)
           return
         cell.payloadSize = uint16(written)
@@ -523,8 +518,7 @@ proc generateMtEventBroker*(
 
         for target in crossTargets:
           if not target.ring.tryEnqueue(cellIdx):
-            warn "event dropped: listener queue full",
-              eventType = `typeNameLit`
+            warn "event dropped: listener queue full", eventType = `typeNameLit`
             `releaseCellIdent`(cellIdx)
           else:
             fireBrokerSignal(target.signal)
@@ -699,10 +693,7 @@ proc generateMtEventBroker*(
               `globalBucketsIdent`[i].hasListeners = false
               if `globalBucketsIdent`[i].threadId != myThreadId:
                 crossRings.add(
-                  (
-                    `globalBucketsIdent`[i].ring,
-                    `globalBucketsIdent`[i].listenerSignal,
-                  )
+                  (`globalBucketsIdent`[i].ring, `globalBucketsIdent`[i].listenerSignal)
                 )
 
         # Same-thread tv clear.
@@ -757,8 +748,7 @@ proc generateMtEventBroker*(
       ) {.async: (raises: []).} =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
-        var ringsToShutdown:
-          seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
+        var ringsToShutdown: seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
         withLock(`globalLockIdent`):
           var i = 0
           while i < `globalBucketCountIdent`:
@@ -767,10 +757,7 @@ proc generateMtEventBroker*(
                 `globalBucketsIdent`[i].threadGen == myThreadGen and
                 `globalBucketsIdent`[i].active:
               ringsToShutdown.add(
-                (
-                  `globalBucketsIdent`[i].ring,
-                  `globalBucketsIdent`[i].listenerSignal,
-                )
+                (`globalBucketsIdent`[i].ring, `globalBucketsIdent`[i].listenerSignal)
               )
               for j in i ..< `globalBucketCountIdent` - 1:
                 `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
@@ -834,9 +821,7 @@ proc generateMtEventBroker*(
   # ── Public shutdown ───────────────────────────────────────────────────
   result.add(
     quote do:
-      proc shutdown*(
-          _: typedesc[`typeIdent`]
-      ): Future[void] {.async: (raises: []).} =
+      proc shutdown*(_: typedesc[`typeIdent`]): Future[void] {.async: (raises: []).} =
         await `shutdownProcessLoopsForCtxIdent`(DefaultBrokerContext)
 
       proc shutdown*(

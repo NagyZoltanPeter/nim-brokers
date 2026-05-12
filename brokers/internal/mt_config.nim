@@ -17,8 +17,7 @@
 import std/[macros, strutils]
 
 type
-  MtEvtCfg* = object
-    ## Resolved EventBroker(mt) capacity config.
+  MtEvtCfg* = object ## Resolved EventBroker(mt) capacity config.
     queueDepth*: int ## ring slots per listener bucket (power-of-2)
     slabCapacity*: int ## global slab cell count
     maxPayloadBytes*: int ## per-cell payload bytes
@@ -30,8 +29,7 @@ type
     maxPayloadBytesOrigin*: string
     freeListShardsOrigin*: string
 
-  MtReqCfg* = object
-    ## Resolved RequestBroker(mt) capacity config.
+  MtReqCfg* = object ## Resolved RequestBroker(mt) capacity config.
     queueDepth*: int
     slabCapacity*: int
     maxPayloadBytes*: int
@@ -199,22 +197,19 @@ proc intValOrFail(n: NimNode, kw: string): int =
   ## Extract a compile-time int from a kwarg RHS. Errors clearly on
   ## non-int input.
   case n.kind
-  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
-      nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit:
+  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit, nnkUIntLit,
+      nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit:
     int(n.intVal)
   else:
-    error(
-      "broker kwarg '" & kw & "' expects an integer literal, got " & $n.kind, n
-    )
+    error("broker kwarg '" & kw & "' expects an integer literal, got " & $n.kind, n)
     0
 
 # ---------------------------------------------------------------------------
 # Kwarg parsing — EventBroker(mt)
 # ---------------------------------------------------------------------------
 
-const ValidEvtKwargs = [
-  "queueDepth", "slabCapacity", "maxPayloadBytes", "freeListShards"
-]
+const ValidEvtKwargs =
+  ["queueDepth", "slabCapacity", "maxPayloadBytes", "freeListShards"]
 
 proc applyEvtKwarg(cfg: var MtEvtCfg, kw: string, n: NimNode) =
   case kw
@@ -239,15 +234,12 @@ proc applyEvtKwarg(cfg: var MtEvtCfg, kw: string, n: NimNode) =
   of "freeListShards":
     let v = intValOrFail(n, kw)
     if v <= 0 or v > 64:
-      error(
-        "EventBroker kwarg 'freeListShards' must be in 1..64, got " & $v, n
-      )
+      error("EventBroker kwarg 'freeListShards' must be in 1..64, got " & $v, n)
     cfg.freeListShards = v
     cfg.freeListShardsOrigin = "kwarg"
   else:
     error(
-      "Unknown EventBroker(mt) kwarg '" & kw &
-        "'. Valid: " & ValidEvtKwargs.join(", "),
+      "Unknown EventBroker(mt) kwarg '" & kw & "'. Valid: " & ValidEvtKwargs.join(", "),
       n,
     )
 
@@ -257,8 +249,8 @@ proc presetFromKwargRhs(rhs: NimNode): BuiltinPreset =
   if rhs.kind != nnkIdent:
     error(
       "preset value must be one of the built-in preset names " &
-        "(defaultBalanced, fastBurst, largePayload, tinyFootprint), got " &
-        $rhs.kind & " — " & rhs.repr,
+        "(defaultBalanced, fastBurst, largePayload, tinyFootprint), got " & $rhs.kind &
+        " — " & rhs.repr,
       rhs,
     )
   parseBuiltinPreset($rhs, rhs)
@@ -275,8 +267,8 @@ proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
   for n in kwargs:
     if n.kind != nnkExprEqExpr:
       error(
-        "EventBroker(mt) expects kwargs of the form 'name = value', got " &
-          $n.kind & " — " & n.repr,
+        "EventBroker(mt) expects kwargs of the form 'name = value', got " & $n.kind &
+          " — " & n.repr,
         n,
       )
     let nameNode = n[0]
@@ -295,8 +287,8 @@ proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
 # ---------------------------------------------------------------------------
 
 const ValidReqKwargs = [
-  "queueDepth", "slabCapacity", "maxPayloadBytes",
-  "responseSlots", "maxResponseBytes", "freeListShards"
+  "queueDepth", "slabCapacity", "maxPayloadBytes", "responseSlots", "maxResponseBytes",
+  "freeListShards",
 ]
 
 proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
@@ -334,15 +326,14 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
   of "freeListShards":
     let v = intValOrFail(n, kw)
     if v <= 0 or v > 64:
-      error(
-        "RequestBroker kwarg 'freeListShards' must be in 1..64, got " & $v, n
-      )
+      error("RequestBroker kwarg 'freeListShards' must be in 1..64, got " & $v, n)
     cfg.freeListShards = v
     cfg.freeListShardsOrigin = "kwarg"
   else:
     error(
-      "Unknown RequestBroker(mt) kwarg '" & kw &
-        "'. Valid: " & ValidReqKwargs.join(", "),
+      "Unknown RequestBroker(mt) kwarg '" & kw & "'. Valid: " & ValidReqKwargs.join(
+        ", "
+      ),
       n,
     )
 
@@ -376,10 +367,8 @@ proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
   if t.kind == nnkIdent:
     let name = $t
     case name
-    of "bool", "char", "byte", "uint", "int",
-        "uint8", "int8", "uint16", "int16",
-        "uint32", "int32", "uint64", "int64",
-        "float", "float32", "float64":
+    of "bool", "char", "byte", "uint", "int", "uint8", "int8", "uint16", "int16",
+        "uint32", "int32", "uint64", "int64", "float", "float32", "float64":
       (ScalarBytes, "scalar:" & name)
     of "string":
       (StringBytes, "string")
@@ -431,11 +420,11 @@ proc peelFutureResult*(t: NimNode): NimNode =
   ## Walks `Future[Result[T, E]]` and returns T. Returns nil if the
   ## shape doesn't match.
   var cur = t
-  if cur.kind == nnkBracketExpr and cur.len >= 2 and
-      cur[0].kind == nnkIdent and $cur[0] == "Future":
+  if cur.kind == nnkBracketExpr and cur.len >= 2 and cur[0].kind == nnkIdent and
+      $cur[0] == "Future":
     cur = cur[1]
-  if cur.kind == nnkBracketExpr and cur.len >= 2 and
-      cur[0].kind == nnkIdent and ($cur[0] == "Result" or $cur[0] == "results.Result"):
+  if cur.kind == nnkBracketExpr and cur.len >= 2 and cur[0].kind == nnkIdent and
+      ($cur[0] == "Result" or $cur[0] == "results.Result"):
     return cur[1]
   nil
 
@@ -445,8 +434,8 @@ proc peelFutureResult*(t: NimNode): NimNode =
 
 proc fmtBytes(n: int): string =
   if n >= 1024 * 1024:
-    $(n div (1024 * 1024)) & "." & align($((n mod (1024 * 1024)) div (102 * 1024)), 1, '0') &
-      " MB"
+    $(n div (1024 * 1024)) & "." &
+      align($((n mod (1024 * 1024)) div (102 * 1024)), 1, '0') & " MB"
   elif n >= 1024:
     $(n div 1024) & "." & align($((n mod 1024) div 102), 1, '0') & " KB"
   else:
@@ -468,9 +457,7 @@ proc estEvtIdleBytes(cfg: MtEvtCfg): tuple[ring, slab, total: int] =
   let slab = cfg.slabCapacity * cellStride
   (ring, slab, ring + slab)
 
-proc estReqIdleBytes(
-    cfg: MtReqCfg
-): tuple[ring, slab, respPool, total: int] =
+proc estReqIdleBytes(cfg: MtReqCfg): tuple[ring, slab, respPool, total: int] =
   let ring = cfg.queueDepth * RingSlotBytes
   let cellStride = alignUp8(CellHeaderBytes + cfg.maxPayloadBytes)
   let slab = cfg.slabCapacity * cellStride
@@ -480,22 +467,20 @@ proc estReqIdleBytes(
 
 proc fmtEvtCfgSummary*(typeName: string, cfg: MtEvtCfg): string =
   let est = estEvtIdleBytes(cfg)
-  "[brokers] EventBroker(" & typeName & "): " &
-    "queueDepth=" & $cfg.queueDepth & " [" & cfg.queueDepthOrigin & "], " &
-    "slabCapacity=" & $cfg.slabCapacity & " [" & cfg.slabCapacityOrigin & "], " &
-    "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" & cfg.maxPayloadBytesOrigin &
-    "], freeListShards=" & $cfg.freeListShards & " [" & cfg.freeListShardsOrigin &
-    "] — idle RAM: ring≈" & fmtBytes(est.ring) & ", slab≈" & fmtBytes(est.slab) &
-    ", total≈" & fmtBytes(est.total)
+  "[brokers] EventBroker(" & typeName & "): " & "queueDepth=" & $cfg.queueDepth & " [" &
+    cfg.queueDepthOrigin & "], " & "slabCapacity=" & $cfg.slabCapacity & " [" &
+    cfg.slabCapacityOrigin & "], " & "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" &
+    cfg.maxPayloadBytesOrigin & "], freeListShards=" & $cfg.freeListShards & " [" &
+    cfg.freeListShardsOrigin & "] — idle RAM: ring≈" & fmtBytes(est.ring) &
+    ", slab≈" & fmtBytes(est.slab) & ", total≈" & fmtBytes(est.total)
 
 proc fmtReqCfgSummary*(typeName: string, cfg: MtReqCfg): string =
   let est = estReqIdleBytes(cfg)
-  "[brokers] RequestBroker(" & typeName & "): " &
-    "queueDepth=" & $cfg.queueDepth & " [" & cfg.queueDepthOrigin & "], " &
-    "slabCapacity=" & $cfg.slabCapacity & " [" & cfg.slabCapacityOrigin & "], " &
-    "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" & cfg.maxPayloadBytesOrigin &
-    "], responseSlots=" & $cfg.responseSlots & " [" & cfg.responseSlotsOrigin &
-    "], maxResponseBytes=" & $cfg.maxResponseBytes & " [" &
+  "[brokers] RequestBroker(" & typeName & "): " & "queueDepth=" & $cfg.queueDepth & " [" &
+    cfg.queueDepthOrigin & "], " & "slabCapacity=" & $cfg.slabCapacity & " [" &
+    cfg.slabCapacityOrigin & "], " & "maxPayloadBytes=" & $cfg.maxPayloadBytes & " [" &
+    cfg.maxPayloadBytesOrigin & "], responseSlots=" & $cfg.responseSlots & " [" &
+    cfg.responseSlotsOrigin & "], maxResponseBytes=" & $cfg.maxResponseBytes & " [" &
     cfg.maxResponseBytesOrigin & "], freeListShards=" & $cfg.freeListShards & " [" &
     cfg.freeListShardsOrigin & "] — idle RAM: ring≈" & fmtBytes(est.ring) &
     ", slab≈" & fmtBytes(est.slab) & ", respPool≈" & fmtBytes(est.respPool) &
@@ -507,8 +492,8 @@ proc parseMtReqKwargs*(kwargs: openArray[NimNode]): MtReqCfg =
   for n in kwargs:
     if n.kind != nnkExprEqExpr:
       error(
-        "RequestBroker(mt) expects kwargs of the form 'name = value', got " &
-          $n.kind & " — " & n.repr,
+        "RequestBroker(mt) expects kwargs of the form 'name = value', got " & $n.kind &
+          " — " & n.repr,
         n,
       )
     let nameNode = n[0]
@@ -536,8 +521,7 @@ proc splitMtArgs*(
   let bodyNode = args[args.len - 1]
   if bodyNode.kind notin {nnkStmtList, nnkTypeDef, nnkTypeSection}:
     error(
-      what & " body must be a `:` block of type definitions (got " &
-        $bodyNode.kind & ")",
+      what & " body must be a `:` block of type definitions (got " & $bodyNode.kind & ")",
       bodyNode,
     )
   var kw = newSeqOfCap[NimNode](args.len - 1)

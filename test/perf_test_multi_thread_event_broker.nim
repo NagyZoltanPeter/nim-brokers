@@ -156,8 +156,7 @@ suite "Multi-thread EventBroker — performance":
     const PostEmitWaitMs = 2_000
     const EmitJoinTimeoutMs = 30_000
 
-    let emitJoinDeadlineNs =
-      wallStart.ticks + EmitJoinTimeoutMs.int64 * 1_000_000
+    let emitJoinDeadlineNs = wallStart.ticks + EmitJoinTimeoutMs.int64 * 1_000_000
     while true:
       var allDone = true
       for i in 0 ..< NumEmitterThreads:
@@ -176,8 +175,7 @@ suite "Multi-thread EventBroker — performance":
     # Phase 2: short drain window for in-flight events to be delivered.
     let drainStart = getMonoTime()
     while gEventsReceived.load() < TotalCrossThreadEvents:
-      if (getMonoTime() - drainStart).inNanoseconds >=
-          PostEmitWaitMs.int64 * 1_000_000:
+      if (getMonoTime() - drainStart).inNanoseconds >= PostEmitWaitMs.int64 * 1_000_000:
         break
       await sleepAsync(chronos.milliseconds(1))
 
@@ -196,16 +194,19 @@ suite "Multi-thread EventBroker — performance":
     echo ""
     echo "  ┌─── Cross-Thread Results ─────────────────────────────"
     echo "  │ Emitted        : ", TotalCrossThreadEvents
-    echo "  │ Delivered      : ", delivered, " (",
-      formatFloat(float64(delivered) * 100.0 / float64(TotalCrossThreadEvents),
-                  ffDecimal, 2), "%)"
+    echo "  │ Delivered      : ",
+      delivered,
+      " (",
+      formatFloat(
+        float64(delivered) * 100.0 / float64(TotalCrossThreadEvents), ffDecimal, 2
+      ),
+      "%)"
     echo "  │ Dropped        : ", TotalCrossThreadEvents - delivered
     echo "  │ Emit window    : ", fmtNs(emitElapsed)
     echo "  │ Total wall     : ", fmtNs(wallElapsed)
     echo "  │ Emit rate      : ",
       fmtRate(TotalCrossThreadEvents, emitElapsed), " (offered)"
-    echo "  │ Delivery rate  : ",
-      fmtRate(delivered, wallElapsed), " (received)"
+    echo "  │ Delivery rate  : ", fmtRate(delivered, wallElapsed), " (received)"
     echo "  │ Avg latency    : ", fmtNs(avgNs)
     echo "  │ Min latency    : ", fmtNs(minNs)
     echo "  │ Max latency    : ", fmtNs(maxNs)

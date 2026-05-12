@@ -60,24 +60,28 @@ EventBroker(mt, preset = tinyFootprint):
 RequestBroker(mt):
   type ScalarRes = object
     value*: int32
+
   proc signature*(key: int32): Future[Result[ScalarRes, string]] {.async.}
 
 # fastBurst preset.
 RequestBroker(mt, preset = fastBurst):
   type FastRes = object
     note*: string
+
   proc signature*(key: string): Future[Result[FastRes, string]] {.async.}
 
 # largePayload preset with explicit responseSlots override.
 RequestBroker(mt, preset = largePayload, responseSlots = 16):
   type BlobRes = object
     blob*: seq[byte]
+
   proc signature*(key: string): Future[Result[BlobRes, string]] {.async.}
 
 # tinyFootprint preset.
 RequestBroker(mt, preset = tinyFootprint):
   type TinyRes = object
     ok*: bool
+
   proc signature*(id: uint8): Future[Result[TinyRes, string]] {.async.}
 
 # ---------------------------------------------------------------------------

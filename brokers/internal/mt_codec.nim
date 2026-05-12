@@ -30,11 +30,11 @@ import std/[macros, typetraits]
 # the bool return is false on overflow / truncation / malformed input.
 
 proc mtMarshalValue*[T](
-    buf: ptr UncheckedArray[byte], cap: int, value: T, pos: var int
+  buf: ptr UncheckedArray[byte], cap: int, value: T, pos: var int
 ): bool {.gcsafe.}
 
 proc mtUnmarshalValue*[T](
-    buf: ptr UncheckedArray[byte], len: int, value: var T, pos: var int
+  buf: ptr UncheckedArray[byte], len: int, value: var T, pos: var int
 ): bool {.gcsafe.}
 
 # Sequence specialization — separate generic so the element type `U`
@@ -90,9 +90,7 @@ proc mtMarshalValue*[T](
     buf: ptr UncheckedArray[byte], cap: int, value: T, pos: var int
 ): bool {.gcsafe.} =
   when T is ref:
-    {.
-      error: "mt broker payload field type is unsupported (ref T): " & $T
-    .}
+    {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
   # below and are marshaled bytewise. Caller is responsible for the
   # lifetime of what they point to — typically used for shared structures
@@ -127,17 +125,13 @@ proc mtMarshalValue*[T](
         return false
     return true
   else:
-    {.
-      error: "mt broker payload field type is unsupported by mtMarshalValue: " & $T
-    .}
+    {.error: "mt broker payload field type is unsupported by mtMarshalValue: " & $T.}
 
 proc mtUnmarshalValue*[T](
     buf: ptr UncheckedArray[byte], len: int, value: var T, pos: var int
 ): bool {.gcsafe.} =
   when T is ref:
-    {.
-      error: "mt broker payload field type is unsupported (ref T): " & $T
-    .}
+    {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
   # below and are marshaled bytewise. Caller is responsible for the
   # lifetime of what they point to — typically used for shared structures
@@ -174,9 +168,7 @@ proc mtUnmarshalValue*[T](
         return false
     return true
   else:
-    {.
-      error: "mt broker payload field type is unsupported by mtUnmarshalValue: " & $T
-    .}
+    {.error: "mt broker payload field type is unsupported by mtUnmarshalValue: " & $T.}
 
 # ---------------------------------------------------------------------------
 # Per-type wrapper proc generation (called from broker macros)
@@ -194,20 +186,20 @@ proc genMtCodecProcs*(
   let dstIdent = ident("dst")
   let posIdent = ident("pos")
 
-  let marshalProc = quote do:
+  let marshalProc = quote:
     proc `marshalIdent`(
-        `bufIdent`: ptr UncheckedArray[byte]; `capIdent`: int;
-        `valueIdent`: `typeIdent`
+        `bufIdent`: ptr UncheckedArray[byte], `capIdent`: int, `valueIdent`: `typeIdent`
     ): int {.gcsafe, raises: [].} =
       var `posIdent` = 0
       if mtMarshalValue(`bufIdent`, `capIdent`, `valueIdent`, `posIdent`):
         return `posIdent`
       return -1
 
-  let unmarshalProc = quote do:
+  let unmarshalProc = quote:
     proc `unmarshalIdent`(
-        `bufIdent`: ptr UncheckedArray[byte]; `lenIdent`: int;
-        `dstIdent`: var `typeIdent`
+        `bufIdent`: ptr UncheckedArray[byte],
+        `lenIdent`: int,
+        `dstIdent`: var `typeIdent`,
     ): bool {.gcsafe, raises: [].} =
       var `posIdent` = 0
       return mtUnmarshalValue(`bufIdent`, `lenIdent`, `dstIdent`, `posIdent`)

@@ -38,15 +38,20 @@ suite "VyukovMpscRing — basics":
     var x: int
     check ring.tryEnqueue(1)
     check ring.tryEnqueue(2)
-    check ring.tryDequeue(x); check x == 1
+    check ring.tryDequeue(x)
+    check x == 1
     check ring.tryEnqueue(3)
     check ring.tryEnqueue(4)
     check ring.tryEnqueue(5)
     check (not ring.tryEnqueue(6)) # full
-    check ring.tryDequeue(x); check x == 2
-    check ring.tryDequeue(x); check x == 3
-    check ring.tryDequeue(x); check x == 4
-    check ring.tryDequeue(x); check x == 5
+    check ring.tryDequeue(x)
+    check x == 2
+    check ring.tryDequeue(x)
+    check x == 3
+    check ring.tryDequeue(x)
+    check x == 4
+    check ring.tryDequeue(x)
+    check x == 5
     check (not ring.tryDequeue(x))
     freeVyukovMpscRing(ring)
 
@@ -56,7 +61,8 @@ suite "VyukovMpscRing — basics":
     ring.close()
     check (not ring.tryEnqueue(2))
     var x: int
-    check ring.tryDequeue(x); check x == 1
+    check ring.tryDequeue(x)
+    check x == 1
     freeVyukovMpscRing(ring)
 
 # ─── MPSC stress ──────────────────────────────────────────────────────────
@@ -211,7 +217,10 @@ suite "ShardedFreeList — basics":
     var fl: ShardedFreeList
     initShardedFreeList(fl, nShards = 1, capacity = 16)
     # Seed: push 0,1,2,3
-    push(fl, 0, 0); push(fl, 1, 0); push(fl, 2, 0); push(fl, 3, 0)
+    push(fl, 0, 0)
+    push(fl, 1, 0)
+    push(fl, 2, 0)
+    push(fl, 3, 0)
     check pop(fl, 0) == 3
     check pop(fl, 0) == 2
     check pop(fl, 0) == 1
@@ -270,7 +279,8 @@ suite "ShardedFreeList — concurrency":
     var seen = initHashSet[uint32]()
     while true:
       let idx = pop(flShared.fl, 0)
-      if idx == EmptyIdx: break
+      if idx == EmptyIdx:
+        break
       check (idx notin seen)
       seen.incl(idx)
     check seen.len == flCapacity.int
@@ -471,16 +481,14 @@ proc respWriter() {.thread.} =
   if respRace.pool.beginWrite(respRace.idx):
     respRace.pool.commitWrite(respRace.idx, 0'u16)
     var expected = 0
-    discard
-      respRace.outcome.compareExchange(expected, 1, moAcquireRelease, moAcquire)
+    discard respRace.outcome.compareExchange(expected, 1, moAcquireRelease, moAcquire)
 
 proc respAbandoner() {.thread.} =
   while not respRace.startGate.load(moAcquire):
     sleep(0)
   if respRace.pool.abandon(respRace.idx):
     var expected = 0
-    discard
-      respRace.outcome.compareExchange(expected, 2, moAcquireRelease, moAcquire)
+    discard respRace.outcome.compareExchange(expected, 2, moAcquireRelease, moAcquire)
 
 suite "ResponseSlotPool — race":
   test "concurrent write vs abandon — exactly one wins":

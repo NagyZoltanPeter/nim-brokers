@@ -538,8 +538,7 @@ macro EventBroker*(mode: untyped, args: varargs[untyped]): untyped =
   of ebApi:
     if split.kwargs.len > 0:
       error(
-        "EventBroker(API) does not accept kwargs (got: " &
-          split.kwargs[0].repr & ")",
+        "EventBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
         split.kwargs[0],
       )
     when not compileOption("threads"):
@@ -560,8 +559,7 @@ macro EventBroker*(mode: untyped, args: varargs[untyped]): untyped =
   of ebDefault:
     if split.kwargs.len > 0:
       error(
-        "EventBroker(" & mode.repr &
-          ") does not accept kwargs (kwargs are mt-only)",
+        "EventBroker(" & mode.repr & ") does not accept kwargs (kwargs are mt-only)",
         split.kwargs[0],
       )
     generateEventBroker(body)
