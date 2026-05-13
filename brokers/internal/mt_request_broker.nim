@@ -644,9 +644,7 @@ proc generateMtRequestBroker*(
                 # drainAsyncOps. Doing the free asynchronously here ran the
                 # refc allocator during shutdown teardown and SEGV'd on
                 # Linux + macOS ASAN (PR #13, deferredFreeReqRing path).
-                enqueuePendingRingFree(
-                  capturedRing, capturedSlab, capturedPool
-                )
+                enqueuePendingRingFree(capturedRing, capturedSlab, capturedPool)
                 return 2
               return 0
             # Got a cell — unmarshal ReqMsg, dispatch.

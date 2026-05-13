@@ -756,7 +756,13 @@ proc setAsanEnv() =
     if rc == 0 and trimmed.len > 0 and trimmed != "libclang_rt.asan-x86_64.so":
       let dir = parentDir(trimmed)
       let cur = getEnv("LD_LIBRARY_PATH")
-      putEnv("LD_LIBRARY_PATH", if cur.len == 0: dir else: dir & ":" & cur)
+      putEnv(
+        "LD_LIBRARY_PATH",
+        if cur.len == 0:
+          dir
+        else:
+          dir & ":" & cur,
+      )
 
 proc asanCompileFlags(): string =
   result = "-fsanitize=address -fno-omit-frame-pointer -g"
@@ -777,11 +783,8 @@ proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
   # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
   # fires on memory faults inside the .dylib. Without this, Nim prints its own
   # traceback and exits before ASAN can report the underlying heap error.
-  # -d:brokerDispatchTrace: emit per-thread dispatcher traces (registerBrokerPoller,
-  # brokerDispatchLoop lifecycle, shutdown drain) at chronicles info level to help
-  # diagnose refc allocator corruption seen on macos-amd64 (PR #13).
   var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy -d:noSignalHandler -d:brokerDispatchTrace --threads:on --app:lib --mm:" &
+    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy -d:noSignalHandler --threads:on --app:lib --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"
@@ -914,10 +917,8 @@ proc testAsan(mm: string, path: string) =
   # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
   # fires on memory faults. Without this, Nim prints its own traceback and
   # exits before ASAN can report the underlying heap error.
-  # -d:brokerDispatchTrace: emit per-thread dispatcher traces to diagnose refc
-  # allocator corruption (PR #13).
   let flags =
-    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE -d:noSignalHandler -d:brokerDispatchTrace --threads:on --mm:" &
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE -d:noSignalHandler --threads:on --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
   exec "nim c " & flags & " test/" & path & ".nim"

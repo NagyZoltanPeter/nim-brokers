@@ -47,9 +47,15 @@ issues touch them.
 | OS / arch | Nim 2.2.4 + orc | Nim 2.2.4 + refc | Nim 2.2.10 + orc | Nim 2.2.10 + refc | Nim devel + orc | Nim devel + refc |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Linux amd64** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **macOS arm64** | ✅ | ✅ native ⚠️ — see §2.7; CBOR ✅ | ✅ | ✅ native ⚠️ — see §2.7; CBOR ✅ | ✅ (untested) | ✅ native ⚠️ likely same; CBOR ✅ |
-| **macOS amd64** | ✅ likely same as arm64 | ✅ native ⚠️ likely same as arm64 — see §2.7 | ✅ likely same as arm64 | ✅ native ⚠️ likely same as arm64 — see §2.7 | ✅ likely same as arm64 | ✅ native ⚠️ likely same as arm64 — see §2.7 |
-| **Windows amd64** | ✅ | ❌ — see §2.1 | ✅ | ❌ — see §2.1 | ✅ | ❌ — see §2.1 (devel install also unsupported by setup-nim-action) |
+| **macOS arm64** | ✅ | ✅ | ✅ | ✅ | ✅ (untested) | ✅ |
+| **macOS amd64** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Windows amd64** | ⚠️ — see §2.9 | ❌ — see §2.1 | ✅ | ❌ — see §2.1 | ✅ | ❌ — see §2.1 (devel install also unsupported by setup-nim-action) |
+
+A single edge-case caveat for Nim 2.2.4 + refc under heavy ASAN-stress
+ctx churn (50+ contexts back-to-back) on macOS amd64 and Linux amd64 is
+documented in §2.7's "Residual edge case" — Nim 2.2.10's allocator
+patches close it, and normal usage (any RPC frequency, moderate context
+counts) is unaffected.
 
 Nim versions older than 2.2.0 are **not supported** (see §2.4).
 
@@ -61,14 +67,20 @@ limitations** on any supported platform after the channel-dispatch
 refactor.
 
 If you need `--mm:refc`:
-- **Linux + refc**: fully supported, no constraints.
+- **Linux + refc**: fully supported on every Nim release in the matrix.
 - **Windows + refc**: unsupported (see §2.1). No workaround; use ORC.
 - **macOS + refc + CBOR-mode FFI**: fully supported.
-- **macOS + refc + native-mode FFI**: ⚠️ a chronos+refc Future-allocator
-  race under sustained high-frequency complex-response RPC workloads
-  remains as a residual fragility (§2.7). Light to moderate workloads
-  are fine. If you need sustained ~100 RPC/sec native+refc on macOS,
-  switch to CBOR-mode FFI or ORC.
+- **macOS + refc + native-mode FFI**: fully supported as of PR #13. The
+  pre-PR-#13 high-frequency RPC fragility (old §2.7) is resolved by
+  replacing the FFI entry points' `waitFor request(...)` with
+  `blockingRequest(...)` — see §2.7 for the rationale and trade-offs.
+
+A single non-blocking caveat applies to **Nim 2.2.4 + refc + ASAN-stress
+ctx churn** (≥ 50 create/shutdown cycles in one ASAN-instrumented
+process). The fragility lives in Nim 2.2.4's refc allocator itself and
+is closed by Nim 2.2.10. Real-world workloads (any RPC frequency, any
+reasonable context count) on Nim 2.2.4 + refc are unaffected. See §2.7
+"Residual edge case".
 
 ### 1.4 Historical context: limitations closed by the channel-dispatch refactor
 
@@ -325,9 +337,13 @@ using `Channel[T]` directly.
 
 ### 2.7 macOS + native-mode FFI + `--mm:refc`: chronos Future allocator under high-frequency RPC
 
-**Status: ACTIVE.** Identified after the channel-dispatch refactor.
-Different trigger and different location than §2.2 or §2.6. Lives in
-chronos's `Future` allocator, outside our code surface.
+**Status: RESOLVED in PR #13** for the structural root cause; a residual
+edge-case window remains on Nim 2.2.4 specifically (see "Residual edge case"
+at the bottom of this section). Resolved upstream by Nim 2.2.10's allocator
+patches even without our fixes.
+
+Identified after the channel-dispatch refactor. Different trigger and
+different location than §2.2 or §2.6.
 
 **Scope.** Affects only the combination **macOS + native-mode FFI +
 `--mm:refc`** under workloads that issue cross-thread requests at high
@@ -404,10 +420,189 @@ issues a request).
    workloads at < ~20 RPC/sec are fine; > 100 RPC/sec on a single foreign
    thread reliably triggers §2.7.
 
-**Upstream issue.** Filing a Nim/chronos issue with the torpedo
-reproducer is on the follow-up list. The fix is at one of two layers:
-chronos's Future allocator path, or Nim's refc cross-thread allocator
-race that's been latent since at least 2.2.4.
+**Upstream issue.** The original hypothesis (chronos Future allocator
+race) turned out to be downstream of a structural issue in our code: the
+FFI caller's thread doesn't own a chronos event loop, but our generated
+FFI entries were driving one via `waitFor request(...)` on every call.
+PR #13 replaced this with `blockingRequest` — pure busy-poll of the
+response slot, no Future allocation, no chronos involvement on the
+caller's thread. That eliminated the chronos allocator pressure that was
+exposing the latent refc fragility.
+
+#### Root cause (PR #13 analysis)
+
+`ensureBrokerDispatchStarted()` lazily spawns a per-thread
+`brokerDispatchLoop` coroutine on first use. That design is correct for
+threads that own a chronos event loop for their entire lifetime
+(processing/delivery threads spawned by `createContext`, torn down via
+`joinThread`). It is **wrong** for an FFI caller's thread which:
+
+- re-enters Nim per FFI call
+- lives for the entire host process
+- has no joiner that can tear down its chronos state
+
+The persistent loop's suspended `await signal.wait()` Future, the
+threadvar pollers seq, and chronos's pending callback list accumulated
+across calls. Under refc this dragged the thread's ZCT and freelist
+state through a slow corruption until a `collectZCT` walk hit a cell
+with `typ == nil` and SEGV'd (typically around ctx=51 under the
+`testFfiApiCpp` parity test).
+
+#### Fix (PR #13)
+
+Two FFI entry points in `api_library.nim` and `api_request_broker.nim`
+now use `blockingRequest` instead of `waitFor request(...)`:
+
+| Surface | Was | Now |
+|---|---|---|
+| `<lib>_shutdown(ctx)` | `waitFor shutdownReq.request(brokerCtx)` | `blockingRequest(shutdownReqIdent, brokerCtx)` |
+| `<lib>_<request>(ctx)` (zero-arg) | `waitFor typeIdent.request(brokerCtx)` | `blockingRequest(typeIdent, brokerCtx)` |
+
+Subscribe/unsubscribe (`on<Event>` / `off<Event>`) and arg-bearing
+request entries already used `blockingRequest` — they were never
+implicated in §2.7.
+
+`blockingRequest` is the existing busy-poll variant: claim a
+`ResponseSlot`, byte-marshal the request into a `PayloadSlab` cell,
+fire the provider's signal, busy-poll `ResponseSlot.readyState` via
+`Moment.now()` / `sleep(1)`, then unmarshal the response bytes back on
+the caller's thread. Zero chronos Future allocations on the caller's
+thread; zero persistent state in chronos pending lists.
+
+`stopBrokerDispatchHere()` is retained as defense-in-depth — a no-op
+when no dispatch loop was started, but if user code or future codegen
+ever drives a `waitFor` from a foreign thread it will tear the loop
+down cleanly before returning to C.
+
+#### Hot-path perf consequences
+
+| | Before (`waitFor request()`) | After (`blockingRequest`) |
+|---|---|---|
+| Per-call Nim allocations on caller thread | 1 Future + 1 closure for poller + ZCT churn | **None** — slab cell + response slot are pre-allocated in `createShared` memory |
+| Wait mechanism | Parked on eventfd/kqueue (0 CPU) | Busy-poll: check slot, `sleep(1ms)`, repeat |
+| Wake latency | ~50–200μs | 0 if response ready when we check, else ≤1ms (sleep granularity) |
+| Memory churn | refc allocations → GC pressure | Zero |
+
+For typical FFI workloads where requests complete in well under 1ms,
+the busy-poll never enters `sleep(1)` — it sees `Ready` on the first
+or second check. So expected per-call latency is **slightly faster**
+(no chronos future-allocation overhead, no `signal.wait` setup). It's
+only slower on the tail for requests that take many milliseconds,
+where 1ms sleep granularity adds tail latency — but those would have
+included full chronos overhead in the old path anyway. **Memory: strict
+win.** No per-call Nim heap allocations on the caller thread means no
+ZCT growth, no eventual `collectZCT`, no refc pressure.
+
+#### Residual edge case (Nim 2.2.4 only, ASAN-stress only)
+
+The **normal** CI matrix is fully green under Nim 2.2.4 + refc on
+Linux amd64, macOS amd64, and macOS arm64 — no caveats apply to
+production usage.
+
+Under **ASAN instrumentation** (`-d:noSignalHandler` so ASAN catches
+the SEGV instead of Nim's signal handler swallowing it) plus a *very*
+aggressive create/shutdown stress test — 50+ contexts back-to-back
+in one process — Nim 2.2.4's refc allocator can still surface
+nil-deref reports inside chronos's `shutdownProcessLoopsForCtx<Event>`
+path on the provider threads. This is the upstream refc allocator
+fragility under sustained cross-thread allocation churn during
+teardown; Nim 2.2.10's allocator patches close it. Even on Nim 2.2.4,
+non-ASAN builds run the same stress test cleanly because Nim's
+default signal handler suppresses the late-teardown SEGV after the
+test logic has already passed.
+
+Recommendation: if you build an ASAN-instrumented stress harness that
+churns contexts at this rate, use Nim ≥ 2.2.10 or ORC. For everything
+else (any RPC frequency, any reasonable context count, ordinary
+builds without ASAN) Nim 2.2.4 + refc is fully supported. Steady-state
+RPC at any frequency was already resolved by the blockingRequest
+switch — the old §2.7 trigger ("> 100 RPC/sec on a single foreign
+thread") no longer reproduces under any GC or sanitizer combination.
+
+---
+
+### 2.8 Provider-thread shutdown: synchronous deferred ring/slab/pool free
+
+**Status: RESOLVED in PR #13.** Internal correctness fix; not visible at
+the API surface. Documented for future maintainers and for searchers
+landing here from the original crash signatures.
+
+The original ring/slab/pool free path used `asyncSpawn
+deferredFreeReqRing(ring, slab, pool)` from inside a broker poll fn
+when it observed `ring.isClosed()`. The async proc did `await
+sleepAsync(50ms)` (a grace window for cross-thread senders that
+captured pointers before the bucket was removed under lock) and then
+freed the three buffers. Two problems exposed by Linux refc + ASAN:
+
+1. The `sleepAsync(50ms)` Future was allocated **inside teardown** —
+   during `cleanupAllRequestsIdent(ctx)` followed by `drainAsyncOps`
+   the processing thread's gch was already churning through 17 brokers'
+   worth of `clearProvider` cleanup. One of the resulting Future
+   allocations would SEGV in `rawAlloc` (offset 0x4 / 0x8 / 0x28 in
+   the allocator's bookkeeping).
+
+2. `drainAsyncOps` only polls chronos for 1ms; the 50ms `sleepAsync`
+   never fired before the thread exited. The async free was either
+   orphaned (silent shared-memory leak) or racing thread teardown.
+
+Replaced with a synchronous deferred-free registry in
+`brokers/internal/mt_broker_common.nim`:
+
+- `enqueuePendingRingFree(ring, slab, pool)` (thread-local seq).
+- `drainPendingRingFrees()` — single `sleep(50)` grace window per
+  thread, then direct calls to the existing `freeVyukovMpscRing` /
+  `deinitPayloadSlab` + `deallocShared` / `deinitResponseSlotPool` +
+  `deallocShared` helpers.
+
+Called from both provider thread procs in `api_library.nim` after
+`drainAsyncOps` (processing thread) and after
+`shutdownAllProcessLoopsIdent(ctx)` (delivery thread).
+
+A related teardown-order bug was also fixed on the delivery thread:
+the old order ran `cleanupAllIdent(ctx)` (which calls
+`dropAllListeners`, decrementing listener-closure refcounts to zero)
+**before** `waitFor shutdownAllProcessLoops(ctx)` (which awaits the
+in-flight listener-invocation futures stored in `tvListenerFuts`).
+Under refc, this created a window where chronos resumed a future
+whose continuation pointed at freed listener-closure code — a hard
+SEGV with `pc == bad address` inside `internalContinue`. The fix is
+to run `clearProvider → drain processLoops + listener futures → drop
+listeners` in that order, so no in-flight invocation references can
+outlive the listener table they call into.
+
+---
+
+### 2.9 Windows + Nim 2.2.4 + `--mm:orc` + debug: `testFfiApi` Python harness mid-suite crash
+
+**Status: ACTIVE — Windows + Nim 2.2.4 only.** Nim 2.2.10 and Nim devel
+are clean on the same Windows runner.
+
+**Scope.** Only Windows amd64 + Nim 2.2.4 + `--mm:orc` + debug, only the
+`nimble testFfiApi` task (the Python ctypes parity test discovered via
+`unittest`). Surfaces as the test process exiting mid-suite around
+`test_const_array` with no Python-side stack trace, only nimble's
+"unhandled exception: FAILED" wrapper around the Python harness exit.
+Linux and macOS run the same test cleanly under Nim 2.2.4.
+
+**Symptom.**
+```
+test_const_array (test_typemappingtestlib.TestArrays.test_const_array) ...
+D:\...\nim-brokers\.nim_runtime\lib\system\nimscript.nim(264, 7)
+Error: unhandled exception:
+  FAILED: "...\python3.exe" -m unittest discover -s test/typemappingtestlib
+                            -p "test_*.py" -v [OSError]
+```
+
+The Nim DLL aborts the Python process mid-test. Same DLL runs cleanly
+under the same Python on Nim 2.2.10 and devel. Other `testFfiApiCpp`,
+`testFfiApiCppCbor`, etc. variants on the same Windows + Nim 2.2.4 ALSO
+pass — only the Python harness is affected. The failure mode is most
+likely a Windows-specific quirk in Nim 2.2.4's TLS / DLL teardown
+ordering that interacts with Python's ctypes-driven DLL unload.
+
+**Recommendation.** For Windows production, use **Nim ≥ 2.2.10**. The
+PR-#13 fixes are not implicated (the trace passes through the same
+generated entry points on Nim 2.2.10 + Windows without issue).
 
 ---
 

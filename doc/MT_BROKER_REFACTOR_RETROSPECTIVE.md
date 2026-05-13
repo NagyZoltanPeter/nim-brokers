@@ -173,7 +173,7 @@ RPC than averages.
 | §2.6 macOS+ORC slot-payload UAF after sender exit | HIT | **CLOSED** — all 7 probes pass under ASAN+ORC |
 | §2.3 Nim-devel+refc+release shared-heap regression | HIT | **CLOSED** (same trigger class) |
 | §2.1 Windows+refc TLS-uninit | HIT | HIT — not channel-related |
-| §2.7 chronos `newFutureImpl` alloc race on macOS+refc+native-FFI | masked by §2.2 | **Newly disclosed** — refactor moved broker allocs off hot path, exposing chronos's own alloc race on cross-thread RPC > ~50/s. Workaround: ORC or CBOR-mode FFI. |
+| §2.7 chronos `newFutureImpl` alloc race on macOS+refc+native-FFI | masked by §2.2 | **CLOSED in PR #13** — root cause was structural (`waitFor request(...)` on the foreign caller's thread spawning a persistent `brokerDispatchLoop`), not a chronos bug. Switched FFI entry points to `blockingRequest`. See §9 below. |
 
 ## 7. New costs — honest accounting
 
@@ -291,3 +291,188 @@ build with `-d:brokerConfigSilent`, or per category with
 `--hint[User]:off`.
 
 See [MT_BROKER_CONFIG.md](MT_BROKER_CONFIG.md) for the full reference.
+
+## 9. Post-refactor follow-up: PR #13 (FFI-thread + provider-thread teardown)
+
+The refactor moved every broker-owned allocation off the hot path
+(commit `c821bb4`'s "Phase 4b" eliminated the last cross-thread refc
+`=copy`). Throughput went up and the §2.2 / §2.6 / §2.3 bug classes
+went away. Real-world FFI consumers ran fine; the test matrix was
+green on every reasonable build under both ORC and refc.
+
+When [macos-amd64 + refc + ASAN](LIMITATION.md#27-macos--native-mode-ffi---mmrefc-chronos-future-allocator-under-high-frequency-rpc)
+was added to CI (with `-d:noSignalHandler` so Nim's signal handler
+doesn't swallow heap faults before ASAN reports them), four distinct
+crash classes surfaced in the FFI test harness — all in code that
+existed before the refactor too, but had been masked by Nim's signal
+handler eating the SEGV after the test logic had already passed.
+This section documents them, the structural fixes, and the perf
+implications.
+
+### 9.1 The bugs, in the order they were exposed
+
+#### Bug 1: persistent `brokerDispatchLoop` on the FFI caller's thread
+
+**Where.** `api_library.nim` `<lib>_shutdown` and the zero-arg
+`<lib>_<request>()` entries used `waitFor typeIdent.request(brokerCtx)`.
+`sendAndAwait` calls `ensureBrokerDispatchStarted()` on every entry,
+which lazily `asyncSpawn`s a per-thread `brokerDispatchLoop`.
+
+**Why it hurts.** The dispatch loop was designed for chronos-loop-owning
+threads (processing/delivery threads created by `createContext`, torn
+down via `joinThread`). The FFI caller's thread is a different beast:
+it lives for the entire host process and re-enters Nim per call. The
+loop's suspended `await signal.wait()` Future, the threadvar pollers
+seq, and chronos's pending callback list accumulated across calls.
+Under refc this dragged the thread's ZCT and freelist through a slow
+corruption until a `collectZCT` walk hit a cell with `typ == nil` and
+SEGV'd in `prepareDealloc` — reliably around the 51st create/shutdown
+cycle on macOS amd64 + Nim 2.2.4.
+
+**Fix.** Switch both FFI entries to `blockingRequest(...)` — the
+existing busy-poll variant already used by `on<Event>`, `off<Event>`,
+and arg-bearing request entries. Zero chronos Future allocations, no
+dispatch loop spawn, no chronos pending list state on the FFI caller's
+thread. `stopBrokerDispatchHere()` is kept as defense-in-depth (no-op
+when no loop was started) in case future codegen ever drives a
+`waitFor` from a foreign thread.
+
+#### Bug 2: `asyncSpawn deferredFreeReqRing` during provider-thread teardown
+
+**Where.** `mt_request_broker.nim`'s `pollFnMakerIdent` poll fn, when
+it observed `ring.isClosed()` (clearProvider closed the ring),
+`asyncSpawn`'d an async proc that did `await sleepAsync(50ms)` and
+then freed the ring/slab/pool buffers.
+
+**Why it hurts.** `cleanupAllRequestsIdent(ctx)` calls `clearProvider`
+for all 17 brokers in rapid succession. The next pass through
+`brokerDispatchLoop` sees 17 closed rings and schedules 17 `asyncSpawn
+deferredFreeReqRing(...)` calls. Each one allocates a Future for the
+async proc itself plus a Future for the inner `sleepAsync(50ms)`. The
+processing thread's gch is churning through closure deallocations at
+this moment (each `clearProvider`'s `tvCleanup` runs `del(i)` on a
+seq of provider closures). One of those Future allocations would hit
+the refc allocator in a fragile state and SEGV in `rawAlloc`.
+
+Additionally, the 50ms `sleepAsync` couldn't actually fire — the proc
+thread's `waitFor drainAsyncOps()` only polled chronos for 1ms before
+the thread exited. The async free was either orphaned (silent
+shared-memory leak) or racing thread teardown.
+
+**Fix.** Replace `asyncSpawn deferredFreeReqRing(...)` with synchronous
+enqueue into a thread-local registry. The processing-thread proc
+drains the registry **once** at the end (a single `sleep(50)` grace
+window covers every broker on the thread, then direct free calls).
+No chronos involvement in the cleanup path. New API in
+`brokers/internal/mt_broker_common.nim`:
+
+```nim
+proc enqueuePendingRingFree*(ring: ptr VyukovMpscRing[uint32],
+                              slab: ptr PayloadSlab,
+                              pool: ptr ResponseSlotPool) {.gcsafe.}
+proc drainPendingRingFrees*() {.gcsafe.}
+```
+
+#### Bug 3: delivery-thread listener-closure use-after-free
+
+**Where.** `api_library.nim` delivery-thread proc previously did:
+```nim
+cleanupAllIdent(arg.ctx)            # dropAllListeners → refcount--
+RegisterEventListenerResult.clearProvider(arg.ctx)
+waitFor shutdownAllProcessLoopsIdent(arg.ctx)
+```
+
+**Why it hurts.** `cleanupAllIdent` clears the per-event listener
+table, dropping each listener closure's refcount. Under refc this
+often takes the refcount to zero and frees the closure immediately.
+`shutdownAllProcessLoopsIdent(ctx)` then awaits the in-flight
+listener-invocation futures stored in `tvListenerFutsIdent` — futures
+whose continuations reference the listener-closure code that was just
+freed. Chronos's next poll resumed one of those continuations and
+jumped into freed memory (`pc == bad address`).
+
+**Fix.** Reorder so listener-invocation futures drain BEFORE the
+listener table is cleared:
+```nim
+RegisterEventListenerResult.clearProvider(arg.ctx)
+waitFor shutdownAllProcessLoopsIdent(arg.ctx)  # drain in-flight invocations
+cleanupAllIdent(arg.ctx)                       # safe now
+drainPendingRingFrees()
+```
+
+#### Bug 4: residual Nim 2.2.4 refc allocator fragility under heavy churn
+
+**Status.** Not a bug in nim-brokers; an upstream refc allocator
+fragility patched by Nim 2.2.10. On Nim 2.2.4 + Linux refc + ASAN +
+50+ create/shutdown cycles back-to-back, the allocator can still
+return nil from an internal lookup during teardown churn. The
+production fix is "use Nim ≥ 2.2.10" or "use ORC". Documented in the
+[LIMITATION.md §2.7 residual edge case](LIMITATION.md#27-macos--native-mode-ffi---mmrefc-chronos-future-allocator-under-high-frequency-rpc).
+
+### 9.2 Why these were exposed *now*, not by the refactor itself
+
+| Bug | Existed before refactor? | Why now? |
+|---|---|---|
+| 1. FFI thread dispatch loop | Yes — the persistent loop pattern existed in any code that called `<lib>_<request>()` from a foreign thread | The refactor's new `brokerDispatchLoop` is denser allocation-wise than the previous per-broker poll. Also: `-d:noSignalHandler` was newly added so ASAN sees the SEGV instead of Nim swallowing it. |
+| 2. `asyncSpawn deferredFreeReqRing` | Yes — this code path was added by the refactor (Phase 1) but the race-with-teardown was masked by Nim's signal handler swallowing SEGVs during thread exit | `-d:noSignalHandler` exposed it. |
+| 3. Listener UAF teardown order | Yes — predates the refactor | Same: signal handler had been swallowing the SEGV at thread exit. |
+| 4. Nim 2.2.4 allocator fragility | Yes — upstream Nim issue | Heavy ASAN-instrumented create/shutdown stress flushed it out. |
+
+The net diagnostic insight: enabling ASAN with `-d:noSignalHandler`
+on a refc + shared-lib + chronos workload exposes a class of latent
+fragilities that production users see as "occasional crash during
+shutdown that doesn't reproduce reliably." Worth running periodically.
+
+### 9.3 Perf implications
+
+The only PR #13 change that touches the hot path is bug 1's fix
+(switching FFI entries from `waitFor request()` to `blockingRequest`).
+Net per-call effect on the FFI caller's thread:
+
+| | Before | After |
+|---|---|---|
+| Per-call Nim allocations | 1 Future + 1 closure for poller + ZCT churn | **None** |
+| Persistent chronos state on caller thread | grows across calls | none |
+| Wait mechanism | Park on eventfd/kqueue (0 CPU) | Busy-poll: check slot, `sleep(1ms)`, repeat |
+| Wake latency (typical sub-ms request) | ~50–200µs (signal + scheduler) | 0 if Ready on first check, else ≤1ms |
+| Memory churn | refc allocations → GC pressure | Zero |
+
+For typical FFI workloads (sub-millisecond response time, called from
+a thread that's going to block anyway) the busy-poll never enters
+`sleep(1)` — it sees `Ready` on the first or second check. Net effect:
+**slightly faster per call** (no Future setup) and **strictly less
+memory churn** (no per-call refc allocations). The trade-off is the
+1ms sleep granularity on slow requests, which is irrelevant in any
+FFI library where the caller is going to block anyway.
+
+The teardown-path changes (bugs 2 & 3) have no hot-path effect. They
+trade an unreliable async free against a synchronous `sleep(50)`
+grace window per provider thread — same wall-clock latency, less
+memory churn during shutdown, no shared-memory leaks.
+
+### 9.4 The four-bug chain as a learning
+
+The pattern: **refc + shared-lib + chronos + heavy threading during
+teardown is fragile**. Each of the four bugs in §9.1 was exposed only
+when ASAN + `-d:noSignalHandler` started reporting heap faults that
+Nim's default signal handler had been silently swallowing. Each fix is
+correct on its own and reduces allocation pressure or fixes UAF
+ordering. None invalidates the channel-dispatch refactor — they
+patch issues in code that was already fragile before, just hidden.
+
+Maintenance guidance going forward:
+
+1. **Don't drive chronos on a foreign caller's thread.** If you ever
+   add a new FFI entry point that needs cross-thread RPC, use
+   `blockingRequest`, not `waitFor request(...)`.
+2. **Don't `asyncSpawn` during teardown.** Anything that needs a
+   grace window before freeing shared memory should enqueue into
+   `gPendingRingFrees` (or an equivalent pattern) and drain
+   synchronously at thread exit.
+3. **Drain in-flight invocation futures before dropping their
+   targets.** This is a general refc rule but particularly relevant
+   for event-listener tables.
+4. **Run with ASAN + `-d:noSignalHandler` periodically** even when
+   tests look green. Nim's signal handler hides a lot of latent
+   damage on shared-library shutdown paths.
+

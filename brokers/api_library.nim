@@ -1110,9 +1110,6 @@ proc registerBrokerLibraryNativeImpl(
         if entryPtr.isNil:
           return
 
-        when defined(brokerDispatchTrace):
-          info "shutdown:beforeShutdownRequest",
-            library = `libNameLit`, ctx = ctx
         # Use blockingRequest, NOT `waitFor shutdownRequest.request(...)`:
         # the FFI caller's thread does not own a chronos event loop, so
         # driving one here spawns a persistent brokerDispatchLoop coroutine
@@ -1122,9 +1119,6 @@ proc registerBrokerLibraryNativeImpl(
         # synchronously with no chronos involvement on this thread, so the
         # FFI caller stays allocation-light and refc-safe.
         let shutdownRes = blockingRequest(`shutdownReqIdent`, brokerCtx)
-        when defined(brokerDispatchTrace):
-          info "shutdown:afterShutdownRequest",
-            library = `libNameLit`, ctx = ctx, ok = shutdownRes.isOk()
         if shutdownRes.isErr():
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()

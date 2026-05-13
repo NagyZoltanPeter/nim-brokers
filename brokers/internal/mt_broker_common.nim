@@ -11,15 +11,6 @@ import std/os # `sleep` for synchronous grace window in drainPendingRingFrees
 import ./mt_queue
 export chronos, threadsync, atomics
 
-when defined(brokerDispatchTrace):
-  import chronicles
-  import std/typedthreads
-
-template dispatchTrace*(msg: string, args: varargs[untyped]) =
-  when defined(brokerDispatchTrace):
-    {.cast(gcsafe).}:
-      info msg, tid = getThreadId(), args
-
 # ---------------------------------------------------------------------------
 # Thread identity
 # ---------------------------------------------------------------------------
@@ -104,12 +95,10 @@ proc registerBrokerPoller*(fn: ThreadDispatchPollFn) =
   ## Register a poll function with this thread's dispatcher.
   ## Must be called from the owning thread.
   gBrokerThreadPollers.add(fn)
-  dispatchTrace "registerBrokerPoller", pollersLen = gBrokerThreadPollers.len
 
 proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
   ## Single dispatch loop per chronos thread.  Drains all registered broker
   ## channel pollers whenever the shared signal fires.
-  dispatchTrace "brokerDispatchLoop:start"
   while true:
     # Drain: keep polling until every channel is empty.
     var anyWork = true
@@ -122,8 +111,6 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
         of 2:
           # Poller is done — remove it.
           gBrokerThreadPollers.del(i)
-          dispatchTrace "brokerDispatchLoop:pollerDone",
-            pollersLen = gBrokerThreadPollers.len
         of 1:
           anyWork = true
           inc i
@@ -132,16 +119,13 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
     # FFI-caller teardown hook: an external caller (stopBrokerDispatchHere)
     # asked the loop to exit. Drain pass is complete, exit cleanly.
     if gBrokerDispatchStopRequested:
-      dispatchTrace "brokerDispatchLoop:stopRequested"
       break
     # Wait for next signal.
     let waitRes = catch:
       await signal.wait()
     if waitRes.isErr():
-      dispatchTrace "brokerDispatchLoop:waitErr", err = waitRes.error.msg
       break
     if gBrokerDispatchStopRequested:
-      dispatchTrace "brokerDispatchLoop:stopRequestedAfterWait"
       break
   # Dispatcher is exiting (e.g. thread shutting down).  Close the per-thread
   # signal so its OS handle (eventfd on Linux, pipe pair on macOS) is reclaimed
@@ -155,8 +139,6 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
     let closeRes = sig.close()
     if closeRes.isErr():
       discard
-  dispatchTrace "brokerDispatchLoop:exit",
-    pollersLen = gBrokerThreadPollers.len, sigWasNil = sig.isNil
 
 # ---------------------------------------------------------------------------
 # Pending-ring-free registry — synchronous deferred cleanup at thread exit
@@ -193,16 +175,13 @@ type PendingRingFree* = object
 var gPendingRingFrees* {.threadvar.}: seq[PendingRingFree]
 
 proc enqueuePendingRingFree*(
-    ring: ptr VyukovMpscRing[uint32],
-    slab: ptr PayloadSlab,
-    pool: ptr ResponseSlotPool,
+    ring: ptr VyukovMpscRing[uint32], slab: ptr PayloadSlab, pool: ptr ResponseSlotPool
 ) {.gcsafe.} =
   ## Called from a broker poll fn on the provider thread when its ring has
   ## been closed by clearProvider(). The (ring, slab, pool) triple will be
   ## freed by `drainPendingRingFrees()` at thread shutdown.
   {.cast(gcsafe).}:
     gPendingRingFrees.add(PendingRingFree(ring: ring, slab: slab, pool: pool))
-    dispatchTrace "enqueuePendingRingFree", pendingLen = gPendingRingFrees.len
 
 proc drainPendingRingFrees*() {.gcsafe.} =
   ## Drain the per-thread pending-ring-free registry synchronously.
@@ -212,8 +191,6 @@ proc drainPendingRingFrees*() {.gcsafe.} =
   ## completed (i.e. after `drainAsyncOps` in the processing-thread proc).
   if gPendingRingFrees.len == 0:
     return
-  dispatchTrace "drainPendingRingFrees:start",
-    pendingLen = gPendingRingFrees.len
   # Single grace window: 50ms is enough for any sender that snapshotted
   # pool/slab/ring pointers before clearProvider closed the ring to either
   # complete its enqueue (which then fails on isClosed()) or abort. Without
@@ -229,19 +206,13 @@ proc drainPendingRingFrees*() {.gcsafe.} =
       deinitResponseSlotPool(entry.pool[])
       deallocShared(entry.pool)
   gPendingRingFrees.setLen(0)
-  dispatchTrace "drainPendingRingFrees:done"
 
 proc ensureBrokerDispatchStarted*() =
   ## Start the per-thread dispatch loop if not already running.
   ## Must be called from within a chronos async context.
   if not gBrokerDispatchStarted:
     gBrokerDispatchStarted = true
-    dispatchTrace "ensureBrokerDispatchStarted:spawning",
-      pollersLen = gBrokerThreadPollers.len
     asyncSpawn brokerDispatchLoop(getOrInitBrokerSignal())
-  else:
-    dispatchTrace "ensureBrokerDispatchStarted:already",
-      pollersLen = gBrokerThreadPollers.len
 
 proc stopBrokerDispatchHere*() =
   ## Tear down the per-thread brokerDispatchLoop on the calling thread.
@@ -260,8 +231,6 @@ proc stopBrokerDispatchHere*() =
   ## `waitFor` until the loop's coroutine actually exits.
   if not gBrokerDispatchStarted:
     return
-  dispatchTrace "stopBrokerDispatchHere:requesting",
-    pollersLen = gBrokerThreadPollers.len
   gBrokerDispatchStopRequested = true
   let sig = gBrokerThreadSignal
   if not sig.isNil:
@@ -277,5 +246,3 @@ proc stopBrokerDispatchHere*() =
 
   waitFor awaitLoopExit()
   gBrokerDispatchStopRequested = false
-  dispatchTrace "stopBrokerDispatchHere:done",
-    stillStarted = gBrokerDispatchStarted
