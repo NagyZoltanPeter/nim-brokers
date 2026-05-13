@@ -762,13 +762,17 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         ): `cResultIdent` {.exportc: `funcNameLit`, cdecl, dynlib.} =
           ensureForeignThreadGc()
           let brokerCtx = BrokerContext(ctx)
-          let res = waitFor `typeIdent`.request(brokerCtx)
-          # FFI-caller teardown: see brokers/internal/mt_broker_common.nim
-          # stopBrokerDispatchHere docstring. The waitFor above transparently
-          # started a persistent brokerDispatchLoop on the foreign caller's
-          # thread; without teardown its chronos pending-state accumulates
-          # across calls and eventually corrupts the refc ZCT (PR #13).
-          stopBrokerDispatchHere()
+          # Use the blocking (busy-poll) variant on the foreign caller's
+          # thread, NOT `waitFor request(...)`. Driving chronos on a thread
+          # that doesn't own an event loop spawns a persistent
+          # brokerDispatchLoop coroutine + suspended `signal.wait()` future
+          # whose state accumulates across FFI calls; under refc that
+          # eventually corrupts the thread's GC heap (PR #13, macos-amd64
+          # ASAN). The arg-bearing FFI request entries already use
+          # blockingRequest for the same reason. Keeps subscribe / on / off
+          # / shutdown / request all on the same allocation-free
+          # synchronous response-slot polling path on the caller's thread.
+          let res = blockingRequest(`typeIdent`, brokerCtx)
           if res.isOk():
             return `encodeProcIdent`(res.get())
           else:

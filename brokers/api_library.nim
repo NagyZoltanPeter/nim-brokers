@@ -1092,7 +1092,15 @@ proc registerBrokerLibraryNativeImpl(
         when defined(brokerDispatchTrace):
           info "shutdown:beforeShutdownRequest",
             library = `libNameLit`, ctx = ctx
-        let shutdownRes = waitFor `shutdownReqIdent`.request(brokerCtx)
+        # Use blockingRequest, NOT `waitFor shutdownRequest.request(...)`:
+        # the FFI caller's thread does not own a chronos event loop, so
+        # driving one here spawns a persistent brokerDispatchLoop coroutine
+        # whose suspended `signal.wait()` future state accumulates across
+        # FFI calls and corrupts the refc heap under --mm:refc (PR #13,
+        # macos-amd64 ASAN). blockingRequest busy-polls the response slot
+        # synchronously with no chronos involvement on this thread, so the
+        # FFI caller stays allocation-light and refc-safe.
+        let shutdownRes = blockingRequest(`shutdownReqIdent`, brokerCtx)
         when defined(brokerDispatchTrace):
           info "shutdown:afterShutdownRequest",
             library = `libNameLit`, ctx = ctx, ok = shutdownRes.isOk()
@@ -1100,30 +1108,12 @@ proc registerBrokerLibraryNativeImpl(
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
 
-        # FFI-caller teardown: stop the per-thread brokerDispatchLoop that the
-        # waitFor above started (via ensureBrokerDispatchStarted in
-        # sendAndAwait). On a foreign caller's thread the loop has no joiner
-        # and would otherwise persist across calls, accumulating chronos
-        # pending-state and refc ZCT entries until collectZCT walks a freed
-        # cell (PR #13: macos-amd64 refc crash at ~51 ctx).
+        # Defense-in-depth: if any earlier code path on this thread did
+        # start a brokerDispatchLoop (e.g. user code calling request()
+        # async-style), tear it down before threads are joined so its
+        # state can't race with the gch on this thread. No-op when the
+        # loop was never started.
         stopBrokerDispatchHere()
-
-        # Drain residual callSoon callbacks left pending on the calling thread.
-        # Under --mm:refc, each waitFor leaves callbacks after the poll sentinel;
-        # without draining, the ZCT grows across context lifecycles and eventually
-        # triggers collectZCT on a freed cell (cell.typ == nil → SIGSEGV).
-        block:
-          proc drainCallerCallbacks() {.async: (raises: []).} =
-            let sleepRes = catch:
-              await sleepAsync(milliseconds(1))
-            if sleepRes.isErr():
-              discard
-
-          when defined(brokerDispatchTrace):
-            info "shutdown:beforeDrain", library = `libNameLit`, ctx = ctx
-          waitFor drainCallerCallbacks()
-          when defined(brokerDispatchTrace):
-            info "shutdown:afterDrain", library = `libNameLit`, ctx = ctx
 
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)
