@@ -737,6 +737,15 @@ proc registerBrokerLibraryNativeImpl(
         `cleanupAllRequestsIdent`(arg.ctx)
         waitFor drainAsyncOps()
 
+        # Synchronously free the (ring, slab, pool) triples that each
+        # cleared broker's poll fn queued into the thread-local pending-
+        # free registry (see mt_broker_common.drainPendingRingFrees and
+        # mt_request_broker pollFn comment). Doing this here — after
+        # drainAsyncOps, on the owning provider thread, before the thread
+        # exits — replaces the previous asyncSpawn'd deferredFreeReqRing
+        # that SEGV'd in rawAlloc during teardown (PR #13).
+        drainPendingRingFrees()
+
   )
 
   # Delivery thread proc

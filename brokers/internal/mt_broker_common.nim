@@ -7,6 +7,8 @@
 
 import chronos, chronos/threadsync
 import std/atomics
+import std/os # `sleep` for synchronous grace window in drainPendingRingFrees
+import ./mt_queue
 export chronos, threadsync, atomics
 
 when defined(brokerDispatchTrace):
@@ -155,6 +157,79 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
       discard
   dispatchTrace "brokerDispatchLoop:exit",
     pollersLen = gBrokerThreadPollers.len, sigWasNil = sig.isNil
+
+# ---------------------------------------------------------------------------
+# Pending-ring-free registry — synchronous deferred cleanup at thread exit
+# ---------------------------------------------------------------------------
+# When clearProvider(ctx) closes a request broker's ring on the provider
+# thread, the corresponding poll fn (registered via brokerDispatchLoop's
+# pollers seq) detects `ring.isClosed()` on its next iteration and needs to
+# free the shared-memory (ring, slab, pool) triple — but only after a grace
+# window long enough for any cross-thread sender that snapshotted those
+# pointers under the previous globalLock state to finish its enqueue.
+#
+# Previous design: `asyncSpawn deferredFreeReqRing(...)` — start an async
+# proc that does `await sleepAsync(50ms)` then frees. Two problems:
+#
+#   1. Allocating the sleepAsync Future inside an asyncSpawn started during
+#      `cleanupAllRequestsIdent` runs the refc allocator at a moment where
+#      the thread's gch state is fragile from teardown churn. Observed as a
+#      hard SEGV in rawAlloc on Linux refc + ASAN (PR #13).
+#
+#   2. drainAsyncOps only polls chronos for 1ms — the 50ms sleepAsync would
+#      never fire before the processing thread exits, so the buffers either
+#      leak or are freed by an orphaned coroutine racing thread teardown.
+#
+# Current design: the poll fn instead records the triple in a thread-local
+# seq; the processing-thread proc drains the seq AFTER drainAsyncOps via a
+# single synchronous `sleep(50)` followed by direct free calls. No chronos
+# involvement in the cleanup path; the grace window applies once for the
+# whole ctx instead of once per broker.
+type PendingRingFree* = object
+  ring*: ptr VyukovMpscRing[uint32]
+  slab*: ptr PayloadSlab
+  pool*: ptr ResponseSlotPool
+
+var gPendingRingFrees* {.threadvar.}: seq[PendingRingFree]
+
+proc enqueuePendingRingFree*(
+    ring: ptr VyukovMpscRing[uint32],
+    slab: ptr PayloadSlab,
+    pool: ptr ResponseSlotPool,
+) {.gcsafe.} =
+  ## Called from a broker poll fn on the provider thread when its ring has
+  ## been closed by clearProvider(). The (ring, slab, pool) triple will be
+  ## freed by `drainPendingRingFrees()` at thread shutdown.
+  {.cast(gcsafe).}:
+    gPendingRingFrees.add(PendingRingFree(ring: ring, slab: slab, pool: pool))
+    dispatchTrace "enqueuePendingRingFree", pendingLen = gPendingRingFrees.len
+
+proc drainPendingRingFrees*() {.gcsafe.} =
+  ## Drain the per-thread pending-ring-free registry synchronously.
+  ## Sleeps once for a 50ms grace window covering all queued frees, then
+  ## releases each (ring, slab, pool) triple. Must be called from the owning
+  ## thread AFTER any chronos work that may still touch the buffers has
+  ## completed (i.e. after `drainAsyncOps` in the processing-thread proc).
+  if gPendingRingFrees.len == 0:
+    return
+  dispatchTrace "drainPendingRingFrees:start",
+    pendingLen = gPendingRingFrees.len
+  # Single grace window: 50ms is enough for any sender that snapshotted
+  # pool/slab/ring pointers before clearProvider closed the ring to either
+  # complete its enqueue (which then fails on isClosed()) or abort. Without
+  # this, a stale sender deref'ing the about-to-be-freed slab/pool crashes.
+  sleep(50)
+  for entry in gPendingRingFrees:
+    if not entry.ring.isNil:
+      freeVyukovMpscRing(entry.ring)
+    if not entry.slab.isNil:
+      deinitPayloadSlab(entry.slab[])
+      deallocShared(entry.slab)
+    if not entry.pool.isNil:
+      deinitResponseSlotPool(entry.pool[])
+      deallocShared(entry.pool)
+  gPendingRingFrees.setLen(0)
+  dispatchTrace "drainPendingRingFrees:done"
 
 proc ensureBrokerDispatchStarted*() =
   ## Start the per-thread dispatch loop if not already running.

@@ -183,7 +183,6 @@ proc generateMtRequestBroker*(
   let sendReplyIdent = ident("sendReply" & typeDisplayName)
   let handleMsgIdent = ident("handleMsg" & typeDisplayName)
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
-  let deferredFreeReqRingIdent = ident("deferredFreeReqRing" & typeDisplayName)
   let shardHintIdent = ident("shardHint" & typeDisplayName)
   let marshalIdent = ident(typeDisplayName & "MtMarshal")
   let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
@@ -621,29 +620,10 @@ proc generateMtRequestBroker*(
 
   # ── Poll fn maker ────────────────────────────────────────────────────
   # Dequeues cell idx from ring, unmarshals ReqMsg, dispatches.  When the
-  # ring is closed and empty, frees its own resources and returns 2.
+  # ring is closed and empty, registers its (ring, slab, pool) triple for
+  # synchronous deferred free at thread exit (see drainPendingRingFrees).
   result.add(
     quote do:
-      proc `deferredFreeReqRingIdent`(
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-      ) {.async: (raises: []).} =
-        # Brief grace window so any cross-thread sender that captured
-        # these pointers under the previous lock state can complete its
-        # claim/marshal/push without seeing freed memory.
-        let sleepRes = catch:
-          await sleepAsync(milliseconds(50))
-        if sleepRes.isErr():
-          discard
-        freeVyukovMpscRing(ring)
-        if not slab.isNil:
-          deinitPayloadSlab(slab[])
-          deallocShared(slab)
-        if not pool.isNil:
-          deinitResponseSlotPool(pool[])
-          deallocShared(pool)
-
       proc `pollFnMakerIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
@@ -659,7 +639,12 @@ proc generateMtRequestBroker*(
             var cellIdx: uint32
             if not capturedRing.tryDequeue(cellIdx):
               if capturedRing.isClosed():
-                asyncSpawn `deferredFreeReqRingIdent`(
+                # Hand off to the thread-local pending-free registry; the
+                # processing-thread proc drains it synchronously after
+                # drainAsyncOps. Doing the free asynchronously here ran the
+                # refc allocator during shutdown teardown and SEGV'd on
+                # Linux + macOS ASAN (PR #13, deferredFreeReqRing path).
+                enqueuePendingRingFree(
                   capturedRing, capturedSlab, capturedPool
                 )
                 return 2
