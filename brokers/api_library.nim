@@ -780,16 +780,27 @@ proc registerBrokerLibraryNativeImpl(
 
           waitFor awaitShutdown(addr arg.shutdownFlag)
 
-          # Cleanup: drop all registered event listeners
-          `cleanupAllIdent`(arg.ctx)
-          # Remove the RegisterEventListenerResult provider before entering the
-          # processLoop shutdown so that any in-flight on<Event>() requests processed
-          # during the shutdown waitFor return an error instead of calling listen()
-          # on a partially-torn-down bucket registry.
+          # Stop accepting new on<Event>/off<Event> requests by clearing the
+          # RegisterEventListenerResult provider. listen()/dropListener() calls
+          # in flight at this moment land on a partially-torn-down bucket
+          # registry; their callers see an err Result rather than crashing.
           RegisterEventListenerResult.clearProvider(arg.ctx)
-          # Terminate all processLoop coroutines on this thread and await them before
-          # the thread exits to prevent use-after-free on thread-local allocators.
+          # Terminate all per-event processLoop coroutines AND drain in-flight
+          # listener-invocation futures BEFORE dropping listeners. Order matters
+          # under --mm:refc: if cleanupAllIdent drops listeners first, the
+          # listener-closure refcounts can hit zero while their invocation
+          # futures are still in chronos's pending callback queue; the next
+          # chronos poll then continues a future whose continuation points
+          # into freed code, jumping to an unmapped address (PR #13, Linux
+          # ASAN: SEGV with pc==address inside internalContinue).
           waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
+          # All in-flight listener futures have completed; now safe to drop
+          # the listener table (their closure refcounts can fall to zero
+          # without anything else referencing them).
+          `cleanupAllIdent`(arg.ctx)
+          # Free the RegisterEventListenerResult ring/slab/pool that
+          # clearProvider above queued. See mt_broker_common drainPendingRingFrees.
+          drainPendingRingFrees()
 
     )
   elif hasEventHandlers:
@@ -820,6 +831,7 @@ proc registerBrokerLibraryNativeImpl(
 
           RegisterEventListenerResult.clearProvider(arg.ctx)
           waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
+          drainPendingRingFrees()
 
     )
   else:
