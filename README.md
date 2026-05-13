@@ -16,6 +16,10 @@ What is nim-brokers?
    - Support for `native` C ABI and `CBOR`-encoded ABI strategies.
      - Interface parity between strategies is guarantied above C interface (C++, Python, Rust and Go wrappers' public surfaces are the same regardless of the underlying ABI strategy). 
 
+> **Version:** current release is **2.0.0** (see `brokers.nimble`). 
+> :exclamation: Current recommended version to use is **2.0.0**.
+> Full per-release history and feature notes are in [CHANGELOG.md](CHANGELOG.md).
+
 ## Table of Contents
 
 - [nim-brokers](#nim-brokers)
@@ -32,6 +36,7 @@ What is nim-brokers?
   - [Multi-thread support](#multi-thread-support)
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
     - [EventBroker (multi-thread)](#eventbroker-multi-thread)
+    - [Tuning multi-thread brokers](#tuning-multi-thread-brokers)
   - [Broker FFI API](#broker-ffi-api)
     - [FFI\_API detailed documentation](#ffi_api-detailed-documentation)
     - [Type-support matrix](#type-support-matrix)
@@ -242,11 +247,11 @@ A global context lock is available via `lockGlobalBrokerContext` for serialized 
 
 ## Multi-thread support
 
-With `(mt)` variants, nim-brokers supports cross-thread communication with the same type-safe, decoupled interface as the single-thread versions. The multi-thread implementation uses a typed channel and shared signal strategy for cross-thread coordination, while same-thread calls bypass channels entirely for near-zero overhead.
+With `(mt)` variants, nim-brokers supports cross-thread communication with the same type-safe, decoupled interface as the single-thread versions. Since v2.0.0 the multi-thread implementation dispatches cross-thread work over a **lock-free Vyukov MPSC ring + a pre-allocated payload slab** (plus a response-slot pool for `RequestBroker(mt)`), woken by one shared `ThreadSignalPtr` per thread. There is **no `Channel[T]` on the hot path** — payloads are encoded into a refcounted slab cell, the ring carries the cell index, and the listener decodes in place. Same-thread calls bypass the ring entirely for near-zero overhead. See [doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md](doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md) for the design rationale and benchmark deltas.
 
 ### RequestBroker (multi-thread)
 
-Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via a zero-fd channel and a shared per-thread signal.
+Cross-thread request/response. The provider runs on the thread that called `setProvider`; requests from **any** thread in the process are routed to it via the ring+slab+pool dispatch and a shared per-thread signal. Sizing (ring depth, slab capacity, response-slot count, max payload bytes) is determined at compile time — type-driven defaults are applied unless overridden via kwargs/presets; see "Tuning multi-thread brokers" below.
 ```nim
 import std/atomics, std/threads
 import chronos
@@ -304,16 +309,17 @@ echo Weather.requestTimeout()                   # 2 seconds
 
 **Performance considerations:**
 
-- **Same-thread path** adds only a mutex + threadvar scan (~25 µs debug, sub-microsecond release).
-- **Cross-thread path** allocates a one-shot response channel per request (~187 µs debug / ~2-5 µs release with ORC). `--mm:refc` is ~2-3x slower due to deep-copy semantics on `Channel[T].send`.
+- **Same-thread path** is a direct provider call through threadvar state — zero ring/slab traffic.
+- **Cross-thread path** reserves a response slot from the pool, encodes the request into a slab cell, enqueues the cell index on the ring, and signals the provider. No per-call shared-heap allocation — the slab and pool are pre-sized at init. Refc and ORC are now close in performance (the old `Channel[T]` deep-copy gap is gone).
 - The provider serves requests sequentially on its event loop; throughput is bounded by handler execution time.
-- For high-throughput scenarios (>10K req/s), consider batching at the application level or using `--mm:orc`.
+- A **bounded ring/pool can return `err(...)` on overflow** (visible failure mode); size them via kwargs/presets if the workload is bursty. See [doc/MT_BROKER_CONFIG.md](doc/MT_BROKER_CONFIG.md).
+- See the perf table in [doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md](doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md) — up to **7.4× throughput** / **270× lower latency** vs. the v1.x `Channel[T]` design under refc.
 
 See [Multi-Thread RequestBroker](doc/MultiThread_RequestBroker.md) for architecture diagrams, call sequences, and memory layout details. Run `nimble perftest` for benchmarks.
 
 ### EventBroker (multi-thread)
 
-Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** thread; events emitted from **any** thread are broadcast to all registered listeners. Same-thread delivery uses `asyncSpawn` (no channel); cross-thread delivery uses a `Channel[T]` per listener-thread plus a shared per-thread signal — zero OS file descriptors per broker type.
+Cross-thread pub/sub (fire-and-forget). Listeners can be registered on **any** thread; events emitted from **any** thread are broadcast to all registered listeners. Same-thread delivery uses `asyncSpawn` (no ring traffic). Cross-thread delivery encodes the event **once** into a slab cell, refcounts it to the listener count, and enqueues the cell index on each listener-thread's ring; the listener thread is woken by its shared per-thread `ThreadSignalPtr`. Zero per-emit shared-heap allocation, zero OS fds per broker type.
 
 ```nim
 import brokers/event_broker
@@ -358,9 +364,10 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 **Performance considerations:**
 
-- **Same-thread path** bypasses channels entirely — events dispatch directly via `asyncSpawn`.
-- **Cross-thread path** sends to each listener thread's `Channel[T]` then wakes the shared signal (~20-160 µs debug, sub-millisecond release).
-- Broadcast fan-out: one `Channel[T]` per (BrokerContext, listener-thread) pair; all broker types on a thread share one `ThreadSignalPtr`.
+- **Same-thread path** bypasses the ring entirely — events dispatch directly via `asyncSpawn`.
+- **Cross-thread path**: one slab encode + one refcount initialise to `N_listeners`, then one ring enqueue per listener-thread, then a single `fireBrokerSignal` per listener-thread. Under v2.0.0 this yields **~788 K evt/s** (refc) / **~511 K evt/s** (orc) on the 5×500×512 B benchmark — see [retrospective](doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md).
+- Fan-out: **one slab cell, atomically refcounted** — no per-listener payload copy. One ring per (BrokerContext, listener-thread) pair; all broker types on a thread share one `ThreadSignalPtr`.
+- **Bounded ring** can return `err(...)` on overflow (new visible failure mode vs. unbounded `Channel[T]`). Size via kwargs/presets — see [doc/MT_BROKER_CONFIG.md](doc/MT_BROKER_CONFIG.md).
 - For high-throughput scenarios, prefer `--mm:orc` and `-d:release`.
 
 See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
@@ -632,101 +639,105 @@ Total: ~80 bytes for 1 context, 1 provider signature.
 
 **Scenario:** One `BrokerContext` (default). Thread A emits and has one listener. Thread B has two listeners. Thread C has one listener.
 
+> Sizes below reflect the v2.0.0 ring+slab design. `queueDepth` (ring slots),
+> `slabCapacity` (cells), and `maxPayloadBytes` (cell size) are resolved at
+> compile time from kwargs / preset / type-driven defaults — the values shown
+> are illustrative. The exact resolved numbers are printed as a compile-time
+> `hint` at every `EventBroker(mt)` call site.
+
 ```
-Shared memory (process lifetime):
-  Global bucket array    4 × sizeof(Bucket)          ~200 bytes (initial capacity 4)
-  Lock (OS mutex)                                     ~40-64 bytes
-  Init + count + cap                                  ~25 bytes
-
-  Bucket[0]: (Default, threadA, chanA, signalA, threadGen, active, hasListeners)
-  Bucket[1]: (Default, threadB, chanB, signalB, threadGen, active, hasListeners)
-  Bucket[2]: (Default, threadC, chanC, signalC, threadGen, active, hasListeners)
-
-  Channel[T] × 3         ~80 bytes each               ~240 bytes
-    (one per listener-thread; mutex + condvar only — zero OS fds)
+Shared memory (process lifetime), per (broker, ctx, listener-thread):
+  VyukovMpscRing[uint32]   ring header + queueDepth * uint32 slots
+                            (lock-free, pure shared memory, no OS fds)
+  PayloadSlab              slabCapacity * (maxPayloadBytes + cell header)
+                            (pre-allocated bytes — no per-emit alloc)
+  Bucket entry             (Default, listener-threadId, threadGen, active,
+                            ring*, slab*, hasListeners)
+  Global bucket array      grows as needed; protected by an init/teardown Lock
 
 Per-thread (one-time, shared by ALL broker types on that thread):
-  ThreadSignalPtr × 3    ~2 OS fds each (macOS: socketpair)
-  brokerDispatchLoop: one Future per thread            ~128 bytes × 3
+  ThreadSignalPtr          ~2 OS fds each (macOS: socketpair) — shared by
+                            every (mt) broker type on this thread
+  brokerDispatchLoop       one async Future per thread that drains all
+                            registered poll fns on the shared signal
 
-Threadvar (per thread, GC-managed):
-  Thread A: tvCtxs[Default], tvHandlers[{1: cb1}], tvNextIds[2]
-            ~16 + 48 + 8 = ~72 bytes
-  Thread B: tvCtxs[Default], tvHandlers[{1: cb2, 2: cb3}], tvNextIds[3]
-            ~16 + 96 + 8 = ~120 bytes
-  Thread C: tvCtxs[Default], tvHandlers[{1: cb4}], tvNextIds[2]
-            ~16 + 48 + 8 = ~72 bytes
+Threadvar (per listener thread, GC-managed):
+  tvCtxs[Default], tvHandlers[{id → closure}], tvNextIds[next]
+   — only the closure table is GC-managed; payloads never enter the GC heap
 
-Total: ~1.2 KB for 3 listener-threads, 4 listeners, 1 context.
+Total: dominated by `slabCapacity * maxPayloadBytes` per listener-thread bucket
+(fixed at compile time), plus three `ThreadSignalPtr`s for thread A/B/C.
 ```
 
 **Key points:**
-- Channels are allocated **per (BrokerContext, listener-thread)** pair — not per listener. Thread B's two listeners share one channel.
-- Each `Channel[T]` uses only mutex + condvar — **zero OS file descriptors**.
+- Ring + slab are allocated **per (BrokerContext, listener-thread)** pair — not per listener. Thread B's two listeners share one ring and one slab; the payload is encoded once and refcounted to `N_listeners`.
+- Ring storage is pure shared memory — no `Channel[T]`, **no OS fds**.
 - The `ThreadSignalPtr` (which holds the OS fd) is **shared** across all broker types on a thread. Adding more broker types costs zero additional fds.
-- `brokerDispatchLoop`: a single shared async coroutine per thread wakes on the shared signal and drains all registered poll fns.
+- `brokerDispatchLoop`: a single shared async coroutine per thread wakes on the shared signal and drains all registered poll fns via the ring's non-blocking `tryDeque`.
 - Each bucket includes a `threadGen: uint64` field to disambiguate reused threadvar addresses across thread lifetimes, and an `active: bool` flag.
-- Emitter threads allocate **zero** persistent memory — `emit()` only acquires the lock, snapshots targets, sends to each `Channel[T]`, and fires the target thread's shared signal.
-- Buckets persist across `dropListener`/`listen` cycles (channel reuse).
+- Emitter threads allocate **zero shared-heap memory per emit** — `emit()` acquires the lock, snapshots target buckets, encodes the payload **once** into a slab cell, sets the refcount, enqueues the cell index on each listener's ring, and fires each target thread's shared signal.
+- **Bounded ring:** if a listener thread's ring is full, the emitter sees overflow on enqueue (visible failure mode — explicit, not silently buffered). Size via `queueDepth` / preset / kwarg.
+- Buckets and slabs persist across `dropListener`/`listen` cycles (capacity is reused).
 
 ### RequestBroker(mt) — example
 
 **Scenario:** One `BrokerContext` (default). Thread A provides and also requests (same-thread). Threads B and C request cross-thread.
 
+> Sizes below reflect the v2.0.0 ring+slab+pool design. `queueDepth`,
+> `slabCapacity`, `maxPayloadBytes`, `responseSlots`, and `maxResponseBytes`
+> are resolved at compile time; the values are printed as a compile-time
+> `hint` at the `RequestBroker(mt)` call site.
+
 ```
-Shared memory (process lifetime):
-  Global bucket array    4 × sizeof(Bucket)           ~160 bytes (initial capacity 4)
-  Lock (OS mutex)                                      ~40-64 bytes
-  Init + count + cap                                   ~25 bytes
-  Timeout var (Duration = int64)                       ~8 bytes
-
-  Bucket[0]: (Default, threadA, requestChan, providerSignal, threadGen)
-    (RequestBroker has ONE bucket per context,
-     unlike EventBroker which has one per listener-thread)
-
-  Channel[T] × 1 (request channel)    ~80 bytes (mutex + condvar, zero OS fds)
-    Shared by all requester threads
+Shared memory (process lifetime), per (broker, ctx):
+  VyukovMpscRing[uint32]    ring header + queueDepth slots (request side)
+  PayloadSlab               slabCapacity * (maxPayloadBytes + header)
+  ResponseSlotPool          responseSlots * (maxResponseBytes + slot header)
+                             (reserved per in-flight request, freed on decode)
+  Bucket entry              (Default, providerThreadId, threadGen, ring*,
+                             slab*, pool*)
+  Global bucket array       grows as needed; protected by an init/teardown Lock
+  Timeout var (Duration)    ~8 bytes — applies only to cross-thread requests
 
 Per-thread (one-time, shared by ALL broker types on that thread):
-  ThreadSignalPtr: providerSignal (thread A) + requesterSignal (each requester thread)
-    Each = ~2 OS fds (macOS: socketpair)
+  ThreadSignalPtr            ~2 OS fds (macOS: socketpair) — shared across
+                             every (mt) broker type on the thread
 
 Threadvar (provider thread A only):
   tvCtxs[Default], tvHandlers[handler]
-  ~16 + 8 = ~24 bytes
 
-Per-request (cross-thread only, transient):
-  Response channel        ~80 bytes Channel[T] (createShared, no OS fds)
-  One-shot poller registered on requester thread's dispatcher
-  Deallocated on success; intentionally leaked on timeout (no OS resource leak)
-
-Total baseline: ~400 bytes for 1 provider, 1 context.
+Per-request (cross-thread only, transient — no shared-heap alloc per call):
+  One slot in ResponseSlotPool reserved at request issue, returned on decode.
+  On timeout: the slot is sealed and freed deterministically on the requester
+  side; the provider's eventual write into a sealed slot is a no-op (safe).
 ```
 
 **Per-request cost:**
 
-| Path | Allocation | Lifetime |
-|------|-----------|----------|
-| Same-thread (Thread A → A) | Zero | — |
-| Cross-thread (Thread B → A) | ~80 bytes response channel | Freed after response; leaked on timeout (safe — no OS fds) |
+| Path | Allocation per call | Notes |
+|------|---------------------|-------|
+| Same-thread (Thread A → A) | Zero | direct provider call through threadvar |
+| Cross-thread (Thread B → A) | Zero (pool + slab pre-sized at init) | request encoded into a slab cell, reply written into a reserved pool slot |
 
 **Key points:**
-- Same-thread requests have **zero channel overhead** — the provider handler is called directly from threadvar.
-- Cross-thread requests allocate one `Channel[T]` for the response per call (~80 bytes, zero OS fds). Deallocated on success. On timeout, leaked safely (provider's eventual `send` writes into an unread channel — no crash, no OS resource leak).
-- The request channel is shared — all requester threads `send` into the same `Channel[T]`. A shared `brokerDispatchLoop` on the provider thread drains it via `tryRecv`.
-- Adding a second `BrokerContext` on the same provider thread costs one additional bucket + channel (~160 bytes) plus one threadvar entry (~24 bytes).
+- Same-thread requests have **zero ring/slab traffic** — the provider handler is called directly from threadvar.
+- Cross-thread requests do **not** allocate per call: a slab cell holds the request payload, a response-pool slot holds the reply. Both come from pre-sized pools. On timeout the pool slot is reclaimed deterministically (no leak, no OS fd).
+- The request ring is shared — all requester threads enqueue into the same MPSC ring. A shared `brokerDispatchLoop` on the provider thread drains it via the ring's `tryDeque`.
+- Adding a second `BrokerContext` on the same provider thread costs one additional bucket + ring + slab + pool — exact size driven by the compile-time config.
+- **Bounded resources can return `err(...)` on overflow**: ring full → enqueue failure; pool exhausted → no free response slot. Tune via `queueDepth` / `responseSlots` / preset.
 
 ### Comparison
 
 | | EventBroker | RequestBroker | EventBroker(mt) | RequestBroker(mt) |
 |---|---|---|---|---|
 | Storage | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars |
-| Shared memory | None | None | Bucket array + Lock | Bucket array + Lock |
-| Channels | None | None | One `Channel[T]` per listener-thread | One `Channel[T]` per context (request) + one per cross-thread call (response) |
-| Per-call cost | Zero | Zero | Zero | ~80 bytes response channel (cross-thread only) |
+| Shared memory | None | None | Bucket array + Lock + ring + slab (per listener-thread) | Bucket array + Lock + ring + slab + response-slot pool (per context) |
+| Dispatch primitive | direct asyncSpawn | direct call | Vyukov MPSC ring (cell idx) + refcounted slab cell | Vyukov MPSC ring (cell idx) + slab + response-slot pool |
+| Per-call cost | Zero | Zero | Zero shared-heap alloc; one slab encode + N ring enqueues | Zero shared-heap alloc; one slab encode + one pool slot reservation |
 | OS resources | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) |
-| Baseline per context | ~100 bytes | ~16 bytes | ~300 bytes (bucket + Channel[T] + poll fn) | ~300 bytes (bucket + Channel[T] + poll fn) |
-| Intentional leaks | None | None | Channel[T] on shutdown (no OS fds — safe) | Response Channel[T] on timeout (no OS fds — safe) |
+| Baseline per context | ~100 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) |
+| Overflow behaviour | n/a | n/a | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) |
+| Intentional leaks | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout |
 
 ## Platform & Nim Version Support
 
