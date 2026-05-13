@@ -43,6 +43,7 @@ proc mtUnmarshalValue*[T](
 proc mtMarshalSeq*[U](
     buf: ptr UncheckedArray[byte], cap: int, value: openArray[U], pos: var int
 ): bool {.gcsafe.} =
+  mixin mtMarshalValue                 # allow user overloads for element type
   if pos + 4 > cap:
     return false
   let sLen = uint32(value.len)
@@ -65,6 +66,7 @@ proc mtMarshalSeq*[U](
 proc mtUnmarshalSeq*[U](
     buf: ptr UncheckedArray[byte], len: int, value: var seq[U], pos: var int
 ): bool {.gcsafe.} =
+  mixin mtUnmarshalValue               # allow user overloads for element type
   if pos + 4 > len:
     return false
   var sLen: uint32
@@ -89,6 +91,7 @@ proc mtUnmarshalSeq*[U](
 proc mtMarshalValue*[T](
     buf: ptr UncheckedArray[byte], cap: int, value: T, pos: var int
 ): bool {.gcsafe.} =
+  mixin mtMarshalValue                 # allow user overloads for field types
   when T is ref:
     {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
@@ -130,6 +133,7 @@ proc mtMarshalValue*[T](
 proc mtUnmarshalValue*[T](
     buf: ptr UncheckedArray[byte], len: int, value: var T, pos: var int
 ): bool {.gcsafe.} =
+  mixin mtUnmarshalValue               # allow user overloads for field types
   when T is ref:
     {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
