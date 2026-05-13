@@ -97,6 +97,14 @@ if(ASAN)
     endif()
     target_compile_options(test_typemappingtestlib PRIVATE -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(test_typemappingtestlib PRIVATE -fsanitize=address)
+    if(UNIX AND NOT APPLE)
+        # The Nim .so is linked with -shared-libasan (see brokers.nimble's
+        # asanLinkFlags(sharedLib=true)). On Linux, clang defaults executables
+        # to static asan, which conflicts at runtime with the .so's shared
+        # asan ("incompatible ASan runtimes"). Force the exe onto the same
+        # shared runtime; LD_LIBRARY_PATH is set by setAsanEnv() in nimble.
+        target_link_options(test_typemappingtestlib PRIVATE -shared-libasan)
+    endif()
     if(WIN32)
         # CRT alignment is handled at configure time via
         # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL — see brokers.nimble's
