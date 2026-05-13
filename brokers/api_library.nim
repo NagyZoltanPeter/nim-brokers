@@ -737,6 +737,15 @@ proc registerBrokerLibraryNativeImpl(
         `cleanupAllRequestsIdent`(arg.ctx)
         waitFor drainAsyncOps()
 
+        # Synchronously free the (ring, slab, pool) triples that each
+        # cleared broker's poll fn queued into the thread-local pending-
+        # free registry (see mt_broker_common.drainPendingRingFrees and
+        # mt_request_broker pollFn comment). Doing this here — after
+        # drainAsyncOps, on the owning provider thread, before the thread
+        # exits — replaces the previous asyncSpawn'd deferredFreeReqRing
+        # that SEGV'd in rawAlloc during teardown (PR #13).
+        drainPendingRingFrees()
+
   )
 
   # Delivery thread proc
@@ -771,16 +780,27 @@ proc registerBrokerLibraryNativeImpl(
 
           waitFor awaitShutdown(addr arg.shutdownFlag)
 
-          # Cleanup: drop all registered event listeners
-          `cleanupAllIdent`(arg.ctx)
-          # Remove the RegisterEventListenerResult provider before entering the
-          # processLoop shutdown so that any in-flight on<Event>() requests processed
-          # during the shutdown waitFor return an error instead of calling listen()
-          # on a partially-torn-down bucket registry.
+          # Stop accepting new on<Event>/off<Event> requests by clearing the
+          # RegisterEventListenerResult provider. listen()/dropListener() calls
+          # in flight at this moment land on a partially-torn-down bucket
+          # registry; their callers see an err Result rather than crashing.
           RegisterEventListenerResult.clearProvider(arg.ctx)
-          # Terminate all processLoop coroutines on this thread and await them before
-          # the thread exits to prevent use-after-free on thread-local allocators.
+          # Terminate all per-event processLoop coroutines AND drain in-flight
+          # listener-invocation futures BEFORE dropping listeners. Order matters
+          # under --mm:refc: if cleanupAllIdent drops listeners first, the
+          # listener-closure refcounts can hit zero while their invocation
+          # futures are still in chronos's pending callback queue; the next
+          # chronos poll then continues a future whose continuation points
+          # into freed code, jumping to an unmapped address (PR #13, Linux
+          # ASAN: SEGV with pc==address inside internalContinue).
           waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
+          # All in-flight listener futures have completed; now safe to drop
+          # the listener table (their closure refcounts can fall to zero
+          # without anything else referencing them).
+          `cleanupAllIdent`(arg.ctx)
+          # Free the RegisterEventListenerResult ring/slab/pool that
+          # clearProvider above queued. See mt_broker_common drainPendingRingFrees.
+          drainPendingRingFrees()
 
     )
   elif hasEventHandlers:
@@ -811,6 +831,7 @@ proc registerBrokerLibraryNativeImpl(
 
           RegisterEventListenerResult.clearProvider(arg.ctx)
           waitFor `shutdownAllProcessLoopsIdent`(arg.ctx)
+          drainPendingRingFrees()
 
     )
   else:
@@ -1089,23 +1110,25 @@ proc registerBrokerLibraryNativeImpl(
         if entryPtr.isNil:
           return
 
-        let shutdownRes = waitFor `shutdownReqIdent`.request(brokerCtx)
+        # Use blockingRequest, NOT `waitFor shutdownRequest.request(...)`:
+        # the FFI caller's thread does not own a chronos event loop, so
+        # driving one here spawns a persistent brokerDispatchLoop coroutine
+        # whose suspended `signal.wait()` future state accumulates across
+        # FFI calls and corrupts the refc heap under --mm:refc (PR #13,
+        # macos-amd64 ASAN). blockingRequest busy-polls the response slot
+        # synchronously with no chronos involvement on this thread, so the
+        # FFI caller stays allocation-light and refc-safe.
+        let shutdownRes = blockingRequest(`shutdownReqIdent`, brokerCtx)
         if shutdownRes.isErr():
           error "Library shutdown request failed",
             library = `libNameLit`, ctx = ctx, detail = shutdownRes.error()
 
-        # Drain residual callSoon callbacks left pending on the calling thread.
-        # Under --mm:refc, each waitFor leaves callbacks after the poll sentinel;
-        # without draining, the ZCT grows across context lifecycles and eventually
-        # triggers collectZCT on a freed cell (cell.typ == nil → SIGSEGV).
-        block:
-          proc drainCallerCallbacks() {.async: (raises: []).} =
-            let sleepRes = catch:
-              await sleepAsync(milliseconds(1))
-            if sleepRes.isErr():
-              discard
-
-          waitFor drainCallerCallbacks()
+        # Defense-in-depth: if any earlier code path on this thread did
+        # start a brokerDispatchLoop (e.g. user code calling request()
+        # async-style), tear it down before threads are joined so its
+        # state can't race with the gch on this thread. No-op when the
+        # loop was never started.
+        stopBrokerDispatchHere()
 
         # Signal delivery thread shutdown first
         entryPtr.delivArg.shutdownFlag.store(1, moRelease)

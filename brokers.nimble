@@ -88,45 +88,6 @@ proc nimWindowsImplibFlag(outDir, libName: string): string =
   else:
     ""
 
-proc isNim224MacosRefcDebug(mm: string, release: bool): bool =
-  ## True for the one combo with a known upstream Nim 2.2.4 stdlib
-  ## regression:  macOS + Nim 2.2.4 + --mm:refc + debug build.
-  ##
-  ## Sustained Channel[T].send of complex seq/object payloads triggers
-  ## heap corruption in refc through stdlib system/channels_builtin.nim
-  ## storeAux deep-copy. Fixed in Nim 2.2.10. See LIMITATION.md for the
-  ## full analysis. Linux + 2.2.4 + refc debug is unaffected; refc
-  ## release on macOS + 2.2.4 is unaffected.
-  when defined(macosx) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
-    return mm == "refc" and not release
-  false
-
-proc isNim224MacosRefcDebugFromOpt(opt: string): bool =
-  ## Same as isNim224MacosRefcDebug but parses --mm:refc / -d:release
-  ## from a full Nim option string used by the iteration loops.
-  let mm = if "--mm:refc" in opt: "refc" else: "orc"
-  let release = "-d:release" in opt
-  isNim224MacosRefcDebug(mm, release)
-
-proc fragileTestsNimDefine(mm: string, release: bool): string =
-  ## On the affected combo, emit the Nim define that gates fragile
-  ## stress tests at compile time. See LIMITATION.md for what's gated.
-  if isNim224MacosRefcDebug(mm, release): " -d:brokerTestsSkipFragileRefcBursts" else: ""
-
-proc fragileTestsNimDefineFromOpt(opt: string): string =
-  if isNim224MacosRefcDebugFromOpt(opt): " -d:brokerTestsSkipFragileRefcBursts" else: ""
-
-proc fragileTestsCmakeFlag(mm: string, release: bool): string =
-  ## Emit the cmake variable that translates to a compile definition the
-  ## C++ test uses to skip fragile RUN(...) calls. Always emit an
-  ## explicit ON/OFF — cmake's CMakeCache.txt persists across iteration
-  ## reconfigures, so omitting the flag would leave the previous
-  ## iteration's value in place.
-  if isNim224MacosRefcDebug(mm, release):
-    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=ON"
-  else:
-    " -DBROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS=OFF"
-
 proc skipRefcOnWindows(opt, label: string): bool =
   ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
   ## Windows. See README → "Platform Support" + "Known Limitations" for the
@@ -404,7 +365,10 @@ task test, "Run all single and multi-threaded broker tests":
     ]:
       test opt, f
 
-  let mtTests = ["test_multi_thread_request_broker", "test_multi_thread_event_broker"]
+  let mtTests = [
+    "test_multi_thread_request_broker", "test_multi_thread_event_broker",
+    "test_multi_thread_broker_configs",
+  ]
   for f in mtTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
@@ -414,12 +378,9 @@ task test, "Run all single and multi-threaded broker tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      test opt & fragileTestsNimDefineFromOpt(opt), f
+      test opt, f
 
 task perftest, "Run performance and stress tests":
-  # perf_test_* are stress-by-design and would tear up the affected
-  # Nim 2.2.4 macOS refc debug freelist almost immediately; gate the
-  # whole task on this combo rather than carving out individual tests.
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
   for f in mtTests:
@@ -430,10 +391,6 @@ task perftest, "Run performance and stress tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
-        continue
-      if isNim224MacosRefcDebugFromOpt(opt):
-        echo "Skipping " & f & " (" & opt &
-          ") on macOS + Nim 2.2.4: see LIMITATION.md (perf tests are stress-by-design)."
         continue
       test opt, f
 
@@ -467,7 +424,7 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
       if skipRefcOnWindows(opt, f):
         continue
       let extraOpt = nimMainPrefixFlag(prefix)
-      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
+      test opt & extraOpt, f
 
 task testApi, "Run FFI API broker tests":
   let apiTests =
@@ -486,7 +443,7 @@ task testApi, "Run FFI API broker tests":
           nimMainPrefixFlag("apitestlib")
         else:
           ""
-      test opt & extraOpt & fragileTestsNimDefineFromOpt(opt), f
+      test opt & extraOpt, f
 
 task buildFfiExample, "Build FFI API example library":
   buildFfiExampleLibrary()
@@ -668,7 +625,6 @@ proc buildTypeMapTestLibCbor(
   flags.add(
     nimWindowsImplibFlag("test/typemappingtestlib/build_cbor", "typemappingtestlib")
   )
-  flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
   if genPy:
@@ -690,14 +646,8 @@ task runTypeMapTestLibCborCpp,
   buildTypeMapTestLibCbor()
   let cmakeDir = typeMapTestLibCborCmakeDir()
   let srcDir = "test/typemappingtestlib"
-  let mm =
-    if existsEnv("MM"):
-      getEnv("MM")
-    else:
-      "orc"
-  let release = existsEnv("RELEASE")
   exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) & " -DUSE_CBOR=ON" &
-    cmakeWindowsConfigureExtras() & fragileTestsCmakeFlag(mm, release)
+    cmakeWindowsConfigureExtras()
   exec "cmake --build " & quoteArg(cmakeDir)
   exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
 
@@ -738,14 +688,6 @@ task runTypeMapTestLibCborGo,
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":
   buildTypeMapTestLibCbor(true)
-  let mm =
-    if existsEnv("MM"):
-      getEnv("MM")
-    else:
-      "orc"
-  let release = existsEnv("RELEASE")
-  if isNim224MacosRefcDebug(mm, release):
-    putEnv("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS", "1")
   # The same test_typemappingtestlib.py drives both native and CBOR
   # builds; selection is via TYPEMAP_BUILD_DIR which points at the
   # build output that holds the matching generated .py wrapper.
@@ -765,7 +707,6 @@ proc buildTypeMapTestLibrary(
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
   flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
-  flags.add(fragileTestsNimDefine(mm, release))
   if release:
     flags.add(" -d:release")
   if generateRust or existsEnv("GEN_RUST"):
@@ -777,12 +718,11 @@ proc buildTypeMapTestLibrary(
 proc typeMapTestCmakeBuildDir(): string =
   "test/typemappingtestlib/cmake-build"
 
-proc buildTypeMapTestCmakeTarget(target = "", fragileFlag: string = "") =
+proc buildTypeMapTestCmakeTarget(target = "") =
   let cmakeDir = "test/typemappingtestlib"
   let buildDir = typeMapTestCmakeBuildDir()
   mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras() &
-    fragileFlag
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -807,6 +747,22 @@ proc setAsanEnv() =
     let llvmSym = findExe("llvm-symbolizer")
     if llvmSym.len > 0:
       putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
+  when defined(linux):
+    # The Nim .so links -shared-libasan, so the loader needs libclang_rt.asan-*.so
+    # on LD_LIBRARY_PATH. The C++ test exe is linked with plain -fsanitize=address
+    # (static asan on Linux) and otherwise can't satisfy the .so's runtime dep.
+    let (so, rc) = gorgeEx("clang -print-file-name=libclang_rt.asan-x86_64.so")
+    let trimmed = so.strip()
+    if rc == 0 and trimmed.len > 0 and trimmed != "libclang_rt.asan-x86_64.so":
+      let dir = parentDir(trimmed)
+      let cur = getEnv("LD_LIBRARY_PATH")
+      putEnv(
+        "LD_LIBRARY_PATH",
+        if cur.len == 0:
+          dir
+        else:
+          dir & ":" & cur,
+      )
 
 proc asanCompileFlags(): string =
   result = "-fsanitize=address -fno-omit-frame-pointer -g"
@@ -824,8 +780,11 @@ proc asanLinkFlags(sharedLib: bool = false): string =
     result.add(" -Wl,/debug")
 
 proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
+  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
+  # fires on memory faults inside the .dylib. Without this, Nim prints its own
+  # traceback and exits before ASAN can report the underlying heap error.
   var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" &
+    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy -d:noSignalHandler --threads:on --app:lib --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags(sharedLib = true)) &
     " --path:. --outdir:test/typemappingtestlib/build-asan"
@@ -949,16 +908,17 @@ task testFfiApiCpp,
       if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
         continue
       buildTypeMapTestLibrary(mm, release)
-      buildTypeMapTestCmakeTarget(
-        "test_typemappingtestlib", fragileTestsCmakeFlag(mm, release)
-      )
+      buildTypeMapTestCmakeTarget("test_typemappingtestlib")
       exec quoteArg(typeMapTestCppExecutablePath())
 
 proc testAsan(mm: string, path: string) =
   let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
   let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
+  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
+  # fires on memory faults. Without this, Nim prints its own traceback and
+  # exits before ASAN can report the underlying heap error.
   let flags =
-    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" &
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE -d:noSignalHandler --threads:on --mm:" &
     mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
     quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
   exec "nim c " & flags & " test/" & path & ".nim"
@@ -1004,6 +964,16 @@ task testMtRequestBrokerAsanRefc,
   if skipRefcOnWindows("refc", "testMtRequestBrokerAsanRefc"):
     return
   testAsan("refc", "test_multi_thread_request_broker")
+
+task testMtBrokerConfigsAsanOrc,
+  "Run multi-thread broker config showcase under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_broker_configs")
+
+task testMtBrokerConfigsAsanRefc,
+  "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtBrokerConfigsAsanRefc"):
+    return
+  testAsan("refc", "test_multi_thread_broker_configs")
 
 # ----------------------------------------------------------------------------
 # probeWinTlsUninit — minimal repro for LIMITATION.md §2.1

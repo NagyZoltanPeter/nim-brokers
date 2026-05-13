@@ -32,7 +32,14 @@ const
 # Broker definition — realistic payload with seq data
 # ---------------------------------------------------------------------------
 
-EventBroker(mt):
+# Tuned for burst: defaults (queueDepth=256, slabCapacity=1024) overflow
+# under 5×500 emitter bursts. The `fastBurst` preset bumps both with a
+# small per-cell payload size. Memory cost (PayloadSize = 512 B fits in
+# fastBurst's 256 B cap? — no; bump maxPayloadBytes to 1024 for our test).
+#   ring  =  4096 slots × ~24 B   ≈   96 KB
+#   slab  =  8192 cells × ~1056 B ≈  8.4 MB
+#   total ≈ ~8.5 MB (vs ~1.1 MB at defaults).
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
   type PerfEvt = object
     tag*: string
     payload*: seq[byte]
@@ -140,28 +147,66 @@ suite "Multi-thread EventBroker — performance":
     for i in 0 ..< NumEmitterThreads:
       threads[i].createThread(stressEmitter)
 
-    # Keep event loop alive so processLoop can dispatch events.
-    while gEventsReceived.load() < TotalCrossThreadEvents:
-      await sleepAsync(chronos.milliseconds(1))
+    # Phase 1: wait for emitter threads to finish issuing events.
+    # We poll thread state while keeping the event loop alive so the
+    # listener can drain events into gEventsReceived.
+    # NOTE: the new ring-based MT EventBroker drops events when the listener
+    # ring is full (lossy, non-blocking emit); we cap the post-emit wait and
+    # report delivered/emitted instead of assuming losslessness.
+    const PostEmitWaitMs = 2_000
+    const EmitJoinTimeoutMs = 30_000
 
-    let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
+    let emitJoinDeadlineNs = wallStart.ticks + EmitJoinTimeoutMs.int64 * 1_000_000
+    while true:
+      var allDone = true
+      for i in 0 ..< NumEmitterThreads:
+        if threads[i].running:
+          allDone = false
+          break
+      if allDone or getMonoTime().ticks >= emitJoinDeadlineNs:
+        break
+      await sleepAsync(chronos.milliseconds(1))
 
     for i in 0 ..< NumEmitterThreads:
       threads[i].joinThread()
+
+    let emitElapsed = (getMonoTime() - wallStart).inNanoseconds
+
+    # Phase 2: short drain window for in-flight events to be delivered.
+    let drainStart = getMonoTime()
+    while gEventsReceived.load() < TotalCrossThreadEvents:
+      if (getMonoTime() - drainStart).inNanoseconds >= PostEmitWaitMs.int64 * 1_000_000:
+        break
+      await sleepAsync(chronos.milliseconds(1))
+
+    let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
+    let delivered = gEventsReceived.load().int
 
     PerfEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
     # -- Statistics --
-    let avgNs = gLatencySumNs.load() div int64(TotalCrossThreadEvents)
+    let denom = max(delivered, 1)
+    let avgNs = gLatencySumNs.load() div int64(denom)
     let minNs = gLatencyMinNs.load()
     let maxNs = gLatencyMaxNs.load()
 
     echo ""
     echo "  ┌─── Cross-Thread Results ─────────────────────────────"
-    echo "  │ Total events   : ", TotalCrossThreadEvents
-    echo "  │ Wall-clock time: ", fmtNs(wallElapsed)
-    echo "  │ Throughput     : ", fmtRate(TotalCrossThreadEvents, wallElapsed)
+    echo "  │ Emitted        : ", TotalCrossThreadEvents
+    echo "  │ Delivered      : ",
+      delivered,
+      " (",
+      formatFloat(
+        float64(delivered) * 100.0 / float64(TotalCrossThreadEvents), ffDecimal, 2
+      ),
+      "%)"
+    echo "  │ Dropped        : ", TotalCrossThreadEvents - delivered
+    echo "  │ Emit window    : ", fmtNs(emitElapsed)
+    echo "  │ Total wall     : ", fmtNs(wallElapsed)
+    echo "  │ Emit rate      : ",
+      fmtRate(TotalCrossThreadEvents, emitElapsed), " (offered)"
+    echo "  │ Delivery rate  : ", fmtRate(delivered, wallElapsed), " (received)"
     echo "  │ Avg latency    : ", fmtNs(avgNs)
     echo "  │ Min latency    : ", fmtNs(minNs)
     echo "  │ Max latency    : ", fmtNs(maxNs)

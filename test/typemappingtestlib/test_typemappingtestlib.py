@@ -621,10 +621,6 @@ class TestMultiContext(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(
-    os.environ.get("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS") == "1",
-    "fragile refc bursts skipped",
-)
 class TestForeignThreadStress(unittest.TestCase):
     def setUp(self):
         self.lib = _make_lib()
@@ -702,10 +698,6 @@ class TestSeqObjectEventMemorySafety(unittest.TestCase):
         finally:
             lib.shutdown()
 
-    @unittest.skipIf(
-        os.environ.get("BROKER_TESTS_SKIP_FRAGILE_REFC_BURSTS") == "1",
-        "fragile refc bursts skipped",
-    )
     def test_rapid_fire_no_leak(self):
         lib = _make_lib()
         try:

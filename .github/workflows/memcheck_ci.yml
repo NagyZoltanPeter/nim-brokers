@@ -4,22 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: "Runner platform"
+        description: "Runner platform (use 'all' to fan out across the matrix)"
         required: true
         type: choice
         default: ubuntu-latest
         options:
+          - all
           - ubuntu-latest
           - windows-latest
           - macos-latest
           - macos-15
           - macos-15-intel
       nim-version:
-        description: "Nim compiler version (semver, accepted by jiro4989/setup-nim-action)"
+        description: "Nim compiler version (use 'all' to run 2.2.4, 2.2.10, devel)"
         required: true
         type: choice
         default: "2.2.10"
         options:
+          - "all"
           - "2.2.10"
           - "2.2.4"
           - "devel"
@@ -36,6 +38,8 @@ on:
           - testMtEventBrokerAsanRefc
           - testMtRequestBrokerAsanOrc
           - testMtRequestBrokerAsanRefc
+          - testMtBrokerConfigsAsanOrc
+          - testMtBrokerConfigsAsanRefc
           - probeWinTlsUninitOrc
           - probeWinTlsUninitRefc
 
@@ -43,15 +47,53 @@ permissions:
   contents: read
 
 jobs:
+  # Compute the runner × Nim-version matrix from inputs. Either dimension
+  # may be a single value or "all"; the cartesian product is emitted as
+  # JSON for the downstream job to consume via fromJSON.
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+    steps:
+      - id: compute
+        env:
+          RUNNER_IN: ${{ inputs.runner }}
+          NIM_IN: ${{ inputs.nim-version }}
+        run: |
+          if [ "$RUNNER_IN" = "all" ]; then
+            runners='["ubuntu-latest","windows-latest","macos-latest","macos-15-intel"]'
+          else
+            runners="[\"$RUNNER_IN\"]"
+          fi
+          if [ "$NIM_IN" = "all" ]; then
+            nims='["2.2.4","2.2.10","devel"]'
+          else
+            nims="[\"$NIM_IN\"]"
+          fi
+          matrix=$(jq -nc \
+            --argjson r "$runners" \
+            --argjson n "$nims" \
+            '[ $r[] as $runner | $n[] as $nim
+               | {runner: $runner, "nim-version": $nim} ]')
+          echo "Computed matrix: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   memcheck-ci:
-    runs-on: ${{ inputs.runner }}
+    needs: setup-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+    name: ${{ matrix.runner }} · nim ${{ matrix['nim-version'] }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix['nim-version'] == 'devel' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Nim
         uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: ${{ inputs.nim-version }}
+          nim-version: ${{ matrix['nim-version'] }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install clang (Linux)
@@ -109,7 +151,7 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
+          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -147,6 +189,7 @@ jobs:
             "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
             "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
             "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
+            "testMtBrokerConfigsAsanOrc", "testMtBrokerConfigsAsanRefc",
             "probeWinTlsUninitOrc", "probeWinTlsUninitRefc"
           )
           $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }

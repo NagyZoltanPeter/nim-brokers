@@ -84,7 +84,7 @@ The multi-thread `emit()` is an **async** proc (`{.async: (raises: []).}`):
 - In `{.thread.}` procs with no event loop: use `waitFor emit(...)` — this creates
   a temporary event loop for the duration of the call.
 - **Same-thread listeners**: dispatched via `asyncSpawn` (fire-and-forget).
-- **Cross-thread listeners**: delivered via `Channel[T].send` + `fireBrokerSignal` (near-instant, no OS fds consumed).
+- **Cross-thread listeners**: delivered via a per-bucket lock-free Vyukov MPSC ring + `fireBrokerSignal` (near-instant, no OS fds consumed).
 
 ### Thread procs cannot be closures
 
@@ -119,11 +119,11 @@ connection.close()           # now safe
 
 1. Removes all buckets for the context under a global lock.
 2. Cleans up local threadvar entries if the caller owns any for this context.
-3. Sends `emkClearListeners` to each remote thread's `Channel[T]` and fires the shared signal.
-4. Each remote thread's `brokerDispatchLoop` poll fn receives the message, clears its own threadvar handler table for the context, and continues running (returns 1 — stays registered for future events from other contexts).
+3. Sends a `CtrlClearListeners` sentinel into each remote thread's ring and fires the shared signal.
+4. Each remote thread's `brokerDispatchLoop` poll fn receives the sentinel, clears its own threadvar handler table for the context, and continues running (returns 1 — stays registered for future events from other contexts).
 
 Handler removal on remote threads is **asynchronous** — it happens when the
-remote thread's event loop processes the `emkClearListeners` message. In-flight
+remote thread's event loop processes the `CtrlClearListeners` sentinel. In-flight
 `asyncSpawn` futures that were already dispatched before the message arrives
 complete naturally on the remote thread.
 
@@ -134,15 +134,18 @@ The three operations have distinct in-flight guarantees:
 | Operation | Stops new dispatches? | Waits for in-flight? |
 |-----------|----------------------|----------------------|
 | `dropListener` (sync) | Yes — handler removed from table | **No** — in-flight continues |
-| `dropAllListeners` (any thread) | Yes — sends `emkClearListeners` | **No** — in-flight continues |
-| Context shutdown (`shutdownProcessLoopsForCtx`) | Yes — sends `emkShutdown`, poll fn exits | **Yes** — awaits `tvListenerFuts` (5 s timeout) |
+| `dropAllListeners` (any thread) | Yes — sends `CtrlClearListeners` sentinel | **No** — in-flight continues |
+| Context shutdown (`shutdownProcessLoopsForCtx`) | Yes — closes the ring (`ring.closed = true`), poll fn drains and exits | **Yes** — awaits `tvListenerFuts` (5 s timeout) |
 
-**Context shutdown** is the safe teardown path. It sends `emkShutdown` to each
-listener thread's channel, which causes the poll fn to complete a shutdown
-`Future[void]` and remove itself from the dispatcher (returns 2). The caller
-then awaits each shutdown future (up to 5 seconds), and finally drains any
-remaining in-flight listener futures tracked in `tvListenerFuts` before
-returning. This guarantees no callbacks are running after the call returns.
+**Context shutdown** is the safe teardown path. It sets the ring's
+`closed` flag (release-ordered, so the flip is visible to in-flight
+emitters that already captured the ring pointer); the poll fn on the
+listener thread observes empty + closed, completes a shutdown
+`Future[void]`, and self-unregisters (returns 2). The caller then awaits
+each shutdown future (up to 5 seconds), waits a 50 ms grace window for
+in-flight emit callers, and finally drains any remaining in-flight
+listener futures tracked in `tvListenerFuts` before returning. This
+guarantees no callbacks are running after the call returns.
 
 The FFI API library lifecycle (`registerBrokerLibrary`) calls
 `shutdownProcessLoopsForCtx` automatically on `mylib_shutdown(ctx)`.
@@ -151,23 +154,29 @@ The FFI API library lifecycle (`registerBrokerLibrary`) calls
 
 ## Architecture
 
-### Per-Listener-Thread Channel Model
+### Per-Listener-Thread Ring + Global Slab Model
 
-Each thread that registers listeners for a `BrokerContext` gets its own `Channel[T]`.
-All broker types on a thread share one `ThreadSignalPtr` and one `brokerDispatchLoop`.
-This enables broadcast fan-out with zero extra OS file descriptors per broker type:
+Each thread that registers listeners for a `BrokerContext` gets its own
+lock-free Vyukov MPSC `ring` (carrying a slab cell index per slot). All
+broker types on a thread share one `ThreadSignalPtr` and one
+`brokerDispatchLoop`. A **global per-broker-type slab** holds the actual
+event payload bytes; one slab cell is shared across N listener-bucket
+rings via atomic refcount, so emit allocates one cell and fans out N
+pointer pushes (not N deep copies):
 
 ```
 Emitter Thread                 Listener Thread A                 Listener Thread B
 ┌──────────────┐              ┌─────────────────────────────┐   ┌─────────────────────────────┐
-│   emit(evt)  │──send+sig───▶│  Channel[T] A               │   │  Channel[T] B               │
-│              │──send+sig────│                             │──▶│                             │
-└──────────────┘              │  brokerDispatchLoop (shared)│   │  brokerDispatchLoop (shared)│
-                              │    ↓ poll fn tryRecv        │   │    ↓ poll fn tryRecv        │
-                              │  asyncSpawn handleEventMsg  │   │  asyncSpawn handleEventMsg  │
-                              │    ↓                        │   │    ↓                        │
-                              │  listener1(evt)             │   │  listener3(evt)             │
-                              │  listener2(evt)             │   │                             │
+│   emit(evt)  │              │  ring A (MPSC, slot=cellIdx)│   │  ring B (MPSC, slot=cellIdx)│
+│              │              │                             │   │                             │
+│  claim 1 cell│──cellIdx+sig▶│                             │   │                             │
+│  refcount=2  │──cellIdx+sig─│                             │──▶│                             │
+│  marshal evt │              │  brokerDispatchLoop (shared)│   │  brokerDispatchLoop (shared)│
+└──────┬───────┘              │    ↓ poll fn tryDequeue     │   │    ↓ poll fn tryDequeue     │
+       │                      │  unmarshal evt; dispatch    │   │  unmarshal evt; dispatch    │
+       ▼                      │  decRef cell                │   │  decRef cell                │
+  Global Slab (per            │  listener1(evt)             │   │  listener3(evt)             │
+  broker-type, shared)        │  listener2(evt)             │   │                             │
                               └─────────────────────────────┘   └─────────────────────────────┘
 
 fd count: 2 per thread (one shared ThreadSignalPtr) regardless of broker type count.
@@ -179,20 +188,25 @@ fd count: 2 per thread (one shared ThreadSignalPtr) regardless of broker type co
 sequenceDiagram
     participant E as Emitter Thread
     participant L as Global Lock
-    participant C as Channel[T] (Listener Thread)
+    participant SLAB as Global Event Slab
+    participant R as ring (Listener Thread MPSC)
     participant S as ThreadSignalPtr (Listener Thread, shared)
     participant DL as brokerDispatchLoop (Listener Thread)
     participant H as Listener Handler
 
     E->>L: withLock: collect targets for ctx
-    L-->>E: targets[]
-    E->>C: send(EventMsg)
-    Note over E: returns immediately (unbounded)
+    L-->>E: targets[] (one entry per listener-thread bucket)
+    E->>SLAB: claim 1 cell; refcount = N targets
+    E->>SLAB: marshal evt into cell.bytes
+    E->>R: tryEnqueue(cellIdx)
+    Note over E: returns immediately (bounded ring with backpressure)
     E->>S: fireBrokerSignal
 
     S->>DL: wakes up
-    DL->>C: tryRecv() → EventMsg
-    DL->>H: asyncSpawn handleEventMsg(event, ctx)
+    DL->>R: tryDequeue() → cellIdx
+    DL->>SLAB: read+unmarshal cell.bytes → evt on listener heap
+    DL->>H: asyncSpawn notifyListener(cb, evt)
+    DL->>SLAB: decRef cell (last decRef returns cell to slab)
     Note over DL: in-flight future tracked in tvListenerFuts
 ```
 
@@ -220,18 +234,18 @@ sequenceDiagram
     participant Caller as Caller Thread
     participant L as Global Lock
     participant TV as Caller Threadvars
-    participant C as Channel[T] (remote)
+    participant R as ring (remote MPSC)
     participant S as ThreadSignalPtr (remote, shared)
     participant DL as brokerDispatchLoop (remote)
 
-    Caller->>L: withLock: collect (chan, sig) for ctx
-    L-->>Caller: chansToClear[]
+    Caller->>L: withLock: flip hasListeners=false; collect (ring, sig) per remote bucket
+    L-->>Caller: ringsToClear[]
     Caller->>TV: clean local threadvar entries
-    Caller->>C: send(emkClearListeners)
+    Caller->>R: tryEnqueue(CtrlClearListeners sentinel)
     Caller->>S: fireBrokerSignal
 
     S->>DL: wakes up
-    DL->>C: tryRecv() → emkClearListeners
+    DL->>R: tryDequeue() → CtrlClearListeners
     DL->>DL: clearListeners(ctx) — wipes threadvar handlers
     Note over DL: poll fn returns 1 (keeps running)
     Note over DL: in-flight asyncSpawn futures continue naturally
@@ -251,10 +265,14 @@ gTMtBuckets ─────────┐
   │ brokerCtx: Default│ brokerCtx: Default│ brokerCtx: ctxA   │
   │ threadId:  0x1000 │ threadId:  0x2000 │ threadId:  0x1000 │
   │ threadGen: 0      │ threadGen: 1      │ threadGen: 0      │
-  │ eventChan: ──────►│ eventChan: ──────►│ eventChan: ──────►│
+  │ ring: ───────────►│ ring: ───────────►│ ring: ───────────►│
   │ active:    true   │ active:    true   │ active:    true   │
   │ hasListeners: true│ hasListeners: true│ hasListeners: true│
   └───────────────────────────────────────────────────────────┘
+
+  Plus, separately: gTMtSlab — global per-broker-type payload slab
+  (createShared once, lazy-init on first listen/emit, holds refcounted
+  cells shared across all bucket rings).
   gTMtBucketCount = 3
   gTMtLock = Lock (protects all shared arrays)
 ```
@@ -298,11 +316,15 @@ lower latencies.*
 
 **Optimization notes:**
 
-- Use `--mm:orc -d:release` for production — avoids deep-copy overhead on `Channel[T].send`.
-- Same-thread delivery is essentially free (direct `asyncSpawn`, no locking on the hot path).
-- Each listener thread has its own `Channel[T]` and shared `brokerDispatchLoop` — listener throughput scales with the number of listener threads.
+- Use `--mm:orc -d:release` for production. The hot path is allocation-
+  free regardless of MM (atomic claim of a pre-allocated slab cell +
+  memcpy/marshal + atomic ring push); release-mode optimizations
+  primarily help the marshaler and `asyncSpawn` machinery.
+- Same-thread delivery is essentially free (direct `asyncSpawn`, no locking on the hot path, no slab/ring touched).
+- Each listener thread has its own MPSC ring and shared `brokerDispatchLoop` — listener throughput scales with the number of listener threads.
 - `emit()` holds the global lock only long enough to copy the target list (snapshot pattern).
-- **Zero OS fds per broker type** — `Channel[T]` is pure mutex+condvar. Adding more broker types never increases fd count.
+- **Zero OS fds per broker type** — the ring is a pure user-space lock-free queue, slab is `createShared` memory. Adding more broker types never increases fd count.
+- **Fan-out is one alloc, N pointer pushes** — one slab cell shared across N listener-bucket rings via atomic refcount, not N independent deep-copies of the payload.
 
 ---
 
@@ -313,10 +335,10 @@ lower latencies.*
 | Cross-thread emit | ✗ | ✓ |
 | Cross-thread listen | ✗ | ✓ |
 | `emit()` return type | void (asyncSpawn) | Future[void] (async) |
-| Channel overhead | None | Per listener-thread |
+| Transport overhead | None | Per-bucket lock-free ring + global slab (per broker type) |
 | `dropListener` scope | Any (thread-local broker) | Must be from registering thread |
 | `dropListener` in-flight drain | No — in-flight continues | No — in-flight continues (sync, immediate) |
-| `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends `emkClearListeners`, no drain) |
+| `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends `CtrlClearListeners` sentinel, no drain) |
 | BrokerContext support | ✓ | ✓ |
 | Field-constructor emit | ✓ | ✓ |
 

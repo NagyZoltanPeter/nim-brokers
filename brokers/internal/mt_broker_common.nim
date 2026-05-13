@@ -7,6 +7,8 @@
 
 import chronos, chronos/threadsync
 import std/atomics
+import std/os # `sleep` for synchronous grace window in drainPendingRingFrees
+import ./mt_queue
 export chronos, threadsync, atomics
 
 # ---------------------------------------------------------------------------
@@ -68,6 +70,13 @@ type ThreadDispatchPollFn* = proc(): int {.gcsafe, raises: [].}
 var gBrokerThreadSignal* {.threadvar.}: ThreadSignalPtr
 var gBrokerThreadPollers* {.threadvar.}: seq[ThreadDispatchPollFn]
 var gBrokerDispatchStarted* {.threadvar.}: bool
+var gBrokerDispatchStopRequested* {.threadvar.}: bool
+  ## Set by stopBrokerDispatchHere() to ask the loop to exit on its next
+  ## drain pass. Used by FFI entry points so that transient foreign threads
+  ## (e.g. the C++ caller of <lib>_request_*/<lib>_shutdown) don't accumulate
+  ## a persistent suspended coroutine and its associated chronos/GC state
+  ## across calls. The flag is cleared by stopBrokerDispatchHere() after the
+  ## loop confirms exit.
 
 proc getOrInitBrokerSignal*(): ThreadSignalPtr =
   ## Get (or lazily create) the per-thread signal shared by all broker types.
@@ -107,10 +116,16 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
           inc i
         else:
           inc i
+    # FFI-caller teardown hook: an external caller (stopBrokerDispatchHere)
+    # asked the loop to exit. Drain pass is complete, exit cleanly.
+    if gBrokerDispatchStopRequested:
+      break
     # Wait for next signal.
     let waitRes = catch:
       await signal.wait()
     if waitRes.isErr():
+      break
+    if gBrokerDispatchStopRequested:
       break
   # Dispatcher is exiting (e.g. thread shutting down).  Close the per-thread
   # signal so its OS handle (eventfd on Linux, pipe pair on macOS) is reclaimed
@@ -125,9 +140,109 @@ proc brokerDispatchLoop*(signal: ThreadSignalPtr) {.async: (raises: []).} =
     if closeRes.isErr():
       discard
 
+# ---------------------------------------------------------------------------
+# Pending-ring-free registry — synchronous deferred cleanup at thread exit
+# ---------------------------------------------------------------------------
+# When clearProvider(ctx) closes a request broker's ring on the provider
+# thread, the corresponding poll fn (registered via brokerDispatchLoop's
+# pollers seq) detects `ring.isClosed()` on its next iteration and needs to
+# free the shared-memory (ring, slab, pool) triple — but only after a grace
+# window long enough for any cross-thread sender that snapshotted those
+# pointers under the previous globalLock state to finish its enqueue.
+#
+# Previous design: `asyncSpawn deferredFreeReqRing(...)` — start an async
+# proc that does `await sleepAsync(50ms)` then frees. Two problems:
+#
+#   1. Allocating the sleepAsync Future inside an asyncSpawn started during
+#      `cleanupAllRequestsIdent` runs the refc allocator at a moment where
+#      the thread's gch state is fragile from teardown churn. Observed as a
+#      hard SEGV in rawAlloc on Linux refc + ASAN (PR #13).
+#
+#   2. drainAsyncOps only polls chronos for 1ms — the 50ms sleepAsync would
+#      never fire before the processing thread exits, so the buffers either
+#      leak or are freed by an orphaned coroutine racing thread teardown.
+#
+# Current design: the poll fn instead records the triple in a thread-local
+# seq; the processing-thread proc drains the seq AFTER drainAsyncOps via a
+# single synchronous `sleep(50)` followed by direct free calls. No chronos
+# involvement in the cleanup path; the grace window applies once for the
+# whole ctx instead of once per broker.
+type PendingRingFree* = object
+  ring*: ptr VyukovMpscRing[uint32]
+  slab*: ptr PayloadSlab
+  pool*: ptr ResponseSlotPool
+
+var gPendingRingFrees* {.threadvar.}: seq[PendingRingFree]
+
+proc enqueuePendingRingFree*(
+    ring: ptr VyukovMpscRing[uint32], slab: ptr PayloadSlab, pool: ptr ResponseSlotPool
+) {.gcsafe.} =
+  ## Called from a broker poll fn on the provider thread when its ring has
+  ## been closed by clearProvider(). The (ring, slab, pool) triple will be
+  ## freed by `drainPendingRingFrees()` at thread shutdown.
+  {.cast(gcsafe).}:
+    gPendingRingFrees.add(PendingRingFree(ring: ring, slab: slab, pool: pool))
+
+proc drainPendingRingFrees*() {.gcsafe.} =
+  ## Drain the per-thread pending-ring-free registry synchronously.
+  ## Sleeps once for a 50ms grace window covering all queued frees, then
+  ## releases each (ring, slab, pool) triple. Must be called from the owning
+  ## thread AFTER any chronos work that may still touch the buffers has
+  ## completed (i.e. after `drainAsyncOps` in the processing-thread proc).
+  if gPendingRingFrees.len == 0:
+    return
+  # Single grace window: 50ms is enough for any sender that snapshotted
+  # pool/slab/ring pointers before clearProvider closed the ring to either
+  # complete its enqueue (which then fails on isClosed()) or abort. Without
+  # this, a stale sender deref'ing the about-to-be-freed slab/pool crashes.
+  sleep(50)
+  for entry in gPendingRingFrees:
+    if not entry.ring.isNil:
+      freeVyukovMpscRing(entry.ring)
+    if not entry.slab.isNil:
+      deinitPayloadSlab(entry.slab[])
+      deallocShared(entry.slab)
+    if not entry.pool.isNil:
+      deinitResponseSlotPool(entry.pool[])
+      deallocShared(entry.pool)
+  gPendingRingFrees.setLen(0)
+
 proc ensureBrokerDispatchStarted*() =
   ## Start the per-thread dispatch loop if not already running.
   ## Must be called from within a chronos async context.
   if not gBrokerDispatchStarted:
     gBrokerDispatchStarted = true
     asyncSpawn brokerDispatchLoop(getOrInitBrokerSignal())
+
+proc stopBrokerDispatchHere*() =
+  ## Tear down the per-thread brokerDispatchLoop on the calling thread.
+  ##
+  ## Intended for **FFI entry points** (procs exported with `cdecl, dynlib`
+  ## that run on a foreign caller's thread). The dispatch loop was designed
+  ## for chronos-loop-owning threads (processing/delivery threads), which
+  ## are torn down via joinThread. An FFI caller's thread instead lives for
+  ## the entire process and re-enters Nim per call; without teardown its
+  ## suspended `await signal.wait()` future, registered pollers seq, and
+  ## chronos pending-callback list accumulate across calls and eventually
+  ## drag the thread's refc ZCT/heap into corruption (PR #13).
+  ##
+  ## Safe to call from sync context (after `waitFor` returns). No-op if the
+  ## loop was never started on this thread. Drives chronos via an internal
+  ## `waitFor` until the loop's coroutine actually exits.
+  if not gBrokerDispatchStarted:
+    return
+  gBrokerDispatchStopRequested = true
+  let sig = gBrokerThreadSignal
+  if not sig.isNil:
+    discard sig.fireSync()
+
+  proc awaitLoopExit() {.async: (raises: []).} =
+    let deadline = Moment.now() + chronos.seconds(2)
+    while gBrokerDispatchStarted and Moment.now() < deadline:
+      let sleepRes = catch:
+        await sleepAsync(milliseconds(1))
+      if sleepRes.isErr():
+        break
+
+  waitFor awaitLoopExit()
+  gBrokerDispatchStopRequested = false

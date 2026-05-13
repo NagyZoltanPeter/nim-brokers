@@ -89,8 +89,8 @@ import chronos, chronicles, results
 import ./internal/helper/broker_utils, ./broker_context
 
 when compileOption("threads"):
-  import ./internal/mt_event_broker
-  export mt_event_broker
+  import ./internal/mt_config, ./internal/mt_event_broker
+  export mt_config, mt_event_broker
 
 when compileOption("threads") and
     (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
@@ -506,17 +506,38 @@ proc generateEventBroker(body: NimNode): NimNode =
   when defined(brokerDebug):
     echo result.repr
 
-macro EventBroker*(body: untyped): untyped =
-  ## Default (single-thread) mode.
-  generateEventBroker(body)
-
-macro EventBroker*(mode: untyped, body: untyped): untyped =
-  ## Explicit mode selector.
-  ## Example:
+macro EventBroker*(args: varargs[untyped]): untyped =
+  ## Single-thread default mode, or explicit mode selector with optional kwargs.
+  ##
+  ## Examples:
+  ##   EventBroker:
+  ##     type MyEvent = object
+  ##       value*: int
+  ##
   ##   EventBroker(mt):
   ##     type MyEvent = object
   ##       value*: int
+  ##
+  ##   EventBroker(mt, queueDepth = 1024, slabCapacity = 4096):
+  ##     type MyEvent = object
+  ##       value*: int
+  if args.len == 0:
+    macros.error("EventBroker requires a body block")
+  if args.len == 1:
+    return generateEventBroker(args[0])
+  let mode = args[0]
+  let body = args[^1]
+  if body.kind notin {nnkStmtList, nnkTypeDef, nnkTypeSection}:
+    error(
+      "EventBroker(" & mode.repr & ") body must be a `:` block of type definitions (got " &
+        $body.kind & ")",
+      body,
+    )
+  var kwargs: seq[NimNode]
+  for i in 1 ..< args.len - 1:
+    kwargs.add(args[i])
   let m = parseEventBrokerMode(mode)
+  let split = (kwargs: kwargs, body: body)
   case m
   of ebMultiThread:
     when not compileOption("threads"):
@@ -526,8 +547,14 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
           "Compile with `--threads:on` to use multi-thread EventBroker."
       .}
     else:
-      generateMtEventBroker(body)
+      let cfg = parseMtEvtKwargs(split.kwargs)
+      generateMtEventBroker(body, cfg)
   of ebApi:
+    if split.kwargs.len > 0:
+      error(
+        "EventBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
+        split.kwargs[0],
+      )
     when not compileOption("threads"):
       {.
         error:
@@ -542,6 +569,11 @@ macro EventBroker*(mode: untyped, body: untyped): untyped =
         else:
           generateApiEventBroker(body)
       else:
-        generateMtEventBroker(body)
+        generateMtEventBroker(body, defaultMtEvtCfg())
   of ebDefault:
+    if split.kwargs.len > 0:
+      error(
+        "EventBroker(" & mode.repr & ") does not accept kwargs (kwargs are mt-only)",
+        split.kwargs[0],
+      )
     generateEventBroker(body)
