@@ -3,6 +3,16 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [2.0.1] — 2026-05-13
+
+**Hotfix: allow user overloads for MT broker payload field types.**
+
+- `mtMarshalValue` / `mtUnmarshalValue` / `mtMarshalSeq` / `mtUnmarshalSeq`
+  in `brokers/internal/mt_codec.nim` now declare `mixin mtMarshalValue` /
+  `mixin mtUnmarshalValue`, so user-defined overloads for custom field /
+  element types are picked up at instantiation site instead of being
+  shadowed by the generic codec.
+
 ## [2.0.0] — 2026-05-13
 
 **Multi-thread dispatch refactor — lock-free ring + pre-allocated slab + response-slot pool, replacing `Channel[T]`.**
@@ -133,6 +143,7 @@ All notable changes to **nim-brokers** are documented here. The project follows
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[2.0.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.1
 [2.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.0
 [1.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v1.2.0
 [1.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v1.1.0
