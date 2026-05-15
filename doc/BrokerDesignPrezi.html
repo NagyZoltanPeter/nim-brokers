@@ -1125,7 +1125,7 @@ OnFilterSubscribeEvent.emit(
   <section class="section-header">
     <div class="num">06</div>
     <h2 style="color:var(--logos-red);">Multi-Thread Brokers</h2>
-    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Cross-thread messaging &middot; Same API &middot; New trade-offs</p>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Cross-thread messaging &middot; Same API &middot; Based on Efficient, Lock free MPSC Queue</p>
   </section>
 
   <!-- 6.1  Why multi-thread? -->
@@ -1164,10 +1164,10 @@ OnFilterSubscribeEvent.emit(
         <h3>Multi-thread <code>(mt)</code></h3>
         <ul>
           <li>Shared bucket registry under <code>Lock</code></li>
-          <li>One <code>Channel[T]</code> (0 OS fds) per (context, listener-thread)</li>
-          <li>One shared <code>ThreadSignalPtr</code> per thread &mdash; fd count is 2, not 2 per (broker&thinsp;&times;&thinsp;threads)</li>
-          <li>Closures stay in <code>threadvar</code> &mdash; only metadata is shared</li>
-          <li>Same-thread fast-path bypasses channels entirely</li>
+          <li>Lock-free <strong>MPSC ring</strong> + pre-allocated <strong>payload slab</strong> per (ctx, listener-thread) &mdash; <strong>zero allocation on the hot path</strong></li>
+          <li>One shared <code>ThreadSignalPtr</code> per thread (fd count stays O(threads))</li>
+          <li>Closures stay in <code>threadvar</code> &mdash; only fixed-size cells cross the heap boundary</li>
+          <li>Same-thread fast-path bypasses the ring entirely</li>
         </ul>
       </div>
     </div>
@@ -1185,12 +1185,13 @@ OnFilterSubscribeEvent.emit(
       </div>
 
       <div style="display:flex; flex-direction:column; gap:0.5em; align-items:center;">
-        <div style="color:var(--logos-muted); font-size:0.6em; margin-bottom:0.2em;">&darr; Channel[T].send + fireBrokerSignal &darr;</div>
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-bottom:0.2em;">&darr; encode into slab cell &middot; ring enqueue &middot; signal &darr;</div>
         <div class="diag-box" style="border-color:var(--logos-orange); color:var(--logos-orange); min-width:14em;">
           Shared Bucket Registry<br>
-          <span style="font-size:0.8em; color:var(--logos-muted);">Lock-protected &middot; createShared</span>
+          <span style="font-size:0.8em; color:var(--logos-muted);">Lock-protected &middot; createShared</span><br>
+          + MPSC ring &middot; payload slab
         </div>
-        <div style="color:var(--logos-muted); font-size:0.6em; margin-top:0.2em;">&darr; Channel[T] per listener thread &middot; shared brokerDispatchLoop &darr;</div>
+        <div style="color:var(--logos-muted); font-size:0.6em; margin-top:0.2em;">&darr; ring dequeue &middot; decode &middot; cell recycled &middot; shared brokerDispatchLoop &darr;</div>
       </div>
 
       <div style="display:flex; flex-direction:column; gap:0.5em;">
@@ -1224,19 +1225,29 @@ OnFilterSubscribeEvent.emit(
           <td>Lock is held only for metadata scan &mdash; no callbacks run under lock</td>
         </tr>
         <tr class="fragment">
-          <td style="color:var(--logos-red);"><strong>Channel overhead</strong></td>
-          <td>Cross-thread delivery copies the event message into a <code>Channel[T]</code> via <code>send</code> and wakes the target thread's shared signal</td>
-          <td>Same-thread path skips channels entirely; keep hot-path listeners co-located</td>
+          <td style="color:var(--logos-red);"><strong>Fixed RAM at init</strong></td>
+          <td>Ring + slab + response-slot pool are reserved up-front per (broker, ctx, listener-thread). Idle footprint is non-zero even when nothing is in flight.</td>
+          <td>Tune <code>queueDepth</code>, <code>slabCapacity</code>, <code>responseSlots</code>, <code>maxPayloadBytes</code> &mdash; or use a <code>preset = small / default / bursty / embedded</code></td>
         </tr>
         <tr class="fragment">
-          <td style="color:var(--logos-red);"><strong>Message copying</strong></td>
-          <td>Event / request payloads are value-copied into the channel buffer</td>
-          <td>Keep payloads small or use <code>ref</code> types for large data</td>
+          <td style="color:var(--logos-red);"><strong>Marshal cost</strong></td>
+          <td>Cross-thread payloads are encoded byte-for-byte into the slab cell &mdash; one copy, no GC touch</td>
+          <td>Same-thread path skips encode/decode entirely</td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Drop on overflow</strong></td>
+          <td>If the ring is full or the slab is exhausted, <code>EventBroker(mt).emit</code> <strong>drops the event</strong> and <code>RequestBroker(mt).request</code> returns <code>err</code>. <code>Channel[T]</code> back-pressure is gone.</td>
+          <td>Size the queue/slab for your burst; monitor drop counters; or size up via <code>preset = bursty</code></td>
+        </tr>
+        <tr class="fragment">
+          <td style="color:var(--logos-red);"><strong>Payload size cap</strong></td>
+          <td>Each marshaled payload must fit in <code>maxPayloadBytes</code> (similarly <code>maxResponseBytes</code> for replies). Larger payloads fail to encode.</td>
+          <td>Defaults are type-driven (4 KB string, 16 KB seq[string], 64 KB seq[byte], &hellip;); override per-broker if needed</td>
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-red);"><strong>Shared memory</strong></td>
-          <td>Bucket array &amp; channels live in <code>createShared</code> heap &mdash; manual lifecycle, no GC</td>
-          <td>Managed automatically by the macro-generated init / grow / drop procs</td>
+          <td>Bucket array, ring, slab, and response-slot pool live in <code>createShared</code> &mdash; manual lifecycle, no GC</td>
+          <td>Managed automatically by the macro-generated init / drop procs</td>
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-red);"><strong>Shutdown complexity</strong></td>
@@ -1333,11 +1344,11 @@ OnFilterSubscribeEvent.emit(
     </div>
 
     <ul>
-      <li class="fragment"><strong>Cross-thread request</strong> &mdash; caller sends request via channel, blocks (or awaits) until the provider thread responds via a separate response channel</li>
-      <li class="fragment"><strong>Round-trip latency</strong> &mdash; two channel hops (request + response), both using <code>Channel[T]</code> (0 OS fds); expect ~2&times; the cost of a single emit</li>
-      <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; the shared <code>brokerDispatchLoop</code> receives requests via a poll fn and dispatches to the local provider closure</li>
-      <li class="fragment"><strong>Same-thread fast path</strong> &mdash; when requester and provider share a thread, the provider is called directly with zero channel overhead</li>
-      <li class="fragment"><strong>Timeout handling</strong> &mdash; cross-thread requests use <code>withTimeout</code> (default 5&thinsp;s); if the provider is unresponsive, <code>request</code> returns <code>err</code>. Configure via <code>T.setRequestTimeout(duration)</code> / <code>T.requestTimeout()</code>. Same-thread requests are unaffected.</li>
+      <li class="fragment"><strong>Cross-thread request</strong> &mdash; args go into a request slab cell + ring; reply comes back via a reserved <strong>response slot</strong>. No allocation on the hot path.</li>
+      <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; the shared dispatch loop drains the ring and calls the local provider closure</li>
+      <li class="fragment"><strong>Same-thread fast path</strong> &mdash; provider is invoked directly with zero ring/slab overhead</li>
+      <li class="fragment"><strong>Failure modes</strong> &mdash; <code>err</code> on payload too large, ring full, response-slot pool exhausted, or timeout (default 5&thinsp;s, configurable via <code>T.setRequestTimeout</code>)</li>
+      <li class="fragment"><strong>Capacity knobs</strong> &mdash; <code>queueDepth</code>, <code>slabCapacity</code>, <code>responseSlots</code>, payload/response size caps; or pick a named <code>preset</code></li>
     </ul>
   </section>
 
@@ -1350,12 +1361,83 @@ OnFilterSubscribeEvent.emit(
     </div>
 
     <ul>
-      <li class="fragment"><strong>Per-listener-thread channel</strong> &mdash; one <code>Channel[T]</code> (0 OS fds) per (context, listener-thread) pair; multiple listeners on the same thread share one channel</li>
-      <li class="fragment"><strong>Shared dispatcher</strong> &mdash; a single <code>brokerDispatchLoop</code> per thread serves all broker types; in-flight futures tracked in <code>tvListenerFuts</code> and complete naturally on context drop</li>
-      <li class="fragment"><strong>Listener concurrency</strong> &mdash; within a thread, all listeners for an event run concurrently (not serialised)</li>
-      <li class="fragment"><strong>Async emit</strong> &mdash; <code>emit</code> is <code>{.async: (raises: []).}</code>; cross-thread sends use <code>Channel[T].send</code> + <code>fireBrokerSignal</code>, same-thread dispatches via <code>asyncSpawn</code></li>
-      <li class="fragment"><strong>Ordering</strong> &mdash; per-thread FIFO guaranteed by the channel; cross-thread ordering is per-target-thread, not global</li>
+      <li class="fragment"><strong>Per-listener-thread ring + slab</strong> &mdash; one shared ring + slab per (ctx, listener-thread); all listeners on that thread share it</li>
+      <li class="fragment"><strong>Single-cell fan-out</strong> &mdash; one slab cell per emit, refcounted across listeners &mdash; <strong>no per-listener deep-copy</strong></li>
+      <li class="fragment"><strong>Listener concurrency</strong> &mdash; within a thread, listeners for an event run concurrently (not serialised)</li>
+      <li class="fragment"><strong>Async emit</strong> &mdash; <code>emit</code> is <code>{.async: (raises: []).}</code>; same-thread dispatches via <code>asyncSpawn</code>, cross-thread via the ring + signal</li>
+      <li class="fragment"><strong>Ordering</strong> &mdash; per-target-thread FIFO; cross-thread ordering is per-target, not global</li>
+      <li class="fragment"><strong>Capacity knobs</strong> &mdash; <code>queueDepth</code>, <code>slabCapacity</code>, <code>maxPayloadBytes</code>, plus named <code>preset</code>s</li>
     </ul>
+  </section>
+
+  <!-- 6.9  Capacity & footprint tuning -->
+  <section>
+    <h2>Capacity, Footprint &amp; Perf</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <h3>Compile-time configuration</h3>
+        <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-10">
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
+  type Tick = object
+    seq*: uint64
+    payload*: seq[byte]
+
+RequestBroker(mt, queueDepth = 1024,
+                  responseSlots = 512,
+                  maxResponseBytes = 32768):
+  type Query = object
+    key*: string
+        </code></pre>
+
+        <div class="callout" style="margin-top:0.6em; font-size:0.78em;">
+          <p><strong>Resolution order:</strong> defaults &rarr; <code>preset = &hellip;</code> &rarr; individual kwargs (override the preset) &rarr; type-driven auto for any unset payload-size field. The compiler emits a <code>hint</code> showing resolved values + total reserved RAM.</p>
+        </div>
+
+        <div class="callout good" style="margin-top:0.5em; font-size:0.78em;">
+          <p><strong>Why it&rsquo;s faster:</strong> no per-send deep-copy, no GC touch on payloads &mdash; up to <strong>7.4&times; throughput</strong>, <strong>~270&times; lower latency</strong> (refc, 512&thinsp;B); ~11&times; lower latency on ORC.</p>
+        </div>
+      </div>
+
+      <div>
+        <h3>Built-in presets</h3>
+        <table style="font-size:0.72em; margin-top:0.3em;">
+          <thead>
+            <tr><th>Preset</th><th>Target</th><th>EVT idle RAM</th><th>REQ idle RAM</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>defaultBalanced</code></td>
+              <td>General purpose; same as omitting <code>preset</code></td>
+              <td>~1&thinsp;MB<br><small>1024 cells &times; 1&thinsp;KB</small></td>
+              <td>~70&thinsp;KB<br><small>64 cells + 256 reply slots</small></td>
+            </tr>
+            <tr>
+              <td><code>fastBurst</code></td>
+              <td>Bursty emit/request, small payloads &mdash; wide ring &amp; slab to absorb spikes</td>
+              <td>~2&thinsp;MB<br><small>8192 cells &times; 256&thinsp;B</small></td>
+              <td>~4.3&thinsp;MB<br><small>256 cells + 1024 &times; 4&thinsp;KB replies</small></td>
+            </tr>
+            <tr>
+              <td><code>largePayload</code></td>
+              <td>Infrequent traffic, big payloads (e.g. 64&thinsp;KB blobs)</td>
+              <td>~8&thinsp;MB<br><small>128 cells &times; 64&thinsp;KB</small></td>
+              <td>~18&thinsp;MB<br><small>32 &times; 64&thinsp;KB + 64 &times; 256&thinsp;KB</small></td>
+            </tr>
+            <tr>
+              <td><code>tinyFootprint</code></td>
+              <td>Embedded / memory-constrained; rare traffic only</td>
+              <td>~8&thinsp;KB<br><small>32 cells &times; 256&thinsp;B</small></td>
+              <td>~20&thinsp;KB<br><small>8 cells + 16 &times; 1&thinsp;KB replies</small></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn" style="margin-top:0.5em; font-size:0.78em;">
+          <p><strong>Trade-off:</strong> no more <code>Channel[T]</code> back-pressure &mdash; ring/slab overflow drops events or fails requests. Pick the preset (or override knobs) to match your burst budget.</p>
+        </div>
+      </div>
+    </div>
   </section>
 
 </section><!-- /Section 6 -->
@@ -1475,7 +1557,7 @@ OnFilterSubscribeEvent.emit(
   <section class="section-header">
     <div class="num">09</div>
     <h2 style="color:var(--logos-blue);">Broker FFI-API</h2>
-    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; C ABI &middot; C++ and Python wrappers</p>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; native C-ABI <em>or</em> CBOR &middot; stable C++ / Python / Rust / Go wrapper surface</p>
   </section>
 
   <!-- 9.1  The Concept -->
@@ -1526,7 +1608,7 @@ OnFilterSubscribeEvent.emit(
 
       <div>
         <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.45em; align-items:center; margin-top:0.6em;">
-          <div class="diag-box accent">Foreign App<br><small style="color:var(--logos-muted);">C / C++ / Python</small></div>
+          <div class="diag-box accent">Foreign App<br><small style="color:var(--logos-muted);">C / C++ / Python / Rust / Go</small></div>
           <div class="arrow">&harr;</div>
           <div class="diag-box">Generated ABI<br><small style="color:var(--logos-muted);">header + wrappers</small></div>
           <div class="arrow">&harr;</div>
@@ -1634,7 +1716,7 @@ when defined(BrokerFfiApi):
         </div>
 
         <div class="callout" style="margin-top:0.6em;">
-          <p><strong>Wrapper generation:</strong> from this one declaration set, the build emits <code>libmylib</code>, <code>mylib.h</code>, the C++ wrapper class, and optionally the Python ctypes wrapper.</p>
+          <p><strong>Wrapper generation:</strong> from this one declaration set, the build emits <code>libmylib</code>, <code>mylib.h</code>, and the C++ wrapper class — plus, opt-in, a Python ctypes module, a Rust Cargo crate, and a Go cgo module. All four high-level wrappers expose the same stable typed surface.</p>
         </div>
       </div>
     </div>
@@ -1693,6 +1775,120 @@ lib.shutdown();
     </div>
   </section>
 
+  <!-- 9.5b  Two ABI modes + wrapper parity -->
+  <section>
+    <h2>Two ABI Modes &middot; One Wrapper Surface</h2>
+
+    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
+      <div>
+        <h3>Pick the ABI shape at compile time</h3>
+        <table style="margin-top:0.4em; font-size:0.78em;">
+          <thead>
+            <tr><th>Mode</th><th>Compile flag</th><th>Surface</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Native C-ABI</strong></td>
+              <td><code>-d:BrokerFfiApiNative</code></td>
+              <td>Per-request typed C functions, per-event typed callback typedefs, owner-aware free helpers</td>
+            </tr>
+            <tr>
+              <td><strong>CBOR</strong></td>
+              <td><code>-d:BrokerFfiApiCBOR</code></td>
+              <td>Fixed 11-function ABI (<code>_call</code> / <code>_subscribe</code> / <code>_getSchema</code> &hellip;); payloads are CBOR blobs decoded inside the wrapper</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout" style="margin-top:0.7em;">
+          <p><strong>Same Nim sources, same wrappers.</strong> Switching mode rebuilds the library and the generated bindings — consumer code does not change.</p>
+        </div>
+      </div>
+
+      <div>
+        <h3>Stable wrapper surface across languages</h3>
+        <table style="margin-top:0.4em; font-size:0.78em;">
+          <thead>
+            <tr><th>Wrapper</th><th>Idiom</th><th>Native</th><th>CBOR</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>C++</td><td><code>Lib::request() -&gt; Result&lt;T&gt;</code>, lambdas with <code>Lib&amp; owner</code></td><td>&#10003;</td><td>&#10003;</td></tr>
+            <tr><td>Python</td><td>ctypes / cbor2; dataclasses, typed methods</td><td>&#10003;</td><td>&#10003;</td></tr>
+            <tr><td>Rust</td><td><code>Lib::request() -&gt; Result&lt;T,String&gt;</code>, <code>Drop</code>, <code>Arc&lt;dyn Fn&gt;</code> handlers</td><td>&#10003;</td><td>&#10003;</td></tr>
+            <tr><td>Go</td><td><code>(T, error)</code>, <code>Close()</code> + finalizer, handler maps under <code>sync.Mutex</code></td><td>&#10003;</td><td>&#10003;</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout good" style="margin-top:0.7em;">
+          <p><strong>Parity test harness:</strong> <code>typemappingtestlib</code> runs the same matrix (primitives, enums, distinct, <code>seq</code>, <code>array</code>, nested objects) through every wrapper in both modes &mdash; CI keeps the surface honest.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout warn" style="margin-top:0.7em;">
+      <p><strong>When to choose which:</strong> native gives the smallest call overhead and zero-copy scalars; CBOR gives a fixed ABI (no header churn when the API evolves), self-describing payloads, and a discovery API for tooling and plugins.</p>
+    </div>
+  </section>
+
+  <!-- 9.5c  Layered architecture diagram -->
+  <section>
+    <h2>Layered Architecture</h2>
+
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.72em; margin:0.2em 0 0.6em 0;">
+      One Nim source &rarr; choose a C ABI flavor at build time &rarr; wrappers expose <em>one</em> idiomatic surface per language, regardless of mode.
+    </p>
+
+    <!-- Row 1: Consumer apps -->
+    <div style="display:grid; grid-template-columns:repeat(6, 1fr); gap:0.4em; margin-top:0.3em;">
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">Nim app</div>
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">C app</div>
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">C++ app</div>
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">Python app</div>
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">Rust app</div>
+      <div class="diag-box" style="font-size:0.72em; padding:0.4em;">Go app</div>
+    </div>
+
+    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.2em 0;">&darr; &nbsp; consumer code unchanged across ABI modes &nbsp; &darr;</div>
+
+    <!-- Row 2: Wrappers (C++/Py/Rs/Go) — C consumes the .h directly -->
+    <div style="display:grid; grid-template-columns:1fr 1fr 4fr; gap:0.4em; align-items:stretch;">
+      <div class="diag-box" style="font-size:0.7em; padding:0.4em; opacity:0.55;">(Nim &rarr; brokers)</div>
+      <div class="diag-box" style="font-size:0.7em; padding:0.4em; opacity:0.55;">(C &rarr; .h)</div>
+      <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:0.4em;">
+        <div class="diag-box" style="background:#dbeafe; border-color:#1d4ed8; color:#1d4ed8; font-size:0.72em; padding:0.4em;">&lt;lib&gt;.hpp<br><small>C++ wrapper class</small></div>
+        <div class="diag-box" style="background:#dbeafe; border-color:#1d4ed8; color:#1d4ed8; font-size:0.72em; padding:0.4em;">&lt;lib&gt;.py<br><small>ctypes / cbor2</small></div>
+        <div class="diag-box" style="background:#dbeafe; border-color:#1d4ed8; color:#1d4ed8; font-size:0.72em; padding:0.4em;">&lt;lib&gt;_rs/<br><small>Rust crate</small></div>
+        <div class="diag-box" style="background:#dbeafe; border-color:#1d4ed8; color:#1d4ed8; font-size:0.72em; padding:0.4em;">&lt;lib&gt;_go/<br><small>Go module</small></div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.3em 0;">&darr; &nbsp; <strong>build-time choice of C ABI</strong> &nbsp; &darr;</div>
+
+    <!-- Row 3: Two ABI modes -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6em;">
+      <div class="diag-box" style="background:#fef3c7; border-color:#b45309; color:#b45309; font-size:0.78em; padding:0.5em;">
+        <strong>Native ABI</strong><br>
+        <small>typed C functions &middot; one export per request/event &middot; <em>&lt;lib&gt;.h</em></small>
+      </div>
+      <div class="diag-box" style="background:#fef3c7; border-color:#b45309; color:#b45309; font-size:0.78em; padding:0.5em;">
+        <strong>CBOR ABI</strong><br>
+        <small>fixed 11-function ABI &middot; CBOR-encoded payloads &middot; <em>&lt;lib&gt;.h</em> (CBOR shape)</small>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.3em 0;">&darr;</div>
+
+    <!-- Row 4: Nim library (single source) -->
+    <div class="diag-box green" style="font-size:0.78em; padding:0.6em;">
+      <strong>Nim Library &mdash; single source</strong><br>
+      <small><code>RequestBroker(API)</code> / <code>EventBroker(API)</code> / <code>registerBrokerLibrary</code> &nbsp;&rarr;&nbsp; generated runtime (lifecycle &middot; delivery thread &middot; processing thread) &nbsp;&rarr;&nbsp; MT brokers + chronos</small>
+    </div>
+
+    <div class="callout good" style="margin-top:0.5em;">
+      <p style="font-size:0.78em;"><strong>Invariant:</strong> 1 Nim source &middot; 1 C ABI per build &middot; 1 wrapper per language &middot; consumer code compiles unchanged against either build.</p>
+    </div>
+  </section>
+
   <!-- 9.6  Build flags -->
   <section>
     <h2>Build Flags That Enable the Feature</h2>
@@ -1701,7 +1897,10 @@ lib.shutdown();
       <div>
         <pre><code class="language-sh" data-trim>
 nim c \
-  -d:BrokerFfiApi \
+  -d:BrokerFfiApiNative \   # or -d:BrokerFfiApiCBOR
+  -d:BrokerFfiApiGenPy \    # opt-in: Python ctypes wrapper
+  -d:BrokerFfiApiGenRust \  # opt-in: Rust Cargo crate
+  -d:BrokerFfiApiGenGo \    # opt-in: Go cgo module
   --threads:on \
   --app:lib \
   --nimMainPrefix:mylib \
@@ -1711,18 +1910,19 @@ nim c \
         </code></pre>
 
         <div class="callout" style="margin-top:0.6em;">
-          <p>Add <code>-d:BrokerFfiApiGenPy</code> when you also want the generated Python wrapper module.</p>
+          <p>Pick one ABI mode — <code>-d:BrokerFfiApiNative</code> or <code>-d:BrokerFfiApiCBOR</code>. C and C++ headers are emitted in both; Python / Rust / Go are opt-in via <code>-d:BrokerFfiApiGen{Py,Rust,Go}</code>.</p>
         </div>
       </div>
 
       <div>
         <h3>Required knobs</h3>
         <ul>
-          <li><code>-d:BrokerFfiApi</code> enables the library generator path</li>
+          <li><code>-d:BrokerFfiApiNative</code> <em>or</em> <code>-d:BrokerFfiApiCBOR</code> selects the ABI mode</li>
           <li><code>--threads:on</code> enables the delivery and processing thread runtime</li>
           <li><code>--app:lib</code> builds a shared library instead of an executable</li>
           <li><code>--nimMainPrefix:mylib</code> must match <code>name: "mylib"</code> in <code>registerBrokerLibrary</code></li>
           <li><code>--mm:orc</code> or <code>--mm:refc</code> are the supported memory managers</li>
+          <li class="fragment">Wrapper opt-ins: <code>-d:BrokerFfiApiGenPy</code> / <code>GenRust</code> / <code>GenGo</code></li>
         </ul>
 
         <div class="callout good" style="margin-top:0.7em;">
@@ -1773,47 +1973,6 @@ nim c \
   </section>
 
 </section><!-- /Section 10 -->
-
-<!-- ══════════════════════════════════════════════════
-     SECTION 11 — OPPORTUNITIES (standalone)
-══════════════════════════════════════════════════ -->
-<section>
-
-  <!-- 11.1  Opportunities -->
-  <section>
-    <h2 style="color:var(--logos-green);">Opportunities!</h2>
-    <p style="color:var(--logos-muted); font-size:0.85em; margin-bottom:0.6em;">A natural extension point beyond the core broker runtime:</p>
-
-    <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
-      <div>
-        <div class="callout good">
-          <p><strong>Serializable by design:</strong> broker requests and events are plain structured data, which makes them a strong fit for explicit serialization formats.</p>
-        </div>
-
-        <ul style="font-size:0.82em; line-height:1.7; margin-top:0.7em;">
-          <li class="fragment">Encode broker payloads with CBOR, JSON, or Protobuf</li>
-          <li class="fragment">Reuse the same contract across process boundaries</li>
-          <li class="fragment">Treat the broker interface as a stable schema for plugins, RPC, or transport layers</li>
-        </ul>
-      </div>
-
-      <div>
-        <div class="diag-box accent" style="font-size:0.72em; padding:0.8em;">
-          Broker request / event type<br><br>
-          <span style="color:var(--logos-muted);">&darr; serialize &darr;</span><br><br>
-          JSON / CBOR / Protobuf<br><br>
-          <span style="color:var(--logos-muted);">&darr; transport or storage &darr;</span><br><br>
-          RPC &middot; plugin boundary &middot; cross-process API
-        </div>
-
-        <div class="fragment callout" style="margin-top:0.8em;">
-          <p>This is where brokers can evolve from an internal decoupling tool into a portable interface definition that survives beyond a single process.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-</section><!-- /Section 11 -->
 
 </div><!-- /.slides -->
 </div><!-- /.reveal -->
