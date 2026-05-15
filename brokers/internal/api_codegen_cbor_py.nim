@@ -85,6 +85,11 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return primPyHint(t)
+  if lower == "seq[byte]":
+    # CBOR major type 2 (byte string) decodes to Python `bytes`; mirror
+    # that on the wrapper side so `Option[seq[byte]]` inside an Option
+    # also resolves to `Optional[bytes]` rather than `Optional[List[int]]`.
+    return "bytes"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToPyHint(unwrapBracket(t, "seq"))
     return
@@ -138,6 +143,8 @@ proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
     return "0.0"
   else:
     discard
+  if lower == "seq[byte]":
+    return "b\"\""
   if lower.startsWith("seq[") or lower.startsWith("array["):
     return "field(default_factory=list)"
   if lower.startsWith("option["):
@@ -182,6 +189,11 @@ proc pyDecodeExpr(nimType, src: string): string {.compileTime.} =
     return "(int(" & src & ") if isinstance(" & src & ", int) else 0)"
   if t in ["float", "float32", "float64"]:
     return "(float(" & src & ") if isinstance(" & src & ", (int, float)) else 0.0)"
+  if lower == "seq[byte]":
+    # CBOR byte string → Python `bytes`. Accept the byte-string shape
+    # cbor2 produces directly, and tolerate the legacy list-of-int
+    # shape (e.g. when a sender emits major type 4 instead of 2).
+    return "(bytes(" & src & ") if " & src & " is not None else b\"\")"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = unwrapBracket(t, "seq")
     let raw = "(" & src & " or [])"
@@ -213,6 +225,13 @@ proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return src
+  if lower == "seq[byte]":
+    # cbor2 encodes Python `bytes` as CBOR byte string (major type 2),
+    # which is what the Nim provider expects. Tolerate list-of-int input
+    # by converting on the fly.
+    return
+      "(" & src & " if isinstance(" & src & ", (bytes, bytearray)) else bytes(" &
+        src & " or []))"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = unwrapBracket(t, "seq")
     return "[" & pyEncodeExpr(inner, "_x") & " for _x in (" & src & " or [])]"
