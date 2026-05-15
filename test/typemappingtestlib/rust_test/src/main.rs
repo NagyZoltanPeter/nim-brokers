@@ -15,7 +15,7 @@ mod lib;
 
 use lib::{Tag, Typemappingtestlib};
 #[cfg(feature = "cbor")]
-use lib::{KeyRange, TupleRow, ScanRequest, Result};
+use lib::KeyRange;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1420,24 +1420,35 @@ fn test_bytes_echo_request_empty() {
     lib.shutdown();
 }
 
-// ScanRequest STRUCTURAL probe — proves the Rust wrapper compiles with
-// the generated KeyRange / TupleRow / ScanRequest types and that
-// scan_request is callable with the expected signature. Round-trip is
-// NOT asserted: Nim-side cbor_serialization writes named tuples
-// positionally (CBOR array) while the wrapper struct expects a CBOR
-// map. That wire alignment is a follow-up codec task; the Nim CBOR
-// test exercises the round-trip in-language.
 #[cfg(feature = "cbor")]
-fn test_scan_request_types_emitted() {
+fn test_scan_request_forward() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
     let kr = KeyRange { startKey: "lo".to_string(), stopKey: "hi".to_string() };
-    check_eq!(&kr.startKey, &"lo".to_string());
-    let tr = TupleRow { key: "k".to_string(), payload: "p".to_string() };
-    let sr = ScanRequest { rows: vec![tr] };
-    check_eq!(sr.rows.len(), 1);
-    check_eq!(&sr.rows[0].key, &"k".to_string());
-    // Just ensure the method exists — don't actually call it.
-    let _f: fn(&Typemappingtestlib, String, KeyRange, bool) -> Result<ScanRequest> =
-        Typemappingtestlib::scan_request;
+    let r = lib.scan_request("scan".to_string(), kr, false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.rows.len(), 3);
+        check_eq!(&v.rows[0].key, &"0:lo".to_string());
+        check_eq!(&v.rows[2].key, &"2:lo".to_string());
+        check_eq!(&v.rows[0].payload, &"scan-row-0:hi".to_string());
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_scan_request_reverse() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let kr = KeyRange { startKey: "lo".to_string(), stopKey: "hi".to_string() };
+    let r = lib.scan_request("scan".to_string(), kr, true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.rows.len(), 3);
+        check_eq!(&v.rows[0].key, &"2:lo".to_string());
+        check_eq!(&v.rows[2].key, &"0:lo".to_string());
+    }
+    lib.shutdown();
 }
 
 fn test_obj_seq_result_empty() {
@@ -2592,7 +2603,8 @@ fn main() {
         run_test("test_opt_seq_absent", test_opt_seq_absent);
         run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
         run_test("test_bytes_echo_request_empty", test_bytes_echo_request_empty);
-        run_test("test_scan_request_types_emitted", test_scan_request_types_emitted);
+        run_test("test_scan_request_forward", test_scan_request_forward);
+        run_test("test_scan_request_reverse", test_scan_request_reverse);
     }
     run_test("test_obj_seq_result_empty", test_obj_seq_result_empty);
     run_test("test_obj_seq_result_length", test_obj_seq_result_length);

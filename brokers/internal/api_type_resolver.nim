@@ -486,6 +486,12 @@ macro autoRegisterApiType*(T: typed): untyped =
       if not isTypeRegistered(nestedName) and not isNimPrimitive(nestedName):
         result.add(newCall(ident("autoRegisterApiType"), nestedSym))
     registerFromFieldTuples(typeName, tupleFields)
+    # Bind a map-shaped CBOR encoder/decoder so the wire matches the
+    # named struct that wrappers emit for the same tuple type. The
+    # default `write[T: tuple]` in cbor_serialization writes positional
+    # CBOR arrays which decode wrappers reject as "expected map".
+    when defined(BrokerFfiApiCBOR):
+      result.add(newCall(ident("bindCborTupleMap"), actualSym))
     return result
 
   # Object types — existing behavior

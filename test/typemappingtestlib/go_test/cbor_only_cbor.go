@@ -62,22 +62,33 @@ func test_bytes_echo_request_empty() {
 	lib.Close()
 }
 
-// ScanRequest STRUCTURAL probe — proves the Go wrapper compiled with
-// the generated KeyRange / TupleRow / ScanRequest types and that
-// ScanRequest is a method on the lib. Round-trip is NOT asserted: Nim
-// cbor_serialization writes named tuples positionally (CBOR array)
-// while the wrapper struct expects a CBOR map. The keyword-escape
-// (`range` → `rangeArg`) is verified by virtue of the file compiling
-// with the generated method signature.
-func test_scan_request_types_emitted() {
+// ScanRequest round-trip — exercises tuple-as-struct (TupleRow),
+// seq[Tuple] (rows), and object-as-input-param (KeyRange). The
+// keyword-escape (`range` → `rangeArg`) is implicitly verified by
+// the generated method signature.
+func test_scan_request_forward() {
+	lib := newLib()
+	lib.CreateContext()
 	kr := typemappingtestlib.KeyRange{StartKey: "lo", StopKey: "hi"}
-	checkEq(kr.StartKey, "lo", "kr.StartKey")
-	tr := typemappingtestlib.TupleRow{Key: "k", Payload: "p"}
-	sr := typemappingtestlib.ScanRequest{Rows: []typemappingtestlib.TupleRow{tr}}
-	checkEq(len(sr.Rows), 1, "row count")
-	checkEq(sr.Rows[0].Key, "k", "row[0].Key")
-	// Reference the method without calling it.
-	_ = (&typemappingtestlib.Typemappingtestlib{}).ScanRequest
+	r, err := lib.ScanRequest("scan", kr, false)
+	check(err == nil, "is_ok")
+	checkEq(len(r.Rows), 3, "row count")
+	checkEq(r.Rows[0].Key, "0:lo", "row[0].key")
+	checkEq(r.Rows[2].Key, "2:lo", "row[2].key")
+	checkEq(r.Rows[0].Payload, "scan-row-0:hi", "row[0].payload")
+	lib.Close()
+}
+
+func test_scan_request_reverse() {
+	lib := newLib()
+	lib.CreateContext()
+	kr := typemappingtestlib.KeyRange{StartKey: "lo", StopKey: "hi"}
+	r, err := lib.ScanRequest("scan", kr, true)
+	check(err == nil, "is_ok")
+	checkEq(len(r.Rows), 3, "row count")
+	checkEq(r.Rows[0].Key, "2:lo", "row[0].key")
+	checkEq(r.Rows[2].Key, "0:lo", "row[2].key")
+	lib.Close()
 }
 
 func runCborOnly() {
@@ -86,5 +97,6 @@ func runCborOnly() {
 	runTest("test_opt_seq_absent", test_opt_seq_absent)
 	runTest("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip)
 	runTest("test_bytes_echo_request_empty", test_bytes_echo_request_empty)
-	runTest("test_scan_request_types_emitted", test_scan_request_types_emitted)
+	runTest("test_scan_request_forward", test_scan_request_forward)
+	runTest("test_scan_request_reverse", test_scan_request_reverse)
 }

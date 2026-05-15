@@ -1227,25 +1227,37 @@ static void test_opt_seq_absent() {
     lib.shutdown();
 }
 
-// ScanRequest STRUCTURAL probe — proves the C++ wrapper compiles with the
-// generated TupleRow / KeyRange / ScanRequest types and that the
-// scanRequest() method exists with the expected signature. The actual
-// round-trip is NOT asserted because Nim-side `cbor_serialization` emits
-// named tuples positionally (CBOR array) while the wrapper struct expects
-// a CBOR map — that wire alignment is a follow-up codec task. The Nim
-// CBOR test exercises the round-trip successfully (tuple ↔ tuple decode
-// works in-language).
-static void test_scan_request_struct_compiles() {
+// ScanRequest round-trip — exercises tuple-as-struct (TupleRow), seq[Tuple]
+// (rows), and object-as-input-param (KeyRange) end-to-end. With the per-
+// tuple `bindCborTupleMap` overrides on the Nim side, named tuples
+// serialise as CBOR maps so the wrapper-side struct decoders are happy.
+static void test_scan_request_forward() {
+    Typemappingtestlib lib;
+    lib.createContext();
     KeyRange kr;
     kr.startKey = "lo";
     kr.stopKey = "hi";
-    TupleRow tr;
-    tr.key = "k";
-    tr.payload = "p";
-    ScanRequest sr;
-    sr.rows = std::vector<TupleRow>{tr};
-    CHECK_EQ(sr.rows.size(), static_cast<size_t>(1));
-    CHECK_EQ(sr.rows[0].key, std::string("k"));
+    auto r = lib.scanRequest("scan", kr, false);
+    CHECK(r.isOk());
+    CHECK_EQ(r->rows.size(), static_cast<size_t>(3));
+    CHECK_EQ(r->rows[0].key, std::string("0:lo"));
+    CHECK_EQ(r->rows[2].key, std::string("2:lo"));
+    CHECK_EQ(r->rows[0].payload, std::string("scan-row-0:hi"));
+    lib.shutdown();
+}
+
+static void test_scan_request_reverse() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    KeyRange kr;
+    kr.startKey = "lo";
+    kr.stopKey = "hi";
+    auto r = lib.scanRequest("scan", kr, true);
+    CHECK(r.isOk());
+    CHECK_EQ(r->rows.size(), static_cast<size_t>(3));
+    CHECK_EQ(r->rows[0].key, std::string("2:lo"));
+    CHECK_EQ(r->rows[2].key, std::string("0:lo"));
+    lib.shutdown();
 }
 #endif
 
@@ -2278,7 +2290,8 @@ int main() {
     RUN(test_obj_as_param);
     RUN(test_opt_seq_present);
     RUN(test_opt_seq_absent);
-    RUN(test_scan_request_struct_compiles);
+    RUN(test_scan_request_forward);
+    RUN(test_scan_request_reverse);
 #endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);

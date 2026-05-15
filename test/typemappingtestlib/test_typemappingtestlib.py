@@ -441,24 +441,28 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.first, -1)
         self.assertEqual(r.value.last, -1)
 
-    def test_scan_request_types_emitted(self):
-        # STRUCTURAL probe — proves the Python wrapper emitted KeyRange,
-        # TupleRow, and ScanRequest dataclasses with the expected fields
-        # and that scan_request is a callable method. The actual round-trip
-        # is NOT asserted because Nim-side cbor_serialization writes named
-        # tuples positionally (CBOR array) while the wrapper dataclass
-        # expects a CBOR map. That wire alignment is a follow-up codec task;
-        # the Nim CBOR test exercises the round-trip in-language.
+    def test_scan_request_forward(self):
         if _BUILD_DIR_NAME != "build_cbor":
             self.skipTest("scan_request only registered in CBOR build")
-        from typemappingtestlib import KeyRange, TupleRow, ScanRequest
+        from typemappingtestlib import KeyRange
         kr = KeyRange(startKey="lo", stopKey="hi")
-        self.assertEqual(kr.startKey, "lo")
-        tr = TupleRow(key="k", payload="p")
-        sr = ScanRequest(rows=[tr])
-        self.assertEqual(len(sr.rows), 1)
-        self.assertEqual(sr.rows[0].key, "k")
-        self.assertTrue(callable(getattr(self.lib, "scan_request")))
+        r = self.lib.scan_request("scan", kr, False)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(len(r.value.rows), 3)
+        self.assertEqual(r.value.rows[0].key, "0:lo")
+        self.assertEqual(r.value.rows[2].key, "2:lo")
+        self.assertEqual(r.value.rows[0].payload, "scan-row-0:hi")
+
+    def test_scan_request_reverse(self):
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("scan_request only registered in CBOR build")
+        from typemappingtestlib import KeyRange
+        kr = KeyRange(startKey="lo", stopKey="hi")
+        r = self.lib.scan_request("scan", kr, True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(len(r.value.rows), 3)
+        self.assertEqual(r.value.rows[0].key, "2:lo")
+        self.assertEqual(r.value.rows[2].key, "0:lo")
 
 
 # ---------------------------------------------------------------------------
