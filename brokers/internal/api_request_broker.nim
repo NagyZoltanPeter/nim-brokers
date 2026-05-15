@@ -565,23 +565,37 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             result.`fName` = `objIdent`.`fName`
         )
       elif isOptionType(fType):
-        # Phase E1 (scalar): emit `if v.x.isSome: c.x = v.x.get; c.x_has_value =
-        # true else: c.x = default(T); c.x_has_value = false`. The default
-        # value when absent is whatever Nim's default(T) returns — for the
-        # C side it doesn't matter what's in the value field when has_value
-        # is false; readers must consult has_value first.
+        # Encode `Option[T]` into the (`<name>: T`, `<name>_has_value: bool`)
+        # pair. When absent, the value side is set to the C default (zero
+        # for scalars, nil for cstring/pointers); readers MUST consult
+        # has_value first.
         let hasValueIdent = ident($fName & optionHasValueSuffix)
         let inner = optionInnerType(fType)
-        let cInnerType = toCFieldType(inner)
-        encodeBody.add(
-          quote do:
-            if `objIdent`.`fName`.isSome():
-              result.`fName` = cast[`cInnerType`](`objIdent`.`fName`.get())
-              result.`hasValueIdent` = true
-            else:
-              result.`fName` = default(`cInnerType`)
-              result.`hasValueIdent` = false
-        )
+        if isCStringType(inner):
+          # Option[string] (E2a): allocate a heap-owned copy on Some, nil on
+          # None. Memory is reclaimed in the generated free function (see
+          # the matching Option-string branch in the free body below).
+          hasSeqFields = true
+          encodeBody.add(
+            quote do:
+              if `objIdent`.`fName`.isSome():
+                result.`fName` = allocCStringCopy(`objIdent`.`fName`.get())
+                result.`hasValueIdent` = true
+              else:
+                result.`fName` = nil
+                result.`hasValueIdent` = false
+          )
+        else:
+          let cInnerType = toCFieldType(inner)
+          encodeBody.add(
+            quote do:
+              if `objIdent`.`fName`.isSome():
+                result.`fName` = cast[`cInnerType`](`objIdent`.`fName`.get())
+                result.`hasValueIdent` = true
+              else:
+                result.`fName` = default(`cInnerType`)
+                result.`hasValueIdent` = false
+          )
       else:
         encodeBody.add(
           quote do:
@@ -713,6 +727,18 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               if not `rIdent`.`fName`.isNil:
                 freeCString(`rIdent`.`fName`)
           )
+        elif isOptionType(fType):
+          # Option[T]: only the Option[string] case allocates (cstring
+          # via allocCStringCopy in the encode body); free it here when
+          # has_value is true. Other inner types are POD — no cleanup.
+          let inner = optionInnerType(fType)
+          if isCStringType(inner):
+            let hasValueIdent = ident($fName & optionHasValueSuffix)
+            freeBody.add(
+              quote do:
+                if `rIdent`.`hasValueIdent` and not `rIdent`.`fName`.isNil:
+                  freeCString(`rIdent`.`fName`)
+            )
         # enum, primitive, array[N,T] with primitive elements: nothing to free
 
     result.add(
@@ -1443,6 +1469,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           s.add(I & "if c." & fName & optionHasValueSuffix & ":\n")
           if isEnumNode(inner):
             s.add(I & "    " & fName & " = " & $inner & "(c." & fName & ")\n")
+          elif isCStringType(inner):
+            # cstring → str; tolerate nil even when has_value is true
+            # (encode contract guarantees the pointer is set, but the
+            # decode is defensive).
+            s.add(
+              I & "    " & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
+                " else \"\"\n"
+            )
           else:
             s.add(I & "    " & fName & " = c." & fName & "\n")
           s.add(I & "else:\n")
@@ -1924,10 +1958,26 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 result.add("            _r." & fName & " = c." & fName & ".to_vec();\n")
               elif isOptionType(fType):
                 # Option[T]: read sibling has_value flag → Option<T>.
-                result.add(
-                  "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
-                    " { Some(c." & fName & ") } else { None };\n"
-                )
+                let inner = optionInnerType(fType)
+                if isCStringType(inner):
+                  # cstring → String via CStr::from_ptr (defensive vs nil
+                  # even though the encode contract guarantees non-nil
+                  # when has_value is true).
+                  result.add(
+                    "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
+                      " {\n"
+                  )
+                  result.add(
+                    "                if c." & fName &
+                      ".is_null() { Some(String::new()) } else { Some(::std::ffi::CStr::from_ptr(c." &
+                      fName & ").to_string_lossy().into_owned()) }\n"
+                  )
+                  result.add("            } else { None };\n")
+                else:
+                  result.add(
+                    "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
+                      " { Some(c." & fName & ") } else { None };\n"
+                  )
               else:
                 result.add("            _r." & fName & " = c." & fName & ";\n")
             result.add("            " & rsFreeFuncName & "(&mut c as *mut _);\n")
@@ -2208,10 +2258,20 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             elif isOptionType(fType):
               # Option[T]: read sibling has_value flag → *T (nil = absent).
               let inner = optionInnerType(fType)
-              let goInner = nimTypeToGo(inner)
               goConvertCode.add("\tif bool(r." & fName & optionHasValueSuffix & ") {\n")
-              goConvertCode.add("\t\t_v := " & goInner & "(r." & fName & ")\n")
-              goConvertCode.add("\t\tout." & exName & " = &_v\n")
+              if isCStringType(inner):
+                # cstring → string via C.GoString. Defensive against nil
+                # even when has_value is true (encode contract guarantees
+                # non-nil here).
+                goConvertCode.add("\t\tvar _v string\n")
+                goConvertCode.add(
+                  "\t\tif r." & fName & " != nil { _v = C.GoString(r." & fName & ") }\n"
+                )
+                goConvertCode.add("\t\tout." & exName & " = &_v\n")
+              else:
+                let goInner = nimTypeToGo(inner)
+                goConvertCode.add("\t\t_v := " & goInner & "(r." & fName & ")\n")
+                goConvertCode.add("\t\tout." & exName & " = &_v\n")
               goConvertCode.add("\t}\n")
             else:
               # Plain scalar field. Convert via Go primitive type conversion.

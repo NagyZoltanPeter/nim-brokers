@@ -1238,6 +1238,28 @@ static void test_opt_scalar_absent() {
     lib.shutdown();
 }
 
+// Variable-shape Option probe (Phase E2a) — Option[string] crosses the
+// C ABI as `<name>: char*` + `<name>_has_value: bool` (uniform layout).
+// Wrapper exposes it as std::optional<std::string>.
+static void test_opt_string_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optStringRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(*r->value, std::string("hello"));
+    lib.shutdown();
+}
+
+static void test_opt_string_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optStringRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
 // Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
 // into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
 // where the field is missing decodes cleanly with `has_value() == false`.
@@ -2311,6 +2333,8 @@ int main() {
     RUN(test_obj_seq_param_string_encoding);
     RUN(test_opt_scalar_present);
     RUN(test_opt_scalar_absent);
+    RUN(test_opt_string_present);
+    RUN(test_opt_string_absent);
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
     RUN(test_opt_seq_present);

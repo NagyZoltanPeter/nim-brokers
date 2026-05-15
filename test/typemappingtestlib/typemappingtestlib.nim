@@ -203,6 +203,17 @@ RequestBroker(API):
 
   proc signature*(present: bool): Future[Result[OptScalarRequest, string]] {.async.}
 
+## OptStringRequest — Phase E2a, variable-shape Option (string). At the C
+## ABI the field expands to `value: char*` + `value_has_value: bool`.
+## Layout X is uniform: the bool is always emitted even though `nullptr`
+## could encode absent for pointer-shaped inner types — readers MUST
+## consult `value_has_value` first; `value` is undefined when absent.
+RequestBroker(API):
+  type OptStringRequest* = object
+    value*: Option[string]
+
+  proc signature*(present: bool): Future[Result[OptStringRequest, string]] {.async.}
+
 ## Distinct-over-seq probe. Registered by the type resolver to keep the
 ## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
 ## time, but NOT used in any active broker signature: per-wrapper
@@ -567,6 +578,15 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptScalarRequest(value: some(42'i32)))
       else:
         return ok(OptScalarRequest(value: none(int32))),
+  )
+
+  discard OptStringRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptStringRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptStringRequest(value: some("hello")))
+      else:
+        return ok(OptStringRequest(value: none(string))),
   )
 
   when defined(BrokerFfiApiCBOR):

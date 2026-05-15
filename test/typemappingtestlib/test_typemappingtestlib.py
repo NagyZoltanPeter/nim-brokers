@@ -412,6 +412,17 @@ class TestSeqObject(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertIsNone(r.value.value)
 
+    def test_opt_string_present(self):
+        # Phase E2a — Option[string]. Native + CBOR.
+        r = self.lib.opt_string_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.value, "hello")
+
+    def test_opt_string_absent(self):
+        r = self.lib.opt_string_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
     def test_opt_seq_present(self):
         # Option[seq[byte]] probe. Native codegen rejects Option[T] outright
         # ("Generic types other than seq[T] and array[N,T] are not yet
