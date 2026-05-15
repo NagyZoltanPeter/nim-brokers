@@ -1204,14 +1204,17 @@ static void test_opt_seq_present() {
     lib.shutdown();
 }
 
-// NOTE: `test_opt_seq_absent` is intentionally OMITTED here. The CBOR C++
-// wrapper decode currently fails when `Option[seq[byte]]` is `none()` —
-// jsoncons `JSONCONS_ALL_MEMBER_TRAITS` treats the field as required and
-// the decode rejects the payload that Nim emits for `none`. Other wrappers
-// (Python/Rust/Go) handle the absent case correctly. Tracked under the
-// "any Option[T]" task — wrapper trait macro must switch to N_MEMBER_TRAITS
-// (or per-field optional registration) for fields whose Nim type is
-// `Option[T]`.
+// Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
+// into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
+// where the field is missing decodes cleanly with `has_value() == false`.
+static void test_opt_seq_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optSeqRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
 
 // ScanRequest STRUCTURAL probe — proves the C++ wrapper compiles with the
 // generated TupleRow / KeyRange / ScanRequest types and that the
@@ -2263,7 +2266,7 @@ int main() {
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
     RUN(test_opt_seq_present);
-    // test_opt_seq_absent — see note above the omitted definition.
+    RUN(test_opt_seq_absent);
     RUN(test_scan_request_struct_compiles);
 #endif
     RUN(test_obj_seq_result_empty);

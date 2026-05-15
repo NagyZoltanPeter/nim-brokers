@@ -256,22 +256,58 @@ proc emitCppStructFields*(h: var string, entry: ApiTypeEntry): bool {.compileTim
       h.add("  " & cppType & " " & f.name & "{};\n")
 
 proc emitMemberTraitsMacro*(
-    h: var string, qualifiedName: string, fieldNames: seq[string]
+    h: var string,
+    qualifiedName: string,
+    typeName: string,
+    fieldNames: seq[string],
 ) {.compileTime.} =
-  ## Emit `JSONCONS_ALL_MEMBER_TRAITS(<qualifiedName>, f1, f2, ...)`.
+  ## Emit a JSONCONS member-traits macro for `<qualifiedName>`.
   ##
-  ## Per jsoncons documentation, these macros generate partial
-  ## specialisations of `jsoncons::json_type_traits` and must be invoked
-  ## at a namespace scope that encloses `jsoncons` — in practice, global
-  ## scope outside the user's namespace, with the type fully qualified.
-  ## Empty structs skip the macro entirely; jsoncons handles them
+  ## When the registered struct contains any `Option[T]` field, switch
+  ## from the `_ALL_` flavour (every member required) to the `_N_`
+  ## flavour with `N = required.len`, listing required fields first
+  ## then optional ones. Without this split, decoding a payload where
+  ## an `Option` field is `none` (no key on the wire) fails with
+  ## `Key 'X' not found`.
+  ##
+  ## Per jsoncons docs, these macros generate partial specialisations
+  ## of `jsoncons::json_type_traits` and must be invoked at namespace
+  ## scope enclosing `jsoncons` — i.e. global scope, type fully
+  ## qualified. Empty structs are skipped; jsoncons handles those
   ## implicitly when nested via Option fields.
   if fieldNames.len == 0:
     return
-  h.add("JSONCONS_ALL_MEMBER_TRAITS(" & qualifiedName)
-  for n in fieldNames:
-    h.add(", " & n)
-  h.add(")\n")
+
+  var required: seq[string] = @[]
+  var optional: seq[string] = @[]
+  if isTypeRegistered(typeName):
+    let entry = lookupTypeEntry(typeName)
+    for n in fieldNames:
+      var isOption = false
+      for f in entry.fields:
+        if f.name == n:
+          if f.nimType.toLowerAscii().startsWith("option["):
+            isOption = true
+          break
+      if isOption:
+        optional.add(n)
+      else:
+        required.add(n)
+  else:
+    required = fieldNames
+
+  if optional.len == 0:
+    h.add("JSONCONS_ALL_MEMBER_TRAITS(" & qualifiedName)
+    for n in required:
+      h.add(", " & n)
+    h.add(")\n")
+  else:
+    h.add("JSONCONS_N_MEMBER_TRAITS(" & qualifiedName & ", " & $required.len)
+    for n in required:
+      h.add(", " & n)
+    for n in optional:
+      h.add(", " & n)
+    h.add(")\n")
 
 proc emitEnvelopeTraits*(h: var string, qualifiedName: string) {.compileTime.} =
   ## Emit the JSONCONS macro for `<libname>::<Type>Envelope`. Both fields
@@ -699,11 +735,15 @@ proc generateCborCppHeaderFile*(
     h.add("} // namespace jsoncons\n\n")
 
   for (name, fields) in payloadFields:
-    emitMemberTraitsMacro(h, libName & "::" & name, fields)
+    emitMemberTraitsMacro(h, libName & "::" & name, name, fields)
   for envName in envelopeNames:
     emitEnvelopeTraits(h, libName & "::" & envName)
   for (name, fields) in argsFields:
-    emitMemberTraitsMacro(h, libName & "::" & name, fields)
+    # Args structs aren't in the public registry under their `<Method>Args`
+    # synthesised name; the loop falls through to `required = fieldNames`
+    # and behaves identically to the previous _ALL_ emission. Pass the
+    # name anyway so future arg-side Option support flips on for free.
+    emitMemberTraitsMacro(h, libName & "::" & name, name, fields)
   if payloadFields.len > 0 or envelopeNames.len > 0 or argsFields.len > 0:
     h.add("\n")
 
