@@ -428,6 +428,25 @@ class TestSeqObject(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertIsNone(r.value.value)
 
+    def test_scan_request_types_emitted(self):
+        # STRUCTURAL probe — proves the Python wrapper emitted KeyRange,
+        # TupleRow, and ScanRequest dataclasses with the expected fields
+        # and that scan_request is a callable method. The actual round-trip
+        # is NOT asserted because Nim-side cbor_serialization writes named
+        # tuples positionally (CBOR array) while the wrapper dataclass
+        # expects a CBOR map. That wire alignment is a follow-up codec task;
+        # the Nim CBOR test exercises the round-trip in-language.
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("scan_request only registered in CBOR build")
+        from typemappingtestlib import KeyRange, TupleRow, ScanRequest
+        kr = KeyRange(startKey="lo", stopKey="hi")
+        self.assertEqual(kr.startKey, "lo")
+        tr = TupleRow(key="k", payload="p")
+        sr = ScanRequest(rows=[tr])
+        self.assertEqual(len(sr.rows), 1)
+        self.assertEqual(sr.rows[0].key, "k")
+        self.assertTrue(callable(getattr(self.lib, "scan_request")))
+
 
 # ---------------------------------------------------------------------------
 # Events

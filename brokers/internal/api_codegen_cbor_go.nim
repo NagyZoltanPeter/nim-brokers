@@ -94,7 +94,9 @@ proc nimTypeToGoCborHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      return primGoHint(resolveUnderlyingType(t))
+      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
+      # `distinct seq[byte]` → `[]byte` rather than `""`).
+      return nimTypeToGoCborHint(resolveUnderlyingType(t))
   ""
 
 proc isGoCborMappable*(nimType: string): bool {.compileTime.} =
@@ -103,6 +105,22 @@ proc isGoCborMappable*(nimType: string): bool {.compileTime.} =
 proc goExportedField*(name: string): string {.compileTime.} =
   if name.len > 0 and name[0] >= 'a' and name[0] <= 'z':
     chr(ord(name[0]) - 32) & name[1 ..^ 1]
+  else:
+    name
+
+const goReservedWords = [
+  "break", "case", "chan", "const", "continue", "default", "defer", "else",
+  "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
+  "package", "range", "return", "select", "struct", "switch", "type", "var",
+]
+
+proc goSafeParam*(name: string): string {.compileTime.} =
+  ## Returns a Go-legal local identifier — appends `Arg` suffix when the
+  ## Nim parameter name collides with a Go reserved keyword (e.g.
+  ## `range` → `rangeArg`, `type` → `typeArg`). The CBOR wire field is
+  ## emitted from the original name, so wire compatibility is preserved.
+  if name in goReservedWords:
+    name & "Arg"
   else:
     name
 
@@ -439,7 +457,7 @@ proc generateCborGoFile*(
       # makes Go report "Priority is not a type" inside the args struct
       # because the parameter shadows the type in lookup).
       argsStructFields.add("\t\t" & exN & " " & hType & " `cbor:\"" & n & "\"`\n")
-      argsAssign.add("\t\t" & exN & ": " & n & ",\n")
+      argsAssign.add("\t\t" & exN & ": " & goSafeParam(n) & ",\n")
       firstNonZero = true
     g.add("func (l *" & className & ") " & methodName & "(")
     var firstP = true
@@ -448,7 +466,7 @@ proc generateCborGoFile*(
       let hType = if h.len > 0: h else: "any"
       if not firstP:
         g.add(", ")
-      g.add(n & " " & hType)
+      g.add(goSafeParam(n) & " " & hType)
       firstP = false
     g.add(") (" & respType & ", error) {\n")
     if firstNonZero:

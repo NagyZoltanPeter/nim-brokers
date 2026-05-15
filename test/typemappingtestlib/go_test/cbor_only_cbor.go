@@ -38,8 +38,27 @@ func test_opt_seq_absent() {
 	lib.Close()
 }
 
+// ScanRequest STRUCTURAL probe — proves the Go wrapper compiled with
+// the generated KeyRange / TupleRow / ScanRequest types and that
+// ScanRequest is a method on the lib. Round-trip is NOT asserted: Nim
+// cbor_serialization writes named tuples positionally (CBOR array)
+// while the wrapper struct expects a CBOR map. The keyword-escape
+// (`range` → `rangeArg`) is verified by virtue of the file compiling
+// with the generated method signature.
+func test_scan_request_types_emitted() {
+	kr := typemappingtestlib.KeyRange{StartKey: "lo", StopKey: "hi"}
+	checkEq(kr.StartKey, "lo", "kr.StartKey")
+	tr := typemappingtestlib.TupleRow{Key: "k", Payload: "p"}
+	sr := typemappingtestlib.ScanRequest{Rows: []typemappingtestlib.TupleRow{tr}}
+	checkEq(len(sr.Rows), 1, "row count")
+	checkEq(sr.Rows[0].Key, "k", "row[0].Key")
+	// Reference the method without calling it.
+	_ = (&typemappingtestlib.Typemappingtestlib{}).ScanRequest
+}
+
 func runCborOnly() {
 	runTest("test_obj_as_param", test_obj_as_param)
 	runTest("test_opt_seq_present", test_opt_seq_present)
 	runTest("test_opt_seq_absent", test_opt_seq_absent)
+	runTest("test_scan_request_types_emitted", test_scan_request_types_emitted)
 }

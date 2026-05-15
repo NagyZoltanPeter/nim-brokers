@@ -216,27 +216,30 @@ when defined(BrokerFfiApiCBOR):
 ## Required to enable: extend `resolveAliasBase` (and the symmetric path
 ## in `collectNestedTypeNodes`) to handle nnkBracketExpr underlyings.
 ## That is (b)-scope codegen work, not part of this probe pass.
-## Probe block — currently DISABLED at the broker level, kept here so the
-## next codegen pass (tuple-as-struct + native Option[T]) can flip the
-## `when defined(BrokerFfiApiCBOR)` switch back on once the wrappers can
-## emit a typed `seq[TupleRow]`. The type aliases themselves DO compile —
-## the type resolver now handles `distinct seq[byte]` (api_type_resolver
-## `$base` → `repr` fix) and the MT codec routes distincts through their
-## base. What still trips wrappers:
-##   - Rust CBOR emits `Vec<serde_cbor_value::Value>` placeholder for
-##     `seq[TupleRow]` (crate not declared); needs tuple→struct codegen.
-##   - C++/Py/Go CBOR emit "TODO: Nim type 'seq[TupleRow]' not yet
-##     mappable" stubs; same root cause.
-type
-  Key* = distinct seq[byte]
+## Distinct-over-seq probe. Registered by the type resolver but NOT used
+## in any active broker signature: each wrapper would need byte-string
+## tagging on the wire side (e.g. Rust `#[serde(with = "serde_bytes")]`,
+## jsoncons byte-string trait, cbor2 bytes coercion in Python) before
+## a round-trip with `Key`-typed fields can succeed. Tracked separately
+## from tuple-as-struct support. The type still appears in
+## `gApiTypeRegistry` as an `atkDistinct` entry so the resolver fix is
+## kept exercised at compile time.
+type Key* {.used.} = distinct seq[byte]
 
-  KeyRange* = object
-    start*: Key
-    stop*: Key ## exclusive; an empty `stop` means "no upper bound"
+## KeyRange — plain object input param. Object-as-input-param is
+## CBOR-only (see ObjParamRequest gating note above). Uses `string`
+## rather than `seq[byte]` to keep the wire format uniformly text-string
+## across every wrapper (per-wrapper byte-string handling for inbound
+## binary fields is a follow-up task).
+type KeyRange* = object
+  startKey*: string ## inclusive lower bound
+  stopKey*: string ## exclusive upper bound; empty = unbounded
 
-  TupleRow* = tuple[key: Key, payload: seq[byte]]
+## TupleRow — named tuple alias. Per agreed Option (B) the codegen
+## emits this as a struct with the same field names in every wrapper.
+type TupleRow* = tuple[key: string, payload: string]
 
-when false and defined(BrokerFfiApiCBOR):
+when defined(BrokerFfiApiCBOR):
   RequestBroker(API):
     type ScanRequest* = object
       rows*: seq[TupleRow]
@@ -575,9 +578,26 @@ proc setupProviders(ctx: BrokerContext) =
           return ok(OptSeqRequest(value: none(seq[byte]))),
     )
 
-    # ScanRequest provider intentionally omitted — see `when false:` block
-    # above for the reason (api_type_resolver crash on distinct-over-seq).
-    discard
+    # ScanRequest provider — exercises distinct-over-seq (Key), tuple
+    # (TupleRow → struct), seq[Tuple] (rows), and object-as-param
+    # (KeyRange) in one round-trip.
+    discard ScanRequest.setProvider(
+      ctx,
+      proc(
+          category: string, range: KeyRange, reverse: bool
+      ): Future[Result[ScanRequest, string]] {.closure, async.} =
+        var rows: seq[TupleRow] = @[]
+        for i in 0 ..< 3:
+          let k = $i & ":" & range.startKey
+          let p = category & "-row-" & $i & ":" & range.stopKey
+          rows.add((key: k, payload: p))
+        if reverse:
+          var rev: seq[TupleRow] = @[]
+          for i in countdown(rows.len - 1, 0):
+            rev.add(rows[i])
+          rows = rev
+        return ok(ScanRequest(rows: rows)),
+    )
 
   # No probe providers — see "Probe negatives" comment above for why each
   # of array[N, Object] / array[N, string] / seq[Object<seq>] is omitted.

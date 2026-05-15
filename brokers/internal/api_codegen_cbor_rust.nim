@@ -108,7 +108,9 @@ proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      return primRustHint(resolveUnderlyingType(t))
+      # Recurse via outer mapper so distinct/alias over compound types
+      # (e.g. `distinct seq[byte]`) maps to `Vec<u8>` rather than the "" fallback.
+      return nimTypeToRustHint(resolveUnderlyingType(t))
   ""
 
 proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =

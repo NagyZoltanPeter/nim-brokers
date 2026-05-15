@@ -120,6 +120,80 @@ proc extractEnumValues(sym: NimNode): seq[(string, int)] {.compileTime.} =
     else:
       discard
 
+const tuplePositionalNames* =
+  ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth"]
+  ## Synthesised field names for unnamed positional tuple elements.
+  ## Tuples with more than 9 positional elements are rejected by the FFI
+  ## generator — wrap them in a named `object` instead.
+
+proc extractFieldsFromTupleSym(sym: NimNode): seq[(string, string)] {.compileTime.} =
+  ## Extract `(fieldName, fieldTypeName)` pairs from a resolved tuple type
+  ## symbol. Named tuples like `tuple[key: Key, payload: seq[byte]]` use the
+  ## declared field names verbatim. Unnamed positional tuples up to 9
+  ## elements receive synthesised names from `tuplePositionalNames`.
+  let typeImpl = getTypeImpl(sym)
+  let tupleTy = if typeImpl.kind == nnkTupleTy: typeImpl else: nil
+  if tupleTy.isNil:
+    return @[]
+
+  var posIdx = 0
+  for child in tupleTy:
+    if child.kind == nnkIdentDefs:
+      let typeNode = child[child.len - 2]
+      for i in 0 ..< child.len - 2:
+        let rawName = $child[i]
+        result.add((rawName, typeNode.repr.strip()))
+    else:
+      if posIdx >= tuplePositionalNames.len:
+        error(
+          "FFI tuple support is limited to 9 positional fields; got element " &
+            $(posIdx + 1) & " of tuple " & $sym & ". Wrap in a named object instead.",
+          sym,
+        )
+      result.add((tuplePositionalNames[posIdx], child.repr.strip()))
+      inc posIdx
+
+proc collectNestedTypeNodesFromTuple(sym: NimNode): seq[NimNode] {.compileTime.} =
+  ## Tuple-shaped analogue of `collectNestedTypeNodes` — walks a resolved
+  ## tuple type's fields and returns NimNodes for any nested custom types
+  ## (object / enum / distinct / alias / seq[Custom] / array[N, Custom])
+  ## that need recursive registration.
+  let typeImpl = getTypeImpl(sym)
+  let tupleTy = if typeImpl.kind == nnkTupleTy: typeImpl else: nil
+  if tupleTy.isNil:
+    return @[]
+
+  proc handleFieldType(fieldType: NimNode, acc: var seq[NimNode]) =
+    if fieldType.kind == nnkSym and not isNimPrimitive($fieldType):
+      let innerImpl = getTypeImpl(fieldType)
+      if innerImpl.kind in {nnkObjectTy, nnkEnumTy, nnkDistinctTy, nnkTupleTy}:
+        acc.add(fieldType)
+      else:
+        let instName = $getTypeInst(fieldType)
+        if instName != $fieldType and not isNimPrimitive(instName):
+          acc.add(fieldType)
+    elif fieldType.kind == nnkBracketExpr and fieldType.len >= 2 and
+        $fieldType[0] == "seq":
+      let elemSym = fieldType[1]
+      if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
+        let elemImpl = getTypeImpl(elemSym)
+        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
+          acc.add(elemSym)
+    elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
+        $fieldType[0] == "array":
+      let elemSym = fieldType[2]
+      if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
+        let elemImpl = getTypeImpl(elemSym)
+        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
+          acc.add(elemSym)
+
+  for child in tupleTy:
+    if child.kind == nnkIdentDefs:
+      let typeNode = child[child.len - 2]
+      handleFieldType(typeNode, result)
+    else:
+      handleFieldType(child, result)
+
 proc resolveAliasBase(sym: NimNode): string {.compileTime.} =
   ## Follows alias/distinct chains to the underlying primitive name.
   let typeImpl = getTypeImpl(sym)
@@ -173,6 +247,8 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         result.add(fieldType)
       elif innerImpl.kind == nnkDistinctTy:
         result.add(fieldType)
+      elif innerImpl.kind == nnkTupleTy:
+        result.add(fieldType)
       else:
         # Could be an alias — check if it resolves to something different
         let instName = $getTypeInst(fieldType)
@@ -185,9 +261,7 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
       let elemSym = fieldType[1]
       if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
         let elemImpl = getTypeImpl(elemSym)
-        if elemImpl.kind == nnkObjectTy:
-          result.add(elemSym)
-        elif elemImpl.kind == nnkEnumTy:
+        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
 
     # array[N, T] where T is a custom type
@@ -196,10 +270,24 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
       let elemSym = fieldType[2]
       if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
         let elemImpl = getTypeImpl(elemSym)
-        if elemImpl.kind == nnkObjectTy:
+        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
-        elif elemImpl.kind == nnkEnumTy:
-          result.add(elemSym)
+
+proc parseFieldTypeExpr(ftype: string): NimNode {.compileTime.} =
+  ## Convert a stringified field type (`"int32"`, `"seq[byte]"`,
+  ## `"array[4, int32]"`, `"Tag"`) into a properly structured type node.
+  ## A simple identifier round-trips via `ident()`; anything containing
+  ## brackets goes through `parseExpr` so we get an `nnkBracketExpr` (or
+  ## similar) that downstream `toCFieldType` etc. can pattern-match on.
+  let trimmed = ftype.strip()
+  if '[' in trimmed:
+    try:
+      return parseExpr(trimmed)
+    except ValueError as e:
+      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
+    except CatchableError as e:
+      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
+  ident(trimmed)
 
 proc buildSyntheticApiTypeBody(
     typeName: string, fields: seq[(string, string)]
@@ -212,7 +300,12 @@ proc buildSyntheticApiTypeBody(
   var recList = newTree(nnkRecList)
   for (fname, ftype) in fields:
     recList.add(
-      newTree(nnkIdentDefs, postfix(ident(fname), "*"), ident(ftype), newEmptyNode())
+      newTree(
+        nnkIdentDefs,
+        postfix(ident(fname), "*"),
+        parseFieldTypeExpr(ftype),
+        newEmptyNode(),
+      )
     )
   let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
   let typeDef = newTree(nnkTypeDef, ident(typeName), newEmptyNode(), objTy)
@@ -367,6 +460,33 @@ macro autoRegisterApiType*(T: typed): untyped =
           let goBase = nimTypeToGo(ident(targetName))
           gApiGoEnums.add("type " & typeName & " = " & goBase)
         return result
+
+  # Tuple types — register as a synthesised object so the CBOR codegen
+  # modules (which iterate `gApiTypeRegistry` for `atkObject` entries)
+  # pick the tuple up and emit struct definitions. Named tuples keep
+  # their declared field names; unnamed positional tuples up to 9
+  # elements receive `first`..`ninth`.
+  #
+  # Note: we deliberately DO NOT call `generateApiType` here. That path
+  # emits a fixed-layout `<Name>CItem` for the native ABI which has no
+  # count-companion field for `seq[T]` members — so a tuple like
+  # `tuple[a: Key, b: seq[byte]]` cannot fit. Native-ABI tuple support
+  # belongs to a follow-up task; for now the CBOR-mode codegen runs off
+  # the schema entry alone, and the native codegen sees an object with
+  # a missing CItem and falls back to its own TODO emission for
+  # downstream wrappers (which is what existing native-uncovered shapes
+  # like `seq[Object<seq>]` already do).
+  if typeImpl.kind == nnkTupleTy:
+    let tupleFields = extractFieldsFromTupleSym(actualSym)
+    if tupleFields.len == 0:
+      return result
+    let nestedNodesT = collectNestedTypeNodesFromTuple(actualSym)
+    for nestedSym in nestedNodesT:
+      let nestedName = $nestedSym
+      if not isTypeRegistered(nestedName) and not isNimPrimitive(nestedName):
+        result.add(newCall(ident("autoRegisterApiType"), nestedSym))
+    registerFromFieldTuples(typeName, tupleFields)
+    return result
 
   # Object types — existing behavior
   let fields = extractFieldsFromSym(actualSym)

@@ -115,7 +115,9 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      return primPyHint(resolveUnderlyingType(t))
+      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
+      # `distinct seq[byte]` → `List[int]` rather than `""`).
+      return nimTypeToPyHint(resolveUnderlyingType(t))
   ""
 
 proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =

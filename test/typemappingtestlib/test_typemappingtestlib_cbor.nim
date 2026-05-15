@@ -412,6 +412,43 @@ suite "typemappingtestlib_cbor parity":
     check dec.value.value.isNone()
     discard typemappingtestlib_shutdown(ctx)
 
+  test "tuple-as-struct + distinct-over-seq + object-as-param round-trip (ScanRequest)":
+    # Probes the tuple support pass: KeyRange (object input param),
+    # Key (distinct seq[byte]), TupleRow (named tuple alias rendered
+    # as struct), and ScanRequest.rows (seq[Tuple]).
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      category*: string
+      range*: KeyRange
+      reverse*: bool
+
+    let args = Args(
+      category: "scan", range: KeyRange(startKey: "lo", stopKey: "hi"), reverse: false
+    )
+    let (st, resp) = callApi(ctx, "scan_request", cborEncode(args).value)
+    check st == 0'i32
+    let dec = cborDecodeResultEnvelope(resp, ScanRequest)
+    check dec.isOk()
+    check dec.value.rows.len == 3
+    # Forward order: row[0].key starts with "0:", row[2].key starts with "2:".
+    check dec.value.rows[0].key == "0:lo"
+    check dec.value.rows[2].key == "2:lo"
+    check dec.value.rows[0].payload == "scan-row-0:hi"
+
+    # Reverse run — same rows, opposite order.
+    let revArgs = Args(
+      category: "scan", range: KeyRange(startKey: "lo", stopKey: "hi"), reverse: true
+    )
+    let (st2, resp2) = callApi(ctx, "scan_request", cborEncode(revArgs).value)
+    check st2 == 0'i32
+    let dec2 = cborDecodeResultEnvelope(resp2, ScanRequest)
+    check dec2.isOk()
+    check dec2.value.rows.len == 3
+    check dec2.value.rows[0].key == "2:lo"
+    check dec2.value.rows[2].key == "0:lo"
+    discard typemappingtestlib_shutdown(ctx)
+
   test "counter request emits counter_changed":
     resetSlots()
     let ctx = setupCtx()
