@@ -1360,6 +1360,33 @@ fn test_obj_as_param() {
     lib.shutdown();
 }
 
+// Option[seq[byte]] probe — Native codegen rejects Option[T] (the broker
+// is `when defined(BrokerFfiApiCBOR)`-gated in Nim), so this only runs in
+// the CBOR build. The CBOR Rust wrapper maps it to `Option<Vec<u8>>`.
+#[cfg(feature = "cbor")]
+fn test_opt_seq_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_seq_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), Some(vec![1u8, 2, 3, 4]));
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_opt_seq_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_seq_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), None::<Vec<u8>>);
+    }
+    lib.shutdown();
+}
+
 fn test_obj_seq_result_empty() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -2506,7 +2533,11 @@ fn main() {
     run_test("test_obj_seq_param_multiple", test_obj_seq_param_multiple);
     run_test("test_obj_seq_param_string_encoding", test_obj_seq_param_string_encoding);
     #[cfg(feature = "cbor")]
-    run_test("test_obj_as_param", test_obj_as_param);
+    {
+        run_test("test_obj_as_param", test_obj_as_param);
+        run_test("test_opt_seq_present", test_opt_seq_present);
+        run_test("test_opt_seq_absent", test_opt_seq_absent);
+    }
     run_test("test_obj_seq_result_empty", test_obj_seq_result_empty);
     run_test("test_obj_seq_result_length", test_obj_seq_result_length);
     run_test("test_obj_seq_result_keys", test_obj_seq_result_keys);

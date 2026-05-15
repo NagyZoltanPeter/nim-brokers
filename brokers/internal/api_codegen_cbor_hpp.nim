@@ -758,13 +758,21 @@ proc generateCborCppHeaderFile*(
   h.add("  void push_back(std::uint8_t b) noexcept { dst[(*pos)++] = b; }\n")
   h.add("  void flush() noexcept {}\n")
   h.add("};\n\n")
+  # jsoncons 1.7.0 moved encode_traits into the `reflect` sub-namespace and
+  # renamed the entry point from `encode(v, enc, ctx, ec)` to
+  # `try_encode(alloc_set, v, enc)` returning `write_result`
+  # (= `expected<void, std::error_code>`).
   h.add("template <class T>\n")
   h.add("std::size_t cborEncodedSize(const T& v) {\n")
   h.add("  std::size_t n = 0;\n")
   h.add("  jsoncons::cbor::basic_cbor_encoder<CountingSink> enc{CountingSink{n}};\n")
-  h.add("  std::error_code ec;\n")
-  h.add("  jsoncons::encode_traits<T, char>::encode(v, enc, jsoncons::json(), ec);\n")
-  h.add("  if (ec) throw std::system_error(ec, \"cbor counting pass\");\n")
+  h.add(
+    "  auto result = jsoncons::reflect::encode_traits<T>::try_encode(\n" &
+      "      jsoncons::make_alloc_set(), v, enc);\n"
+  )
+  h.add(
+    "  if (!result) throw std::system_error(result.error(), \"cbor counting pass\");\n"
+  )
   h.add("  enc.flush();\n")
   h.add("  return n;\n")
   h.add("}\n\n")
@@ -774,9 +782,13 @@ proc generateCborCppHeaderFile*(
   h.add(
     "  jsoncons::cbor::basic_cbor_encoder<SpanSink> enc{SpanSink{dst, cap, pos}};\n"
   )
-  h.add("  std::error_code ec;\n")
-  h.add("  jsoncons::encode_traits<T, char>::encode(v, enc, jsoncons::json(), ec);\n")
-  h.add("  if (ec) throw std::system_error(ec, \"cbor write pass\");\n")
+  h.add(
+    "  auto result = jsoncons::reflect::encode_traits<T>::try_encode(\n" &
+      "      jsoncons::make_alloc_set(), v, enc);\n"
+  )
+  h.add(
+    "  if (!result) throw std::system_error(result.error(), \"cbor write pass\");\n"
+  )
   h.add("  enc.flush();\n")
   h.add("}\n\n")
   # rawCall / rawCallOwned — free functions in detail namespace.

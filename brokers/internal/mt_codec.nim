@@ -127,6 +127,13 @@ proc mtMarshalValue*[T](
       if not mtMarshalValue(buf, cap, fval, pos):
         return false
     return true
+  elif T is distinct:
+    # Unwrap to the underlying base and recurse. POD distincts (e.g.
+    # `distinct int32`) are caught by the `supportsCopyMem` branch above;
+    # this branch handles distincts whose base needs structural marshaling
+    # such as `distinct seq[byte]` or `distinct string`.
+    var base = distinctBase(value)
+    return mtMarshalValue(buf, cap, base, pos)
   else:
     {.error: "mt broker payload field type is unsupported by mtMarshalValue: " & $T.}
 
@@ -170,6 +177,13 @@ proc mtUnmarshalValue*[T](
     for _, fval in fieldPairs(value):
       if not mtUnmarshalValue(buf, len, fval, pos):
         return false
+    return true
+  elif T is distinct:
+    type Base = distinctBase(T)
+    var base: Base
+    if not mtUnmarshalValue(buf, len, base, pos):
+      return false
+    value = T(base)
     return true
   else:
     {.error: "mt broker payload field type is unsupported by mtUnmarshalValue: " & $T.}

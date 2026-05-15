@@ -13,6 +13,33 @@ func test_obj_as_param() {
 	lib.Close()
 }
 
+// Option[seq[byte]] probe — gated to CBOR (native codegen rejects
+// Option[T]). The Go CBOR wrapper maps it to *[]byte (nil = absent).
+func test_opt_seq_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(len(*r.Value), 4, "len")
+		checkEq((*r.Value)[0], byte(1), "byte[0]")
+		checkEq((*r.Value)[3], byte(4), "byte[3]")
+	}
+	lib.Close()
+}
+
+func test_opt_seq_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
 func runCborOnly() {
 	runTest("test_obj_as_param", test_obj_as_param)
+	runTest("test_opt_seq_present", test_opt_seq_present)
+	runTest("test_opt_seq_absent", test_opt_seq_absent)
 }

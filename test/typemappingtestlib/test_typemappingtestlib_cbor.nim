@@ -381,6 +381,37 @@ suite "typemappingtestlib_cbor parity":
     check dec.value.total == 10
     discard typemappingtestlib_shutdown(ctx)
 
+  test "Option[seq[byte]] result — present":
+    # Probe for Option[T] over the FFI surface. Native codegen rejects
+    # Option[T] outright; the broker is gated to CBOR mode.
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      present*: bool
+
+    let (st, resp) =
+      callApi(ctx, "opt_seq_request", cborEncode(Args(present: true)).value)
+    check st == 0'i32
+    let dec = cborDecodeResultEnvelope(resp, OptSeqRequest)
+    check dec.isOk()
+    check dec.value.value.isSome()
+    check dec.value.value.get() == @[byte 1, 2, 3, 4]
+    discard typemappingtestlib_shutdown(ctx)
+
+  test "Option[seq[byte]] result — absent":
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      present*: bool
+
+    let (st, resp) =
+      callApi(ctx, "opt_seq_request", cborEncode(Args(present: false)).value)
+    check st == 0'i32
+    let dec = cborDecodeResultEnvelope(resp, OptSeqRequest)
+    check dec.isOk()
+    check dec.value.value.isNone()
+    discard typemappingtestlib_shutdown(ctx)
+
   test "counter request emits counter_changed":
     resetSlots()
     let ctx = setupCtx()

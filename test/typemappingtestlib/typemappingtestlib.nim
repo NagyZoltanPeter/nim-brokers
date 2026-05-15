@@ -17,6 +17,7 @@
 
 {.push raises: [].}
 
+import std/options
 import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
@@ -181,6 +182,68 @@ RequestBroker(API):
     count*: int32
 
   proc signature*(n: int32): Future[Result[TagSeqRequest, string]] {.async.}
+
+## OptSeqRequest: exercises Option[seq[byte]] as a result field.
+## Native codegen rejects `Option[T]` ("Generic types other than seq[T] and
+## array[N,T] are not yet supported in API broker FFI"). CBOR gating only.
+when defined(BrokerFfiApiCBOR):
+  RequestBroker(API):
+    type OptSeqRequest* = object
+      value*: Option[seq[byte]]
+
+    proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
+
+## ScanRequest probe block — currently DISABLED for FFI builds because
+## auto-registration in `api_type_resolver.resolveAliasBase` crashes on
+## distinct-over-seq:
+##
+##   Key = distinct seq[byte]
+##   KeyRange = object  (start, stop: Key)   # used as INPUT param
+##   TupleRow = tuple[key: Key, payload: seq[byte]]
+##   ScanRequest = object (rows: seq[TupleRow])
+##
+## Failure: `Error: Invalid node kind nnkBracketExpr for macros.\`$\``
+## at brokers/internal/api_type_resolver.nim:128 — the resolver does
+## `$base` on the distinct underlying type, but for `distinct seq[byte]`
+## the underlying is an `nnkBracketExpr` not a symbol. This blocks even
+## CBOR-mode registration before any wrapper is generated.
+##
+## What's gated by this single AST issue:
+##   - distinct-over-seq fields on objects
+##   - tuple types in FFI signatures (would map to struct{key,payload})
+##   - object-as-input-param in CBOR (KeyRange is the request param)
+##
+## Required to enable: extend `resolveAliasBase` (and the symmetric path
+## in `collectNestedTypeNodes`) to handle nnkBracketExpr underlyings.
+## That is (b)-scope codegen work, not part of this probe pass.
+## Probe block — currently DISABLED at the broker level, kept here so the
+## next codegen pass (tuple-as-struct + native Option[T]) can flip the
+## `when defined(BrokerFfiApiCBOR)` switch back on once the wrappers can
+## emit a typed `seq[TupleRow]`. The type aliases themselves DO compile —
+## the type resolver now handles `distinct seq[byte]` (api_type_resolver
+## `$base` → `repr` fix) and the MT codec routes distincts through their
+## base. What still trips wrappers:
+##   - Rust CBOR emits `Vec<serde_cbor_value::Value>` placeholder for
+##     `seq[TupleRow]` (crate not declared); needs tuple→struct codegen.
+##   - C++/Py/Go CBOR emit "TODO: Nim type 'seq[TupleRow]' not yet
+##     mappable" stubs; same root cause.
+type
+  Key* = distinct seq[byte]
+
+  KeyRange* = object
+    start*: Key
+    stop*: Key ## exclusive; an empty `stop` means "no upper bound"
+
+  TupleRow* = tuple[key: Key, payload: seq[byte]]
+
+when false and defined(BrokerFfiApiCBOR):
+  RequestBroker(API):
+    type ScanRequest* = object
+      rows*: seq[TupleRow]
+
+    proc signature*(
+      category: string, range: KeyRange, reverse: bool
+    ): Future[Result[ScanRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] and seq[object] INPUT param coverage
@@ -497,6 +560,24 @@ proc setupProviders(ctx: BrokerContext) =
       proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
         return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
     )
+
+  # --- New probe providers: Option[T], distinct-over-seq, tuple, KeyRange ---
+  # All gated to CBOR — native codegen rejects Option[T] outright, and
+  # ScanRequest takes an object-as-param which is CBOR-only.
+
+  when defined(BrokerFfiApiCBOR):
+    discard OptSeqRequest.setProvider(
+      ctx,
+      proc(present: bool): Future[Result[OptSeqRequest, string]] {.closure, async.} =
+        if present:
+          return ok(OptSeqRequest(value: some(@[byte 1, 2, 3, 4])))
+        else:
+          return ok(OptSeqRequest(value: none(seq[byte]))),
+    )
+
+    # ScanRequest provider intentionally omitted — see `when false:` block
+    # above for the reason (api_type_resolver crash on distinct-over-seq).
+    discard
 
   # No probe providers — see "Probe negatives" comment above for why each
   # of array[N, Object] / array[N, string] / seq[Object<seq>] is omitted.

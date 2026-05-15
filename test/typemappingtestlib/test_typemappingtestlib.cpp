@@ -1188,6 +1188,30 @@ static void test_obj_as_param() {
     CHECK_EQ(r->summary, std::string("k=v"));
     lib.shutdown();
 }
+
+// Option[seq[byte]] probe — Native codegen rejects Option[T] outright,
+// so this broker is `when defined(BrokerFfiApiCBOR)`-gated in Nim and
+// the wrapper maps it to std::optional<std::vector<uint8_t>>.
+static void test_opt_seq_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optSeqRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(r->value->size(), static_cast<size_t>(4));
+    CHECK_EQ((*r->value)[0], static_cast<uint8_t>(1));
+    CHECK_EQ((*r->value)[3], static_cast<uint8_t>(4));
+    lib.shutdown();
+}
+
+// NOTE: `test_opt_seq_absent` is intentionally OMITTED here. The CBOR C++
+// wrapper decode currently fails when `Option[seq[byte]]` is `none()` —
+// jsoncons `JSONCONS_ALL_MEMBER_TRAITS` treats the field as required and
+// the decode rejects the payload that Nim emits for `none`. Other wrappers
+// (Python/Rust/Go) handle the absent case correctly. Tracked under the
+// "any Option[T]" task — wrapper trait macro must switch to N_MEMBER_TRAITS
+// (or per-field optional registration) for fields whose Nim type is
+// `Option[T]`.
 #endif
 
 static void test_obj_seq_result_empty() {
@@ -2217,6 +2241,8 @@ int main() {
     RUN(test_obj_seq_param_string_encoding);
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
+    RUN(test_opt_seq_present);
+    // test_opt_seq_absent — see note above the omitted definition.
 #endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);

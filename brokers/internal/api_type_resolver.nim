@@ -125,14 +125,17 @@ proc resolveAliasBase(sym: NimNode): string {.compileTime.} =
   let typeImpl = getTypeImpl(sym)
   if typeImpl.kind == nnkDistinctTy:
     let base = typeImpl[0]
-    return $base
+    # `$` panics on non-symbol nodes (e.g. nnkBracketExpr for
+    # `distinct seq[byte]`); `repr` accepts any AST shape and yields
+    # the same printable form for symbols.
+    return base.repr.strip()
   # For aliases, getTypeInst gives us the target
   let typeInst = getTypeInst(sym)
   if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
-    return $typeInst[1]
+    return typeInst[1].repr.strip()
   if typeInst.kind == nnkSym:
     return $typeInst
-  return $sym
+  return sym.repr.strip()
 
 proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
   ## Walk the fields of a resolved type symbol and return NimNodes for
