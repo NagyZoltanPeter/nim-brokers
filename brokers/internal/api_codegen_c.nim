@@ -44,6 +44,24 @@ proc isArrayTypeNode*(nimType: NimNode): bool {.compileTime.} =
   nimType.kind == nnkBracketExpr and nimType.len == 3 and
     ($nimType[0]).toLowerAscii() == "array"
 
+proc isOptionType*(nimType: NimNode): bool {.compileTime.} =
+  ## Returns true if the type node represents `Option[T]` (any inner T).
+  ## Native Option support expands each Option field at the C ABI to
+  ## `<name>: T` + `<name>_has_value: bool` (uniform layout — see
+  ## doc/TYPESUPPORT.md).
+  nimType.kind == nnkBracketExpr and nimType.len == 2 and
+    ($nimType[0]).toLowerAscii() == "option"
+
+proc optionInnerType*(nimType: NimNode): NimNode {.compileTime.} =
+  ## Extracts the inner type node from an `Option[T]` node.
+  assert isOptionType(nimType)
+  nimType[1]
+
+const optionHasValueSuffix* = "_has_value"
+  ## Per agreed ABI shape, every `Option[T]` field expands to two C ABI
+  ## fields: the unwrapped value (named after the original Nim field)
+  ## and a presence flag named `<field><optionHasValueSuffix>`.
+
 proc constNodeIntValue(impl: NimNode): (bool, int) {.compileTime.} =
   ## Returns (true, value) if `impl` is (or wraps) an integer literal const value.
   if impl.kind == nnkIntLit:
@@ -180,6 +198,13 @@ proc nimTypeToCSuffix*(nimType: NimNode): string {.compileTime.} =
       let n = arrayNodeSize(nimType)
       let elemName = arrayNodeElemName(nimType)
       nimTypeToCSuffixIdent(elemName) & "[" & $n & "]"
+    elif isOptionType(nimType):
+      # Option[T] expands to a value field of T plus a sibling
+      # `<name>_has_value: bool` at the OUTER struct emission level.
+      # `nimTypeToCSuffix` here returns the C type of the value side
+      # only; struct-emission helpers consult `isOptionType` separately
+      # to add the companion bool field.
+      nimTypeToCSuffix(optionInnerType(nimType))
     else:
       error(
         "Generic types other than seq[T] and array[N,T] are not yet supported in API broker FFI",

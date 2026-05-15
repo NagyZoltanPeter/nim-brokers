@@ -389,7 +389,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
   )
 
   # Add result fields (mapped to C-compatible types)
-  # seq[T] expands to pointer + cint count; array[N,T] stays as array[N,cType]
+  # seq[T] expands to pointer + cint count; array[N,T] stays as array[N,cType];
+  # Option[T] expands to <name>: T + <name>_has_value: bool (uniform layout).
   if hasInlineFields:
     for i in 0 ..< fieldNames.len:
       let fType = fieldTypes[i]
@@ -408,6 +409,30 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             nnkIdentDefs,
             postfix(ident($fieldNames[i] & "_count"), "*"),
             ident("cint"),
+            newEmptyNode(),
+          )
+        )
+      elif isOptionType(fType):
+        # Phase E1 (scalar): emit value field of unwrapped T plus a sibling
+        # `<name>_has_value: bool`. The encode proc populates both from
+        # the Nim Option's some/none state. Layout X (uniform) — every
+        # Option emits the bool sibling regardless of whether the value
+        # type is variable-shape; that comes in phases E2/E3.
+        let inner = optionInnerType(fType)
+        let cFieldType = toCFieldType(inner)
+        cResultFields.add(
+          newTree(
+            nnkIdentDefs,
+            postfix(copyNimTree(fieldNames[i]), "*"),
+            cFieldType,
+            newEmptyNode(),
+          )
+        )
+        cResultFields.add(
+          newTree(
+            nnkIdentDefs,
+            postfix(ident($fieldNames[i] & optionHasValueSuffix), "*"),
+            ident("bool"),
             newEmptyNode(),
           )
         )
@@ -538,6 +563,24 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         encodeBody.add(
           quote do:
             result.`fName` = `objIdent`.`fName`
+        )
+      elif isOptionType(fType):
+        # Phase E1 (scalar): emit `if v.x.isSome: c.x = v.x.get; c.x_has_value =
+        # true else: c.x = default(T); c.x_has_value = false`. The default
+        # value when absent is whatever Nim's default(T) returns — for the
+        # C side it doesn't matter what's in the value field when has_value
+        # is false; readers must consult has_value first.
+        let hasValueIdent = ident($fName & optionHasValueSuffix)
+        let inner = optionInnerType(fType)
+        let cInnerType = toCFieldType(inner)
+        encodeBody.add(
+          quote do:
+            if `objIdent`.`fName`.isSome():
+              result.`fName` = cast[`cInnerType`](`objIdent`.`fName`.get())
+              result.`hasValueIdent` = true
+            else:
+              result.`fName` = default(`cInnerType`)
+              result.`hasValueIdent` = false
         )
       else:
         encodeBody.add(
@@ -739,6 +782,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         # array[N, T] → encoded as "elemType[N]", generateCStruct handles layout
         let cType = nimTypeToCSuffix(fType) # returns "elemType[N]"
         result.add(($fNames[i], cType))
+      elif isOptionType(fType):
+        # Option[T] → <name>: T + <name>_has_value: bool (uniform layout).
+        let inner = optionInnerType(fType)
+        let cType =
+          if forOutput:
+            nimTypeToCOutput(inner)
+          else:
+            nimTypeToCInput(inner)
+        result.add(($fNames[i], cType))
+        result.add(($fNames[i] & optionHasValueSuffix, "bool"))
       elif forOutput:
         result.add(($fNames[i], nimTypeToCOutput(fType)))
       else:
@@ -1099,6 +1152,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             adopt.add(
               "    r." & fName & " = static_cast<" & enumTypeName & ">(c." & fName &
                 ");\n"
+            )
+          elif isOptionType(fType):
+            # Option[T]: read sibling has_value flag → std::optional.
+            let inner = optionInnerType(fType)
+            let cppInner = nimTypeToCpp(inner)
+            adopt.add(
+              "    r." & fName & " = c." & fName & optionHasValueSuffix &
+                " ? std::optional<" & cppInner & ">(c." & fName & ") : std::nullopt;\n"
             )
           else:
             adopt.add("    r." & fName & " = c." & fName & ";\n")

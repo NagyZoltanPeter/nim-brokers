@@ -1215,6 +1215,29 @@ static void test_opt_seq_present() {
 // `std::vector<uint8_t>` for byte-string fields). Tracked as a follow-up.
 // Python / Rust / Go cover this round-trip end-to-end.
 
+// Native Option[T] probe (Phase E1 / scalar). Works in both native and
+// CBOR builds: the C ABI now expands every `Option[T]` field to a
+// `<name>: T` + `<name>_has_value: bool` pair (uniform layout); the
+// C++ wrapper exposes it as `std::optional<T>`.
+static void test_opt_scalar_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optScalarRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(*r->value, 42);
+    lib.shutdown();
+}
+
+static void test_opt_scalar_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optScalarRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
 // Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
 // into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
 // where the field is missing decodes cleanly with `has_value() == false`.
@@ -2286,6 +2309,8 @@ int main() {
     RUN(test_obj_seq_param_single);
     RUN(test_obj_seq_param_multiple);
     RUN(test_obj_seq_param_string_encoding);
+    RUN(test_opt_scalar_present);
+    RUN(test_opt_scalar_absent);
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
     RUN(test_opt_seq_present);

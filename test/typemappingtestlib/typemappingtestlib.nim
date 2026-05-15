@@ -193,6 +193,16 @@ when defined(BrokerFfiApiCBOR):
 
     proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
 
+## OptScalarRequest — exercises `Option[int32]` as a result field. Phase
+## E1 of native Option support: every Option field expands at the C ABI
+## to `<name>: T` + `<name>_has_value: bool` (uniform shape; documented
+## in the codegen modules).
+RequestBroker(API):
+  type OptScalarRequest* = object
+    value*: Option[int32]
+
+  proc signature*(present: bool): Future[Result[OptScalarRequest, string]] {.async.}
+
 ## Distinct-over-seq probe. Registered by the type resolver to keep the
 ## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
 ## time, but NOT used in any active broker signature: per-wrapper
@@ -548,6 +558,15 @@ proc setupProviders(ctx: BrokerContext) =
       for v in values:
         total += v
       return ok(PrimSeqParamRequest(count: int32(values.len), total: total)),
+  )
+
+  discard OptScalarRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptScalarRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptScalarRequest(value: some(42'i32)))
+      else:
+        return ok(OptScalarRequest(value: none(int32))),
   )
 
   when defined(BrokerFfiApiCBOR):
