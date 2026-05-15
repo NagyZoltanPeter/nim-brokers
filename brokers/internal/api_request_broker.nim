@@ -1294,6 +1294,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               pyCStruct.add(
                 "        (\"" & fName & "\", " & ctElem & " * " & $n & "),\n"
               )
+            elif isOptionType(fType):
+              # Option[T] expands to value field of inner T plus a sibling
+              # `<name>_has_value: c_bool`.
+              let ctField = nimTypeToCtypes(optionInnerType(fType))
+              pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
+              pyCStruct.add(
+                "        (\"" & fName & optionHasValueSuffix & "\", ctypes.c_bool),\n"
+              )
             else:
               # nimTypeToCtypes now resolves enums → ctypes.c_int32
               # and distinct/alias types → underlying ctypes type
@@ -1428,6 +1436,18 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         elif isEnumNode(fType):
           # Enum: wrap raw int with the Python IntEnum class
           I & fName & " = " & $fType & "(c." & fName & ")\n"
+        elif isOptionType(fType):
+          # Option[T]: read sibling has_value flag → Optional[T].
+          let inner = optionInnerType(fType)
+          var s = ""
+          s.add(I & "if c." & fName & optionHasValueSuffix & ":\n")
+          if isEnumNode(inner):
+            s.add(I & "    " & fName & " = " & $inner & "(c." & fName & ")\n")
+          else:
+            s.add(I & "    " & fName & " = c." & fName & "\n")
+          s.add(I & "else:\n")
+          s.add(I & "    " & fName & " = None\n")
+          s
         else:
           I & fName & " = c." & fName & "\n"
 
@@ -1570,9 +1590,13 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
       proc rsTypeMappable(t: NimNode): bool {.compileTime.} =
         ## Accepts the v2 native-mode set: scalars + seq[primitive] +
-        ## seq[string] + seq[Object] + array[N, primitive].
+        ## seq[string] + seq[Object] + array[N, primitive] + Option[scalar]
+        ## (Phase E1 — variable-shape Option inner types come in E2/E3).
         if rsScalarMappable(t):
           return true
+        if isOptionType(t):
+          # Option[T] is mappable iff its inner T is a scalar (E1 scope).
+          return rsScalarMappable(optionInnerType(t))
         if isSeqType(t):
           let elem = seqItemTypeName(t)
           if isNimPrimitive(elem):
@@ -1660,6 +1684,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 ffi.add(
                   "    pub " & fName & ": [" & rsElemFfi(elem) & "; " & $n & "],\n"
                 )
+              elif isOptionType(fType):
+                let inner = optionInnerType(fType)
+                ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(inner) & ",\n")
+                ffi.add("    pub " & fName & optionHasValueSuffix & ": bool,\n")
               else:
                 ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(fType) & ",\n")
           ffi.add("}")
@@ -1680,6 +1708,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                   else:
                     arrayNodeElemName(fType)
                 safe.add("    pub " & fName & ": Vec<" & rsElemSafe(elem) & ">,\n")
+              elif isOptionType(fType):
+                safe.add(
+                  "    pub " & fName & ": Option<" &
+                    nimTypeToRust(optionInnerType(fType)) & ">,\n"
+                )
               else:
                 safe.add("    pub " & fName & ": " & nimTypeToRust(fType) & ",\n")
           else:
@@ -1889,6 +1922,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                   result.add("            }\n")
               elif isArrayTypeNode(fType):
                 result.add("            _r." & fName & " = c." & fName & ".to_vec();\n")
+              elif isOptionType(fType):
+                # Option[T]: read sibling has_value flag → Option<T>.
+                result.add(
+                  "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
+                    " { Some(c." & fName & ") } else { None };\n"
+                )
               else:
                 result.add("            _r." & fName & " = c." & fName & ";\n")
             result.add("            " & rsFreeFuncName & "(&mut c as *mut _);\n")
@@ -1980,6 +2019,9 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         false
 
       proc goTypeMappable(t: NimNode): bool {.compileTime.} =
+        if isOptionType(t):
+          # Option[scalar] in Phase E1; variable-shape inner types in E2/E3.
+          return goScalarMappable(optionInnerType(t))
         if goScalarMappable(t):
           return true
         if isSeqType(t):
@@ -2058,6 +2100,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                   else:
                     nimTypeToGo(ident(elem))
                 goSafe.add("\t" & exName & " []" & goElem & "\n")
+              elif isOptionType(fType):
+                goSafe.add(
+                  "\t" & exName & " *" & nimTypeToGo(optionInnerType(fType)) & "\n"
+                )
               else:
                 goSafe.add("\t" & exName & " " & nimTypeToGo(fType) & "\n")
           else:
@@ -2158,6 +2204,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 "\t\tout." & exName & "[i] = " & nimTypeToGo(ident(elem)) & "(r." & fName &
                   "[i])\n"
               )
+              goConvertCode.add("\t}\n")
+            elif isOptionType(fType):
+              # Option[T]: read sibling has_value flag → *T (nil = absent).
+              let inner = optionInnerType(fType)
+              let goInner = nimTypeToGo(inner)
+              goConvertCode.add("\tif bool(r." & fName & optionHasValueSuffix & ") {\n")
+              goConvertCode.add("\t\t_v := " & goInner & "(r." & fName & ")\n")
+              goConvertCode.add("\t\tout." & exName & " = &_v\n")
               goConvertCode.add("\t}\n")
             else:
               # Plain scalar field. Convert via Go primitive type conversion.

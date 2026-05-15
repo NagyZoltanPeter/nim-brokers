@@ -1362,6 +1362,29 @@ fn test_obj_as_param() {
     lib.shutdown();
 }
 
+// Native + CBOR Option[int32] probe (Phase E1).
+fn test_opt_scalar_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_scalar_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value, Some(42i32));
+    }
+    lib.shutdown();
+}
+
+fn test_opt_scalar_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_scalar_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value, None::<i32>);
+    }
+    lib.shutdown();
+}
+
 // Option[seq[byte]] probe — Native codegen rejects Option[T] (the broker
 // is `when defined(BrokerFfiApiCBOR)`-gated in Nim), so this only runs in
 // the CBOR build. The CBOR Rust wrapper maps it to `Option<Vec<u8>>`.
@@ -2596,6 +2619,8 @@ fn main() {
     run_test("test_obj_seq_param_single", test_obj_seq_param_single);
     run_test("test_obj_seq_param_multiple", test_obj_seq_param_multiple);
     run_test("test_obj_seq_param_string_encoding", test_obj_seq_param_string_encoding);
+    run_test("test_opt_scalar_present", test_opt_scalar_present);
+    run_test("test_opt_scalar_absent", test_opt_scalar_absent);
     #[cfg(feature = "cbor")]
     {
         run_test("test_obj_as_param", test_obj_as_param);

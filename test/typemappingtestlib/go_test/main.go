@@ -1338,6 +1338,28 @@ func test_obj_seq_param_string_encoding() {
 
 // test_obj_as_param: lives in cbor_only_*.go (CBOR-gated).
 
+// Native + CBOR Option[int32] probe (Phase E1).
+func test_opt_scalar_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptScalarRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(*r.Value, int32(42), "value")
+	}
+	lib.Close()
+}
+
+func test_opt_scalar_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptScalarRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
 func test_obj_seq_result_empty() {
 	lib := newLib()
 	lib.CreateContext()
@@ -2079,6 +2101,8 @@ func main() {
 	runTest("test_const_array_event_neg_seed", test_const_array_event_neg_seed)
 
 	fmt.Println("\n--- TestSeqObjectTypes ---")
+	runTest("test_opt_scalar_present", test_opt_scalar_present)
+	runTest("test_opt_scalar_absent", test_opt_scalar_absent)
 	runTest("test_obj_seq_param_empty", test_obj_seq_param_empty)
 	runTest("test_obj_seq_param_single", test_obj_seq_param_single)
 	runTest("test_obj_seq_param_multiple", test_obj_seq_param_multiple)

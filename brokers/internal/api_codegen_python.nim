@@ -70,6 +70,11 @@ proc nimTypeToCtypes*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       # Element type — caller appends " * N" for _fields_ entries
       nimTypeToCtypes(ident(arrayNodeElemName(nimType)))
+    elif isOptionType(nimType):
+      # Option[T] expands to two ctypes fields; this returns the type
+      # for the value side. The companion `<name>_has_value: c_bool` is
+      # appended by the ctypes Structure builder.
+      nimTypeToCtypes(optionInnerType(nimType))
     else:
       "ctypes.c_void_p"
   else:
@@ -99,6 +104,8 @@ proc nimTypeToPyAnnotation*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       let elemAnnotation = nimTypeToPyAnnotation(ident(arrayNodeElemName(nimType)))
       "list[" & elemAnnotation & "]"
+    elif isOptionType(nimType):
+      "Optional[" & nimTypeToPyAnnotation(optionInnerType(nimType)) & "]"
     else:
       "object"
   else:
@@ -129,6 +136,8 @@ proc nimTypeToPyDefault*(nimType: NimNode): string {.compileTime.} =
       "field(default_factory=list)"
     elif isArrayTypeNode(nimType):
       "field(default_factory=list)"
+    elif isOptionType(nimType):
+      "None"
     else:
       "None"
   else:

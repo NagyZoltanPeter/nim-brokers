@@ -401,6 +401,17 @@ class TestSeqObject(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.summary, "k=v")
 
+    def test_opt_scalar_present(self):
+        # Native + CBOR Option[int32] probe (Phase E1).
+        r = self.lib.opt_scalar_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.value, 42)
+
+    def test_opt_scalar_absent(self):
+        r = self.lib.opt_scalar_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
     def test_opt_seq_present(self):
         # Option[seq[byte]] probe. Native codegen rejects Option[T] outright
         # ("Generic types other than seq[T] and array[N,T] are not yet

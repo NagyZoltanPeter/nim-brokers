@@ -73,6 +73,8 @@ proc nimTypeToRust*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       let elemName = arrayNodeElemName(nimType)
       "Vec<" & nimTypeToRust(ident(elemName)) & ">"
+    elif isOptionType(nimType):
+      "Option<" & nimTypeToRust(optionInnerType(nimType)) & ">"
     else:
       "()"
   else:
@@ -126,6 +128,11 @@ proc nimTypeToRustFfi*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       let elemName = arrayNodeElemName(nimType)
       "*const " & nimTypeToRustFfi(ident(elemName))
+    elif isOptionType(nimType):
+      # Option[T] expands to two FFI fields; this returns the type for
+      # the value side. The companion `<name>_has_value: bool` is
+      # appended by the FFI struct builder.
+      nimTypeToRustFfi(optionInnerType(nimType))
     else:
       "*mut ::std::ffi::c_void"
   else:

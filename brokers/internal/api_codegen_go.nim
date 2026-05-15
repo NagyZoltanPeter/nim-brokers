@@ -73,6 +73,8 @@ proc nimTypeToGo*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       let elemName = arrayNodeElemName(nimType)
       "[]" & nimTypeToGo(ident(elemName))
+    elif isOptionType(nimType):
+      "*" & nimTypeToGo(optionInnerType(nimType))
     else:
       "interface{}"
   else:
@@ -127,6 +129,11 @@ proc nimTypeToGoCgo*(nimType: NimNode): string {.compileTime.} =
     elif isArrayTypeNode(nimType):
       let elemName = arrayNodeElemName(nimType)
       "*" & nimTypeToGoCgo(ident(elemName))
+    elif isOptionType(nimType):
+      # Option[T] expands to two cgo fields; this returns the type for
+      # the value side. The companion `<name>_has_value: C.bool` is
+      # appended by the cgo struct builder.
+      nimTypeToGoCgo(optionInnerType(nimType))
     else:
       "unsafe.Pointer"
   else:
