@@ -1204,6 +1204,17 @@ static void test_opt_seq_present() {
     lib.shutdown();
 }
 
+// NOTE: BytesEchoRequest (inbound `seq[byte]` byte-string probe) has no
+// C++ assertion here. jsoncons 1.7.0 maps `std::vector<uint8_t>` via
+// `is_compatible_array_type` which encodes as a CBOR array (major type
+// 4); the Nim provider expects a byte string (major type 2). There is
+// no per-field byte-string macro in the `JSONCONS_*_MEMBER_TRAITS`
+// family — the documented opt-in path is a custom partial specialisation
+// of `json_type_traits`, which is a wrapper-API design call (likely
+// emitting a `broker::byte_string` typedef in lieu of bare
+// `std::vector<uint8_t>` for byte-string fields). Tracked as a follow-up.
+// Python / Rust / Go cover this round-trip end-to-end.
+
 // Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
 // into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
 // where the field is missing decodes cleanly with `has_value() == false`.

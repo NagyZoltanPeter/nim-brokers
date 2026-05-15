@@ -584,21 +584,41 @@ proc generateCborRustFile*(
 
     let methodName = e.apiName
     var sigParams = "&self"
-    var argsStructFields = ""
+    var argsStructDecl = ""
+    var argsStructInit = ""
     if e.argFields.len > 0:
+      argsStructDecl.add("        #[derive(Serialize)]\n")
+      argsStructDecl.add("        struct __Args {\n")
       for (n, t) in e.argFields:
         sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
-        argsStructFields.add("            \"" & n & "\": " & n & ",\n")
+        # `seq[byte]` and `Option[seq[byte]]` need `#[serde(with =
+        # "serde_bytes")]` so ciborium encodes them as CBOR byte strings
+        # (major type 2). The Nim cbor_serialization decoder rejects the
+        # default array-of-int form with "Expected: byte string but
+        # found: array".
+        let lowered = t.toLowerAscii().strip()
+        if lowered == "seq[byte]":
+          argsStructDecl.add("            #[serde(with = \"serde_bytes\")]\n")
+        elif lowered == "option[seq[byte]]":
+          argsStructDecl.add(
+            "            #[serde(with = \"::serde_bytes\", default, skip_serializing_if = \"Option::is_none\")]\n"
+          )
+        argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
+        argsStructInit.add("            " & n & ",\n")
+      argsStructDecl.add("        }\n")
 
     rs.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
         "> {\n"
     )
     if e.argFields.len > 0:
-      # Build a serde_json::Value::Object for args, then encode via ciborium.
-      rs.add("        let args = serde_json::json!({\n")
-      rs.add(argsStructFields)
-      rs.add("        });\n")
+      # Build a typed args struct (so `#[serde(with = "serde_bytes")]`
+      # annotations on `Vec<u8>` fields take effect during ciborium
+      # encoding) instead of going through `serde_json::Value`.
+      rs.add(argsStructDecl)
+      rs.add("        let args = __Args {\n")
+      rs.add(argsStructInit)
+      rs.add("        };\n")
       rs.add("        let mut buf: Vec<u8> = Vec::new();\n")
       rs.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
       rs.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")

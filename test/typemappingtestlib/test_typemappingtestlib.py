@@ -420,6 +420,27 @@ class TestSeqObject(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertIsNone(r.value.value)
 
+    def test_bytes_echo_request_roundtrip(self):
+        # Inbound `seq[byte]` byte-string probe — cbor2 encodes Python
+        # `bytes` as CBOR byte string (major type 2), which the Nim
+        # provider expects. CBOR-only.
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("bytes_echo_request only registered in CBOR build")
+        r = self.lib.bytes_echo_request(bytes([10, 20, 30, 40, 50]))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 5)
+        self.assertEqual(r.value.first, 10)
+        self.assertEqual(r.value.last, 50)
+
+    def test_bytes_echo_request_empty(self):
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("bytes_echo_request only registered in CBOR build")
+        r = self.lib.bytes_echo_request(b"")
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 0)
+        self.assertEqual(r.value.first, -1)
+        self.assertEqual(r.value.last, -1)
+
     def test_scan_request_types_emitted(self):
         # STRUCTURAL probe — proves the Python wrapper emitted KeyRange,
         # TupleRow, and ScanRequest dataclasses with the expected fields

@@ -256,10 +256,7 @@ proc emitCppStructFields*(h: var string, entry: ApiTypeEntry): bool {.compileTim
       h.add("  " & cppType & " " & f.name & "{};\n")
 
 proc emitMemberTraitsMacro*(
-    h: var string,
-    qualifiedName: string,
-    typeName: string,
-    fieldNames: seq[string],
+    h: var string, qualifiedName: string, typeName: string, fieldNames: seq[string]
 ) {.compileTime.} =
   ## Emit a JSONCONS member-traits macro for `<qualifiedName>`.
   ##

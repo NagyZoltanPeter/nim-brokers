@@ -193,37 +193,15 @@ when defined(BrokerFfiApiCBOR):
 
     proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
 
-## ScanRequest probe block — currently DISABLED for FFI builds because
-## auto-registration in `api_type_resolver.resolveAliasBase` crashes on
-## distinct-over-seq:
-##
-##   Key = distinct seq[byte]
-##   KeyRange = object  (start, stop: Key)   # used as INPUT param
-##   TupleRow = tuple[key: Key, payload: seq[byte]]
-##   ScanRequest = object (rows: seq[TupleRow])
-##
-## Failure: `Error: Invalid node kind nnkBracketExpr for macros.\`$\``
-## at brokers/internal/api_type_resolver.nim:128 — the resolver does
-## `$base` on the distinct underlying type, but for `distinct seq[byte]`
-## the underlying is an `nnkBracketExpr` not a symbol. This blocks even
-## CBOR-mode registration before any wrapper is generated.
-##
-## What's gated by this single AST issue:
-##   - distinct-over-seq fields on objects
-##   - tuple types in FFI signatures (would map to struct{key,payload})
-##   - object-as-input-param in CBOR (KeyRange is the request param)
-##
-## Required to enable: extend `resolveAliasBase` (and the symmetric path
-## in `collectNestedTypeNodes`) to handle nnkBracketExpr underlyings.
-## That is (b)-scope codegen work, not part of this probe pass.
-## Distinct-over-seq probe. Registered by the type resolver but NOT used
-## in any active broker signature: each wrapper would need byte-string
-## tagging on the wire side (e.g. Rust `#[serde(with = "serde_bytes")]`,
-## jsoncons byte-string trait, cbor2 bytes coercion in Python) before
-## a round-trip with `Key`-typed fields can succeed. Tracked separately
-## from tuple-as-struct support. The type still appears in
-## `gApiTypeRegistry` as an `atkDistinct` entry so the resolver fix is
-## kept exercised at compile time.
+## Distinct-over-seq probe. Registered by the type resolver to keep the
+## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
+## time, but NOT used in any active broker signature: per-wrapper
+## byte-string tagging on the wire side (Rust `#[serde(with =
+## "serde_bytes")]`, jsoncons byte-string trait, cbor2 bytes coercion)
+## must propagate through distinct/alias before a round-trip with
+## `Key`-typed fields can succeed. See the inbound-bytes probe
+## (`BytesEchoRequest`) below for the byte-string round-trip support
+## that exists today.
 type Key* {.used.} = distinct seq[byte]
 
 ## KeyRange — plain object input param. Object-as-input-param is
@@ -247,6 +225,21 @@ when defined(BrokerFfiApiCBOR):
     proc signature*(
       category: string, range: KeyRange, reverse: bool
     ): Future[Result[ScanRequest, string]] {.async.}
+
+  ## BytesEchoRequest — exercises `seq[byte]` as an INPUT param. Each
+  ## wrapper has to encode the value as a CBOR byte string (major type 2)
+  ## or the Nim cbor_serialization decoder rejects it with "Expected:
+  ## byte string but found: array". This probe surfaces the per-wrapper
+  ## byte-string handling work that lives outside the type-shape codegen.
+  RequestBroker(API):
+    type BytesEchoRequest* = object
+      length*: int32 ## number of bytes received
+      first*: int32 ## payload[0] cast to int (-1 if empty)
+      last*: int32 ## payload[^1] cast to int (-1 if empty)
+
+    proc signature*(
+      payload: seq[byte]
+    ): Future[Result[BytesEchoRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] and seq[object] INPUT param coverage
@@ -581,6 +574,25 @@ proc setupProviders(ctx: BrokerContext) =
     # ScanRequest provider — exercises distinct-over-seq (Key), tuple
     # (TupleRow → struct), seq[Tuple] (rows), and object-as-param
     # (KeyRange) in one round-trip.
+    discard BytesEchoRequest.setProvider(
+      ctx,
+      proc(
+          payload: seq[byte]
+      ): Future[Result[BytesEchoRequest, string]] {.closure, async.} =
+        let first =
+          if payload.len > 0:
+            int32(payload[0])
+          else:
+            -1'i32
+        let last =
+          if payload.len > 0:
+            int32(payload[^1])
+          else:
+            -1'i32
+        return
+          ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
+    )
+
     discard ScanRequest.setProvider(
       ctx,
       proc(

@@ -1389,6 +1389,37 @@ fn test_opt_seq_absent() {
     lib.shutdown();
 }
 
+// Inbound `seq[byte]` probe — verifies the Rust args struct serialises
+// `Vec<u8>` as a CBOR byte string (via `#[serde(with = "serde_bytes")]`)
+// rather than a sequence-of-int that the Nim decoder rejects.
+#[cfg(feature = "cbor")]
+fn test_bytes_echo_request_roundtrip() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.bytes_echo_request(vec![10u8, 20, 30, 40, 50]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 5i32);
+        check_eq!(v.first, 10i32);
+        check_eq!(v.last, 50i32);
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_bytes_echo_request_empty() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.bytes_echo_request(Vec::<u8>::new());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 0i32);
+        check_eq!(v.first, -1i32);
+        check_eq!(v.last, -1i32);
+    }
+    lib.shutdown();
+}
+
 // ScanRequest STRUCTURAL probe — proves the Rust wrapper compiles with
 // the generated KeyRange / TupleRow / ScanRequest types and that
 // scan_request is callable with the expected signature. Round-trip is
@@ -2559,6 +2590,8 @@ fn main() {
         run_test("test_obj_as_param", test_obj_as_param);
         run_test("test_opt_seq_present", test_opt_seq_present);
         run_test("test_opt_seq_absent", test_opt_seq_absent);
+        run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
+        run_test("test_bytes_echo_request_empty", test_bytes_echo_request_empty);
         run_test("test_scan_request_types_emitted", test_scan_request_types_emitted);
     }
     run_test("test_obj_seq_result_empty", test_obj_seq_result_empty);

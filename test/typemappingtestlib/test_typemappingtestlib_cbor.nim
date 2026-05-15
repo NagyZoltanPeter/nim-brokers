@@ -412,6 +412,33 @@ suite "typemappingtestlib_cbor parity":
     check dec.value.value.isNone()
     discard typemappingtestlib_shutdown(ctx)
 
+  test "inbound seq[byte] byte-string round-trip (BytesEchoRequest)":
+    # Wrappers must encode `seq[byte]` field VALUES as CBOR byte string;
+    # this Nim-side test pins the provider's behaviour.
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      payload*: seq[byte]
+
+    let args = Args(payload: @[byte 10, 20, 30, 40, 50])
+    let (st, resp) = callApi(ctx, "bytes_echo_request", cborEncode(args).value)
+    check st == 0'i32
+    let dec = cborDecodeResultEnvelope(resp, BytesEchoRequest)
+    check dec.isOk()
+    check dec.value.length == 5'i32
+    check dec.value.first == 10'i32
+    check dec.value.last == 50'i32
+
+    let emptyArgs = Args(payload: @[])
+    let (st2, resp2) = callApi(ctx, "bytes_echo_request", cborEncode(emptyArgs).value)
+    check st2 == 0'i32
+    let dec2 = cborDecodeResultEnvelope(resp2, BytesEchoRequest)
+    check dec2.isOk()
+    check dec2.value.length == 0'i32
+    check dec2.value.first == -1'i32
+    check dec2.value.last == -1'i32
+    discard typemappingtestlib_shutdown(ctx)
+
   test "tuple-as-struct + distinct-over-seq + object-as-param round-trip (ScanRequest)":
     # Probes the tuple support pass: KeyRange (object input param),
     # Key (distinct seq[byte]), TupleRow (named tuple alias rendered

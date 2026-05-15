@@ -230,8 +230,8 @@ proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
     # which is what the Nim provider expects. Tolerate list-of-int input
     # by converting on the fly.
     return
-      "(" & src & " if isinstance(" & src & ", (bytes, bytearray)) else bytes(" &
-        src & " or []))"
+      "(" & src & " if isinstance(" & src & ", (bytes, bytearray)) else bytes(" & src &
+      " or []))"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = unwrapBracket(t, "seq")
     return "[" & pyEncodeExpr(inner, "_x") & " for _x in (" & src & " or [])]"
