@@ -413,21 +413,40 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           )
         )
       elif isOptionType(fType):
-        # Phase E1 (scalar): emit value field of unwrapped T plus a sibling
-        # `<name>_has_value: bool`. The encode proc populates both from
-        # the Nim Option's some/none state. Layout X (uniform) — every
-        # Option emits the bool sibling regardless of whether the value
-        # type is variable-shape; that comes in phases E2/E3.
+        # Layout X (uniform): every Option field emits a sibling
+        # `<name>_has_value: bool`. For `Option[seq[T]]` the value side
+        # is a `(pointer, _count: cint)` pair (matching the existing
+        # seq[T] layout) PLUS the bool — three CResult fields total.
+        # For scalar / cstring / object inner types the value side is
+        # a single field; CResult fields total = 2.
         let inner = optionInnerType(fType)
-        let cFieldType = toCFieldType(inner)
-        cResultFields.add(
-          newTree(
-            nnkIdentDefs,
-            postfix(copyNimTree(fieldNames[i]), "*"),
-            cFieldType,
-            newEmptyNode(),
+        if isSeqType(inner):
+          cResultFields.add(
+            newTree(
+              nnkIdentDefs,
+              postfix(copyNimTree(fieldNames[i]), "*"),
+              ident("pointer"),
+              newEmptyNode(),
+            )
           )
-        )
+          cResultFields.add(
+            newTree(
+              nnkIdentDefs,
+              postfix(ident($fieldNames[i] & "_count"), "*"),
+              ident("cint"),
+              newEmptyNode(),
+            )
+          )
+        else:
+          let cFieldType = toCFieldType(inner)
+          cResultFields.add(
+            newTree(
+              nnkIdentDefs,
+              postfix(copyNimTree(fieldNames[i]), "*"),
+              cFieldType,
+              newEmptyNode(),
+            )
+          )
         cResultFields.add(
           newTree(
             nnkIdentDefs,
@@ -568,7 +587,8 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         # Encode `Option[T]` into the (`<name>: T`, `<name>_has_value: bool`)
         # pair. When absent, the value side is set to the C default (zero
         # for scalars, nil for cstring/pointers); readers MUST consult
-        # has_value first.
+        # has_value first. For Option[seq[T]] (E2b) the value side is the
+        # existing (pointer, _count: cint) seq pair plus the has_value bool.
         let hasValueIdent = ident($fName & optionHasValueSuffix)
         let inner = optionInnerType(fType)
         if isCStringType(inner):
@@ -583,6 +603,37 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 result.`hasValueIdent` = true
               else:
                 result.`fName` = nil
+                result.`hasValueIdent` = false
+          )
+        elif isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+          # Option[seq[primitive]] (E2b): allocate a raw element array on
+          # Some (mirrors the seq[primitive] encode), nil + count=0 on None.
+          hasSeqFields = true
+          let elemName = seqItemTypeName(inner)
+          let primCNimType = primElemCNimType(elemName)
+          let countFieldIdent = ident($fName & "_count")
+          let nIdent = genSym(nskLet, "n")
+          let arrIdent = genSym(nskLet, "arr")
+          let iIdent = genSym(nskForVar, "i")
+          encodeBody.add(
+            quote do:
+              if `objIdent`.`fName`.isSome():
+                let `nIdent` = `objIdent`.`fName`.get().len
+                result.`countFieldIdent` = cint(`nIdent`)
+                if `nIdent` > 0:
+                  let `arrIdent` = cast[ptr UncheckedArray[`primCNimType`]](allocShared(
+                    `nIdent` * sizeof(`primCNimType`)
+                  ))
+                  for `iIdent` in 0 ..< `nIdent`:
+                    `arrIdent`[`iIdent`] =
+                      `primCNimType`(`objIdent`.`fName`.get()[`iIdent`])
+                  result.`fName` = cast[pointer](`arrIdent`)
+                else:
+                  result.`fName` = nil
+                result.`hasValueIdent` = true
+              else:
+                result.`fName` = nil
+                result.`countFieldIdent` = 0
                 result.`hasValueIdent` = false
           )
         else:
@@ -728,9 +779,11 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 freeCString(`rIdent`.`fName`)
           )
         elif isOptionType(fType):
-          # Option[T]: only the Option[string] case allocates (cstring
-          # via allocCStringCopy in the encode body); free it here when
-          # has_value is true. Other inner types are POD — no cleanup.
+          # Option[T]: cstring inner allocates a copy via allocCStringCopy;
+          # seq[primitive] inner allocates a raw element array via
+          # allocShared. Free both with the matching primitive (freeCString
+          # / deallocShared) when has_value is true. Other inner types are
+          # POD — no cleanup.
           let inner = optionInnerType(fType)
           if isCStringType(inner):
             let hasValueIdent = ident($fName & optionHasValueSuffix)
@@ -738,6 +791,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               quote do:
                 if `rIdent`.`hasValueIdent` and not `rIdent`.`fName`.isNil:
                   freeCString(`rIdent`.`fName`)
+            )
+          elif isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            let hasValueIdent = ident($fName & optionHasValueSuffix)
+            let countFieldIdent = ident($fName & "_count")
+            freeBody.add(
+              quote do:
+                if `rIdent`.`hasValueIdent` and `rIdent`.`countFieldIdent` > 0 and
+                    not `rIdent`.`fName`.isNil:
+                  deallocShared(`rIdent`.`fName`)
             )
         # enum, primitive, array[N,T] with primitive elements: nothing to free
 
@@ -810,13 +872,24 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         result.add(($fNames[i], cType))
       elif isOptionType(fType):
         # Option[T] → <name>: T + <name>_has_value: bool (uniform layout).
+        # For Option[seq[primitive]] the value side is the existing seq
+        # pair (pointer + count) — three header fields total.
         let inner = optionInnerType(fType)
-        let cType =
+        if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+          let elemName = seqItemTypeName(inner)
+          let cType = nimTypeToCSuffix(ident(elemName))
           if forOutput:
-            nimTypeToCOutput(inner)
+            result.add(($fNames[i], cType & "*"))
           else:
-            nimTypeToCInput(inner)
-        result.add(($fNames[i], cType))
+            result.add(($fNames[i], "const " & cType & "*"))
+          result.add(($fNames[i] & "_count", "int32_t"))
+        else:
+          let cType =
+            if forOutput:
+              nimTypeToCOutput(inner)
+            else:
+              nimTypeToCInput(inner)
+          result.add(($fNames[i], cType))
         result.add(($fNames[i] & optionHasValueSuffix, "bool"))
       elif forOutput:
         result.add(($fNames[i], nimTypeToCOutput(fType)))
@@ -1180,13 +1253,37 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 ");\n"
             )
           elif isOptionType(fType):
-            # Option[T]: read sibling has_value flag → std::optional.
+            # Option[T]: read sibling has_value flag → std::optional. For
+            # Option[seq[primitive]] (E2b) construct the inner vector from
+            # the (ptr, count) pair.
             let inner = optionInnerType(fType)
             let cppInner = nimTypeToCpp(inner)
-            adopt.add(
-              "    r." & fName & " = c." & fName & optionHasValueSuffix &
-                " ? std::optional<" & cppInner & ">(c." & fName & ") : std::nullopt;\n"
-            )
+            let hv = fName & optionHasValueSuffix
+            if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+              let elemName = seqItemTypeName(inner)
+              let cppElem = nimTypeToCpp(ident(elemName))
+              let countField = fName & "_count"
+              adopt.add("    if (c." & hv & ") {\n")
+              adopt.add("        if (c." & fName & " && c." & countField & " > 0) {\n")
+              adopt.add(
+                "            auto* arr = static_cast<" & cppElem & "*>(c." & fName &
+                  ");\n"
+              )
+              adopt.add(
+                "            r." & fName & " = " & cppInner & "(arr, arr + c." &
+                  countField & ");\n"
+              )
+              adopt.add("        } else {\n")
+              adopt.add("            r." & fName & " = " & cppInner & "{};\n")
+              adopt.add("        }\n")
+              adopt.add("    } else {\n")
+              adopt.add("        r." & fName & " = std::nullopt;\n")
+              adopt.add("    }\n")
+            else:
+              adopt.add(
+                "    r." & fName & " = c." & hv & " ? std::optional<" & cppInner & ">(c." &
+                  fName & ") : std::nullopt;\n"
+              )
           else:
             adopt.add("    r." & fName & " = c." & fName & ";\n")
       adopt.add("    " & freeFuncName & "(&c);\n")
@@ -1322,9 +1419,16 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               )
             elif isOptionType(fType):
               # Option[T] expands to value field of inner T plus a sibling
-              # `<name>_has_value: c_bool`.
-              let ctField = nimTypeToCtypes(optionInnerType(fType))
-              pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
+              # `<name>_has_value: c_bool`. For Option[seq[primitive]] the
+              # value side is the (c_void_p ptr, c_int32 count) pair —
+              # three Structure fields total.
+              let inner = optionInnerType(fType)
+              if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+                pyCStruct.add("        (\"" & fName & "\", ctypes.c_void_p),\n")
+                pyCStruct.add("        (\"" & fName & "_count\", ctypes.c_int32),\n")
+              else:
+                let ctField = nimTypeToCtypes(inner)
+                pyCStruct.add("        (\"" & fName & "\", " & ctField & "),\n")
               pyCStruct.add(
                 "        (\"" & fName & optionHasValueSuffix & "\", ctypes.c_bool),\n"
               )
@@ -1477,6 +1581,20 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               I & "    " & fName & " = c." & fName & ".decode(\"utf-8\") if c." & fName &
                 " else \"\"\n"
             )
+          elif isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            # Option[seq[primitive]] (E2b) → Optional[list[int|float|...]].
+            # Materialise from the (ptr, count) pair via ctypes.cast.
+            let elemName = seqItemTypeName(inner)
+            let ctElem = nimTypeToCtypes(ident(elemName))
+            s.add(I & "    " & fName & "_list = []\n")
+            s.add(I & "    if c." & fName & " and c." & fName & "_count > 0:\n")
+            s.add(
+              I & "        _arr = ctypes.cast(c." & fName & ", ctypes.POINTER(" & ctElem &
+                "))\n"
+            )
+            s.add(I & "        for _i in range(c." & fName & "_count):\n")
+            s.add(I & "            " & fName & "_list.append(_arr[_i])\n")
+            s.add(I & "    " & fName & " = " & fName & "_list\n")
           else:
             s.add(I & "    " & fName & " = c." & fName & "\n")
           s.add(I & "else:\n")
@@ -1629,8 +1747,13 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         if rsScalarMappable(t):
           return true
         if isOptionType(t):
-          # Option[T] is mappable iff its inner T is a scalar (E1 scope).
-          return rsScalarMappable(optionInnerType(t))
+          # Option[scalar] (E1) and Option[seq[primitive]] (E2b).
+          let inner = optionInnerType(t)
+          if rsScalarMappable(inner):
+            return true
+          if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            return true
+          return false
         if isSeqType(t):
           let elem = seqItemTypeName(t)
           if isNimPrimitive(elem):
@@ -1720,7 +1843,12 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 )
               elif isOptionType(fType):
                 let inner = optionInnerType(fType)
-                ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(inner) & ",\n")
+                if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+                  let elem = seqItemTypeName(inner)
+                  ffi.add("    pub " & fName & ": *const " & rsElemFfi(elem) & ",\n")
+                  ffi.add("    pub " & fName & "_count: i32,\n")
+                else:
+                  ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(inner) & ",\n")
                 ffi.add("    pub " & fName & optionHasValueSuffix & ": bool,\n")
               else:
                 ffi.add("    pub " & fName & ": " & nimTypeToRustFfi(fType) & ",\n")
@@ -1973,6 +2101,19 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                       fName & ").to_string_lossy().into_owned()) }\n"
                   )
                   result.add("            } else { None };\n")
+                elif isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+                  # Option[seq[primitive]] → Option<Vec<T>>: materialise
+                  # the Vec from the (ptr, count) pair on Some.
+                  result.add(
+                    "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
+                      " {\n"
+                  )
+                  result.add(
+                    "                if c." & fName & ".is_null() || c." & fName &
+                      "_count == 0 { Some(Vec::new()) } else { Some(::std::slice::from_raw_parts(c." &
+                      fName & ", c." & fName & "_count as usize).to_vec()) }\n"
+                  )
+                  result.add("            } else { None };\n")
                 else:
                   result.add(
                     "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
@@ -2070,8 +2211,13 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
       proc goTypeMappable(t: NimNode): bool {.compileTime.} =
         if isOptionType(t):
-          # Option[scalar] in Phase E1; variable-shape inner types in E2/E3.
-          return goScalarMappable(optionInnerType(t))
+          # Option[scalar] (E1) and Option[seq[primitive]] (E2b).
+          let inner = optionInnerType(t)
+          if goScalarMappable(inner):
+            return true
+          if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            return true
+          return false
         if goScalarMappable(t):
           return true
         if isSeqType(t):
@@ -2151,9 +2297,22 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                     nimTypeToGo(ident(elem))
                 goSafe.add("\t" & exName & " []" & goElem & "\n")
               elif isOptionType(fType):
-                goSafe.add(
-                  "\t" & exName & " *" & nimTypeToGo(optionInnerType(fType)) & "\n"
-                )
+                let inner = optionInnerType(fType)
+                if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+                  # Option[seq[primitive]] → *[]T (nil = absent, empty
+                  # slice = present-but-empty).
+                  let elem = seqItemTypeName(inner)
+                  let lc = elem.toLowerAscii()
+                  let goElem =
+                    if lc in ["string", "cstring"]:
+                      "string"
+                    else:
+                      nimTypeToGo(ident(elem))
+                  goSafe.add("\t" & exName & " *[]" & goElem & "\n")
+                else:
+                  goSafe.add(
+                    "\t" & exName & " *" & nimTypeToGo(optionInnerType(fType)) & "\n"
+                  )
               else:
                 goSafe.add("\t" & exName & " " & nimTypeToGo(fType) & "\n")
           else:
@@ -2267,6 +2426,25 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 goConvertCode.add(
                   "\t\tif r." & fName & " != nil { _v = C.GoString(r." & fName & ") }\n"
                 )
+                goConvertCode.add("\t\tout." & exName & " = &_v\n")
+              elif isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+                # Option[seq[primitive]] → *[]T : materialise the slice
+                # from the (ptr, count) pair on Some.
+                let elem = seqItemTypeName(inner)
+                let goElem = nimTypeToGo(ident(elem))
+                goConvertCode.add("\t\t_v := []" & goElem & "{}\n")
+                goConvertCode.add(
+                  "\t\tif r." & fName & " != nil && r." & fName & "_count > 0 {\n"
+                )
+                goConvertCode.add(
+                  "\t\t\tcs := unsafe.Slice(r." & fName & ", int(r." & fName &
+                    "_count))\n"
+                )
+                goConvertCode.add("\t\t\t_v = make([]" & goElem & ", len(cs))\n")
+                goConvertCode.add("\t\t\tfor i, x := range cs {\n")
+                goConvertCode.add("\t\t\t\t_v[i] = " & goElem & "(x)\n")
+                goConvertCode.add("\t\t\t}\n")
+                goConvertCode.add("\t\t}\n")
                 goConvertCode.add("\t\tout." & exName & " = &_v\n")
               else:
                 let goInner = nimTypeToGo(inner)

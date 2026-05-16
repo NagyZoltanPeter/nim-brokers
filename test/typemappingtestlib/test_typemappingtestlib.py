@@ -424,20 +424,17 @@ class TestSeqObject(unittest.TestCase):
         self.assertIsNone(r.value.value)
 
     def test_opt_seq_present(self):
-        # Option[seq[byte]] probe. Native codegen rejects Option[T] outright
-        # ("Generic types other than seq[T] and array[N,T] are not yet
-        # supported in API broker FFI") so the broker is CBOR-gated.
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("opt_seq_request only registered in CBOR build")
+        # Option[seq[byte]] — native E2b + CBOR.
         r = self.lib.opt_seq_request(True)
         self.assertTrue(r.is_ok())
-        # `seq[byte]` (incl. nested inside `Option[T]`) maps to Python
-        # `bytes` consistently after the byte-string codegen fix.
-        self.assertEqual(r.value.value, bytes([1, 2, 3, 4]))
+        v = r.value.value
+        self.assertIsNotNone(v)
+        # CBOR wrapper maps `seq[byte]` (incl. nested in Option) to bytes;
+        # native ctypes wrapper materialises into a list[int]. Both are
+        # acceptable — assert content equivalence.
+        self.assertEqual(bytes(v) if isinstance(v, list) else v, bytes([1, 2, 3, 4]))
 
     def test_opt_seq_absent(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("opt_seq_request only registered in CBOR build")
         r = self.lib.opt_seq_request(False)
         self.assertTrue(r.is_ok())
         self.assertIsNone(r.value.value)

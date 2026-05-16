@@ -1382,6 +1382,30 @@ func test_opt_string_absent() {
 	lib.Close()
 }
 
+// Phase E2b — Option[seq[byte]]. Native + CBOR.
+func test_opt_seq_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(len(*r.Value), 4, "len")
+		checkEq((*r.Value)[0], byte(1), "byte[0]")
+		checkEq((*r.Value)[3], byte(4), "byte[3]")
+	}
+	lib.Close()
+}
+
+func test_opt_seq_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
 func test_obj_seq_result_empty() {
 	lib := newLib()
 	lib.CreateContext()
@@ -2127,6 +2151,8 @@ func main() {
 	runTest("test_opt_scalar_absent", test_opt_scalar_absent)
 	runTest("test_opt_string_present", test_opt_string_present)
 	runTest("test_opt_string_absent", test_opt_string_absent)
+	runTest("test_opt_seq_present", test_opt_seq_present)
+	runTest("test_opt_seq_absent", test_opt_seq_absent)
 	runTest("test_obj_seq_param_empty", test_obj_seq_param_empty)
 	runTest("test_obj_seq_param_single", test_obj_seq_param_single)
 	runTest("test_obj_seq_param_multiple", test_obj_seq_param_multiple)

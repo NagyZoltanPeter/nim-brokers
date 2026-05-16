@@ -1408,10 +1408,8 @@ fn test_opt_string_absent() {
     lib.shutdown();
 }
 
-// Option[seq[byte]] probe — Native codegen rejects Option[T] (the broker
-// is `when defined(BrokerFfiApiCBOR)`-gated in Nim), so this only runs in
-// the CBOR build. The CBOR Rust wrapper maps it to `Option<Vec<u8>>`.
-#[cfg(feature = "cbor")]
+// Option[seq[byte]] probe — works in BOTH native (E2b) and CBOR builds.
+// Wrapper maps to `Option<Vec<u8>>`.
 fn test_opt_seq_present() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1423,7 +1421,6 @@ fn test_opt_seq_present() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_opt_seq_absent() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -2646,11 +2643,11 @@ fn main() {
     run_test("test_opt_scalar_absent", test_opt_scalar_absent);
     run_test("test_opt_string_present", test_opt_string_present);
     run_test("test_opt_string_absent", test_opt_string_absent);
+    run_test("test_opt_seq_present", test_opt_seq_present);
+    run_test("test_opt_seq_absent", test_opt_seq_absent);
     #[cfg(feature = "cbor")]
     {
         run_test("test_obj_as_param", test_obj_as_param);
-        run_test("test_opt_seq_present", test_opt_seq_present);
-        run_test("test_opt_seq_absent", test_opt_seq_absent);
         run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
         run_test("test_bytes_echo_request_empty", test_bytes_echo_request_empty);
         run_test("test_scan_request_forward", test_scan_request_forward);

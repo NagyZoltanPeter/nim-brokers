@@ -183,15 +183,17 @@ RequestBroker(API):
 
   proc signature*(n: int32): Future[Result[TagSeqRequest, string]] {.async.}
 
-## OptSeqRequest: exercises Option[seq[byte]] as a result field.
-## Native codegen rejects `Option[T]` ("Generic types other than seq[T] and
-## array[N,T] are not yet supported in API broker FFI"). CBOR gating only.
-when defined(BrokerFfiApiCBOR):
-  RequestBroker(API):
-    type OptSeqRequest* = object
-      value*: Option[seq[byte]]
+## OptSeqRequest — Phase E2b, `Option[seq[byte]]` as a result field.
+## At the C ABI this expands to THREE fields under Layout X:
+##   `value: uint8_t*`, `value_count: int32_t`, `value_has_value: bool`.
+## The bool is the source of truth for present/absent — not the
+## (nullptr, 0) pattern. A present-but-empty seq is therefore
+## distinguishable from an absent seq.
+RequestBroker(API):
+  type OptSeqRequest* = object
+    value*: Option[seq[byte]]
 
-    proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
+  proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
 
 ## OptScalarRequest — exercises `Option[int32]` as a result field. Phase
 ## E1 of native Option support: every Option field expands at the C ABI
@@ -596,20 +598,18 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
     )
 
-  # --- New probe providers: Option[T], distinct-over-seq, tuple, KeyRange ---
-  # All gated to CBOR — native codegen rejects Option[T] outright, and
-  # ScanRequest takes an object-as-param which is CBOR-only.
+  # --- New probe providers: Option[seq], tuple, KeyRange ---
+
+  discard OptSeqRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptSeqRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptSeqRequest(value: some(@[byte 1, 2, 3, 4])))
+      else:
+        return ok(OptSeqRequest(value: none(seq[byte]))),
+  )
 
   when defined(BrokerFfiApiCBOR):
-    discard OptSeqRequest.setProvider(
-      ctx,
-      proc(present: bool): Future[Result[OptSeqRequest, string]] {.closure, async.} =
-        if present:
-          return ok(OptSeqRequest(value: some(@[byte 1, 2, 3, 4])))
-        else:
-          return ok(OptSeqRequest(value: none(seq[byte]))),
-    )
-
     # ScanRequest provider — exercises distinct-over-seq (Key), tuple
     # (TupleRow → struct), seq[Tuple] (rows), and object-as-param
     # (KeyRange) in one round-trip.

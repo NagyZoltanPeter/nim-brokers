@@ -2335,10 +2335,10 @@ int main() {
     RUN(test_opt_scalar_absent);
     RUN(test_opt_string_present);
     RUN(test_opt_string_absent);
-#ifdef USE_CBOR
-    RUN(test_obj_as_param);
     RUN(test_opt_seq_present);
     RUN(test_opt_seq_absent);
+#ifdef USE_CBOR
+    RUN(test_obj_as_param);
     RUN(test_scan_request_forward);
     RUN(test_scan_request_reverse);
 #endif
