@@ -1260,6 +1260,29 @@ static void test_opt_string_absent() {
     lib.shutdown();
 }
 
+// Option of a registered object (Phase E3) — embedded by value at the
+// C ABI (`TagCItem value` + `value_has_value`). Wrapper exposes it as
+// std::optional<Tag>.
+static void test_opt_obj_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optObjRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(r->value->key, std::string("ok"));
+    CHECK_EQ(r->value->value, std::string("yes"));
+    lib.shutdown();
+}
+
+static void test_opt_obj_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optObjRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
 // Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
 // into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
 // where the field is missing decodes cleanly with `has_value() == false`.
@@ -2337,6 +2360,8 @@ int main() {
     RUN(test_opt_string_absent);
     RUN(test_opt_seq_present);
     RUN(test_opt_seq_absent);
+    RUN(test_opt_obj_present);
+    RUN(test_opt_obj_absent);
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
     RUN(test_scan_request_forward);

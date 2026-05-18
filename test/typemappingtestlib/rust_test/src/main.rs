@@ -1408,6 +1408,33 @@ fn test_opt_string_absent() {
     lib.shutdown();
 }
 
+// Phase E3 — Option[Tag] (Option of a registered object). Native + CBOR.
+fn test_opt_obj_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_obj_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.value.is_some());
+        if let Some(t) = &v.value {
+            check_eq!(&t.key, &"ok".to_string());
+            check_eq!(&t.value, &"yes".to_string());
+        }
+    }
+    lib.shutdown();
+}
+
+fn test_opt_obj_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_obj_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.value.is_none());
+    }
+    lib.shutdown();
+}
+
 // Option[seq[byte]] probe — works in BOTH native (E2b) and CBOR builds.
 // Wrapper maps to `Option<Vec<u8>>`.
 fn test_opt_seq_present() {
@@ -2645,6 +2672,8 @@ fn main() {
     run_test("test_opt_string_absent", test_opt_string_absent);
     run_test("test_opt_seq_present", test_opt_seq_present);
     run_test("test_opt_seq_absent", test_opt_seq_absent);
+    run_test("test_opt_obj_present", test_opt_obj_present);
+    run_test("test_opt_obj_absent", test_opt_obj_absent);
     #[cfg(feature = "cbor")]
     {
         run_test("test_obj_as_param", test_obj_as_param);

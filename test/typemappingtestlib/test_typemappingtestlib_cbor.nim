@@ -404,6 +404,30 @@ suite "typemappingtestlib_cbor parity":
     check dec2.value.value.isNone()
     discard typemappingtestlib_shutdown(ctx)
 
+  test "Option[Tag] result — present + absent (OptObjRequest)":
+    # Phase E3 — Option of a registered object.
+    resetSlots()
+    let ctx = setupCtx()
+    type Args = object
+      present*: bool
+
+    let (st, resp) =
+      callApi(ctx, "opt_obj_request", cborEncode(Args(present: true)).value)
+    check st == 0'i32
+    let dec = cborDecodeResultEnvelope(resp, OptObjRequest)
+    check dec.isOk()
+    check dec.value.value.isSome()
+    check dec.value.value.get().key == "ok"
+    check dec.value.value.get().value == "yes"
+
+    let (st2, resp2) =
+      callApi(ctx, "opt_obj_request", cborEncode(Args(present: false)).value)
+    check st2 == 0'i32
+    let dec2 = cborDecodeResultEnvelope(resp2, OptObjRequest)
+    check dec2.isOk()
+    check dec2.value.value.isNone()
+    discard typemappingtestlib_shutdown(ctx)
+
   test "Option[seq[byte]] result — present":
     # Probe for Option[T] over the FFI surface. Native codegen rejects
     # Option[T] outright; the broker is gated to CBOR mode.

@@ -437,6 +437,18 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               newEmptyNode(),
             )
           )
+        elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+            lookupTypeEntry($inner).kind == atkObject:
+          # Option[Object] (E3): embed the object's `<Name>CItem` by value
+          # (shape iii). The CItem has the C-ABI layout (cstring fields).
+          cResultFields.add(
+            newTree(
+              nnkIdentDefs,
+              postfix(copyNimTree(fieldNames[i]), "*"),
+              ident($inner & "CItem"),
+              newEmptyNode(),
+            )
+          )
         else:
           let cFieldType = toCFieldType(inner)
           cResultFields.add(
@@ -636,6 +648,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 result.`countFieldIdent` = 0
                 result.`hasValueIdent` = false
           )
+        elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+            lookupTypeEntry($inner).kind == atkObject:
+          # Option[Object] (E3): convert the inner object to its `<Name>CItem`
+          # via the generated `encode<Name>ToCItem` proc (allocates the
+          # CItem's cstring fields). On None embed a zero-initialised CItem.
+          hasSeqFields = true
+          let encodeItemProc = ident("encode" & $inner & "ToCItem")
+          let cItemType = ident($inner & "CItem")
+          encodeBody.add(
+            quote do:
+              if `objIdent`.`fName`.isSome():
+                result.`fName` = `encodeItemProc`(`objIdent`.`fName`.get())
+                result.`hasValueIdent` = true
+              else:
+                result.`fName` = default(`cItemType`)
+                result.`hasValueIdent` = false
+          )
         else:
           let cInnerType = toCFieldType(inner)
           encodeBody.add(
@@ -801,6 +830,28 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                     not `rIdent`.`fName`.isNil:
                   deallocShared(`rIdent`.`fName`)
             )
+          elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+              lookupTypeEntry($inner).kind == atkObject:
+            # Option[Object] (E3): the embedded CItem's cstring fields were
+            # heap-allocated by encode<Name>ToCItem — free each when
+            # has_value is true.
+            let hasValueIdent = ident($fName & optionHasValueSuffix)
+            let itemFields = lookupFfiStruct($inner)
+            var itemFreeStmts = newStmtList()
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                let ifNameIdent = ident(ifName)
+                itemFreeStmts.add(
+                  quote do:
+                    if not `rIdent`.`fName`.`ifNameIdent`.isNil:
+                      freeCString(`rIdent`.`fName`.`ifNameIdent`)
+                )
+            if itemFreeStmts.len > 0:
+              freeBody.add(
+                quote do:
+                  if `rIdent`.`hasValueIdent`:
+                    `itemFreeStmts`
+              )
         # enum, primitive, array[N,T] with primitive elements: nothing to free
 
     result.add(
@@ -883,6 +934,10 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
           else:
             result.add(($fNames[i], "const " & cType & "*"))
           result.add(($fNames[i] & "_count", "int32_t"))
+        elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+            lookupTypeEntry($inner).kind == atkObject:
+          # Option[Object] → embedded `<Name>CItem` value (shape iii).
+          result.add(($fNames[i], $inner & "CItem"))
         else:
           let cType =
             if forOutput:
@@ -1279,6 +1334,14 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
               adopt.add("    } else {\n")
               adopt.add("        r." & fName & " = std::nullopt;\n")
               adopt.add("    }\n")
+            elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+                lookupTypeEntry($inner).kind == atkObject:
+              # Option[Object] (E3): adopt the embedded CItem into the C++
+              # struct via the generated adopt<Name> helper.
+              adopt.add(
+                "    r." & fName & " = c." & hv & " ? std::optional<" & cppInner &
+                  ">(adopt" & $inner & "(c." & fName & ")) : std::nullopt;\n"
+              )
             else:
               adopt.add(
                 "    r." & fName & " = c." & hv & " ? std::optional<" & cppInner & ">(c." &
@@ -1595,6 +1658,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
             s.add(I & "        for _i in range(c." & fName & "_count):\n")
             s.add(I & "            " & fName & "_list.append(_arr[_i])\n")
             s.add(I & "    " & fName & " = " & fName & "_list\n")
+          elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+              lookupTypeEntry($inner).kind == atkObject:
+            # Option[Object] (E3) → Optional[<Dataclass>]. Build the
+            # dataclass from the embedded CItem's fields.
+            let itemFields = lookupFfiStruct($inner)
+            var ctorArgs: seq[string] = @[]
+            for (ifName, ifType) in itemFields:
+              if ifType.toLowerAscii() in ["string", "cstring"]:
+                ctorArgs.add(
+                  ifName & "=(c." & fName & "." & ifName & ".decode(\"utf-8\") if c." &
+                    fName & "." & ifName & " else \"\")"
+                )
+              else:
+                ctorArgs.add(ifName & "=c." & fName & "." & ifName)
+            s.add(
+              I & "    " & fName & " = " & $inner & "(" & ctorArgs.join(", ") & ")\n"
+            )
           else:
             s.add(I & "    " & fName & " = c." & fName & "\n")
           s.add(I & "else:\n")
@@ -1747,11 +1827,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
         if rsScalarMappable(t):
           return true
         if isOptionType(t):
-          # Option[scalar] (E1) and Option[seq[primitive]] (E2b).
+          # Option[scalar] (E1), Option[seq[primitive]] (E2b),
+          # Option[Object-with-primitive/string-fields] (E3).
           let inner = optionInnerType(t)
           if rsScalarMappable(inner):
             return true
           if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            return true
+          if inner.kind == nnkIdent and isTypeRegistered($inner) and
+              lookupTypeEntry($inner).kind == atkObject:
+            for f in lookupTypeEntry($inner).fields:
+              let lc = f.nimType.toLowerAscii()
+              if lc notin [
+                "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                "string", "cstring",
+              ]:
+                return false
             return true
           return false
         if isSeqType(t):
@@ -2114,6 +2206,32 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                       fName & ", c." & fName & "_count as usize).to_vec()) }\n"
                   )
                   result.add("            } else { None };\n")
+                elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+                    lookupTypeEntry($inner).kind == atkObject:
+                  # Option[Object] → Option<Struct>: build the struct from
+                  # the embedded CItem's fields on Some.
+                  let entry = lookupTypeEntry($inner)
+                  result.add(
+                    "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
+                      " {\n"
+                  )
+                  result.add("                Some(" & $inner & " {\n")
+                  for f in entry.fields:
+                    let lcf = f.nimType.toLowerAscii()
+                    if lcf in ["string", "cstring"]:
+                      result.add(
+                        "                    " & f.name & ": if c." & fName & "." &
+                          f.name &
+                          ".is_null() { String::new() } else { ::std::ffi::CStr::from_ptr(c." &
+                          fName & "." & f.name & ").to_string_lossy().into_owned() },\n"
+                      )
+                    else:
+                      result.add(
+                        "                    " & f.name & ": c." & fName & "." & f.name &
+                          ",\n"
+                      )
+                  result.add("                })\n")
+                  result.add("            } else { None };\n")
                 else:
                   result.add(
                     "            _r." & fName & " = if c." & fName & optionHasValueSuffix &
@@ -2211,11 +2329,23 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
 
       proc goTypeMappable(t: NimNode): bool {.compileTime.} =
         if isOptionType(t):
-          # Option[scalar] (E1) and Option[seq[primitive]] (E2b).
+          # Option[scalar] (E1), Option[seq[primitive]] (E2b),
+          # Option[Object-with-primitive/string-fields] (E3).
           let inner = optionInnerType(t)
           if goScalarMappable(inner):
             return true
           if isSeqType(inner) and isSeqOfPrimitiveNode(inner):
+            return true
+          if inner.kind == nnkIdent and isTypeRegistered($inner) and
+              lookupTypeEntry($inner).kind == atkObject:
+            for f in lookupTypeEntry($inner).fields:
+              let lc = f.nimType.toLowerAscii()
+              if lc notin [
+                "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8",
+                "byte", "uint16", "uint32", "uint64", "float", "float32", "float64",
+                "string", "cstring",
+              ]:
+                return false
             return true
           return false
         if goScalarMappable(t):
@@ -2445,6 +2575,26 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
                 goConvertCode.add("\t\t\t\t_v[i] = " & goElem & "(x)\n")
                 goConvertCode.add("\t\t\t}\n")
                 goConvertCode.add("\t\t}\n")
+                goConvertCode.add("\t\tout." & exName & " = &_v\n")
+              elif inner.kind == nnkIdent and isTypeRegistered($inner) and
+                  lookupTypeEntry($inner).kind == atkObject:
+                # Option[Object] → *Struct: build the struct from the
+                # embedded C.<Name>CItem fields on Some.
+                let entry = lookupTypeEntry($inner)
+                goConvertCode.add("\t\t_v := " & $inner & "{}\n")
+                for f in entry.fields:
+                  let exFf = goExportedField(f.name)
+                  let lcf = f.nimType.toLowerAscii()
+                  if lcf in ["string", "cstring"]:
+                    goConvertCode.add(
+                      "\t\tif r." & fName & "." & f.name & " != nil { _v." & exFf &
+                        " = C.GoString(r." & fName & "." & f.name & ") }\n"
+                    )
+                  else:
+                    goConvertCode.add(
+                      "\t\t_v." & exFf & " = " & nimTypeToGo(ident(f.nimType)) & "(r." &
+                        fName & "." & f.name & ")\n"
+                    )
                 goConvertCode.add("\t\tout." & exName & " = &_v\n")
               else:
                 let goInner = nimTypeToGo(inner)

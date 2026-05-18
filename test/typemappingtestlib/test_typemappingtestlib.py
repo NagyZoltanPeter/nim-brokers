@@ -423,6 +423,19 @@ class TestSeqObject(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertIsNone(r.value.value)
 
+    def test_opt_obj_present(self):
+        # Phase E3 — Option[Tag]. Native + CBOR.
+        r = self.lib.opt_obj_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertIsNotNone(r.value.value)
+        self.assertEqual(r.value.value.key, "ok")
+        self.assertEqual(r.value.value.value, "yes")
+
+    def test_opt_obj_absent(self):
+        r = self.lib.opt_obj_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
     def test_opt_seq_present(self):
         # Option[seq[byte]] — native E2b + CBOR.
         r = self.lib.opt_seq_request(True)

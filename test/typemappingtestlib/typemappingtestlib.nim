@@ -216,6 +216,17 @@ RequestBroker(API):
 
   proc signature*(present: bool): Future[Result[OptStringRequest, string]] {.async.}
 
+## OptObjRequest — Phase E3, Option of a registered object (`Option[Tag]`).
+## Shape (iii): the inner object is embedded by value at the C ABI —
+## `value: TagCItem` + `value_has_value: bool`. When absent the embedded
+## CItem is zero-initialised (nil cstring fields); readers MUST consult
+## `value_has_value` first.
+RequestBroker(API):
+  type OptObjRequest* = object
+    value*: Option[Tag]
+
+  proc signature*(present: bool): Future[Result[OptObjRequest, string]] {.async.}
+
 ## Distinct-over-seq probe. Registered by the type resolver to keep the
 ## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
 ## time, but NOT used in any active broker signature: per-wrapper
@@ -589,6 +600,15 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptStringRequest(value: some("hello")))
       else:
         return ok(OptStringRequest(value: none(string))),
+  )
+
+  discard OptObjRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptObjRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptObjRequest(value: some(Tag(key: "ok", value: "yes"))))
+      else:
+        return ok(OptObjRequest(value: none(Tag))),
   )
 
   when defined(BrokerFfiApiCBOR):

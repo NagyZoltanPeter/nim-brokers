@@ -1406,6 +1406,29 @@ func test_opt_seq_absent() {
 	lib.Close()
 }
 
+// Phase E3 — Option[Tag] (Option of a registered object). Native + CBOR.
+func test_opt_obj_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptObjRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(r.Value.Key, "ok", "key")
+		checkEq(r.Value.Value, "yes", "value")
+	}
+	lib.Close()
+}
+
+func test_opt_obj_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptObjRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
 func test_obj_seq_result_empty() {
 	lib := newLib()
 	lib.CreateContext()
@@ -2153,6 +2176,8 @@ func main() {
 	runTest("test_opt_string_absent", test_opt_string_absent)
 	runTest("test_opt_seq_present", test_opt_seq_present)
 	runTest("test_opt_seq_absent", test_opt_seq_absent)
+	runTest("test_opt_obj_present", test_opt_obj_present)
+	runTest("test_opt_obj_absent", test_opt_obj_absent)
 	runTest("test_obj_seq_param_empty", test_obj_seq_param_empty)
 	runTest("test_obj_seq_param_single", test_obj_seq_param_single)
 	runTest("test_obj_seq_param_multiple", test_obj_seq_param_multiple)
