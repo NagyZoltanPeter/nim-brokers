@@ -665,7 +665,8 @@ static void test_seq_byte_empty() {
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
     CHECK(r.isOk());
-    CHECK(r->data.empty());
+    // `seq[byte]` maps to jsoncons::byte_string (no `.empty()`; use size()).
+    CHECK_EQ(r->data.size(), static_cast<size_t>(0));
     lib.shutdown();
 }
 
@@ -1204,16 +1205,32 @@ static void test_opt_seq_present() {
     lib.shutdown();
 }
 
-// NOTE: BytesEchoRequest (inbound `seq[byte]` byte-string probe) has no
-// C++ assertion here. jsoncons 1.7.0 maps `std::vector<uint8_t>` via
-// `is_compatible_array_type` which encodes as a CBOR array (major type
-// 4); the Nim provider expects a byte string (major type 2). There is
-// no per-field byte-string macro in the `JSONCONS_*_MEMBER_TRAITS`
-// family — the documented opt-in path is a custom partial specialisation
-// of `json_type_traits`, which is a wrapper-API design call (likely
-// emitting a `broker::byte_string` typedef in lieu of bare
-// `std::vector<uint8_t>` for byte-string fields). Tracked as a follow-up.
-// Python / Rust / Go cover this round-trip end-to-end.
+// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
+// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
+// string (major type 2) — the form the Nim provider expects.
+static void test_bytes_echo_request_roundtrip() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload{10, 20, 30, 40, 50};
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 5);
+    CHECK_EQ(r->first, 10);
+    CHECK_EQ(r->last, 50);
+    lib.shutdown();
+}
+
+static void test_bytes_echo_request_empty() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload;
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 0);
+    CHECK_EQ(r->first, -1);
+    CHECK_EQ(r->last, -1);
+    lib.shutdown();
+}
 
 // Native Option[T] probe (Phase E1 / scalar). Works in both native and
 // CBOR builds: the C ABI now expands every `Option[T]` field to a
@@ -2366,6 +2383,8 @@ int main() {
     RUN(test_obj_as_param);
     RUN(test_scan_request_forward);
     RUN(test_scan_request_reverse);
+    RUN(test_bytes_echo_request_roundtrip);
+    RUN(test_bytes_echo_request_empty);
 #endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);

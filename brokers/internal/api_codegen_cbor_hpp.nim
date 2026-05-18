@@ -67,6 +67,15 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
   let prim = primCppType(t)
   if prim.len > 0:
     return prim
+  if lower == "seq[byte]":
+    # `jsoncons::byte_string` is jsoncons' own byte-string container. It
+    # satisfies `is_basic_byte_string`, so jsoncons encodes/decodes it as
+    # a CBOR byte string (major type 2) — what the Nim cbor_serialization
+    # decoder expects for `seq[byte]`. A plain `std::vector<uint8_t>` would
+    # ride the wire as a CBOR array (major type 4) and be rejected on
+    # INBOUND request params. `byte_string` is container-like (data/size/
+    # begin/end/operator[]/push_back).
+    return "jsoncons::byte_string"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
     return
