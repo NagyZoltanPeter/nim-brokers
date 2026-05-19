@@ -5,6 +5,7 @@ project(ffibench_cpp_driver CXX)
 # Built twice: USE_CBOR=OFF links the native benchlib, USE_CBOR=ON links
 # the -d:BrokerFfiApiCBOR build and pulls in the jsoncons headers.
 option(USE_CBOR "Link against the CBOR-mode build of benchlib (-d:BrokerFfiApiCBOR)" OFF)
+option(ASAN "Enable AddressSanitizer on the C++ drivers (lib must also be ASAN-built)" OFF)
 
 if(NOT BENCH_DIR)
     if(USE_CBOR)
@@ -51,6 +52,11 @@ function(add_ffibench_target tgt src)
         target_include_directories(${tgt} PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
         target_compile_definitions(${tgt} PRIVATE USE_CBOR=1)
+    endif()
+    if(ASAN)
+        target_compile_options(${tgt} PRIVATE
+            -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(${tgt} PRIVATE -fsanitize=address)
     endif()
     if(APPLE)
         set_target_properties(${tgt} PROPERTIES
