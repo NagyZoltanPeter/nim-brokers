@@ -37,8 +37,11 @@ import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
 import ./internal/api_cbor_subs_registry
 import ./internal/api_cbor_tuple
+import ./internal/api_cbor_courier
+import ./internal/mt_broker_common
 
-export api_cbor_descriptor, api_cbor_subs_registry, api_cbor_tuple
+export api_cbor_descriptor, api_cbor_subs_registry, api_cbor_tuple, api_cbor_courier
+export mt_broker_common
 
 export results, chronos, chronicles, broker_context, api_common
 
@@ -1536,6 +1539,13 @@ proc registerBrokerLibraryCborImpl(
           shutdownFlag: Atomic[int]
           processingReady: Atomic[int]
           processingErrorMessage: cstring
+          # Part C — buffer courier. `courier` is allocated in
+          # `_createContext` and freed in `_shutdown`. `courierSignal` is
+          # the processing thread's broker dispatch signal, published by
+          # the processing thread once its chronos loop is up so a foreign
+          # `<lib>_call` can wake it after enqueuing a request.
+          courier: ptr CborCourier
+          courierSignal: ThreadSignalPtr
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
@@ -1854,6 +1864,71 @@ proc registerBrokerLibraryCborImpl(
           arg.processingReady.store(-1, moRelease)
           return
 
+        # ----------------------------------------------------------------
+        # Part C — buffer courier. The processing thread owns CBOR decode,
+        # the provider call, and CBOR encode. A foreign `<lib>_call` hands
+        # us a raw request buffer over `arg.courier.chan` and blocks on a
+        # response slot; we wake on the shared broker dispatch signal.
+        # ----------------------------------------------------------------
+        proc handleCourierMsg(m: CborCallMsg) {.async: (raises: []), gcsafe.} =
+          # Copy the request bytes off the shared buffer, then free it —
+          # ownership of `m.reqBuf` transferred to us via the channel.
+          var nimReq = newSeq[byte](m.reqLen.int)
+          if m.reqLen > 0 and not m.reqBuf.isNil:
+            copyMem(addr nimReq[0], m.reqBuf, m.reqLen.int)
+          if not m.reqBuf.isNil:
+            deallocShared(m.reqBuf)
+          let apiName = $cast[cstring](addr m.apiName[0])
+          var respBuf: pointer = nil
+          var respLen: int32 = 0
+          var status: int32 = 0
+          if not `knownNamePredIdent`(apiName):
+            let em = "unknown apiName: " & apiName
+            let b = allocShared0(em.len)
+            if em.len > 0:
+              copyMem(b, unsafeAddr em[0], em.len)
+            respBuf = b
+            respLen = int32(em.len)
+            status = -4'i32
+          else:
+            let dispRes = catch:
+              await `dispatchProcIdent`(apiName, arg.ctx, nimReq)
+            if dispRes.isErr():
+              status = -10'i32
+            else:
+              let respBytes = dispRes.get()
+              if respBytes.len > 0:
+                let b = allocShared0(respBytes.len)
+                copyMem(b, unsafeAddr respBytes[0], respBytes.len)
+                respBuf = b
+                respLen = int32(respBytes.len)
+          completeSlot(arg.courier, m.slotIdx.int, respBuf, respLen, status)
+
+        # Drained by the shared `brokerDispatchLoop` whenever the dispatch
+        # signal fires. Each message is handled on its own spawned
+        # coroutine so a slow provider does not stall the drain.
+        proc courierPoll(): int {.gcsafe, raises: [].} =
+          var didWork = 0
+          while true:
+            let recvRes = catch:
+              arg.courier.chan.tryRecv()
+            if recvRes.isErr():
+              break
+            let rv = recvRes.get()
+            if not rv.dataAvailable:
+              break
+            asyncSpawn handleCourierMsg(rv.msg)
+            didWork = 1
+          didWork
+
+        # Publish this thread's dispatch signal so a foreign `<lib>_call`
+        # can wake us, register the courier poller, and start the loop.
+        # Done BEFORE `processingReady = 1` so the first `_call` (which can
+        # only arrive after `createContext` returns) is always serviced.
+        arg.courierSignal = getOrInitBrokerSignal()
+        registerBrokerPoller(courierPoll)
+        ensureBrokerDispatchStarted()
+
         arg.processingReady.store(1, moRelease)
 
         proc awaitShutdown(flag: ptr Atomic[int]) {.async: (raises: []).} =
@@ -1864,6 +1939,11 @@ proc registerBrokerLibraryCborImpl(
               discard
 
         waitFor awaitShutdown(addr arg.shutdownFlag)
+        # Part C: tear down the dispatch-loop coroutine cleanly before the
+        # thread exits. `_shutdown` waits for `courier.inFlight` to reach 0
+        # (while this thread is still handling) before it sets
+        # `shutdownFlag`, so no courier message is in flight here.
+        stopBrokerDispatchHere()
 
   )
 
@@ -1890,6 +1970,10 @@ proc registerBrokerLibraryCborImpl(
         arg.shutdownFlag.store(0, moRelaxed)
         arg.processingReady.store(0, moRelaxed)
         arg.processingErrorMessage = nil
+        # Part C — courier: 64 response slots = ceiling on concurrent
+        # in-flight `<lib>_call`s; a call past that fails fast.
+        arg.courier = newCborCourier(64)
+        arg.courierSignal = nil
 
         let entry = cast[ptr `ctxEntryIdent`](allocShared0(sizeof(`ctxEntryIdent`)))
         entry.ctx = bctx
@@ -1903,6 +1987,7 @@ proc registerBrokerLibraryCborImpl(
             errOut[] = allocCStringCopy(
               "Failed to spawn processing thread: " & createRes.error.msg
             )
+          freeCborCourier(arg.courier)
           deallocShared(arg)
           deallocShared(entry)
           return 0'u32
@@ -1927,6 +2012,7 @@ proc registerBrokerLibraryCborImpl(
               arg.processingErrorMessage = nil
             else:
               errOut[] = allocCStringCopy("processing thread did not become ready")
+          freeCborCourier(arg.courier)
           deallocShared(arg)
           deallocShared(entry)
           return 0'u32
@@ -1950,6 +2036,22 @@ proc registerBrokerLibraryCborImpl(
         if entryToShutdown.isNil:
           return -1'i32
 
+        # Part C — drain in-flight `_call`s BEFORE stopping the processing
+        # thread. `active` is already false (set under the lock above) so
+        # no new call enters; in-flight calls complete (the processing
+        # thread is still handling) and decrement `inFlight`. Only once
+        # inFlight reaches 0 is the channel guaranteed quiescent, so
+        # signalling shutdown + freeing the courier cannot race a `_call`.
+        # A bounded timeout guards against a hung provider (best-effort).
+        block:
+          let courier = entryToShutdown.arg.courier
+          if not courier.isNil:
+            var waitedMs = 0
+            const drainTimeoutMs = 5000
+            while courier.inFlight.load(moAcquire) > 0 and waitedMs < drainTimeoutMs:
+              sleep(1)
+              inc waitedMs
+
         entryToShutdown.arg.shutdownFlag.store(1, moRelease)
         joinThread(entryToShutdown.procThread)
         # Phase 10: free this ctx's subscription state *after* the
@@ -1959,6 +2061,10 @@ proc registerBrokerLibraryCborImpl(
         subsRegistryFreeForCtx(`subsRegIdent`, ctx)
         if not entryToShutdown.arg.processingErrorMessage.isNil:
           freeCString(entryToShutdown.arg.processingErrorMessage)
+        # Part C — free the courier. Phase 1a: `<lib>_call` does not yet
+        # use the courier, so freeing right after joinThread is safe (no
+        # in-flight calls). Phase 1b adds the inFlight-counter wait.
+        freeCborCourier(entryToShutdown.arg.courier)
         deallocShared(entryToShutdown.arg)
 
         withLock `ctxsLockIdent`:
@@ -1984,50 +2090,74 @@ proc registerBrokerLibraryCborImpl(
           respBufOut: ptr pointer,
           respLenOut: ptr int32,
       ): int32 {.exportc: `callFuncNameLit`, cdecl, dynlib.} =
+        # Part C — buffer courier. This runs on the foreign caller's
+        # thread and does NO CBOR decode and NO chronos loop: it hands the
+        # raw request buffer to the processing thread and blocks on a
+        # response slot. `reqBuf` ownership transfers to the processing
+        # thread on a successful `send`; every error path frees it here.
         ensureForeignThreadGc()
         if respBufOut.isNil or respLenOut.isNil:
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
           return -1'i32
         respBufOut[] = nil
         respLenOut[] = 0
         if apiNameC.isNil:
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
           return -2'i32
         if reqLen < 0 or reqLen.int > `bufSizeCap`:
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
           return -3'i32
+        let nameLen = apiNameC.len
+        if nameLen >= CborApiNameMax:
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return -2'i32
 
-        let apiName = $apiNameC
+        # Resolve ctx -> courier. `inFlight` is bumped under the SAME lock
+        # `_shutdown` uses to flip `active`, so once shutdown has run no
+        # new call can enter; `_shutdown` then waits for inFlight -> 0.
+        var courier: ptr CborCourier = nil
+        var courierSig: ThreadSignalPtr = nil
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            let e = `ctxsIdent`[i]
+            if uint32(e.ctx) == ctx and e.active:
+              courier = e.arg.courier
+              courierSig = e.arg.courierSignal
+              discard courier.inFlight.fetchAdd(1, moAcquireRelease)
+              break
+        if courier.isNil:
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return -5'i32
 
-        # Copy the inbound buffer into a Nim seq[byte] so the bytes outlive
-        # the C buffer (which we free unconditionally before returning).
-        var nimReq = newSeq[byte](reqLen.int)
-        if reqLen > 0 and not reqBuf.isNil:
-          copyMem(addr nimReq[0], reqBuf, reqLen.int)
-        if not reqBuf.isNil:
-          deallocShared(reqBuf)
+        let slotIdx = claimSlot(courier)
+        if slotIdx < 0:
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return -6'i32
 
-        let bctx = BrokerContext(ctx)
+        var msg: CborCallMsg
+        if nameLen > 0:
+          copyMem(addr msg.apiName[0], apiNameC, nameLen)
+        # `msg` is stack-zero-initialised, so apiName stays NUL-terminated.
+        msg.reqBuf = reqBuf
+        msg.reqLen = reqLen
+        msg.slotIdx = int32(slotIdx)
+        courier.chan.send(msg) # ownership of reqBuf transfers here
+        if not courierSig.isNil:
+          discard courierSig.fireSync()
 
-        if not `knownNamePredIdent`(apiName):
-          let msg = "unknown apiName: " & apiName
-          let buf = allocShared0(msg.len)
-          if msg.len > 0:
-            copyMem(buf, unsafeAddr msg[0], msg.len)
-          respBufOut[] = buf
-          respLenOut[] = int32(msg.len)
-          return -4'i32
-
-        let dispRes = catch:
-          waitFor `dispatchProcIdent`(apiName, bctx, nimReq)
-        if dispRes.isErr():
-          # Should not happen (adapter is raises:[]), but be defensive.
-          return -10'i32
-
-        let respBytes = dispRes.get()
-        if respBytes.len > 0:
-          let buf = allocShared0(respBytes.len)
-          copyMem(buf, unsafeAddr respBytes[0], respBytes.len)
-          respBufOut[] = buf
-          respLenOut[] = int32(respBytes.len)
-        return 0'i32
+        let res = waitSlot(courier, slotIdx)
+        releaseSlot(courier, slotIdx)
+        respBufOut[] = res.respBuf
+        respLenOut[] = res.respLen
+        discard courier.inFlight.fetchSub(1, moAcquireRelease)
+        return res.status
 
   )
 
