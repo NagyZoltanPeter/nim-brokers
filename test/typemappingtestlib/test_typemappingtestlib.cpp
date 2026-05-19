@@ -322,6 +322,87 @@ static void test_events_off_stops_delivery() {
 }
 
 // ============================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `value` field; CBOR mode exposes it as the bare `int32_t` alias. The event
+// callback carries a bare scalar parameter in both modes.
+// ============================================================================
+
+static void test_primitive_int_result_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.intResultRequest(21);
+    CHECK(r.isOk());
+    // Native mode: IntResultRequest is a struct with a single `value` field.
+    // CBOR mode: IntResultRequest is the bare `int32_t` alias.
+#ifdef USE_CBOR
+    CHECK_EQ(*r, 42); // provider returns value * 2
+#else
+    CHECK_EQ(r->value, 42); // provider returns value * 2
+#endif
+    lib.shutdown();
+}
+
+static void test_primitive_simple_int_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<int64_t> received;
+    auto h = lib.onSimpleIntEvent([&received](Typemappingtestlib&, int64_t v) {
+        received.push(v);
+    });
+    CHECK_NE(h, 0ull);
+
+    lib.intResultRequest(5); // provider emits SimpleIntEvent(value * 10)
+    waitFor([&] { return received.size() >= 1; });
+
+    CHECK_EQ(received.size(), 1u);
+    CHECK_EQ(received.snapshot()[0], static_cast<int64_t>(50));
+
+    lib.offSimpleIntEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. Native mode surfaces the
+// result as an empty struct, CBOR mode as Result<void>; either way the
+// caller only inspects isOk()/isErr(). The void event callback carries no
+// payload argument in both modes.
+// ============================================================================
+
+static void test_void_action_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    auto ok = lib.voidActionRequest("go");
+    CHECK(ok.isOk());
+
+    auto bad = lib.voidActionRequest(""); // provider rejects empty label
+    CHECK(bad.isErr());
+
+    lib.shutdown();
+}
+
+static void test_void_ping_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<int> received;
+    auto h = lib.onVoidPing([&received](Typemappingtestlib&) { received.push(1); });
+    CHECK_NE(h, 0ull);
+
+    lib.voidActionRequest("trigger"); // provider emits VoidPing
+    waitFor([&] { return received.size() >= 1; });
+
+    CHECK_EQ(received.size(), 1u);
+
+    lib.offVoidPing(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // TestContextSeparation
 // ============================================================================
 
@@ -2284,6 +2365,12 @@ int main() {
     printf("\n--- TestEvents ---\n");
     RUN(test_events_counter_changed);
     RUN(test_events_off_stops_delivery);
+
+    printf("\n--- TestPrimitiveBrokerTypes ---\n");
+    RUN(test_primitive_int_result_request);
+    RUN(test_primitive_simple_int_event);
+    RUN(test_void_action_request);
+    RUN(test_void_ping_event);
 
     printf("\n--- TestContextSeparation ---\n");
     RUN(test_context_independent_counters);

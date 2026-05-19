@@ -255,6 +255,77 @@ func test_dual_sig_with_label() {
 }
 
 // ============================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `Value` field; CBOR mode exposes it as the bare `int32` type alias. The
+// build-tagged `intResultValue` helper bridges the two shapes.
+// ============================================================================
+
+func test_primitive_int_result_request() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.IntResultRequest(21)
+	check(err == nil, "intResultRequest is_ok")
+	checkEq(intResultValue(r), int32(42), "value") // provider returns value*2
+	lib.Close()
+}
+
+func test_primitive_simple_int_event() {
+	lib := newLib()
+	lib.CreateContext()
+
+	received := &safeList[int64]{}
+	h := lib.OnSimpleIntEvent(func(value int64) { received.push(value) })
+	checkNe(h, uint64(0), "handle != 0")
+
+	lib.IntResultRequest(5) // provider emits SimpleIntEvent(value*10)
+	waitFor(func() bool { return received.size() >= 1 })
+
+	checkEq(received.size(), 1, "received.size")
+	checkEq(received.snapshot()[0], int64(50), "value*10")
+
+	lib.OffSimpleIntEvent(h)
+	lib.Close()
+}
+
+// ============================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. The request returns only an
+// error (nil = ok); the event handler takes no payload argument.
+// ============================================================================
+
+func test_void_action_request() {
+	lib := newLib()
+	lib.CreateContext()
+
+	_, okErr := lib.VoidActionRequest("go")
+	check(okErr == nil, "voidActionRequest ok")
+
+	_, badErr := lib.VoidActionRequest("") // provider rejects empty label
+	check(badErr != nil, "voidActionRequest err on empty label")
+
+	lib.Close()
+}
+
+func test_void_ping_event() {
+	lib := newLib()
+	lib.CreateContext()
+
+	received := &safeList[int]{}
+	h := lib.OnVoidPing(func() { received.push(1) })
+	checkNe(h, uint64(0), "handle != 0")
+
+	lib.VoidActionRequest("trigger") // provider emits VoidPing
+	waitFor(func() bool { return received.size() >= 1 })
+
+	checkEq(received.size(), 1, "received.size")
+
+	lib.OffVoidPing(h)
+	lib.Close()
+}
+
+// ============================================================================
 // TestEvents
 // ============================================================================
 
@@ -2087,6 +2158,11 @@ func main() {
 	fmt.Println("\n--- TestEvents ---")
 	runTest("test_events_counter_changed", test_events_counter_changed)
 	runTest("test_events_off_stops_delivery", test_events_off_stops_delivery)
+
+	runTest("test_primitive_int_result_request", test_primitive_int_result_request)
+	runTest("test_primitive_simple_int_event", test_primitive_simple_int_event)
+	runTest("test_void_action_request", test_void_action_request)
+	runTest("test_void_ping_event", test_void_ping_event)
 
 	fmt.Println("\n--- TestContextSeparation ---")
 	runTest("test_context_independent_counters", test_context_independent_counters)

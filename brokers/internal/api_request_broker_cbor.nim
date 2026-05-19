@@ -72,6 +72,21 @@ proc registerCborObjectType*(
     entry.fields.add(ApiFieldDef(name: fname, nimType: ftype))
   registerTypeEntry(entry)
 
+proc registerCborPrimitiveType*(
+    typeName: string, parsed: ParsedBrokerType
+) {.compileTime.} =
+  ## Register a primitive (non-object) broker type — `type X = int32` — as a
+  ## distinct alias of its underlying primitive. Wrapper codegen then emits a
+  ## `using X = <prim>` alias and treats X as an emittable scalar payload (the
+  ## CBOR wire value is a bare scalar, not a map). A no-op for non-primitive
+  ## non-object types, which stay TODO-stubbed in the wrappers.
+  if isTypeRegistered(typeName):
+    return
+  if parsed.objectDef.kind == nnkDistinctTy and parsed.objectDef.len == 1 and
+      parsed.objectDef[0].kind == nnkIdent and isNimPrimitive($parsed.objectDef[0]) and
+      ($parsed.objectDef[0]).toLowerAscii() notin ["string", "cstring"]:
+    registerTypeEntry(makeAliasEntry(typeName, $parsed.objectDef[0], atkDistinct))
+
 # ---------------------------------------------------------------------------
 # Adapter proc type — exposed so registerBrokerLibrary (CBOR mode) can
 # materialise a uniform table of dispatchers.
@@ -284,6 +299,12 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
   let apiName = snakeApiName(typeIdent)
   if parsed.hasInlineFields:
     registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
+  elif parsed.isVoid:
+    # `void` → a zero-field object: payload-less request, the response
+    # envelope carries only the ok/err signal.
+    registerCborObjectType(typeName, @[], @[])
+  else:
+    registerCborPrimitiveType(typeName, parsed)
 
   # 3. Collect zero-arg and arg-based signatures.
   let sigs = collectSignatures(body)

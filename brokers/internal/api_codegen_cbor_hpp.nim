@@ -510,12 +510,47 @@ proc generateCborCppHeaderFile*(
   for (name, _) in payloadFields:
     emittablePayloads.add(name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # The CBOR wire value is a bare scalar; the C++ surface uses the `using X
+  # = <prim>` alias directly (no struct). Such a type is an emittable
+  # request response / event payload even though it has no object fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primCppType(resolveUnderlyingType(name)).len > 0
+
+  # A "void payload" is a zero-field broker type — `type X = void` (lowered
+  # to an empty object). It has no value; the request envelope carries only
+  # the ok/err signal and the event callback no payload. jsoncons cannot
+  # (de)serialise a bare empty struct, so the payload slot uses the generic
+  # `jsoncons::json` (which round-trips the empty `{}` map) and the request
+  # method surfaces as `Result<void>`.
+  proc isVoidPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and lookupTypeEntry(name).kind == atkObject and
+      lookupTypeEntry(name).fields.len == 0
+
+  proc isEmittablePayload(name: string): bool {.compileTime.} =
+    name in emittablePayloads or isScalarPayload(name)
+
+  # The C++ type used in the request/event payload slot: `void` surfaces a
+  # `Result<void>`, scalar/object payloads use their own type.
+  proc payloadCppType(name: string): string {.compileTime.} =
+    if isVoidPayload(name): "void" else: name
+
+  # Effective callback/struct fields for a payload type: an object's real
+  # fields, or a single synthetic `value` field for a scalar payload.
+  proc effectiveFields(name: string): seq[ApiFieldDef] {.compileTime.} =
+    if isScalarPayload(name):
+      return @[ApiFieldDef(name: "value", nimType: resolveUnderlyingType(name))]
+    lookupTypeEntry(name).fields
+
   # ---- Compute envelope / args metadata (no emission yet) ----
   var envelopeNames: seq[string] = @[]
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin emittablePayloads:
+    if not isEmittablePayload(e.responseTypeName):
       continue
     let envName = e.responseTypeName & "Envelope"
     if envName notin envelopeNames:
@@ -564,11 +599,10 @@ proc generateCborCppHeaderFile*(
   # mapping (string -> string_view, seq -> span, etc.).
   var emittableEvents: seq[CborEventEntry] = @[]
   for ev in eventEntries:
-    if ev.typeName.len == 0 or ev.typeName notin emittablePayloads:
+    if ev.typeName.len == 0 or not isEmittablePayload(ev.typeName):
       continue
-    let entry = lookupTypeEntry(ev.typeName)
     var allOk = true
-    for f in entry.fields:
+    for f in effectiveFields(ev.typeName):
       if eventCallbackParamType(f.nimType).len == 0:
         allOk = false
         break
@@ -607,7 +641,7 @@ proc generateCborCppHeaderFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin emittablePayloads:
+    if not isEmittablePayload(e.responseTypeName):
       h.add(
         "  // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
           "' is not yet emitted as a typed C++ struct.\n"
@@ -629,7 +663,8 @@ proc generateCborCppHeaderFile*(
         sigParams.add(nimTypeToCppType(t) & " " & n)
         first = false
     h.add(
-      "  Result<" & e.responseTypeName & "> " & methodName & "(" & sigParams & ");\n"
+      "  Result<" & payloadCppType(e.responseTypeName) & "> " & methodName & "(" &
+        sigParams & ");\n"
     )
   h.add("\n")
 
@@ -647,7 +682,6 @@ proc generateCborCppHeaderFile*(
           "' is not yet emitted as a typed C++ struct.\n"
       )
       continue
-    let entry = lookupTypeEntry(ev.typeName)
     let camelBase = snakeToLowerCamel(ev.apiName)
     var pascal = camelBase
     if pascal.len > 0:
@@ -656,7 +690,7 @@ proc generateCborCppHeaderFile*(
     let onName = "on" & pascal
     let offName = "off" & pascal
     h.add("  using " & callbackAlias & " = std::function<void(" & className & "&")
-    for f in entry.fields:
+    for f in effectiveFields(ev.typeName):
       h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
     h.add(")>;\n")
     h.add("  uint64_t " & onName & "(" & callbackAlias & " fn) noexcept;\n")
@@ -687,14 +721,19 @@ proc generateCborCppHeaderFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin emittablePayloads:
+    if not isEmittablePayload(e.responseTypeName):
       continue
     if e.responseTypeName in emittedEnvelopes:
       continue
     emittedEnvelopes.add(e.responseTypeName)
     let envName = e.responseTypeName & "Envelope"
+    # A `void` payload has no struct jsoncons can (de)serialise — the `ok`
+    # slot holds the generic `jsoncons::json` so the empty `{}` map sent on
+    # the wire still round-trips and `has_value()` reports success.
+    let okType =
+      if isVoidPayload(e.responseTypeName): "jsoncons::json" else: e.responseTypeName
     h.add("struct " & envName & " {\n")
-    h.add("  std::optional<" & e.responseTypeName & "> ok;\n")
+    h.add("  std::optional<" & okType & "> ok;\n")
     h.add("  std::optional<std::string> err;\n")
     h.add("};\n\n")
 
@@ -1006,13 +1045,17 @@ proc generateCborCppHeaderFile*(
 
   # ---- Per-event Traits structs ----
   for ev in emittableEvents:
-    let entry = lookupTypeEntry(ev.typeName)
+    let evFields = effectiveFields(ev.typeName)
+    let evScalar = isScalarPayload(ev.typeName)
+    # A `void` event has no struct jsoncons can decode — the payload-less
+    # `{}` map is decoded through the generic `jsoncons::json`.
+    let evStruct = if isVoidPayload(ev.typeName): "jsoncons::json" else: ev.typeName
     h.add("struct " & ev.typeName & "EventTraits {\n")
-    h.add("  using EventStruct = " & ev.typeName & ";\n\n")
+    h.add("  using EventStruct = " & evStruct & ";\n\n")
     # Callback alias: Owner&, then unpacked args.
     h.add("  template <typename Owner>\n")
     h.add("  using Callback = std::function<void(Owner&")
-    for f in entry.fields:
+    for f in evFields:
       h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
     h.add(")>;\n\n")
     h.add(
@@ -1028,19 +1071,24 @@ proc generateCborCppHeaderFile*(
     h.add("  template <typename Owner>\n")
     h.add(
       "  static void invoke(const Callback<Owner>& fn, Owner& owner,\n" &
-        "                     const " & ev.typeName & "& evt) noexcept {\n"
+        "                     const " & evStruct & "& evt) noexcept {\n"
     )
     # Per-field setup statements (e.g. seq[string] -> vector<string_view>)
     # emitted BEFORE the try block so any temporary views the user callback
     # observes stay alive for the entire call.
-    for f in entry.fields:
+    for f in evFields:
       let setup = eventCallbackInvokeSetup(f.name, f.nimType)
       if setup.len > 0:
         h.add(setup)
     h.add("    try {\n")
     h.add("      fn(owner")
-    for f in entry.fields:
-      h.add(", " & eventCallbackArgExpr(f.name, f.nimType))
+    if evScalar:
+      # Scalar payload: the decoded `evt` IS the value — pass it directly
+      # (no `.value` member, EventStruct is the primitive alias itself).
+      h.add(", evt")
+    else:
+      for f in evFields:
+        h.add(", " & eventCallbackArgExpr(f.name, f.nimType))
     h.add(");\n")
     h.add("    } catch (...) {}\n")
     h.add("  }\n")
@@ -1110,12 +1158,21 @@ proc generateCborCppHeaderFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin emittablePayloads:
+    if not isEmittablePayload(e.responseTypeName):
       continue
     if not isMethodSupported(e.apiName):
       continue
     let methodName = snakeToLowerCamel(e.apiName)
     let envName = e.responseTypeName & "Envelope"
+    # `resTy` is `Result<void>` for a payload-less (`void`) request, else
+    # `Result<ResponseType>`. `okExpr` is the matching success construction.
+    let voidResp = isVoidPayload(e.responseTypeName)
+    let resTy = "Result<" & payloadCppType(e.responseTypeName) & ">"
+    let okExpr =
+      if voidResp:
+        resTy & "::ok()"
+      else:
+        resTy & "::ok(std::move(*env.ok))"
     var sigParams = ""
     var argsAssign = ""
     let argsName = argsStructName(e.apiName)
@@ -1128,8 +1185,7 @@ proc generateCborCppHeaderFile*(
         argsAssign.add("  args." & n & " = " & n & ";\n")
         first = false
     h.add(
-      "inline Result<" & e.responseTypeName & "> " & className & "::" & methodName & "(" &
-        sigParams & ") {\n"
+      "inline " & resTy & " " & className & "::" & methodName & "(" & sigParams & ") {\n"
     )
     if e.argFields.len > 0:
       h.add("  " & argsName & " args;\n")
@@ -1138,8 +1194,8 @@ proc generateCborCppHeaderFile*(
       h.add("  try { cborLen = detail::cborEncodedSize(args); }\n")
       h.add("  catch (const std::exception& ex) {\n")
       h.add(
-        "    return Result<" & e.responseTypeName &
-          ">::err(std::string(\"size pass failed: \") + ex.what());\n"
+        "    return " & resTy &
+          "::err(std::string(\"size pass failed: \") + ex.what());\n"
       )
       h.add("  }\n")
       h.add(
@@ -1147,9 +1203,7 @@ proc generateCborCppHeaderFile*(
           "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
       )
       h.add("  if (cborLen > 0 && !inBuf)\n")
-      h.add(
-        "    return Result<" & e.responseTypeName & ">::err(\"allocBuffer failed\");\n"
-      )
+      h.add("    return " & resTy & "::err(\"allocBuffer failed\");\n")
       h.add("  try {\n")
       h.add(
         "    if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
@@ -1157,8 +1211,8 @@ proc generateCborCppHeaderFile*(
       h.add("  } catch (const std::exception& ex) {\n")
       h.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
       h.add(
-        "    return Result<" & e.responseTypeName &
-          ">::err(std::string(\"encode pass failed: \") + ex.what());\n"
+        "    return " & resTy &
+          "::err(std::string(\"encode pass failed: \") + ex.what());\n"
       )
       h.add("  }\n")
       h.add(
@@ -1171,9 +1225,9 @@ proc generateCborCppHeaderFile*(
           "\", nullptr, 0);\n"
       )
     h.add("  if (status != 0)\n")
-    h.add("    return Result<" & e.responseTypeName & ">::err(lastError_);\n")
+    h.add("    return " & resTy & "::err(lastError_);\n")
     h.add("  if (resp.empty())\n")
-    h.add("    return Result<" & e.responseTypeName & ">::err(\"empty response\");\n")
+    h.add("    return " & resTy & "::err(\"empty response\");\n")
     h.add("  " & envName & " env;\n")
     h.add("  try {\n")
     h.add("    auto v = resp.view();\n")
@@ -1182,18 +1236,14 @@ proc generateCborCppHeaderFile*(
     )
     h.add("  } catch (const std::exception& ex) {\n")
     h.add(
-      "    return Result<" & e.responseTypeName &
-        ">::err(std::string(\"decode failed: \") + ex.what());\n"
+      "    return " & resTy & "::err(std::string(\"decode failed: \") + ex.what());\n"
     )
     h.add("  }\n")
     h.add("  if (env.err.has_value())\n")
-    h.add("    return Result<" & e.responseTypeName & ">::err(*env.err);\n")
+    h.add("    return " & resTy & "::err(*env.err);\n")
     h.add("  if (env.ok.has_value())\n")
-    h.add("    return Result<" & e.responseTypeName & ">::ok(std::move(*env.ok));\n")
-    h.add(
-      "  return Result<" & e.responseTypeName &
-        ">::err(\"malformed response envelope\");\n"
-    )
+    h.add("    return " & okExpr & ";\n")
+    h.add("  return " & resTy & "::err(\"malformed response envelope\");\n")
     h.add("}\n\n")
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----

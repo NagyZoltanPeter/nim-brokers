@@ -292,6 +292,89 @@ fn test_dual_sig_with_label() {
 }
 
 // ===========================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `value` field; CBOR mode exposes it as the bare `i32` type alias.
+// ===========================================================================
+
+fn test_primitive_int_result_request() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.int_result_request(21);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        #[cfg(feature = "cbor")]
+        check_eq!(*v, 42); // CBOR: IntResultRequest is the bare i32 alias
+        #[cfg(not(feature = "cbor"))]
+        check_eq!(v.value, 42); // native: struct with a single `value` field
+    }
+    lib.shutdown();
+}
+
+fn test_primitive_simple_int_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let received: SafeList<i64> = list_new();
+    let received_cb = received.clone();
+    let h = lib.on_simple_int_event(move |v: i64| {
+        list_push(&received_cb, v);
+    });
+    check_ne!(h, 0u64);
+
+    let _ = lib.int_result_request(5); // provider emits SimpleIntEvent(value * 10)
+    let received_w = received.clone();
+    wait_for_default(|| list_size(&received_w) >= 1);
+
+    check_eq!(list_size(&received), 1usize);
+    check_eq!(list_snapshot(&received)[0], 50i64);
+
+    lib.off_simple_int_event(h);
+    lib.shutdown();
+}
+
+// ===========================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. The result carries only an
+// ok/err signal; the event callback takes no payload argument.
+// ===========================================================================
+
+fn test_void_action_request() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let ok = lib.void_action_request("go".to_string());
+    check!(ok.is_ok());
+
+    let bad = lib.void_action_request("".to_string()); // provider rejects empty
+    check!(!bad.is_ok());
+
+    lib.shutdown();
+}
+
+fn test_void_ping_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let received: SafeList<i32> = list_new();
+    let received_cb = received.clone();
+    let h = lib.on_void_ping(move || {
+        list_push(&received_cb, 1);
+    });
+    check_ne!(h, 0u64);
+
+    let _ = lib.void_action_request("trigger".to_string()); // provider emits VoidPing
+    let received_w = received.clone();
+    wait_for_default(|| list_size(&received_w) >= 1);
+
+    check_eq!(list_size(&received), 1usize);
+
+    lib.off_void_ping(h);
+    lib.shutdown();
+}
+
+// ===========================================================================
 // TestEvents
 // ===========================================================================
 
@@ -2579,6 +2662,11 @@ fn main() {
     println!("\n--- TestEvents ---");
     run_test("test_events_counter_changed", test_events_counter_changed);
     run_test("test_events_off_stops_delivery", test_events_off_stops_delivery);
+
+    run_test("test_primitive_int_result_request", test_primitive_int_result_request);
+    run_test("test_primitive_simple_int_event", test_primitive_simple_int_event);
+    run_test("test_void_action_request", test_void_action_request);
+    run_test("test_void_ping_event", test_void_ping_event);
 
     println!("\n--- TestContextSeparation ---");
     run_test("test_context_independent_counters", test_context_independent_counters);

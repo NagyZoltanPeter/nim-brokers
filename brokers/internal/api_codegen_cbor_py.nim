@@ -493,6 +493,19 @@ proc generateCborPyFile*(
     if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
       objectNames.add(entry.name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # Its CBOR wire value is a bare scalar; the Python surface uses the
+  # `X = <prim>` alias directly. Such a type is an emittable request
+  # response / event payload despite having no object fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primPyHint(resolveUnderlyingType(name)).len > 0
+
+  proc isEmittablePayload(name: string): bool {.compileTime.} =
+    name in objectNames or isScalarPayload(name)
+
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     py.add(
       "# ---------------------------------------------------------------------------\n"
@@ -619,7 +632,7 @@ proc generateCborPyFile*(
 
   # Per-event handler maps, initialised in __init__.
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
@@ -657,7 +670,7 @@ proc generateCborPyFile*(
   py.add("            _LIB." & p & "shutdown(self._ctx)\n")
   py.add("            self._ctx = 0\n")
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ".clear()\n")
@@ -742,7 +755,7 @@ proc generateCborPyFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin objectNames:
+    if not isEmittablePayload(e.responseTypeName):
       py.add(
         "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
           "' is not a registered object type.\n\n"
@@ -798,7 +811,7 @@ proc generateCborPyFile*(
 
   # Per-event subscribe / unsubscribe.
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       py.add(
         "    # TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
           "' is not a registered object type.\n\n"
@@ -811,12 +824,16 @@ proc generateCborPyFile*(
     # Build per-field type hints + per-field destructure args. The user
     # callback signature is `(<ClassName>, *unpacked_field_types) -> None`
     # — parity with the C++ wrapper and the native-FFI Python wrapper.
-    let entry = lookupTypeEntry(ev.typeName)
     var hintParts: seq[string] = @[className]
     var destructureArgs: seq[string] = @["self"]
-    for f in entry.fields:
-      hintParts.add(nimTypeToPyHint(f.nimType))
-      destructureArgs.add("evt." & f.name)
+    if isScalarPayload(ev.typeName):
+      # Scalar payload: the decoded `evt` IS the value — one bare arg.
+      hintParts.add(primPyHint(resolveUnderlyingType(ev.typeName)))
+      destructureArgs.add("evt")
+    else:
+      for f in lookupTypeEntry(ev.typeName).fields:
+        hintParts.add(nimTypeToPyHint(f.nimType))
+        destructureArgs.add("evt." & f.name)
     let pyCallableHint = "Callable[[" & hintParts.join(", ") & "], None]"
 
     py.add("    def " & onName & "(self, callback: " & pyCallableHint & ") -> int:\n")

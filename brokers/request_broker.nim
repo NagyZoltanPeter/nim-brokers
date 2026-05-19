@@ -534,9 +534,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
             let providerRes = catchedRes.get()
             if providerRes.isOk():
-              let resultValue = providerRes.get()
-              when compiles(resultValue.isNil()):
-                if resultValue.isNil():
+              when compiles(providerRes.get().isNil()):
+                if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                   )
@@ -587,9 +586,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
               )
 
             if providerRes.isOk():
-              let resultValue = providerRes.get()
-              when compiles(resultValue.isNil()):
-                if resultValue.isNil():
+              when compiles(providerRes.get().isNil()):
+                if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                   )
@@ -764,9 +762,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
           let providerRes = catchedRes.get()
           if providerRes.isOk():
-            let resultValue = providerRes.get()
-            when compiles(resultValue.isNil()):
-              if resultValue.isNil():
+            when compiles(providerRes.get().isNil()):
+              if providerRes.get().isNil():
                 return err(
                   "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                 )
@@ -784,9 +781,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
             )
 
           if providerRes.isOk():
-            let resultValue = providerRes.get()
-            when compiles(resultValue.isNil()):
-              if resultValue.isNil():
+            when compiles(providerRes.get().isNil()):
+              if providerRes.get().isNil():
                 return err(
                   "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                 )

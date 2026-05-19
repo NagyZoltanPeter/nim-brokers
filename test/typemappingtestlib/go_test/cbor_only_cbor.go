@@ -73,3 +73,7 @@ func runCborOnly() {
 	runTest("test_scan_request_forward", test_scan_request_forward)
 	runTest("test_scan_request_reverse", test_scan_request_reverse)
 }
+
+// intResultValue extracts the scalar from a CBOR-mode IntResultRequest,
+// which is the bare `int32` type alias.
+func intResultValue(r typemappingtestlib.IntResultRequest) int32 { return int32(r) }

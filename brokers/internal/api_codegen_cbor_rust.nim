@@ -331,6 +331,19 @@ proc generateCborRustFile*(
     if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
       objectNames.add(entry.name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # Its CBOR wire value is a bare scalar; the Rust surface uses the
+  # `pub type X = <prim>` alias directly. Such a type is an emittable
+  # request response / event payload despite having no object fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primRustHint(resolveUnderlyingType(name)).len > 0
+
+  proc isEmittablePayload(name: string): bool {.compileTime.} =
+    name in objectNames or isScalarPayload(name)
+
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     rs.add("// -------- Generated payload types --------\n\n")
 
@@ -398,6 +411,10 @@ proc generateCborRustFile*(
       rs.add("    pub " & f.name & ": " & hint & ",\n")
       anyField = true
     if not anyField:
+      # Zero-field payload (a `void` broker type). `#[serde(skip)]` keeps the
+      # placeholder field off the wire so the struct round-trips the empty
+      # `{}` CBOR map a payload-less request / event carries.
+      rs.add("    #[serde(skip)]\n")
       rs.add("    _phantom: (),\n")
     rs.add("}\n\n")
 
@@ -564,7 +581,7 @@ proc generateCborRustFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin objectNames:
+    if not isEmittablePayload(e.responseTypeName):
       rs.add(
         "    // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
           "' is not a registered object type.\n\n"
@@ -653,7 +670,7 @@ proc generateCborRustFile*(
   # Per-event subscribe / unsubscribe.
   rs.add("    // ---- Event registration ----\n\n")
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       rs.add(
         "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
           "' is not a registered object type.\n\n"
@@ -664,13 +681,17 @@ proc generateCborRustFile*(
     # Build per-field type hints + per-field destructure args. The user
     # callback signature is `Fn(field1, field2, ...)` — parity with the
     # native-mode wrapper so the same client code drives either build.
-    let entry = lookupTypeEntry(ev.typeName)
     var hintParts: seq[string] = @[]
     var destructureArgs: seq[string] = @[]
-    for f in entry.fields:
-      let hint = nimTypeToRustHint(f.nimType)
-      hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
-      destructureArgs.add("v." & f.name)
+    if isScalarPayload(ev.typeName):
+      # Scalar payload: the decoded `v` IS the value — one bare arg.
+      hintParts.add(primRustHint(resolveUnderlyingType(ev.typeName)))
+      destructureArgs.add("v")
+    else:
+      for f in lookupTypeEntry(ev.typeName).fields:
+        let hint = nimTypeToRustHint(f.nimType)
+        hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
+        destructureArgs.add("v." & f.name)
     let fnBound = hintParts.join(", ")
     rs.add(
       "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &

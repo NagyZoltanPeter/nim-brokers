@@ -38,9 +38,27 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
   )
   let typeIdent = parsed.typeIdent
-  let fieldNames = parsed.fieldNames
-  let fieldTypes = parsed.fieldTypes
-  let hasInlineFields = parsed.hasInlineFields
+  var fieldNames = parsed.fieldNames
+  var fieldTypes = parsed.fieldTypes
+  var hasInlineFields = parsed.hasInlineFields
+
+  # Primitive (non-object) result type — e.g. `RequestBroker(API): type X = int32`.
+  # The broker type parses as `distinct <primitive>` with no inline fields. We
+  # synthesise a single `value` field of the underlying primitive type so every
+  # downstream codegen path (CResult struct, C/C++/Python/Rust/Go wrappers)
+  # treats it exactly like an object with one scalar field. The only path that
+  # cannot reuse the object machinery is the encode proc (Step 4): the Nim
+  # result value IS the scalar, so there is no `.value` accessor to read from —
+  # see the `isPrimitiveResult` branch in the encode field loop below.
+  var isPrimitiveResult = false
+  if not hasInlineFields and parsed.objectDef.kind == nnkDistinctTy and
+      parsed.objectDef.len == 1 and parsed.objectDef[0].kind == nnkIdent and
+      isNimPrimitive($parsed.objectDef[0]) and
+      ($parsed.objectDef[0]).toLowerAscii() notin ["string", "cstring"]:
+    isPrimitiveResult = true
+    fieldNames = @[ident("value")]
+    fieldTypes = @[copyNimTree(parsed.objectDef[0])]
+    hasInlineFields = true
 
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let snakeName = toSnakeCase(typeDisplayName)
@@ -508,7 +526,15 @@ proc generateApiRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError]
     for i in 0 ..< fieldNames.len:
       let fName = fieldNames[i]
       let fType = fieldTypes[i]
-      if isSeqOfStringNode(fType):
+      if isPrimitiveResult:
+        # The whole Nim result IS the scalar — cast the distinct value
+        # straight into the synthetic `value` field of the C struct.
+        let cFieldTypeNode = toCFieldType(fType)
+        encodeBody.add(
+          quote do:
+            result.`fName` = cast[`cFieldTypeNode`](`objIdent`)
+        )
+      elif isSeqOfStringNode(fType):
         # seq[string]: allocate array of cstring pointers, copy-allocate each
         hasSeqFields = true
         let countFieldIdent = ident($fName & "_count")

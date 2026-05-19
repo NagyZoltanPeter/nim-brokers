@@ -303,6 +303,16 @@ proc generateCborGoFile*(
     if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
       objectNames.add(entry.name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # Its CBOR wire value is a bare scalar; the Go surface uses the
+  # `type X = <prim>` alias directly. Such a type has no object fields, so
+  # the event handler delivers the bare value rather than unpacked fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primGoHint(resolveUnderlyingType(name)).len > 0
+
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     g.add("// -------- Generated payload types --------\n\n")
 
@@ -469,6 +479,10 @@ proc generateCborGoFile*(
       g.add(goSafeParam(n) & " " & hType)
       firstP = false
     g.add(") (" & respType & ", error) {\n")
+    # `zeroResp` is the typed zero value for the error returns. Using a
+    # declared var (not `RespType{}`) keeps it valid for scalar-payload
+    # aliases too — `int32{}` would be a Go compile error.
+    g.add("\tvar zeroResp " & respType & "\n")
     if firstNonZero:
       g.add("\targs := struct {\n")
       g.add(argsStructFields)
@@ -478,18 +492,17 @@ proc generateCborGoFile*(
       g.add("\tout, err := l.internalCborCall(\"" & e.apiName & "\", args)\n")
     else:
       g.add("\tout, err := l.internalCborCall(\"" & e.apiName & "\", nil)\n")
-    g.add("\tif err != nil { return " & respType & "{}, err }\n")
+    g.add("\tif err != nil { return zeroResp, err }\n")
     g.add("\tvar env struct {\n")
     g.add("\t\tOk  *" & respType & " `cbor:\"ok\"`\n")
     g.add("\t\tErr *string `cbor:\"err\"`\n")
     g.add("\t}\n")
     g.add(
-      "\tif derr := cbor.Unmarshal(out, &env); derr != nil { return " & respType &
-        "{}, derr }\n"
+      "\tif derr := cbor.Unmarshal(out, &env); derr != nil { return zeroResp, derr }\n"
     )
-    g.add("\tif env.Err != nil { return " & respType & "{}, errors.New(*env.Err) }\n")
+    g.add("\tif env.Err != nil { return zeroResp, errors.New(*env.Err) }\n")
     g.add("\tif env.Ok != nil { return *env.Ok, nil }\n")
-    g.add("\treturn " & respType & "{}, errors.New(\"empty response envelope\")\n")
+    g.add("\treturn zeroResp, errors.New(\"empty response envelope\")\n")
     g.add("}\n\n")
 
   # ---- Single CBOR event trampoline + per-event On/Off ---------------------
@@ -521,7 +534,13 @@ proc generateCborGoFile*(
     var fieldGoTypes: seq[string] = @[]
     var fieldExNames: seq[string] = @[]
     var fieldsOk = true
-    if isTypeRegistered(payloadType):
+    let scalarEvt = isScalarPayload(payloadType)
+    if scalarEvt:
+      # Scalar payload: the decoded `p` IS the value — one bare arg.
+      fieldNames.add("value")
+      fieldGoTypes.add(primGoHint(resolveUnderlyingType(payloadType)))
+      fieldExNames.add("value")
+    elif isTypeRegistered(payloadType):
       let entry = lookupTypeEntry(payloadType)
       for f in entry.fields:
         let h = nimTypeToGoCborHint(f.nimType)
@@ -559,10 +578,14 @@ proc generateCborGoFile*(
       g.add("\t\tvar p " & payloadType & "\n")
       g.add("\t\tif derr := cbor.Unmarshal(payload, &p); derr != nil { return }\n")
       g.add("\t\tcb(")
-      for i in 0 ..< fieldNames.len:
-        if i > 0:
-          g.add(", ")
-        g.add("p." & fieldExNames[i])
+      if scalarEvt:
+        # Scalar payload: `p` IS the value — pass it directly.
+        g.add("p")
+      else:
+        for i in 0 ..< fieldNames.len:
+          if i > 0:
+            g.add(", ")
+          g.add("p." & fieldExNames[i])
       g.add(")\n")
       g.add("\t})\n")
       g.add("\th := cgo.NewHandle(wrap)\n")

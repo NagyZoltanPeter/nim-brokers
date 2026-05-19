@@ -161,6 +161,93 @@ class TestRequests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Primitive (non-object) broker types
+# ---------------------------------------------------------------------------
+
+
+class TestPrimitiveBrokerTypes(unittest.TestCase):
+    """IntResultRequest = int32 and SimpleIntEvent = int64 — broker types
+    that are bare primitives rather than objects. The native wrapper exposes
+    the result as a dataclass with a single `value` field and the event
+    callback as a bare scalar. CBOR-mode codegen for these patterns is not
+    yet implemented, so the wrapper omits the method/handler there."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_int_result_request(self):
+        if not hasattr(self.lib, "int_result_request"):
+            self.skipTest("primitive request result not yet emitted in CBOR build")
+        r = self.lib.int_result_request(21)
+        self.assertTrue(r.is_ok(), r.error)
+        # Native mode: IntResultRequest is a dataclass with a `value` field.
+        # CBOR mode: IntResultRequest is the bare `int` alias.
+        actual = r.value.value if hasattr(r.value, "value") else r.value
+        self.assertEqual(actual, 42)  # provider returns value * 2
+
+    def test_simple_int_event(self):
+        if not hasattr(self.lib, "on_simple_int_event"):
+            self.skipTest("primitive event payload not yet emitted in CBOR build")
+        received = []
+        ev = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            ev.set()
+
+        h = self.lib.on_simple_int_event(cb)
+        self.assertNotEqual(h, 0)
+        self.lib.int_result_request(5)  # provider emits SimpleIntEvent(value * 10)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(received, [50])
+        self.lib.off_simple_int_event(h)
+
+
+# ---------------------------------------------------------------------------
+# Void (payload-less) broker types
+# ---------------------------------------------------------------------------
+
+
+class TestVoidBrokerTypes(unittest.TestCase):
+    """VoidActionRequest (`type X = void`) and VoidPing (a `void` event).
+    The request carries only an ok/err signal; the event callback receives
+    no payload argument."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_void_action_request(self):
+        ok = self.lib.void_action_request("go")
+        self.assertTrue(ok.is_ok(), ok.error)
+
+        bad = self.lib.void_action_request("")  # provider rejects empty label
+        self.assertTrue(bad.is_err())
+
+    def test_void_ping_event(self):
+        received = []
+        ev = threading.Event()
+
+        def cb(_lib):
+            received.append(1)
+            ev.set()
+
+        h = self.lib.on_void_ping(cb)
+        self.assertNotEqual(h, 0)
+
+        self.lib.void_action_request("trigger")  # provider emits VoidPing
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(received, [1])
+
+        self.lib.off_void_ping(h)
+
+
+# ---------------------------------------------------------------------------
 # Scalar types
 # ---------------------------------------------------------------------------
 

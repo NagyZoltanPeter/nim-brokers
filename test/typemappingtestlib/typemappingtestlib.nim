@@ -118,6 +118,32 @@ RequestBroker(API):
   ): Future[Result[TypedScalarRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
+# Request Brokers — primitive (non-object) result type coverage
+# ---------------------------------------------------------------------------
+
+## VoidActionRequest: the broker type IS `void` — a payload-less request.
+## Exercises the `isVoid` codegen path: the response carries only a
+## success/error signal, no value. The provider also emits a VoidPing event.
+RequestBroker(API):
+  type VoidActionRequest = void
+
+  proc signature*(label: string): Future[Result[VoidActionRequest, string]] {.async.}
+
+## VoidPing: a payload-less (`void`) API event — a pure notification.
+EventBroker(API):
+  type VoidPing = void
+
+## IntResultRequest: the broker type IS a primitive (int32), not an object.
+## Exercises the `hasInlineFields == false` request codegen path — the C
+## result struct must carry the scalar value alongside `error_message`,
+## and every wrapper must unwrap it as a bare `int32` rather than a struct.
+## Provider returns value*2 and emits SimpleIntEvent(value*10).
+RequestBroker(API):
+  type IntResultRequest = int32
+
+  proc signature*(value: int32): Future[Result[IntResultRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
 # Request Brokers — seq[T] result coverage
 # ---------------------------------------------------------------------------
 
@@ -386,6 +412,13 @@ EventBroker(API):
   type TagSeqEvent = object
     tags*: seq[Tag]
 
+## SimpleIntEvent: the event payload type IS a primitive (int64), not an
+## object. Exercises the `hasInlineFields == false` event codegen path —
+## the C callback typedef must carry a single scalar value parameter
+## instead of a struct, and every wrapper must deliver a bare int64.
+EventBroker(API):
+  type SimpleIntEvent = int64
+
 # ---------------------------------------------------------------------------
 # Provider state (per processing thread = per context)
 # ---------------------------------------------------------------------------
@@ -471,6 +504,26 @@ proc setupProviders(ctx: BrokerContext) =
         ),
       )
       return ok(TypedScalarRequest(priority: priority, jobId: jobId, nextId: nextId)),
+  )
+
+  # --- void (payload-less) request provider ---
+
+  discard VoidActionRequest.setProvider(
+    ctx,
+    proc(label: string): Future[Result[VoidActionRequest, string]] {.closure, async.} =
+      if label.len == 0:
+        return err("empty label")
+      await VoidPing.emit(gProviderCtx, VoidPing())
+      return ok(VoidActionRequest()),
+  )
+
+  # --- primitive (non-object) result provider ---
+
+  discard IntResultRequest.setProvider(
+    ctx,
+    proc(value: int32): Future[Result[IntResultRequest, string]] {.closure, async.} =
+      await SimpleIntEvent.emit(gProviderCtx, SimpleIntEvent(int64(value) * 10'i64))
+      return ok(IntResultRequest(value * 2'i32)),
   )
 
   # --- seq[T] result providers ---

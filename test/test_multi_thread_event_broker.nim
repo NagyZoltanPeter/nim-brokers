@@ -426,3 +426,55 @@ suite "EventBroker macro (multi-thread mode)":
     check gReceivedSum.load() == 6 # 1 + 2 + 3
     MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
+
+## ---------------------------------------------------------------------------
+## Multi-thread EventBroker — void (payload-less) event
+##
+## `type X = void` is lowered to a unique empty object, which travels through
+## the MT slab/channel path as a zero-byte payload. The listener still takes
+## the (empty) event value — argless-listener parity with single-thread mode
+## is a deliberate non-goal for the internal MT layer.
+## ---------------------------------------------------------------------------
+
+EventBroker(mt):
+  type MtVoidSignal = void
+
+var gVoidHits: Atomic[int]
+
+suite "EventBroker macro (multi-thread mode, void / payload-less)":
+  asyncTest "same-thread payload-less emit reaches listeners":
+    gVoidHits.store(0)
+
+    let handle = MtVoidSignal.listen(
+      proc(evt: MtVoidSignal): Future[void] {.async: (raises: []).} =
+        discard gVoidHits.fetchAdd(1)
+    )
+    check handle.isOk()
+
+    await MtVoidSignal.emit(MtVoidSignal())
+    await MtVoidSignal.emit(MtVoidSignal())
+    await sleepAsync(chronos.milliseconds(20))
+
+    check gVoidHits.load() == 2
+
+    MtVoidSignal.dropAllListeners()
+    await sleepAsync(chronos.milliseconds(50))
+
+  asyncTest "dropAllListeners stops payload-less delivery":
+    gVoidHits.store(0)
+
+    let handle = MtVoidSignal.listen(
+      proc(evt: MtVoidSignal): Future[void] {.async: (raises: []).} =
+        discard gVoidHits.fetchAdd(1)
+    )
+    check handle.isOk()
+
+    await MtVoidSignal.emit(MtVoidSignal())
+    await sleepAsync(chronos.milliseconds(20))
+    check gVoidHits.load() == 1
+
+    MtVoidSignal.dropAllListeners()
+    await sleepAsync(chronos.milliseconds(20))
+    await MtVoidSignal.emit(MtVoidSignal())
+    await sleepAsync(chronos.milliseconds(20))
+    check gVoidHits.load() == 1
