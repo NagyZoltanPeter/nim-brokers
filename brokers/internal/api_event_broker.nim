@@ -875,7 +875,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     invokeParams.add(cTrampolineParams)
     trait.add(invokeParams.join(", "))
   else:
-    trait.add("Owner& owner")
+    trait.add(", Owner& owner")
   trait.add(") noexcept {\n")
   if traitInvokePreamble.len > 0:
     trait.add(traitInvokePreamble)

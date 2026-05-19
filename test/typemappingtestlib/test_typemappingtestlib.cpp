@@ -1258,61 +1258,6 @@ static void test_obj_seq_param_string_encoding() {
     lib.shutdown();
 }
 
-#ifdef USE_CBOR
-// Object-as-request-param probe — exercises whole-struct pass-by-value.
-// The Nim broker is gated to CBOR mode (native C/C++/Python/Rust all fail
-// for this pattern; see doc/TYPESUPPORT.md, Section 2).
-static void test_obj_as_param() {
-    Typemappingtestlib lib;
-    lib.createContext();
-    auto r = lib.objParamRequest(makeTag("k", "v"));
-    CHECK(r.isOk());
-    CHECK_EQ(r->summary, std::string("k=v"));
-    lib.shutdown();
-}
-
-// Option[seq[byte]] probe — Native codegen rejects Option[T] outright,
-// so this broker is `when defined(BrokerFfiApiCBOR)`-gated in Nim and
-// the wrapper maps it to std::optional<std::vector<uint8_t>>.
-static void test_opt_seq_present() {
-    Typemappingtestlib lib;
-    lib.createContext();
-    auto r = lib.optSeqRequest(true);
-    CHECK(r.isOk());
-    CHECK(r->value.has_value());
-    CHECK_EQ(r->value->size(), static_cast<size_t>(4));
-    CHECK_EQ((*r->value)[0], static_cast<uint8_t>(1));
-    CHECK_EQ((*r->value)[3], static_cast<uint8_t>(4));
-    lib.shutdown();
-}
-
-// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
-// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
-// string (major type 2) — the form the Nim provider expects.
-static void test_bytes_echo_request_roundtrip() {
-    Typemappingtestlib lib;
-    lib.createContext();
-    jsoncons::byte_string payload{10, 20, 30, 40, 50};
-    auto r = lib.bytesEchoRequest(payload);
-    CHECK(r.isOk());
-    CHECK_EQ(r->length, 5);
-    CHECK_EQ(r->first, 10);
-    CHECK_EQ(r->last, 50);
-    lib.shutdown();
-}
-
-static void test_bytes_echo_request_empty() {
-    Typemappingtestlib lib;
-    lib.createContext();
-    jsoncons::byte_string payload;
-    auto r = lib.bytesEchoRequest(payload);
-    CHECK(r.isOk());
-    CHECK_EQ(r->length, 0);
-    CHECK_EQ(r->first, -1);
-    CHECK_EQ(r->last, -1);
-    lib.shutdown();
-}
-
 // Native Option[T] probe (Phase E1 / scalar). Works in both native and
 // CBOR builds: the C ABI now expands every `Option[T]` field to a
 // `<name>: T` + `<name>_has_value: bool` pair (uniform layout); the
@@ -1381,15 +1326,69 @@ static void test_opt_obj_absent() {
     lib.shutdown();
 }
 
-// Option[seq[byte]] absent — the CBOR codegen now partitions Option fields
-// into the `optional` tail of `JSONCONS_N_MEMBER_TRAITS`, so a payload
-// where the field is missing decodes cleanly with `has_value() == false`.
+// Option[seq[byte]] absent — both modes partition Option fields so a
+// payload where the field is missing yields `has_value() == false`.
 static void test_opt_seq_absent() {
     Typemappingtestlib lib;
     lib.createContext();
     auto r = lib.optSeqRequest(false);
     CHECK(r.isOk());
     CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
+// Option[seq[byte]] present — native Option support (Phase E2b) expands
+// the field to a `(ptr,count)` + `value_has_value` pair at the C ABI;
+// the C++ wrapper exposes it as std::optional<std::vector<uint8_t>>.
+static void test_opt_seq_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optSeqRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(r->value->size(), static_cast<size_t>(4));
+    CHECK_EQ((*r->value)[0], static_cast<uint8_t>(1));
+    CHECK_EQ((*r->value)[3], static_cast<uint8_t>(4));
+    lib.shutdown();
+}
+
+#ifdef USE_CBOR
+// Object-as-request-param probe — exercises whole-struct pass-by-value.
+// The Nim broker is gated to CBOR mode (native C/C++/Python/Rust all fail
+// for this pattern; see doc/TYPESUPPORT.md, Section 2).
+static void test_obj_as_param() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.objParamRequest(makeTag("k", "v"));
+    CHECK(r.isOk());
+    CHECK_EQ(r->summary, std::string("k=v"));
+    lib.shutdown();
+}
+
+// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
+// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
+// string (major type 2) — the form the Nim provider expects.
+static void test_bytes_echo_request_roundtrip() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload{10, 20, 30, 40, 50};
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 5);
+    CHECK_EQ(r->first, 10);
+    CHECK_EQ(r->last, 50);
+    lib.shutdown();
+}
+
+static void test_bytes_echo_request_empty() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload;
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 0);
+    CHECK_EQ(r->first, -1);
+    CHECK_EQ(r->last, -1);
     lib.shutdown();
 }
 
