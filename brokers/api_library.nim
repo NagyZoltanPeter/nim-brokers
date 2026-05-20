@@ -1910,14 +1910,10 @@ proc registerBrokerLibraryCborImpl(
         proc courierPoll(): int {.gcsafe, raises: [].} =
           var didWork = 0
           while true:
-            let recvRes = catch:
-              arg.courier.chan.tryRecv()
-            if recvRes.isErr():
+            var m: CborCallMsg
+            if not tryDequeue(addr arg.courier.ring, m):
               break
-            let rv = recvRes.get()
-            if not rv.dataAvailable:
-              break
-            asyncSpawn handleCourierMsg(rv.msg)
+            asyncSpawn handleCourierMsg(m)
             didWork = 1
           didWork
 
@@ -2148,7 +2144,17 @@ proc registerBrokerLibraryCborImpl(
         msg.reqBuf = reqBuf
         msg.reqLen = reqLen
         msg.slotIdx = int32(slotIdx)
-        courier.chan.send(msg) # ownership of reqBuf transfers here
+        # Ownership of reqBuf transfers into the ring here. Enqueue is
+        # backstopped by the slot claim above (ring.cap == slotCount), so
+        # a false return is a programming error rather than backpressure;
+        # we still handle it cleanly: undo the slot + inFlight, free
+        # reqBuf, return -6.
+        if not tryEnqueue(addr courier.ring, msg):
+          releaseSlot(courier, slotIdx)
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return -6'i32
         if not courierSig.isNil:
           discard courierSig.fireSync()
 

@@ -58,11 +58,29 @@ type
     respLen: int32
     status: int32 ## the int32 `<lib>_call` returns to the foreign caller
 
+  CborCallRing* = object
+    ## Single-lock POD-element MPSC ring, allocated wholly in shared
+    ## heap. Replaces `system.Channel[CborCallMsg]` deliberately: that
+    ## channel allocates its message slots out of the sender thread's
+    ## per-thread Nim allocator, and once the sender thread exits its
+    ## TLS-tied allocator descriptor is freed by pthread cleanup. A
+    ## subsequent `close()` on the shutdown thread walks straight into
+    ## that dead descriptor (caught by ASAN on the stress_mt teardown
+    ## path). This ring uses `allocShared` for its storage — single
+    ## owner (the `CborCourier`), freed from the same thread that
+    ## allocated it, no per-thread allocator involvement.
+    buf: ptr UncheckedArray[CborCallMsg]
+    cap: int
+    head: int ## next index the consumer reads
+    tail: int ## next index a producer writes
+    count: int ## guarded by `lock`
+    lock: Lock
+
   CborCourier* = object
     ## One per library context. Lives in shared heap; created in
     ## `_createContext`, freed in `_shutdown` after the processing thread
     ## has joined and all in-flight `_call`s have drained.
-    chan*: Channel[CborCallMsg]
+    ring*: CborCallRing
     slots: ptr UncheckedArray[CborRespSlot]
     slotCount: int
     inFlight*: Atomic[int]
@@ -77,10 +95,18 @@ type
 
 proc newCborCourier*(slotCount: int): ptr CborCourier =
   ## Allocate a courier with `slotCount` response slots. `slotCount` is the
-  ## ceiling on concurrent in-flight `_call`s; a `_call` that finds no free
-  ## slot fails fast (backpressure) rather than blocking.
+  ## ceiling on concurrent in-flight `_call`s; the request ring is sized
+  ## the same, so the slot pool gates the ring (a `_call` always claims a
+  ## slot before enqueuing, so the ring cannot overflow).
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
-  c.chan.open()
+  c.ring.buf = cast[ptr UncheckedArray[CborCallMsg]](
+    allocShared0(slotCount * sizeof(CborCallMsg))
+  )
+  c.ring.cap = slotCount
+  c.ring.head = 0
+  c.ring.tail = 0
+  c.ring.count = 0
+  initLock(c.ring.lock)
   c.slotCount = slotCount
   c.slots = cast[ptr UncheckedArray[CborRespSlot]](
     allocShared0(slotCount * sizeof(CborRespSlot))
@@ -100,8 +126,42 @@ proc freeCborCourier*(c: ptr CborCourier) =
     deinitCond(c.slots[i].cond)
     deinitLock(c.slots[i].lock)
   deallocShared(c.slots)
-  c.chan.close()
+  deinitLock(c.ring.lock)
+  if not c.ring.buf.isNil:
+    deallocShared(c.ring.buf)
   deallocShared(c)
+
+# ---------------------------------------------------------------------------
+# Ring — MPSC over a fixed-size POD slot array. Single lock for both ends;
+# the ring is not the contended path (per-call cost is dominated by the
+# Cond handoff and the chronos coroutine spawn).
+# ---------------------------------------------------------------------------
+
+proc tryEnqueue*(r: ptr CborCallRing, msg: CborCallMsg): bool =
+  ## Multi-producer. Returns false on full (no _call may be enqueued
+  ## without first claiming a response slot, and the ring is sized to
+  ## match `slotCount`, so a `false` here is a programming error).
+  acquire(r.lock)
+  if r.count >= r.cap:
+    release(r.lock)
+    return false
+  r.buf[r.tail] = msg
+  r.tail = (r.tail + 1) mod r.cap
+  inc r.count
+  release(r.lock)
+  true
+
+proc tryDequeue*(r: ptr CborCallRing, dst: var CborCallMsg): bool =
+  ## Single consumer. Returns false on empty.
+  acquire(r.lock)
+  if r.count == 0:
+    release(r.lock)
+    return false
+  dst = r.buf[r.head]
+  r.head = (r.head + 1) mod r.cap
+  dec r.count
+  release(r.lock)
+  true
 
 # ---------------------------------------------------------------------------
 # Response slots
