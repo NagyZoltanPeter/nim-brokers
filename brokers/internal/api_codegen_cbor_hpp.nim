@@ -22,7 +22,7 @@
 {.push raises: [].}
 
 import std/[macros, os, strutils]
-import ./api_codegen_c, ./api_common, ./api_schema
+import ./api_common, ./api_schema
 
 # ---------------------------------------------------------------------------
 # Nim → C++ type mapping

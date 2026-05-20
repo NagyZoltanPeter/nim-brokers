@@ -28,9 +28,9 @@
 {.push raises: [].}
 
 import std/[macros, strutils]
-import ./api_schema, ./api_type
+import ./api_schema
 
-export api_schema, api_type
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Phase 2: Typed macro that resolves a single external type
@@ -271,45 +271,6 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
 
-proc parseFieldTypeExpr(ftype: string): NimNode {.compileTime.} =
-  ## Convert a stringified field type (`"int32"`, `"seq[byte]"`,
-  ## `"array[4, int32]"`, `"Tag"`) into a properly structured type node.
-  ## A simple identifier round-trips via `ident()`; anything containing
-  ## brackets goes through `parseExpr` so we get an `nnkBracketExpr` (or
-  ## similar) that downstream `toCFieldType` etc. can pattern-match on.
-  let trimmed = ftype.strip()
-  if '[' in trimmed:
-    try:
-      return parseExpr(trimmed)
-    except ValueError as e:
-      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
-    except CatchableError as e:
-      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
-  ident(trimmed)
-
-proc buildSyntheticApiTypeBody(
-    typeName: string, fields: seq[(string, string)]
-): NimNode {.compileTime.} =
-  ## Construct an AST body equivalent to what `ApiType:` receives, e.g.:
-  ##   type TypeName = object
-  ##     field1*: Type1
-  ##     field2*: Type2
-  ## This allows reuse of `generateApiType` for auto-resolved external types.
-  var recList = newTree(nnkRecList)
-  for (fname, ftype) in fields:
-    recList.add(
-      newTree(
-        nnkIdentDefs,
-        postfix(ident(fname), "*"),
-        parseFieldTypeExpr(ftype),
-        newEmptyNode(),
-      )
-    )
-  let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
-  let typeDef = newTree(nnkTypeDef, ident(typeName), newEmptyNode(), objTy)
-  let typeSect = newTree(nnkTypeSection, typeDef)
-  result = newStmtList(typeSect)
-
 macro autoRegisterApiType*(T: typed): untyped =
   ## Phase 2: Receives a resolved type symbol, extracts fields,
   ## recursively processes nested types, registers in the schema,
@@ -407,14 +368,8 @@ macro autoRegisterApiType*(T: typed): untyped =
     if not isTypeRegistered(nestedName) and not isNimPrimitive(nestedName):
       result.add(newCall(ident("autoRegisterApiType"), nestedSym))
 
-  # Register this type in the schema
+  # Register this type in the schema; CBOR codegen reads gApiTypeRegistry.
   registerFromFieldTuples(typeName, fields)
-
-  # Generate CItem type, encode proc, C/C++/Python codegen —
-  # same as ApiType but driven from resolved fields.
-  # Pass emitTypeDefinition=false since the type is already defined externally.
-  let syntheticBody = buildSyntheticApiTypeBody(typeName, fields)
-  result.add(generateApiType(syntheticBody, emitTypeDefinition = false))
 
 # ---------------------------------------------------------------------------
 # Phase 1: Scan untyped AST for external type references
@@ -497,53 +452,5 @@ proc emitAutoRegistrations*(externalIdents: seq[NimNode]): NimNode {.compileTime
   result = newStmtList()
   for typeIdent in externalIdents:
     result.add(newCall(ident("autoRegisterApiType"), typeIdent))
-
-# ---------------------------------------------------------------------------
-# Array size const discovery and pre-registration
-# ---------------------------------------------------------------------------
-
-proc collectArraySizeIdents(
-    n: NimNode, found: var seq[NimNode], seen: var seq[string]
-) {.compileTime.} =
-  ## Recursively walk the AST and collect ident nodes used as the size of
-  ## `array[Size, T]` expressions. Deduplicates by name.
-  if n.kind == nnkBracketExpr and n.len == 3 and ($n[0]).toLowerAscii() == "array":
-    let sizeNode = n[1]
-    if sizeNode.kind == nnkIdent:
-      let name = sizeNode.strVal
-      if name notin seen:
-        seen.add(name)
-        found.add(sizeNode)
-  for child in n.children:
-    collectArraySizeIdents(child, found, seen)
-
-proc discoverArraySizeIdents*(body: NimNode): seq[NimNode] {.compileTime.} =
-  ## Scan an untyped macro body for identifiers used as `array[Ident, T]`
-  ## sizes. Returns ident nodes for each unique name.
-  result = @[]
-  var seen: seq[string] = @[]
-  collectArraySizeIdents(body, result, seen)
-
-{.pop.}
-
-macro registerArraySizeConst*(name: static[string], value: static[int]): untyped =
-  ## Typed pre-pass: Nim resolves the const reference at the call site
-  ## (in user scope) so we receive its int value, which we record in the
-  ## compile-time registry that `arrayNodeSize` consults.
-  registerArraySizeValue(name, value)
-  result = newStmtList()
-
-{.push raises: [].}
-
-proc emitArraySizeRegistrations*(sizeIdents: seq[NimNode]): NimNode {.compileTime.} =
-  ## Generate `registerArraySizeConst("Name", Name)` calls for each ident
-  ## used as an array size. Nim resolves the second arg via `static[int]`,
-  ## storing the int in the registry so `arrayNodeSize` can find it.
-  result = newStmtList()
-  for sizeIdent in sizeIdents:
-    let nameLit = newLit(sizeIdent.strVal)
-    result.add(
-      newCall(ident("registerArraySizeConst"), nameLit, copyNimTree(sizeIdent))
-    )
 
 {.pop.}

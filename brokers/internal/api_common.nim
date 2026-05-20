@@ -2,9 +2,10 @@
 ## ----------
 ## Shared utilities for FFI API broker code generation.
 ##
-## After the Phase 2 codegen surface separation, this module is a thin
-## coordination layer that:
-## - Re-exports all codegen modules (C, C++, Python, Nim) for backward compat
+## After the native FFI codegen surface was retired (see
+## `doc/CBOR_Refactoring.md`), this module is a thin coordination layer
+## that:
+## - Re-exports the type schema registry and FFI mode flag
 ## - Owns the legacy FFI struct registry bridge
 ## - Owns compile-time accumulators that are shared across broker macros
 ##   (event counters, handler entries, cleanup proc names)
@@ -16,28 +17,13 @@
 
 import std/macros
 
-# ---------------------------------------------------------------------------
-# Re-export all codegen modules — existing code that imports api_common
-# continues to see all type mapping procs, accumulators, and generation procs.
-# ---------------------------------------------------------------------------
-
-import ./api_codegen_c
-import ./api_codegen_cpp
-import ./api_codegen_python
-import ./api_codegen_rust
-import ./api_codegen_go
-import ./api_codegen_nim
 import ./api_schema
 import ./api_ffi_mode
+import ./api_outdir
 
-export api_codegen_c
-export api_codegen_cpp
-export api_codegen_python
-export api_codegen_rust
-export api_codegen_go
-export api_codegen_nim
 export api_schema
 export api_ffi_mode
+export api_outdir
 
 # ---------------------------------------------------------------------------
 # Library name accumulator

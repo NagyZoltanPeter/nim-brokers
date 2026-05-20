@@ -80,10 +80,6 @@ proc generateApiCborEventBroker*(body: NimNode): NimNode =
   if externalIdents.len > 0:
     result.add(emitAutoRegistrations(externalIdents))
 
-  let sizeIdents = discoverArraySizeIdents(body)
-  if sizeIdents.len > 0:
-    result.add(emitArraySizeRegistrations(sizeIdents))
-
   result.add(newCall(ident("generateApiCborEventBrokerDeferred"), copyNimTree(body)))
 
 {.pop.}
