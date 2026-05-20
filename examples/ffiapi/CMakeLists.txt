@@ -55,6 +55,13 @@ endif()
 # ---------------------------------------------------------------------------
 # Pure C example
 # ---------------------------------------------------------------------------
+# TODO(plan §10): the native FFI codegen surface was retired (see
+# doc/CBOR_Refactoring.md). Pure-C consumers temporarily have only the raw
+# 11-function CBOR ABI — they would have to hand-encode CBOR against it.
+# The deferred "CBOR-derived typed C functional interface" will restore
+# this example. Until then, keep `example/main.c` in-tree but DO NOT compile
+# it so the build does not break in surprising ways.
+if(FALSE)
 add_executable(example_c example/main.c)
 set_target_properties(example_c PROPERTIES
     C_STANDARD 11
@@ -110,6 +117,7 @@ elseif(UNIX)
         INSTALL_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
     )
 endif()
+endif() # if(FALSE) — pure-C example disabled, see TODO above
 
 # ---------------------------------------------------------------------------
 # Modern C++ example
@@ -176,12 +184,8 @@ endif()
 # Windows: copy the DLL next to the executables so they can be run directly
 # ---------------------------------------------------------------------------
 if(WIN32)
-    add_custom_command(TARGET example_c POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${MYLIB_DIR}/mylib.dll"
-            "$<TARGET_FILE_DIR:example_c>/mylib.dll"
-        COMMENT "Copying mylib.dll next to C example"
-    )
+    # NB: pure-C example_c target is gated off (see TODO above); its DLL
+    # copy step lives with it once the typed C wrapper is restored.
     add_custom_command(TARGET example_cpp POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${MYLIB_DIR}/mylib.dll"
