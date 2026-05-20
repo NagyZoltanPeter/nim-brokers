@@ -57,16 +57,12 @@ proc parseLibraryConfig(
   initializeRequest: NimNode,
   shutdownRequest: NimNode,
   refType: NimNode,
-  ffiMode: BrokerFfiMode,
-  ffiModeExplicit: bool,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
-  var ffiMode = mfCbor
-  var ffiModeExplicit = false
 
   for stmt in body:
     if stmt.kind == nnkCall and stmt.len == 2:
@@ -103,23 +99,6 @@ proc parseLibraryConfig(
           refTy = value[0]
         else:
           refTy = value
-      of "ffimode":
-        var modeNode = value
-        if modeNode.kind == nnkStmtList and modeNode.len == 1:
-          modeNode = modeNode[0]
-        var modeText = ""
-        case modeNode.kind
-        of nnkStrLit:
-          modeText = modeNode.strVal
-        of nnkIdent, nnkSym:
-          modeText = $modeNode
-        else:
-          error(
-            "ffiMode must be the identifier or string literal `cbor` or `native`",
-            modeNode,
-          )
-        ffiMode = parseFfiModeLiteral(modeText)
-        ffiModeExplicit = true
       else:
         error("Unknown registerBrokerLibrary key: " & key, stmt)
     else:
@@ -141,8 +120,6 @@ proc parseLibraryConfig(
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
-    ffiMode: ffiMode,
-    ffiModeExplicit: ffiModeExplicit,
   )
 
 proc parseTypeExpr(
@@ -169,19 +146,11 @@ proc registerBrokerLibraryCborImpl(
       initializeRequest: NimNode,
       shutdownRequest: NimNode,
       refType: NimNode,
-      ffiMode: BrokerFfiMode,
-      ffiModeExplicit: bool,
     ],
 ): NimNode
 
 proc registerBrokerLibraryImpl(body: NimNode): NimNode =
   let config = parseLibraryConfig(body)
-
-  # The native FFI codegen surface was retired — see doc/CBOR_Refactoring.md.
-  # `resolveFfiMode` still runs as a consistency check on the
-  # `ffiMode:` field (and rejects any leftover `mfNative` setting).
-  discard resolveFfiMode(config.ffiMode, config.ffiModeExplicit, config.name)
-
   registerBrokerLibraryCborImpl(body, config)
 
 # ---------------------------------------------------------------------------
@@ -208,8 +177,6 @@ proc registerBrokerLibraryCborImpl(
         initializeRequest: NimNode,
         shutdownRequest: NimNode,
         refType: NimNode,
-        ffiMode: BrokerFfiMode,
-        ffiModeExplicit: bool,
       ],
 ): NimNode =
   let libName = config.name
@@ -1268,9 +1235,10 @@ proc registerBrokerLibraryCborImpl(
 
 macro registerBrokerLibrary*(body: untyped): untyped =
   ## Generates the full shared-library surface for a broker FFI library.
-  ## A no-op unless one of `-d:BrokerFfiApi` or `-d:BrokerFfiApiCBOR` is
-  ## set, so client code never needs a `when defined(...)` guard around
-  ## it. Either flag enables FFI codegen; CBOR is the only mode.
+  ## A no-op unless `-d:BrokerFfiApi` is set, so client code never needs
+  ## a `when defined(...)` guard around it. `-d:BrokerFfiApiCBOR` is
+  ## accepted as a back-compat alias for one release; new build scripts
+  ## should pass `-d:BrokerFfiApi`.
   when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR):
     registerBrokerLibraryImpl(body)
   else:

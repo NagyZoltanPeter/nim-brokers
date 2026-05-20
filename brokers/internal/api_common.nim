@@ -80,22 +80,21 @@ type CborRequestEntry* = object
     ## `<Type>CborArgs` object.
 
 var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
-  ## Accumulated by `RequestBroker(API)` expansions when `brokerFfiMode` is
-  ## `mfCbor`. `registerBrokerLibrary` drains this list to emit the
-  ## per-library `Table[string, CborApiAdapter]` and the `<lib>_call`
-  ## dispatch.
+  ## Accumulated by `RequestBroker(API)` expansions.
+  ## `registerBrokerLibrary` drains this list to emit the per-library
+  ## `Table[string, CborApiAdapter]` and the `<lib>_call` dispatch.
 
 type CborEventEntry* = object
   apiName*: string ## Wire eventName foreign callers pass to `<lib>_subscribe`.
   typeName*: string ## Nim type identifier for the event payload.
 
 var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
-  ## Accumulated by `EventBroker(API)` expansions when `brokerFfiMode` is
-  ## `mfCbor`. `registerBrokerLibrary` reads this list to generate
-  ## per-event listener installers and the `<lib>CborIsKnownEvent`
-  ## predicate. As with `gApiCborRequestEntries`, this list is read but
-  ## not reset — Nim's compile-time VM aliases `let` copies of seqs back
-  ## to the source.
+  ## Accumulated by `EventBroker(API)` expansions.
+  ## `registerBrokerLibrary` reads this list to generate per-event
+  ## listener installers and the `<lib>CborIsKnownEvent` predicate. As
+  ## with `gApiCborRequestEntries`, this list is read but not reset —
+  ## Nim's compile-time VM aliases `let` copies of seqs back to the
+  ## source.
 
 proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
   ## Register an event for the next library's CBOR-mode subscribe surface.
