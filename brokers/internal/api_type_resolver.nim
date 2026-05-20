@@ -29,10 +29,8 @@
 
 import std/[macros, strutils]
 import ./api_schema, ./api_type
-import ./api_codegen_c, ./api_codegen_python, ./api_codegen_rust, ./api_codegen_go
 
 export api_schema, api_type
-export api_codegen_c, api_codegen_python
 
 # ---------------------------------------------------------------------------
 # Phase 2: Typed macro that resolves a single external type
@@ -347,101 +345,12 @@ macro autoRegisterApiType*(T: typed): untyped =
       for (name, ordinal) in values:
         apiValues.add(ApiEnumValue(name: name, ordinal: ordinal))
       registerTypeEntry(makeEnumEntry(typeName, apiValues))
-
-      # Generate C enum typedef in header
-      var enumDecl = "typedef enum {\n"
-      let prefix = toSnakeCase(typeName).toUpperAscii()
-      for v in apiValues:
-        enumDecl.add(
-          "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
-            ",\n"
-        )
-      # `_C` suffix on the typedef name so the C enum doesn't collide
-      # with the C++ `enum class <Name>` emitted by the .hpp wrapper.
-      enumDecl.add("} " & typeName & "_C;\n")
-      appendHeaderDecl(enumDecl)
-
-      # Generate C++ enum (inherits from .h include, but add to cpp structs
-      # for namespace awareness)
-      # No separate C++ struct needed — C enum typedef is used directly
-
-      # Generate Python IntEnum class. Use the original Nim value names
-      # (e.g. `pLow`) — matches the C++ `enum class Priority { pLow, ... }`
-      # surface so the same client code that writes `Priority.pLow` works
-      # in both native- and CBOR-built Python wrappers.
-      when defined(BrokerFfiApiGenPy):
-        var pyEnum = "class " & typeName & "(enum.IntEnum):\n"
-        pyEnum.add("    \"\"\"" & typeName & " — generated from Nim enum.\"\"\"\n")
-        for v in apiValues:
-          pyEnum.add("    " & v.name & " = " & $v.ordinal & "\n")
-        gApiPyTypedefs.add(pyEnum)
-
-      when defined(BrokerFfiApiGenRust):
-        var rsEnum =
-          "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n#[repr(i32)]\npub enum " &
-          typeName & " {\n"
-        for v in apiValues:
-          rsEnum.add("    " & v.name & " = " & $v.ordinal & ",\n")
-        rsEnum.add("}\n\n")
-        if apiValues.len > 0:
-          rsEnum.add(
-            "impl Default for " & typeName & " { fn default() -> Self { " & typeName &
-              "::" & apiValues[0].name & " } }\n"
-          )
-        else:
-          rsEnum.add(
-            "impl Default for " & typeName &
-              " { fn default() -> Self { unsafe { ::std::mem::transmute(0i32) } } }\n"
-          )
-        rsEnum.add("impl From<i32> for " & typeName & " {\n")
-        rsEnum.add("    fn from(v: i32) -> Self { match v {\n")
-        for v in apiValues:
-          rsEnum.add(
-            "        " & $v.ordinal & " => " & typeName & "::" & v.name & ",\n"
-          )
-        rsEnum.add("        _ => Self::default(),\n")
-        rsEnum.add("    } }\n}\n")
-        rsEnum.add(
-          "impl From<" & typeName & "> for i32 { fn from(v: " & typeName &
-            ") -> Self { v as i32 } }"
-        )
-        gApiRustEnums.add(rsEnum)
-
-      when defined(BrokerFfiApiGenGo):
-        var goEnum = "type " & typeName & " int32\n\n"
-        goEnum.add("const (\n")
-        for i, v in apiValues:
-          goEnum.add(
-            "\t" & typeName & "_" & v.name & " " & typeName & " = " & $v.ordinal & "\n"
-          )
-        goEnum.add(")")
-        gApiGoEnums.add(goEnum)
-
-      # Emit recursive calls for nested enum dependencies (rare but possible)
       return result
 
   # Check for distinct types
   if typeImpl.kind == nnkDistinctTy:
     let baseName = resolveAliasBase(actualSym)
     registerTypeEntry(makeAliasEntry(typeName, baseName, atkDistinct))
-
-    # Generate C typedef in header
-    let cBase = nimTypeToCSuffix(ident(baseName))
-    appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
-
-    # Generate Python type alias
-    when defined(BrokerFfiApiGenPy):
-      let pyBase = nimTypeToPyAnnotation(ident(baseName))
-      gApiPyTypedefs.add(typeName & " = " & pyBase & "  # distinct " & baseName)
-
-    when defined(BrokerFfiApiGenRust):
-      let rsBase = nimTypeToRust(ident(baseName))
-      gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
-
-    when defined(BrokerFfiApiGenGo):
-      let goBase = nimTypeToGo(ident(baseName))
-      gApiGoEnums.add("type " & typeName & " = " & goBase & " // distinct " & baseName)
-
     return result
 
   # Check for alias types (sym that resolves to another sym/primitive)
@@ -451,14 +360,6 @@ macro autoRegisterApiType*(T: typed): untyped =
       let targetName = $typeInst[1]
       if targetName != typeName:
         registerTypeEntry(makeAliasEntry(typeName, targetName, atkAlias))
-        let cBase = nimTypeToCSuffix(ident(targetName))
-        appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
-        when defined(BrokerFfiApiGenRust):
-          let rsBase = nimTypeToRust(ident(targetName))
-          gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
-        when defined(BrokerFfiApiGenGo):
-          let goBase = nimTypeToGo(ident(targetName))
-          gApiGoEnums.add("type " & typeName & " = " & goBase)
         return result
 
   # Tuple types — register as a synthesised object so the CBOR codegen
