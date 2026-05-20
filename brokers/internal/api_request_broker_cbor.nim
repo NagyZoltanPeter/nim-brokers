@@ -44,7 +44,13 @@ import
   ./api_schema,
   ./api_type_resolver
 
-export mt_request_broker, api_common, api_cbor_codec
+# `api_type_resolver` re-export: `autoRegisterApiType` is emitted into the
+# user-library AST by the broker macros and must resolve at the user's
+# expansion site. Previously this came in transitively via the native
+# `api_request_broker` re-export chain (retired in Part A); re-export it
+# explicitly here so user code never needs a direct
+# `import brokers/internal/api_type_resolver`.
+export mt_request_broker, api_common, api_cbor_codec, api_type_resolver
 
 # ---------------------------------------------------------------------------
 # Schema registration

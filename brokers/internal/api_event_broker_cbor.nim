@@ -29,7 +29,11 @@ import ./helper/broker_utils, ./mt_event_broker, ./api_common, ./api_schema
 import ./api_request_broker_cbor # for registerCborObjectType
 import ./api_type_resolver
 
-export mt_event_broker, api_common
+# `api_type_resolver` re-export: see note in `api_request_broker_cbor.nim`
+# — `autoRegisterApiType` is emitted into user code by broker macros and
+# must resolve at the user-library expansion site post-Part-A retirement
+# of the native `api_event_broker` re-export chain.
+export mt_event_broker, api_common, api_type_resolver
 
 proc generateApiCborEventBrokerImpl(body: NimNode): NimNode =
   result = newStmtList()

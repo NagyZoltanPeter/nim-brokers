@@ -167,10 +167,11 @@ when compileOption("threads"):
   export mt_config, mt_request_broker
 
 when compileOption("threads") and
-    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
-  import ./internal/api_request_broker, ./internal/api_type
-  export api_request_broker, api_type
-
+    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
+  # Part A — native C-ABI codegen retired. The only surviving FFI strategy
+  # is CBOR; `-d:BrokerFfiApiNative` becomes a hard compile error
+  # (see api_ffi_mode.nim). `api_request_broker.nim` and `api_type.nim`
+  # (the deprecated `ApiType` shim) are deletion candidates in this round.
   import ./internal/api_request_broker_cbor
   export api_request_broker_cbor
 
@@ -903,12 +904,8 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
           "Compile with `--threads:on` to use API RequestBroker."
       .}
     else:
-      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or
-          defined(BrokerFfiApiNative):
-        when brokerFfiMode == mfCbor:
-          generateApiCborRequestBroker(body)
-        else:
-          generateApiRequestBroker(body)
+      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR):
+        generateApiCborRequestBroker(body)
       else:
         generateMtRequestBroker(body, defaultMtReqCfg())
   of rbAsync, rbSync:
