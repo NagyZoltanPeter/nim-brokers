@@ -2,6 +2,36 @@
 
 Single Pure Nim library interface to be used from other Nim apps/modules or from foreign languages through a C ABI.
 
+> ⚠️ **Status — Phase 2 retirement of native FFI codegen.**
+>
+> The native per-type C-export FFI codegen surface (the `mfNative` mode
+> driven by `-d:BrokerFfiApiNative`, and its accompanying typed `.h` /
+> `.hpp` headers plus per-language `.py` / Rust / Go wrappers) was
+> retired. CBOR (`-d:BrokerFfiApiCBOR`, also the default whenever
+> `-d:BrokerFfiApi` is set) is the only FFI mode going forward.
+>
+> Passing `-d:BrokerFfiApiNative` now fails with a hard compile error
+> pointing at `doc/CBOR_Refactoring.md`. Every section below that refers
+> to the native codegen, the typed C header, per-type C export functions,
+> CItem structs, or the native vs. CBOR mode selector should be read as
+> historical / archived material describing the pre-retirement state.
+>
+> Authoritative references for the surviving CBOR surface:
+> - `doc/CBOR_Refactoring.md` — the Phase 1 + 2 plan and current shape
+>   of the `_call` path (including the buffer-courier rework that
+>   eliminates the typed marshal round-trip and the momentary chronos
+>   loop on foreign threads).
+> - `doc/TYPESUPPORT.md` — type-support matrix for the four language
+>   wrappers (Python, C++, Rust, Go) in CBOR-only form.
+> - `doc/TYPE_SURFACE.md` — Nim → wrapper type mapping cheat-sheet.
+> - `doc/MT_vs_CBOR_Marshalling.md` — companion analysis comparing the
+>   MT broker's typed marshalling to the CBOR transport.
+>
+> Pure-C consumers temporarily have only the raw 11-function CBOR ABI
+> (`<lib>_initialize`, `_createContext`, `_call`, `_subscribe`, etc.) —
+> the typed C wrapper is the deferred "CBOR-derived typed C functional
+> interface" tracked in `CBOR_Refactoring.md` §10.
+
 ## Table of Contents
 
 - [Broker FFI API](#broker-ffi-api)
