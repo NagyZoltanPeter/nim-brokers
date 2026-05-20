@@ -22,11 +22,7 @@
 {.push raises: [].}
 
 import std/strutils
-# Part A retirement note: imported for `ensureGeneratedOutputDir` (used in
-# `generateCMakePackageFiles` below). When the native codegen modules are
-# fully deleted (Phase 2b), that helper must move to a kept module
-# (a small `api_outdir.nim` or similar) before this import can go away.
-import ./api_codegen_c
+import ./api_outdir
 
 {.pop.}
 
