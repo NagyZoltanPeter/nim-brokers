@@ -32,8 +32,6 @@ on:
         default: all
         options:
           - all
-          - testFfiApiCppAsanOrc
-          - testFfiApiCppAsanRefc
           - testMtEventBrokerAsanOrc
           - testMtEventBrokerAsanRefc
           - testMtRequestBrokerAsanOrc
@@ -151,7 +149,7 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
+          ALL="testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -186,7 +184,6 @@ jobs:
         shell: pwsh
         run: |
           $all = @(
-            "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
             "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
             "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
             "testMtBrokerConfigsAsanOrc", "testMtBrokerConfigsAsanRefc",
