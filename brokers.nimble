@@ -528,10 +528,7 @@ task runTypeMapTestLibCborGo,
   buildTypeMapTestLibCbor(genGo = true)
   writeTypeMapGoModFor("build_cbor")
   withDir "test/typemappingtestlib/go_test":
-    # The test consumer keeps `-tags cbor` to gate `test_obj_as_param`
-    # in cbor_only_cbor.go (the broker definition is gated to CBOR mode
-    # because object-as-request-param fails on every native backend).
-    exec quoteArg(findGoExe()) & " run -tags cbor ."
+    exec quoteArg(findGoExe()) & " run ."
 
 task runTypeMapTestLibCborPy,
   "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":

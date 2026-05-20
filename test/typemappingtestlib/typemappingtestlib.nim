@@ -277,29 +277,27 @@ type KeyRange* = object
 ## emits this as a struct with the same field names in every wrapper.
 type TupleRow* = tuple[key: string, payload: string]
 
-when defined(BrokerFfiApiCBOR):
-  RequestBroker(API):
-    type ScanRequest* = object
-      rows*: seq[TupleRow]
+RequestBroker(API):
+  type ScanRequest* = object
+    rows*: seq[TupleRow]
 
-    proc signature*(
-      category: string, range: KeyRange, reverse: bool
-    ): Future[Result[ScanRequest, string]] {.async.}
+  proc signature*(
+    category: string, range: KeyRange, reverse: bool
+  ): Future[Result[ScanRequest, string]] {.async.}
 
-  ## BytesEchoRequest — exercises `seq[byte]` as an INPUT param. Each
-  ## wrapper has to encode the value as a CBOR byte string (major type 2)
-  ## or the Nim cbor_serialization decoder rejects it with "Expected:
-  ## byte string but found: array". This probe surfaces the per-wrapper
-  ## byte-string handling work that lives outside the type-shape codegen.
-  RequestBroker(API):
-    type BytesEchoRequest* = object
-      length*: int32 ## number of bytes received
-      first*: int32 ## payload[0] cast to int (-1 if empty)
-      last*: int32 ## payload[^1] cast to int (-1 if empty)
+## BytesEchoRequest — exercises `seq[byte]` as an INPUT param. The CBOR
+## encoder uses major type 2 (byte string) so the Nim cbor_serialization
+## decoder accepts it; per-wrapper byte-string handling has its own
+## coverage downstream of the codegen.
+RequestBroker(API):
+  type BytesEchoRequest* = object
+    length*: int32 ## number of bytes received
+    first*: int32 ## payload[0] cast to int (-1 if empty)
+    last*: int32 ## payload[^1] cast to int (-1 if empty)
 
-    proc signature*(
-      payload: seq[byte]
-    ): Future[Result[BytesEchoRequest, string]] {.async.}
+  proc signature*(
+    payload: seq[byte]
+  ): Future[Result[BytesEchoRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] and seq[object] INPUT param coverage
@@ -338,17 +336,11 @@ RequestBroker(API):
 
 ## ObjParamRequest: takes a single Tag (Object) as INPUT param — exercises
 ## whole-struct pass-by-value across the FFI surface. Returns "key=value".
-##
-## Gated to CBOR mode: native C/C++/Python/Rust codegen all fail for this
-## case (see doc/TYPESUPPORT.md, Section 2 "Object as param"). Probing
-## those backends would break the native C/C++ build before the test
-## even runs, so the broker is only registered when CBOR is in effect.
-when defined(BrokerFfiApiCBOR):
-  RequestBroker(API):
-    type ObjParamRequest = object
-      summary*: string
+RequestBroker(API):
+  type ObjParamRequest = object
+    summary*: string
 
-    proc signature*(tag: Tag): Future[Result[ObjParamRequest, string]] {.async.}
+  proc signature*(tag: Tag): Future[Result[ObjParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Probe negatives (documented; not active brokers). See doc/TYPESUPPORT.md.
@@ -664,12 +656,11 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptObjRequest(value: none(Tag))),
   )
 
-  when defined(BrokerFfiApiCBOR):
-    discard ObjParamRequest.setProvider(
-      ctx,
-      proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
-        return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
-    )
+  discard ObjParamRequest.setProvider(
+    ctx,
+    proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
+      return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
+  )
 
   # --- New probe providers: Option[seq], tuple, KeyRange ---
 
@@ -682,46 +673,45 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptSeqRequest(value: none(seq[byte]))),
   )
 
-  when defined(BrokerFfiApiCBOR):
-    # ScanRequest provider — exercises distinct-over-seq (Key), tuple
-    # (TupleRow → struct), seq[Tuple] (rows), and object-as-param
-    # (KeyRange) in one round-trip.
-    discard BytesEchoRequest.setProvider(
-      ctx,
-      proc(
-          payload: seq[byte]
-      ): Future[Result[BytesEchoRequest, string]] {.closure, async.} =
-        let first =
-          if payload.len > 0:
-            int32(payload[0])
-          else:
-            -1'i32
-        let last =
-          if payload.len > 0:
-            int32(payload[^1])
-          else:
-            -1'i32
-        return
-          ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
-    )
+  # BytesEchoRequest + ScanRequest providers — exercise seq[byte] as
+  # input, distinct-over-seq (Key), tuple (TupleRow → struct), seq[Tuple]
+  # (rows), and object-as-param (KeyRange) in one round-trip.
+  discard BytesEchoRequest.setProvider(
+    ctx,
+    proc(
+        payload: seq[byte]
+    ): Future[Result[BytesEchoRequest, string]] {.closure, async.} =
+      let first =
+        if payload.len > 0:
+          int32(payload[0])
+        else:
+          -1'i32
+      let last =
+        if payload.len > 0:
+          int32(payload[^1])
+        else:
+          -1'i32
+      return
+        ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
+  )
 
-    discard ScanRequest.setProvider(
-      ctx,
-      proc(
-          category: string, range: KeyRange, reverse: bool
-      ): Future[Result[ScanRequest, string]] {.closure, async.} =
-        var rows: seq[TupleRow] = @[]
-        for i in 0 ..< 3:
-          let k = $i & ":" & range.startKey
-          let p = category & "-row-" & $i & ":" & range.stopKey
-          rows.add((key: k, payload: p))
-        if reverse:
-          var rev: seq[TupleRow] = @[]
-          for i in countdown(rows.len - 1, 0):
-            rev.add(rows[i])
-          rows = rev
-        return ok(ScanRequest(rows: rows)),
-    )
+  discard ScanRequest.setProvider(
+    ctx,
+    proc(
+        category: string, range: KeyRange, reverse: bool
+    ): Future[Result[ScanRequest, string]] {.closure, async.} =
+      var rows: seq[TupleRow] = @[]
+      for i in 0 ..< 3:
+        let k = $i & ":" & range.startKey
+        let p = category & "-row-" & $i & ":" & range.stopKey
+        rows.add((key: k, payload: p))
+      if reverse:
+        var rev: seq[TupleRow] = @[]
+        for i in countdown(rows.len - 1, 0):
+          rev.add(rows[i])
+        rows = rev
+      return ok(ScanRequest(rows: rows)),
+  )
 
   # No probe providers — see "Probe negatives" comment above for why each
   # of array[N, Object] / array[N, string] / seq[Object<seq>] is omitted.

@@ -1,5 +1,3 @@
-//go:build cbor
-
 package main
 
 import "typemappingtestlib"
