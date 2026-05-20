@@ -170,16 +170,14 @@ proc buildTorpedoExampleCborLibrary(
   exec "nim c " & buildTorpedoExampleCborFlags(generatePy, generateRust, generateGo) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc ffiExamplesBuildDir(useCbor = false): string =
-  if useCbor: "examples/ffiapi/cmake-build-cbor" else: "examples/ffiapi/cmake-build"
+proc ffiExamplesBuildDir(): string =
+  "examples/ffiapi/cmake-build-cbor"
 
-proc buildFfiCmakeTarget(target = "", useCbor = false) =
+proc buildFfiCmakeTarget(target = "") =
   let cmakeDir = "examples/ffiapi"
-  let buildDir = ffiExamplesBuildDir(useCbor)
+  let buildDir = ffiExamplesBuildDir()
   mkDir(buildDir)
-  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
-    cmakeWindowsConfigureExtras()
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -191,16 +189,14 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
   else:
     joinPath(exampleDir, "build", "example")
 
-proc torpedoCmakeBuildDir(useCbor = false): string =
-  if useCbor: "examples/torpedo/cmake-build-cbor" else: "examples/torpedo/cmake-build"
+proc torpedoCmakeBuildDir(): string =
+  "examples/torpedo/cmake-build-cbor"
 
-proc buildTorpedoCmakeTarget(target = "", useCbor = false) =
+proc buildTorpedoCmakeTarget(target = "") =
   let cmakeDir = "examples/torpedo"
-  let buildDir = torpedoCmakeBuildDir(useCbor)
+  let buildDir = torpedoCmakeBuildDir()
   mkDir(buildDir)
-  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
-    cmakeWindowsConfigureExtras()
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -436,12 +432,12 @@ task buildFfiExampleCbor,
 task buildFfiExampleCborCpp,
   "Build FFI API example — C++ application against the CBOR-mode library (via CMake)":
   buildFfiExampleCborLibrary()
-  buildFfiCmakeTarget("example_cpp", useCbor = true)
+  buildFfiCmakeTarget("example_cpp")
 
 task runFfiExampleCborCpp,
   "Build and run the C++ FFI example application against the CBOR-mode library":
   buildFfiExampleCborLibrary()
-  buildFfiCmakeTarget("example_cpp", useCbor = true)
+  buildFfiCmakeTarget("example_cpp")
   exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
 task runFfiExampleCborPy,
@@ -451,11 +447,10 @@ task runFfiExampleCborPy,
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/ffiapi/python_example/main.py")
 
-# CBOR-mode parity build of the typemapping test library: compiles the
-# SAME test/typemappingtestlib/typemappingtestlib.nim source with
-# -d:BrokerFfiApiCBOR into build_cbor/ and drives the SAME
-# test_typemappingtestlib.{cpp,py} test code against that build (via the
-# CMake project's USE_CBOR=ON toggle for C++).
+# CBOR build of the typemapping test library: compiles
+# test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApiCBOR
+# into build_cbor/ and drives test_typemappingtestlib.{cpp,py} against
+# that build.
 proc buildTypeMapTestLibCbor(
     genPy: bool = false, genRust: bool = false, genGo: bool = false
 ) =
@@ -494,7 +489,7 @@ task runTypeMapTestLibCborCpp,
   buildTypeMapTestLibCbor()
   let cmakeDir = typeMapTestLibCborCmakeDir()
   let srcDir = "test/typemappingtestlib"
-  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) & " -DUSE_CBOR=ON" &
+  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
     cmakeWindowsConfigureExtras()
   exec "cmake --build " & quoteArg(cmakeDir)
   exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
@@ -730,12 +725,12 @@ task buildTorpedoExampleCbor,
 task buildTorpedoExampleCborCpp,
   "Build the Torpedo Duel C++ application against the CBOR-mode library (via CMake)":
   buildTorpedoExampleCborLibrary()
-  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
+  buildTorpedoCmakeTarget("torpedo_cpp")
 
 task runTorpedoExampleCborCpp,
   "Build and run the Torpedo Duel C++ text UI example against the CBOR-mode library":
   buildTorpedoExampleCborLibrary()
-  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
+  buildTorpedoCmakeTarget("torpedo_cpp")
   exec quoteArg(torpedoExecutablePath())
 
 task runTorpedoExampleCborPy,

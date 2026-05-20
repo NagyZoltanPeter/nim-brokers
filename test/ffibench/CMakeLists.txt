@@ -2,17 +2,13 @@ cmake_minimum_required(VERSION 3.16)
 project(ffibench_cpp_driver CXX)
 
 # Phase 0 microbenchmark driver — see doc/CBOR_Refactoring.md §7.3.
-# Built twice: USE_CBOR=OFF links the native benchlib, USE_CBOR=ON links
-# the -d:BrokerFfiApiCBOR build and pulls in the jsoncons headers.
-option(USE_CBOR "Link against the CBOR-mode build of benchlib (-d:BrokerFfiApiCBOR)" OFF)
+# CBOR is the only FFI mode (the native codegen was retired). BENCH_DIR
+# can still be overridden at configure time; by default it points at the
+# CBOR build output.
 option(ASAN "Enable AddressSanitizer on the C++ drivers (lib must also be ASAN-built)" OFF)
 
 if(NOT BENCH_DIR)
-    if(USE_CBOR)
-        set(BENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
-    else()
-        set(BENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
-    endif()
+    set(BENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
 endif()
 
 get_filename_component(BENCH_DIR "${BENCH_DIR}" ABSOLUTE)
@@ -48,11 +44,12 @@ function(add_ffibench_target tgt src)
         RUNTIME_OUTPUT_DIRECTORY "${BENCH_DIR}"
     )
     target_link_libraries(${tgt} PRIVATE benchlib)
-    if(USE_CBOR)
-        target_include_directories(${tgt} PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-        target_compile_definitions(${tgt} PRIVATE USE_CBOR=1)
-    endif()
+    # jsoncons (header-only) used by the generated CBOR wrapper. USE_CBOR=1
+    # stays defined for the driver source (a follow-up will drop the
+    # `#ifdef USE_CBOR` arms there).
+    target_include_directories(${tgt} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
+    target_compile_definitions(${tgt} PRIVATE USE_CBOR=1)
     if(ASAN)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address -fno-omit-frame-pointer)

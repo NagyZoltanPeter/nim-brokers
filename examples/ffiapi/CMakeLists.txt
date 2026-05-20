@@ -4,19 +4,11 @@ project(mylib_examples C CXX)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
-# MYLIB_DIR can be overridden at configure time. When USE_CBOR=ON it
-# defaults to nimlib/build_cbor (the -d:BrokerFfiApiCBOR build output)
-# and the C++ target additionally pulls in the jsoncons headers needed
-# by the CBOR-mode wrapper. With USE_CBOR=OFF it defaults to nimlib/build
-# (the -d:BrokerFfiApiNative build output).
-option(USE_CBOR "Link against the CBOR-mode Nim library (mylib.nim built with -d:BrokerFfiApiCBOR)" OFF)
-
+# CBOR is the only FFI mode (the native codegen was retired — see
+# doc/CBOR_Refactoring.md). MYLIB_DIR can still be overridden at configure
+# time; by default it points at the -d:BrokerFfiApiCBOR build output.
 if(NOT MYLIB_DIR)
-    if(USE_CBOR)
-        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
-    else()
-        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
-    endif()
+    set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
 endif()
 
 # Subdir name used for embedded RPATH — keeps the example binary
@@ -162,11 +154,9 @@ endif()
 
 target_link_libraries(example_cpp PRIVATE mylib)
 
-# CBOR variant: header-only jsoncons for cbor encode/decode in <mylib>.hpp
-if(USE_CBOR)
-    target_include_directories(example_cpp PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-endif()
+# Header-only jsoncons for CBOR encode/decode in <mylib>.hpp.
+target_include_directories(example_cpp PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
 
 if(APPLE)
     set_target_properties(example_cpp PROPERTIES
