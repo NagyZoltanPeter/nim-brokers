@@ -1,100 +1,76 @@
 ## API FFI Mode
 ## ------------
-## Compile-time resolution of the FFI surface generation strategy.
+## Compile-time gate for the FFI surface. After the native codegen was
+## retired (see `doc/CBOR_Refactoring.md`), CBOR is the only FFI
+## strategy. The `BrokerFfiMode` enum is kept as a one-value enum so
+## downstream call sites and the optional `ffiMode:` consistency check
+## on `registerBrokerLibrary` keep compiling unchanged — collapsing it
+## away is a follow-up task (see §10 of the plan).
 ##
-## Two strategies coexist:
-##
-## - `mfNative` — original per-type C exports with native Nim↔C type mapping.
-##   This is what every existing FFI consumer uses today.
-##
-## - `mfCbor` — collapsed C ABI (one sync gate, one event subscribe pair,
-##   alloc/dealloc, lifecycle, discovery) where every payload is CBOR-encoded.
-##   Generated language wrappers (C++/Python/Rust) hide encode/decode entirely.
-##
-## Selection precedence (highest first):
-##   1. `-d:BrokerFfiApiNative`  forces `mfNative`.
-##   2. `-d:BrokerFfiApiCBOR`    forces `mfCbor`.
-##   3. `ffiMode:` field on `registerBrokerLibrary`.
-##   4. Default: `mfCbor` (the new strategy is the documented default).
-##
-## Setting both `-d:BrokerFfiApiNative` and `-d:BrokerFfiApiCBOR` is a fatal
-## compile-time error.
-##
-## Any of `-d:BrokerFfiApi`, `-d:BrokerFfiApiCBOR`, or `-d:BrokerFfiApiNative`
-## enables FFI codegen on its own — passing the strategy flag alone is
-## sufficient and there is no need to also pass `-d:BrokerFfiApi`. Without any
-## of them `registerBrokerLibrary` is a no-op. `-d:BrokerFfiApi` by itself
-## defaults to the CBOR strategy.
+## Either of `-d:BrokerFfiApi` or `-d:BrokerFfiApiCBOR` enables FFI
+## codegen; without one of them `registerBrokerLibrary` is a no-op.
+## `-d:BrokerFfiApiNative` is rejected as a hard compile error so a
+## stale build script cannot silently produce the wrong artifact.
 
 {.push raises: [].}
 
 import std/[macros, strutils]
 
+when defined(BrokerFfiApiNative):
+  {.
+    fatal:
+      "BrokerFfiApiNative was retired — the native FFI codegen surface no " &
+      "longer exists. See doc/CBOR_Refactoring.md. Pass `-d:BrokerFfiApiCBOR` " &
+      "(or just `-d:BrokerFfiApi`) instead."
+  .}
+
 type BrokerFfiMode* = enum
-  mfNative ## Native per-type C exports (original strategy).
-  mfCbor ## CBOR-encoded buffer ABI (new strategy).
+  mfCbor ## CBOR-encoded buffer ABI (the only remaining strategy).
 
 const
   brokerFfiApiCborForced* = defined(BrokerFfiApiCBOR)
-  brokerFfiApiNativeForced* = defined(BrokerFfiApiNative)
 
-when brokerFfiApiCborForced and brokerFfiApiNativeForced:
-  {.
-    fatal:
-      "BrokerFfiApiCBOR and BrokerFfiApiNative are mutually exclusive. " &
-      "Pick one (or neither and let `ffiMode:` decide)."
-  .}
-
-# `brokerFfiMode` is the FFI mode visible to all FFI codegen sites. Driven
-# entirely by compile flags so it has a stable value before any macro
-# expansion runs: per-broker macros (`RequestBroker(API)`,
-# `EventBroker(API)`) expand *before* `registerBrokerLibrary` and therefore
-# cannot consult a per-library `ffiMode:` field — the flag is the only
-# persistent input across macro invocations. When neither force flag is set
-# the default is `mfCbor` (the new strategy is the documented default — see
-# plan §2). Setting `ffiMode:` on `registerBrokerLibrary` is then a
-# *consistency check* against this constant, not an override.
-const brokerFfiMode* {.used.}: BrokerFfiMode =
-  when brokerFfiApiNativeForced: mfNative else: mfCbor
+# `brokerFfiMode` is the FFI mode visible to all FFI codegen sites.
+# After the native retirement it is a constant, but the symbol stays
+# so existing codegen call sites do not need rewriting.
+const brokerFfiMode* {.used.}: BrokerFfiMode = mfCbor
 
 var gApiResolvedFfiMode* {.compileTime.}: BrokerFfiMode = mfCbor
-  ## The resolved mode for the current library, set during
-  ## `registerBrokerLibrary` expansion. Read by codegen modules to choose
-  ## which surface to emit. Defaults to `mfCbor`; overwritten by
-  ## `resolveFfiMode` once the library config has been parsed.
+  ## The resolved mode for the current library. Always `mfCbor`; kept as
+  ## a `var` so the legacy assignment in `resolveFfiMode` still compiles
+  ## and so a future second mode (if one is ever reintroduced) can be
+  ## wired back in without churning every read site.
 
 var gApiResolvedFfiModeSet* {.compileTime.}: bool = false
   ## Sentinel: has `resolveFfiMode` been called for the current library?
 
 proc parseFfiModeLiteral*(s: string): BrokerFfiMode {.compileTime.} =
   ## Map an `ffiMode:` field value (string literal) to `BrokerFfiMode`.
-  ## Raises a compile-time `error` for unknown values.
+  ## Only `"cbor"` is accepted; `"native"` is rejected with a pointer to
+  ## the refactoring doc.
   case s.toLowerAscii()
   of "cbor":
     result = mfCbor
   of "native":
-    result = mfNative
+    error(
+      "ffiMode: \"native\" is no longer supported — the native FFI codegen " &
+        "surface was retired. See doc/CBOR_Refactoring.md."
+    )
   else:
-    error("ffiMode must be \"cbor\" or \"native\"; got \"" & s & "\"")
+    error("ffiMode must be \"cbor\"; got \"" & s & "\"")
 
 proc resolveFfiMode*(
     configMode: BrokerFfiMode, configModeExplicit: bool, libName: string
 ): BrokerFfiMode {.compileTime.} =
-  ## Resolve the effective FFI mode and cross-check the optional `ffiMode:`
-  ## field against the compile-flag-driven `brokerFfiMode` constant. A
-  ## mismatch is rejected at compile time so users do not silently get the
-  ## wrong codegen path.
+  ## Consistency check on the optional `ffiMode:` field. Always returns
+  ## `mfCbor`; rejects any explicit mismatch.
   result = brokerFfiMode
 
   if configModeExplicit and configMode != result:
-    let want =
-      case result
-      of mfCbor: "cbor (set -d:BrokerFfiApiCBOR or omit -d:BrokerFfiApiNative)"
-      of mfNative: "native (set -d:BrokerFfiApiNative)"
     error(
       "registerBrokerLibrary: ffiMode for '" & libName & "' is " & $configMode &
-        " but compile flags resolve to " & $result & ". Pick the matching switch: " &
-        want & "."
+        " but only " & $result & " is supported. Remove the `ffiMode:` field " &
+        "or set it to \"cbor\"."
     )
 
   gApiResolvedFfiMode = result
