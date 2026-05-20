@@ -1,12 +1,9 @@
 // build.rs — wires the Rust example to the libtorpedolib shared library
-// produced by the Nim build (in nimlib/build/ for native mode or
-// nimlib/build_cbor/ for CBOR mode).
+// produced by the Nim CBOR build in nimlib/build_cbor/.
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let cbor = std::env::var("CARGO_FEATURE_CBOR").is_ok();
-    let dir_name = if cbor { "build_cbor" } else { "build" };
-    let lib_dir = format!("{}/../nimlib/{}", manifest, dir_name);
+    let lib_dir = format!("{}/../nimlib/build_cbor", manifest);
 
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=dylib=torpedolib");

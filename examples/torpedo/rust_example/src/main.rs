@@ -6,14 +6,8 @@
 // both own/enemy boards, fleet status, meta panels, and a tail of the
 // event log driven by the broker callbacks.
 //
-//     cargo run                 # native FFI build (nimlib/build/)
-//     cargo run --features cbor # CBOR FFI build   (nimlib/build_cbor/)
+//     cargo run   # builds against the CBOR FFI library in nimlib/build_cbor/
 
-#[cfg(not(feature = "cbor"))]
-#[path = "../../nimlib/build/torpedolib_rs/src/lib.rs"]
-mod torpedolib;
-
-#[cfg(feature = "cbor")]
 #[path = "../../nimlib/build_cbor/torpedolib_rs/src/lib.rs"]
 mod torpedolib;
 

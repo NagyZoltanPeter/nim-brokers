@@ -383,10 +383,10 @@ proc findCargoExe(): string =
   result = "cargo"
 
 task runFfiExampleCborRust,
-  "Build the FFI API example library (CBOR mode) + run the Rust example with --features cbor":
+  "Build the FFI API example library (CBOR mode)":
   buildFfiExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+    " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
 
 proc findGoExe(): string =
   ## Returns the `go` toolchain invocation token. Like cargo via rustup,
@@ -503,7 +503,7 @@ task runTypeMapTestLibCborRust,
   "Build the CBOR-mode parity library + Rust wrapper and run the Rust parity test":
   buildTypeMapTestLibCbor(genRust = true)
   exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
+    " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
 
 proc writeTypeMapGoModFor(buildDir: string) =
   let modPath = "test/typemappingtestlib/go_test/go.mod"
@@ -693,10 +693,10 @@ task probeWinTlsUninitRefc,
   runProbeWinTlsUninit("refc")
 
 task runTorpedoExampleCborRust,
-  "Build the Torpedo Duel FFI library (CBOR mode) + run the Rust example with --features cbor":
+  "Build the Torpedo Duel FFI library (CBOR mode)":
   buildTorpedoExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path examples/torpedo/rust_example/Cargo.toml"
+    " run --manifest-path examples/torpedo/rust_example/Cargo.toml"
 
 proc writeTorpedoGoModFor(buildDir: string) =
   let modPath = "examples/torpedo/go_example/go.mod"

@@ -1,14 +1,8 @@
 # Cargo manifest for the mylib Rust FFI example.
 #
-# Rust example that drives the same `mylib` shared library that the C, C++,
-# and Python examples consume. Two build modes are supported via Cargo
-# features:
+#   cargo run   # builds against the CBOR FFI library in nimlib/build_cbor/
 #
-#   cargo run                 # native FFI build  (uses nimlib/build/)
-#   cargo run --features cbor # CBOR FFI build    (uses nimlib/build_cbor/)
-#
-# The generated wrapper crate is included as a module via #[path] so the
-# same example crate can switch build outputs via the feature flag.
+# The generated wrapper crate is included as a module via #[path].
 
 [package]
 name = "rust_example"
@@ -16,15 +10,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 
-[features]
-default = []
-cbor = ["dep:ciborium", "dep:serde", "dep:serde_json", "dep:serde_bytes"]
-
 [dependencies]
-ciborium = { version = "0.2", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-serde_bytes = { version = "0.11", optional = true }
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
 
 [[bin]]
 name = "rust_example"

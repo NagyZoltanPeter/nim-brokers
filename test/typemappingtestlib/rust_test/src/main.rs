@@ -1,21 +1,13 @@
-// Rust port of test_typemappingtestlib.cpp — exercises every Nim→C→Rust
+// Rust port of test_typemappingtestlib.cpp — exercises every Nim→Rust
 // type mapping through the generated Rust wrapper (typemappingtestlib_rs).
 // One Rust function per C++ test, preserved in the same order.
 //
-//     cargo run                 # native FFI build  (build/)
-//     cargo run --features cbor # CBOR FFI build    (build_cbor/)
+//     cargo run   # builds against the CBOR FFI library in build_cbor/
 
-#[cfg(not(feature = "cbor"))]
-#[path = "../../build/typemappingtestlib_rs/src/lib.rs"]
-mod lib;
-
-#[cfg(feature = "cbor")]
 #[path = "../../build_cbor/typemappingtestlib_rs/src/lib.rs"]
 mod lib;
 
-use lib::{Tag, Typemappingtestlib};
-#[cfg(feature = "cbor")]
-use lib::KeyRange;
+use lib::{KeyRange, Tag, Typemappingtestlib};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -304,10 +296,7 @@ fn test_primitive_int_result_request() {
     let r = lib.int_result_request(21);
     check!(r.is_ok());
     if let Some(v) = r.value() {
-        #[cfg(feature = "cbor")]
-        check_eq!(*v, 42); // CBOR: IntResultRequest is the bare i32 alias
-        #[cfg(not(feature = "cbor"))]
-        check_eq!(v.value, 42); // native: struct with a single `value` field
+        check_eq!(*v, 42); // IntResultRequest is the bare i32 alias
     }
     lib.shutdown();
 }
@@ -1433,7 +1422,6 @@ fn test_obj_seq_param_string_encoding() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_obj_as_param() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1545,7 +1533,6 @@ fn test_opt_seq_absent() {
 // Inbound `seq[byte]` probe — verifies the Rust args struct serialises
 // `Vec<u8>` as a CBOR byte string (via `#[serde(with = "serde_bytes")]`)
 // rather than a sequence-of-int that the Nim decoder rejects.
-#[cfg(feature = "cbor")]
 fn test_bytes_echo_request_roundtrip() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1559,7 +1546,6 @@ fn test_bytes_echo_request_roundtrip() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_bytes_echo_request_empty() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1573,7 +1559,6 @@ fn test_bytes_echo_request_empty() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_scan_request_forward() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1589,7 +1574,6 @@ fn test_scan_request_forward() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_scan_request_reverse() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -2762,7 +2746,6 @@ fn main() {
     run_test("test_opt_seq_absent", test_opt_seq_absent);
     run_test("test_opt_obj_present", test_opt_obj_present);
     run_test("test_opt_obj_absent", test_opt_obj_absent);
-    #[cfg(feature = "cbor")]
     {
         run_test("test_obj_as_param", test_obj_as_param);
         run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
