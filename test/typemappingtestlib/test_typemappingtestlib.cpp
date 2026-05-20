@@ -244,11 +244,7 @@ static void test_requests_multiple_echo() {
 static void test_dual_sig_zero() {
     Typemappingtestlib lib;
     lib.createContext();
-#ifdef USE_CBOR
     auto r = lib.dualSigRequestZero();
-#else
-    auto r = lib.dualSigRequest();
-#endif
     CHECK(r.isOk());
     CHECK_EQ(r->label, std::string("zero"));
     CHECK_EQ(r->counter, 0);
@@ -258,11 +254,7 @@ static void test_dual_sig_zero() {
 static void test_dual_sig_with_label() {
     Typemappingtestlib lib;
     lib.createContext();
-#ifdef USE_CBOR
     auto r = lib.dualSigRequestWithLabel("hello", 7);
-#else
-    auto r = lib.dualSigRequest("hello", 7);
-#endif
     CHECK(r.isOk());
     CHECK_EQ(r->label, std::string("hello"));
     CHECK_EQ(r->counter, 7);
@@ -323,10 +315,9 @@ static void test_events_off_stops_delivery() {
 
 // ============================================================================
 // TestPrimitiveBrokerTypes — non-object (primitive) request result + event
-// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
-// `type X = int64`. Native mode exposes the result as a struct with a single
-// `value` field; CBOR mode exposes it as the bare `int32_t` alias. The event
-// callback carries a bare scalar parameter in both modes.
+// payload. IntResultRequest is `type X = int32` (exposed as the bare
+// `int32_t` alias); SimpleIntEvent is `type X = int64`. The event
+// callback carries a bare scalar parameter.
 // ============================================================================
 
 static void test_primitive_int_result_request() {
@@ -334,13 +325,7 @@ static void test_primitive_int_result_request() {
     lib.createContext();
     auto r = lib.intResultRequest(21);
     CHECK(r.isOk());
-    // Native mode: IntResultRequest is a struct with a single `value` field.
-    // CBOR mode: IntResultRequest is the bare `int32_t` alias.
-#ifdef USE_CBOR
     CHECK_EQ(*r, 42); // provider returns value * 2
-#else
-    CHECK_EQ(r->value, 42); // provider returns value * 2
-#endif
     lib.shutdown();
 }
 
@@ -1352,11 +1337,7 @@ static void test_opt_seq_present() {
     lib.shutdown();
 }
 
-#ifdef USE_CBOR
 // Object-as-request-param probe — exercises whole-struct pass-by-value.
-// Supported on every wrapper since CBOR became the only FFI mode.
-// (`#ifdef USE_CBOR` is now always-true; left in until the C++ test
-// source is swept clean of historical gates.)
 static void test_obj_as_param() {
     Typemappingtestlib lib;
     lib.createContext();
@@ -1425,7 +1406,6 @@ static void test_scan_request_reverse() {
     CHECK_EQ(r->rows[2].key, std::string("0:lo"));
     lib.shutdown();
 }
-#endif
 
 static void test_obj_seq_result_empty() {
     Typemappingtestlib lib;
@@ -2466,13 +2446,11 @@ int main() {
     RUN(test_opt_seq_absent);
     RUN(test_opt_obj_present);
     RUN(test_opt_obj_absent);
-#ifdef USE_CBOR
     RUN(test_obj_as_param);
     RUN(test_scan_request_forward);
     RUN(test_scan_request_reverse);
     RUN(test_bytes_echo_request_roundtrip);
     RUN(test_bytes_echo_request_empty);
-#endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);
     RUN(test_obj_seq_result_keys);

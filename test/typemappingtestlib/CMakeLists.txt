@@ -111,12 +111,9 @@ endif()
 
 target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)
 
-# jsoncons (header-only) used by the generated CBOR wrapper. USE_CBOR=1
-# stays defined for the test source (which still uses `#ifdef USE_CBOR`
-# in a few places — those should be removed in a follow-up cleanup).
+# jsoncons (header-only) used by the generated CBOR wrapper.
 target_include_directories(test_typemappingtestlib PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-target_compile_definitions(test_typemappingtestlib PRIVATE USE_CBOR=1)
 
 # Embed RPATH so the binary finds libtypemappingtestlib next to itself at runtime.
 if(APPLE)

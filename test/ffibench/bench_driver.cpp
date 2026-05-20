@@ -2,9 +2,8 @@
  * bench_driver.cpp — Phase 0 FFI microbenchmark driver.
  * See doc/CBOR_Refactoring.md §7.3.
  *
- * Compiled twice via CMake against the generated benchlib.hpp wrapper:
- *   - USE_CBOR off  -> native ABI build
- *   - USE_CBOR on   -> CBOR ABI build
+ * Compiled against the generated benchlib.hpp wrapper (CBOR FFI build).
+ * The native baseline is captured in doc/bench_baseline.md.
  *
  * Times the FFI request path: a simple all-scalar request (AddRequest)
  * and a variable-size payload request (VecRequest) across payload sizes.
@@ -20,11 +19,7 @@
 using namespace benchlib;
 using sclock = std::chrono::steady_clock;
 
-#ifdef USE_CBOR
 static const char* kMode = "cbor";
-#else
-static const char* kMode = "native";
-#endif
 
 // Every result is isOk()-checked: a fast-failed call (e.g. MT cell
 // overflow returning err) must never be timed as if it were a real

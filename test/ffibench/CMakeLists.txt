@@ -44,12 +44,9 @@ function(add_ffibench_target tgt src)
         RUNTIME_OUTPUT_DIRECTORY "${BENCH_DIR}"
     )
     target_link_libraries(${tgt} PRIVATE benchlib)
-    # jsoncons (header-only) used by the generated CBOR wrapper. USE_CBOR=1
-    # stays defined for the driver source (a follow-up will drop the
-    # `#ifdef USE_CBOR` arms there).
+    # jsoncons (header-only) used by the generated CBOR wrapper.
     target_include_directories(${tgt} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-    target_compile_definitions(${tgt} PRIVATE USE_CBOR=1)
     if(ASAN)
         target_compile_options(${tgt} PRIVATE
             -fsanitize=address -fno-omit-frame-pointer)
