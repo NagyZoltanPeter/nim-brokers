@@ -1354,8 +1354,9 @@ static void test_opt_seq_present() {
 
 #ifdef USE_CBOR
 // Object-as-request-param probe — exercises whole-struct pass-by-value.
-// The Nim broker is gated to CBOR mode (native C/C++/Python/Rust all fail
-// for this pattern; see doc/TYPESUPPORT.md, Section 2).
+// Supported on every wrapper since CBOR became the only FFI mode.
+// (`#ifdef USE_CBOR` is now always-true; left in until the C++ test
+// source is swept clean of historical gates.)
 static void test_obj_as_param() {
     Typemappingtestlib lib;
     lib.createContext();

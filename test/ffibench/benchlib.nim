@@ -1,19 +1,15 @@
 ## benchlib — Phase 0 microbenchmark library for the CBOR refactoring.
 ## ====================================================================
 ## See doc/CBOR_Refactoring.md §7.3. This library exposes two request
-## brokers used to measure the FFI `_call` path BEFORE the Part C buffer
-## courier optimization and BEFORE Part A retires the native codegen:
+## brokers used to measure the FFI `_call` path:
 ##
 ##   - AddRequest  — the simple all-scalar case  (add(a, b) -> sum)
 ##   - VecRequest  — a variable-size payload case (echo seq[int32])
 ##
-## It is compiled twice — `-d:BrokerFfiApiNative` and `-d:BrokerFfiApiCBOR`
-## — so the same C++ driver can time both ABIs.
-##
-## VecRequest carries `seq[int32]` (not `seq[byte]`) on purpose: `seq[byte]`
-## maps to a different C++ surface in native vs. CBOR mode (jsoncons
-## byte_string), which would force a `#ifdef` in the driver. `seq[int32]`
-## has a uniform wrapper surface, so one driver source compiles both ways.
+## After the native FFI codegen retirement (Phase 2 of CBOR_Refactoring),
+## only the `-d:BrokerFfiApiCBOR` build is reachable; the historical
+## native baseline captured in doc/bench_baseline.md is the reference
+## point for evaluating future optimizations against this same driver.
 
 {.push raises: [].}
 
