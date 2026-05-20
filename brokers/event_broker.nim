@@ -126,6 +126,11 @@ proc generateEventBroker(body: NimNode): NimNode =
   let fieldNames = parsed.fieldNames
   let fieldTypes = parsed.fieldTypes
   let hasInlineFields = parsed.hasInlineFields
+  let isVoid = parsed.isVoid
+  ## Payload-less event (`type X = void`): the listener proc, the dispatch
+  ## task and `emit` all drop the event-value parameter. The parser lowers
+  ## `void` to a unique empty `object` so the broker still has a distinct
+  ## identity to name; `isVoid` just strips the now-meaningless value arg.
 
   let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
   let sanitized = sanitizeIdentName(typeIdent)
@@ -151,6 +156,14 @@ proc generateEventBroker(body: NimNode): NimNode =
 
   result = newStmtList()
 
+  let handlerProcTy =
+    if isVoid:
+      quote:
+        proc(): Future[void] {.async: (raises: []), gcsafe.}
+    else:
+      quote:
+        proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
+
   result.add(
     quote do:
       type
@@ -158,8 +171,7 @@ proc generateEventBroker(body: NimNode): NimNode =
         `exportedListenerHandleIdent` = object
           id*: uint64
 
-        `exportedHandlerProcIdent` =
-          proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
+        `exportedHandlerProcIdent` = `handlerProcTy`
         `bucketTypeIdent` = object
           brokerCtx: BrokerContext
           listeners: Table[uint64, `handlerProcIdent`]
@@ -376,55 +388,100 @@ proc generateEventBroker(body: NimNode): NimNode =
 
   )
 
-  result.add(
-    quote do:
-      proc `listenerTaskIdent`(
-          callback: `handlerProcIdent`, event: `typeIdent`
-      ) {.async: (raises: []), gcsafe.} =
-        if callback.isNil():
-          return
-        try:
-          await callback(event)
-        except Exception:
-          error "Failed to execute event listener", error = getCurrentExceptionMsg()
-
-      proc `emitImplIdent`(
-          brokerCtx: BrokerContext, event: `typeIdent`
-      ): Future[void] {.async: (raises: []), gcsafe.} =
-        when compiles(event.isNil()):
-          if event.isNil():
-            error "Cannot emit uninitialized event object", eventType = `typeNameLit`
+  if isVoid:
+    # Payload-less event: listener task, emitImpl and `emit` carry no
+    # event value. `emit` is only the typedesc form (`TypeName.emit()`),
+    # since a bare value-less `emit()` would be hopelessly ambiguous.
+    result.add(
+      quote do:
+        proc `listenerTaskIdent`(
+            callback: `handlerProcIdent`
+        ) {.async: (raises: []), gcsafe.} =
+          if callback.isNil():
             return
-        let broker = `accessProcIdent`()
-        let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
-        if bucketIdx < 0:
-          # nothing to do as nobody is listening
-          return
-        if broker.buckets[bucketIdx].listeners.len == 0:
-          return
+          try:
+            await callback()
+          except Exception:
+            error "Failed to execute event listener", error = getCurrentExceptionMsg()
 
-        # Prune completed futures (sync — no yield point)
-        `pruneInFlightIdent`(broker, bucketIdx)
+        proc `emitImplIdent`(
+            brokerCtx: BrokerContext
+        ): Future[void] {.async: (raises: []), gcsafe.} =
+          let broker = `accessProcIdent`()
+          let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
+          if bucketIdx < 0:
+            # nothing to do as nobody is listening
+            return
+          if broker.buckets[bucketIdx].listeners.len == 0:
+            return
 
-        var callbacks: seq[`handlerProcIdent`] = @[]
-        for cb in broker.buckets[bucketIdx].listeners.values:
-          callbacks.add(cb)
-        for cb in callbacks:
-          let fut = `listenerTaskIdent`(cb, event)
-          broker.buckets[bucketIdx].inFlight.add(fut)
+          # Prune completed futures (sync — no yield point)
+          `pruneInFlightIdent`(broker, bucketIdx)
 
-      proc emit*(event: `typeIdent`) =
-        asyncSpawn `emitImplIdent`(DefaultBrokerContext, event)
+          var callbacks: seq[`handlerProcIdent`] = @[]
+          for cb in broker.buckets[bucketIdx].listeners.values:
+            callbacks.add(cb)
+          for cb in callbacks:
+            let fut = `listenerTaskIdent`(cb)
+            broker.buckets[bucketIdx].inFlight.add(fut)
 
-      proc emit*(_: typedesc[`typeIdent`], event: `typeIdent`) =
-        asyncSpawn `emitImplIdent`(DefaultBrokerContext, event)
+        proc emit*(_: typedesc[`typeIdent`]) =
+          asyncSpawn `emitImplIdent`(DefaultBrokerContext)
 
-      proc emit*(
-          _: typedesc[`typeIdent`], brokerCtx: BrokerContext, event: `typeIdent`
-      ) =
-        asyncSpawn `emitImplIdent`(brokerCtx, event)
+        proc emit*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext) =
+          asyncSpawn `emitImplIdent`(brokerCtx)
 
-  )
+    )
+  else:
+    result.add(
+      quote do:
+        proc `listenerTaskIdent`(
+            callback: `handlerProcIdent`, event: `typeIdent`
+        ) {.async: (raises: []), gcsafe.} =
+          if callback.isNil():
+            return
+          try:
+            await callback(event)
+          except Exception:
+            error "Failed to execute event listener", error = getCurrentExceptionMsg()
+
+        proc `emitImplIdent`(
+            brokerCtx: BrokerContext, event: `typeIdent`
+        ): Future[void] {.async: (raises: []), gcsafe.} =
+          when compiles(event.isNil()):
+            if event.isNil():
+              error "Cannot emit uninitialized event object", eventType = `typeNameLit`
+              return
+          let broker = `accessProcIdent`()
+          let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
+          if bucketIdx < 0:
+            # nothing to do as nobody is listening
+            return
+          if broker.buckets[bucketIdx].listeners.len == 0:
+            return
+
+          # Prune completed futures (sync — no yield point)
+          `pruneInFlightIdent`(broker, bucketIdx)
+
+          var callbacks: seq[`handlerProcIdent`] = @[]
+          for cb in broker.buckets[bucketIdx].listeners.values:
+            callbacks.add(cb)
+          for cb in callbacks:
+            let fut = `listenerTaskIdent`(cb, event)
+            broker.buckets[bucketIdx].inFlight.add(fut)
+
+        proc emit*(event: `typeIdent`) =
+          asyncSpawn `emitImplIdent`(DefaultBrokerContext, event)
+
+        proc emit*(_: typedesc[`typeIdent`], event: `typeIdent`) =
+          asyncSpawn `emitImplIdent`(DefaultBrokerContext, event)
+
+        proc emit*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext, event: `typeIdent`
+        ) =
+          asyncSpawn `emitImplIdent`(brokerCtx, event)
+
+    )
 
   if hasInlineFields:
     # Typedesc emit constructor overloads for inline object/ref object types.

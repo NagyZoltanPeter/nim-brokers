@@ -85,6 +85,11 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return primPyHint(t)
+  if lower == "seq[byte]":
+    # CBOR major type 2 (byte string) decodes to Python `bytes`; mirror
+    # that on the wrapper side so `Option[seq[byte]]` inside an Option
+    # also resolves to `Optional[bytes]` rather than `Optional[List[int]]`.
+    return "bytes"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToPyHint(unwrapBracket(t, "seq"))
     return
@@ -115,7 +120,9 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      return primPyHint(resolveUnderlyingType(t))
+      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
+      # `distinct seq[byte]` → `List[int]` rather than `""`).
+      return nimTypeToPyHint(resolveUnderlyingType(t))
   ""
 
 proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
@@ -136,6 +143,8 @@ proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
     return "0.0"
   else:
     discard
+  if lower == "seq[byte]":
+    return "b\"\""
   if lower.startsWith("seq[") or lower.startsWith("array["):
     return "field(default_factory=list)"
   if lower.startsWith("option["):
@@ -180,6 +189,11 @@ proc pyDecodeExpr(nimType, src: string): string {.compileTime.} =
     return "(int(" & src & ") if isinstance(" & src & ", int) else 0)"
   if t in ["float", "float32", "float64"]:
     return "(float(" & src & ") if isinstance(" & src & ", (int, float)) else 0.0)"
+  if lower == "seq[byte]":
+    # CBOR byte string → Python `bytes`. Accept the byte-string shape
+    # cbor2 produces directly, and tolerate the legacy list-of-int
+    # shape (e.g. when a sender emits major type 4 instead of 2).
+    return "(bytes(" & src & ") if " & src & " is not None else b\"\")"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = unwrapBracket(t, "seq")
     let raw = "(" & src & " or [])"
@@ -211,6 +225,13 @@ proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return src
+  if lower == "seq[byte]":
+    # cbor2 encodes Python `bytes` as CBOR byte string (major type 2),
+    # which is what the Nim provider expects. Tolerate list-of-int input
+    # by converting on the fly.
+    return
+      "(" & src & " if isinstance(" & src & ", (bytes, bytearray)) else bytes(" & src &
+      " or []))"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = unwrapBracket(t, "seq")
     return "[" & pyEncodeExpr(inner, "_x") & " for _x in (" & src & " or [])]"
@@ -472,6 +493,19 @@ proc generateCborPyFile*(
     if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
       objectNames.add(entry.name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # Its CBOR wire value is a bare scalar; the Python surface uses the
+  # `X = <prim>` alias directly. Such a type is an emittable request
+  # response / event payload despite having no object fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primPyHint(resolveUnderlyingType(name)).len > 0
+
+  proc isEmittablePayload(name: string): bool {.compileTime.} =
+    name in objectNames or isScalarPayload(name)
+
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     py.add(
       "# ---------------------------------------------------------------------------\n"
@@ -598,7 +632,7 @@ proc generateCborPyFile*(
 
   # Per-event handler maps, initialised in __init__.
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
@@ -636,7 +670,7 @@ proc generateCborPyFile*(
   py.add("            _LIB." & p & "shutdown(self._ctx)\n")
   py.add("            self._ctx = 0\n")
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ".clear()\n")
@@ -721,7 +755,7 @@ proc generateCborPyFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin objectNames:
+    if not isEmittablePayload(e.responseTypeName):
       py.add(
         "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
           "' is not a registered object type.\n\n"
@@ -777,7 +811,7 @@ proc generateCborPyFile*(
 
   # Per-event subscribe / unsubscribe.
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       py.add(
         "    # TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
           "' is not a registered object type.\n\n"
@@ -790,12 +824,16 @@ proc generateCborPyFile*(
     # Build per-field type hints + per-field destructure args. The user
     # callback signature is `(<ClassName>, *unpacked_field_types) -> None`
     # — parity with the C++ wrapper and the native-FFI Python wrapper.
-    let entry = lookupTypeEntry(ev.typeName)
     var hintParts: seq[string] = @[className]
     var destructureArgs: seq[string] = @["self"]
-    for f in entry.fields:
-      hintParts.add(nimTypeToPyHint(f.nimType))
-      destructureArgs.add("evt." & f.name)
+    if isScalarPayload(ev.typeName):
+      # Scalar payload: the decoded `evt` IS the value — one bare arg.
+      hintParts.add(primPyHint(resolveUnderlyingType(ev.typeName)))
+      destructureArgs.add("evt")
+    else:
+      for f in lookupTypeEntry(ev.typeName).fields:
+        hintParts.add(nimTypeToPyHint(f.nimType))
+        destructureArgs.add("evt." & f.name)
     let pyCallableHint = "Callable[[" & hintParts.join(", ") & "], None]"
 
     py.add("    def " & onName & "(self, callback: " & pyCallableHint & ") -> int:\n")

@@ -322,6 +322,87 @@ static void test_events_off_stops_delivery() {
 }
 
 // ============================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `value` field; CBOR mode exposes it as the bare `int32_t` alias. The event
+// callback carries a bare scalar parameter in both modes.
+// ============================================================================
+
+static void test_primitive_int_result_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.intResultRequest(21);
+    CHECK(r.isOk());
+    // Native mode: IntResultRequest is a struct with a single `value` field.
+    // CBOR mode: IntResultRequest is the bare `int32_t` alias.
+#ifdef USE_CBOR
+    CHECK_EQ(*r, 42); // provider returns value * 2
+#else
+    CHECK_EQ(r->value, 42); // provider returns value * 2
+#endif
+    lib.shutdown();
+}
+
+static void test_primitive_simple_int_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<int64_t> received;
+    auto h = lib.onSimpleIntEvent([&received](Typemappingtestlib&, int64_t v) {
+        received.push(v);
+    });
+    CHECK_NE(h, 0ull);
+
+    lib.intResultRequest(5); // provider emits SimpleIntEvent(value * 10)
+    waitFor([&] { return received.size() >= 1; });
+
+    CHECK_EQ(received.size(), 1u);
+    CHECK_EQ(received.snapshot()[0], static_cast<int64_t>(50));
+
+    lib.offSimpleIntEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. Native mode surfaces the
+// result as an empty struct, CBOR mode as Result<void>; either way the
+// caller only inspects isOk()/isErr(). The void event callback carries no
+// payload argument in both modes.
+// ============================================================================
+
+static void test_void_action_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    auto ok = lib.voidActionRequest("go");
+    CHECK(ok.isOk());
+
+    auto bad = lib.voidActionRequest(""); // provider rejects empty label
+    CHECK(bad.isErr());
+
+    lib.shutdown();
+}
+
+static void test_void_ping_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+
+    SafeList<int> received;
+    auto h = lib.onVoidPing([&received](Typemappingtestlib&) { received.push(1); });
+    CHECK_NE(h, 0ull);
+
+    lib.voidActionRequest("trigger"); // provider emits VoidPing
+    waitFor([&] { return received.size() >= 1; });
+
+    CHECK_EQ(received.size(), 1u);
+
+    lib.offVoidPing(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // TestContextSeparation
 // ============================================================================
 
@@ -665,7 +746,8 @@ static void test_seq_byte_empty() {
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
     CHECK(r.isOk());
-    CHECK(r->data.empty());
+    // `seq[byte]` maps to jsoncons::byte_string (no `.empty()`; use size()).
+    CHECK_EQ(r->data.size(), static_cast<size_t>(0));
     lib.shutdown();
 }
 
@@ -1176,6 +1258,100 @@ static void test_obj_seq_param_string_encoding() {
     lib.shutdown();
 }
 
+// Native Option[T] probe (Phase E1 / scalar). Works in both native and
+// CBOR builds: the C ABI now expands every `Option[T]` field to a
+// `<name>: T` + `<name>_has_value: bool` pair (uniform layout); the
+// C++ wrapper exposes it as `std::optional<T>`.
+static void test_opt_scalar_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optScalarRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(*r->value, 42);
+    lib.shutdown();
+}
+
+static void test_opt_scalar_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optScalarRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
+// Variable-shape Option probe (Phase E2a) — Option[string] crosses the
+// C ABI as `<name>: char*` + `<name>_has_value: bool` (uniform layout).
+// Wrapper exposes it as std::optional<std::string>.
+static void test_opt_string_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optStringRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(*r->value, std::string("hello"));
+    lib.shutdown();
+}
+
+static void test_opt_string_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optStringRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
+// Option of a registered object (Phase E3) — embedded by value at the
+// C ABI (`TagCItem value` + `value_has_value`). Wrapper exposes it as
+// std::optional<Tag>.
+static void test_opt_obj_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optObjRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(r->value->key, std::string("ok"));
+    CHECK_EQ(r->value->value, std::string("yes"));
+    lib.shutdown();
+}
+
+static void test_opt_obj_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optObjRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
+// Option[seq[byte]] absent — both modes partition Option fields so a
+// payload where the field is missing yields `has_value() == false`.
+static void test_opt_seq_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optSeqRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->value.has_value());
+    lib.shutdown();
+}
+
+// Option[seq[byte]] present — native Option support (Phase E2b) expands
+// the field to a `(ptr,count)` + `value_has_value` pair at the C ABI;
+// the C++ wrapper exposes it as std::optional<std::vector<uint8_t>>.
+static void test_opt_seq_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optSeqRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->value.has_value());
+    CHECK_EQ(r->value->size(), static_cast<size_t>(4));
+    CHECK_EQ((*r->value)[0], static_cast<uint8_t>(1));
+    CHECK_EQ((*r->value)[3], static_cast<uint8_t>(4));
+    lib.shutdown();
+}
+
 #ifdef USE_CBOR
 // Object-as-request-param probe — exercises whole-struct pass-by-value.
 // The Nim broker is gated to CBOR mode (native C/C++/Python/Rust all fail
@@ -1186,6 +1362,66 @@ static void test_obj_as_param() {
     auto r = lib.objParamRequest(makeTag("k", "v"));
     CHECK(r.isOk());
     CHECK_EQ(r->summary, std::string("k=v"));
+    lib.shutdown();
+}
+
+// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
+// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
+// string (major type 2) — the form the Nim provider expects.
+static void test_bytes_echo_request_roundtrip() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload{10, 20, 30, 40, 50};
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 5);
+    CHECK_EQ(r->first, 10);
+    CHECK_EQ(r->last, 50);
+    lib.shutdown();
+}
+
+static void test_bytes_echo_request_empty() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    jsoncons::byte_string payload;
+    auto r = lib.bytesEchoRequest(payload);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 0);
+    CHECK_EQ(r->first, -1);
+    CHECK_EQ(r->last, -1);
+    lib.shutdown();
+}
+
+// ScanRequest round-trip — exercises tuple-as-struct (TupleRow), seq[Tuple]
+// (rows), and object-as-input-param (KeyRange) end-to-end. With the per-
+// tuple `bindCborTupleMap` overrides on the Nim side, named tuples
+// serialise as CBOR maps so the wrapper-side struct decoders are happy.
+static void test_scan_request_forward() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    KeyRange kr;
+    kr.startKey = "lo";
+    kr.stopKey = "hi";
+    auto r = lib.scanRequest("scan", kr, false);
+    CHECK(r.isOk());
+    CHECK_EQ(r->rows.size(), static_cast<size_t>(3));
+    CHECK_EQ(r->rows[0].key, std::string("0:lo"));
+    CHECK_EQ(r->rows[2].key, std::string("2:lo"));
+    CHECK_EQ(r->rows[0].payload, std::string("scan-row-0:hi"));
+    lib.shutdown();
+}
+
+static void test_scan_request_reverse() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    KeyRange kr;
+    kr.startKey = "lo";
+    kr.stopKey = "hi";
+    auto r = lib.scanRequest("scan", kr, true);
+    CHECK(r.isOk());
+    CHECK_EQ(r->rows.size(), static_cast<size_t>(3));
+    CHECK_EQ(r->rows[0].key, std::string("2:lo"));
+    CHECK_EQ(r->rows[2].key, std::string("0:lo"));
     lib.shutdown();
 }
 #endif
@@ -2129,6 +2365,12 @@ int main() {
     RUN(test_events_counter_changed);
     RUN(test_events_off_stops_delivery);
 
+    printf("\n--- TestPrimitiveBrokerTypes ---\n");
+    RUN(test_primitive_int_result_request);
+    RUN(test_primitive_simple_int_event);
+    RUN(test_void_action_request);
+    RUN(test_void_ping_event);
+
     printf("\n--- TestContextSeparation ---\n");
     RUN(test_context_independent_counters);
     RUN(test_context_independent_echo);
@@ -2215,8 +2457,20 @@ int main() {
     RUN(test_obj_seq_param_single);
     RUN(test_obj_seq_param_multiple);
     RUN(test_obj_seq_param_string_encoding);
+    RUN(test_opt_scalar_present);
+    RUN(test_opt_scalar_absent);
+    RUN(test_opt_string_present);
+    RUN(test_opt_string_absent);
+    RUN(test_opt_seq_present);
+    RUN(test_opt_seq_absent);
+    RUN(test_opt_obj_present);
+    RUN(test_opt_obj_absent);
 #ifdef USE_CBOR
     RUN(test_obj_as_param);
+    RUN(test_scan_request_forward);
+    RUN(test_scan_request_reverse);
+    RUN(test_bytes_echo_request_roundtrip);
+    RUN(test_bytes_echo_request_empty);
 #endif
     RUN(test_obj_seq_result_empty);
     RUN(test_obj_seq_result_length);

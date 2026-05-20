@@ -84,8 +84,18 @@ proc toCFieldType*(nimType: NimNode): NimNode {.compileTime.} =
       if isEnumRegistered($nimType):
         ident("cint")
       elif isAliasOrDistinctRegistered($nimType):
-        # Resolve to underlying primitive
-        toCFieldType(ident(resolveUnderlyingType($nimType)))
+        # Resolve to underlying. Use parseExpr for compound bases like
+        # `seq[byte]` that wouldn't survive a bare `ident()`.
+        let underlying = resolveUnderlyingType($nimType)
+        let underlyingNode =
+          if '[' in underlying:
+            try:
+              parseExpr(underlying)
+            except CatchableError:
+              ident(underlying)
+          else:
+            ident(underlying)
+        toCFieldType(underlyingNode)
       else:
         copyNimTree(nimType)
   else:

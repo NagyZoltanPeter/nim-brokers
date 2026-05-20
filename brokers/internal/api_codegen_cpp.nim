@@ -83,6 +83,8 @@ proc nimTypeToCpp*(nimType: NimNode): string {.compileTime.} =
       let n = arrayNodeSize(nimType)
       let elemName = arrayNodeElemName(nimType)
       "std::array<" & nimTypeToCpp(ident(elemName)) & ", " & $n & ">"
+    elif isOptionType(nimType):
+      "std::optional<" & nimTypeToCpp(optionInnerType(nimType)) & ">"
     else:
       error(
         "Generic types other than seq[T] and array[N,T] not supported for C++ mapping",

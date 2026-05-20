@@ -131,11 +131,29 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
   # Step 1: Parse type definition with field info
   let parsed = parseSingleTypeDef(body, "EventBroker", collectFieldInfo = true)
   let typeIdent = parsed.typeIdent
-  let fieldNames = parsed.fieldNames
-  let fieldTypes = parsed.fieldTypes
-  let hasInlineFields = parsed.hasInlineFields
+  var fieldNames = parsed.fieldNames
+  var fieldTypes = parsed.fieldTypes
+  var hasInlineFields = parsed.hasInlineFields
 
   let typeDisplayName = sanitizeIdentName(typeIdent)
+
+  # Primitive (non-object) event type — e.g. `EventBroker(API): type X = int64`.
+  # The broker type parses as `distinct <primitive>` with no inline fields. We
+  # synthesise a single `value` field of the underlying primitive type so the
+  # callback typedef and every wrapper trampoline treat it as a one-field
+  # event. The only path that cannot reuse the object machinery is the
+  # delivery wrapper: the Nim event value IS the scalar, so there is no
+  # `.value` accessor — see the `isPrimitiveEvent` branch in the delivery
+  # field loop below.
+  var isPrimitiveEvent = false
+  if not hasInlineFields and parsed.objectDef.kind == nnkDistinctTy and
+      parsed.objectDef.len == 1 and parsed.objectDef[0].kind == nnkIdent and
+      isNimPrimitive($parsed.objectDef[0]) and
+      ($parsed.objectDef[0]).toLowerAscii() notin ["string", "cstring"]:
+    isPrimitiveEvent = true
+    fieldNames = @[ident("value")]
+    fieldTypes = @[copyNimTree(parsed.objectDef[0])]
+    hasInlineFields = true
 
   # ---------------------------------------------------------------------------
   # Type classification helpers
@@ -312,7 +330,12 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
       for i in 0 ..< fieldNames.len:
         let fName = fieldNames[i]
         let fType = fieldTypes[i]
-        if isCStringType(fType):
+        if isPrimitiveEvent:
+          # The whole Nim event IS the scalar — cast the distinct value
+          # straight into the synthetic `value` callback argument.
+          let cFieldType = toCFieldType(fType)
+          callbackCallArgs.add(newTree(nnkCast, cFieldType, evtParam))
+        elif isCStringType(fType):
           # string: allocate a NUL-terminated copy on the shared heap, pass as
           # const char*, free with freeSharedCString after the callback returns.
           let cVarIdent = genSym(nskLet, "c_" & $fName)
@@ -852,7 +875,7 @@ proc generateApiEventBrokerImpl(body: NimNode): NimNode =
     invokeParams.add(cTrampolineParams)
     trait.add(invokeParams.join(", "))
   else:
-    trait.add("Owner& owner")
+    trait.add(", Owner& owner")
   trait.add(") noexcept {\n")
   if traitInvokePreamble.len > 0:
     trait.add(traitInvokePreamble)

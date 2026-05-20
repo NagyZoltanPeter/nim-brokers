@@ -161,6 +161,93 @@ class TestRequests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Primitive (non-object) broker types
+# ---------------------------------------------------------------------------
+
+
+class TestPrimitiveBrokerTypes(unittest.TestCase):
+    """IntResultRequest = int32 and SimpleIntEvent = int64 — broker types
+    that are bare primitives rather than objects. The native wrapper exposes
+    the result as a dataclass with a single `value` field and the event
+    callback as a bare scalar. CBOR-mode codegen for these patterns is not
+    yet implemented, so the wrapper omits the method/handler there."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_int_result_request(self):
+        if not hasattr(self.lib, "int_result_request"):
+            self.skipTest("primitive request result not yet emitted in CBOR build")
+        r = self.lib.int_result_request(21)
+        self.assertTrue(r.is_ok(), r.error)
+        # Native mode: IntResultRequest is a dataclass with a `value` field.
+        # CBOR mode: IntResultRequest is the bare `int` alias.
+        actual = r.value.value if hasattr(r.value, "value") else r.value
+        self.assertEqual(actual, 42)  # provider returns value * 2
+
+    def test_simple_int_event(self):
+        if not hasattr(self.lib, "on_simple_int_event"):
+            self.skipTest("primitive event payload not yet emitted in CBOR build")
+        received = []
+        ev = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            ev.set()
+
+        h = self.lib.on_simple_int_event(cb)
+        self.assertNotEqual(h, 0)
+        self.lib.int_result_request(5)  # provider emits SimpleIntEvent(value * 10)
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(received, [50])
+        self.lib.off_simple_int_event(h)
+
+
+# ---------------------------------------------------------------------------
+# Void (payload-less) broker types
+# ---------------------------------------------------------------------------
+
+
+class TestVoidBrokerTypes(unittest.TestCase):
+    """VoidActionRequest (`type X = void`) and VoidPing (a `void` event).
+    The request carries only an ok/err signal; the event callback receives
+    no payload argument."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_void_action_request(self):
+        ok = self.lib.void_action_request("go")
+        self.assertTrue(ok.is_ok(), ok.error)
+
+        bad = self.lib.void_action_request("")  # provider rejects empty label
+        self.assertTrue(bad.is_err())
+
+    def test_void_ping_event(self):
+        received = []
+        ev = threading.Event()
+
+        def cb(_lib):
+            received.append(1)
+            ev.set()
+
+        h = self.lib.on_void_ping(cb)
+        self.assertNotEqual(h, 0)
+
+        self.lib.void_action_request("trigger")  # provider emits VoidPing
+        self.assertTrue(ev.wait(1.0))
+        self.assertEqual(received, [1])
+
+        self.lib.off_void_ping(h)
+
+
+# ---------------------------------------------------------------------------
 # Scalar types
 # ---------------------------------------------------------------------------
 
@@ -400,6 +487,101 @@ class TestSeqObject(unittest.TestCase):
         r = self.lib.obj_param_request(Tag(key="k", value="v"))
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.summary, "k=v")
+
+    def test_opt_scalar_present(self):
+        # Native + CBOR Option[int32] probe (Phase E1).
+        r = self.lib.opt_scalar_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.value, 42)
+
+    def test_opt_scalar_absent(self):
+        r = self.lib.opt_scalar_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
+    def test_opt_string_present(self):
+        # Phase E2a — Option[string]. Native + CBOR.
+        r = self.lib.opt_string_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.value, "hello")
+
+    def test_opt_string_absent(self):
+        r = self.lib.opt_string_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
+    def test_opt_obj_present(self):
+        # Phase E3 — Option[Tag]. Native + CBOR.
+        r = self.lib.opt_obj_request(True)
+        self.assertTrue(r.is_ok())
+        self.assertIsNotNone(r.value.value)
+        self.assertEqual(r.value.value.key, "ok")
+        self.assertEqual(r.value.value.value, "yes")
+
+    def test_opt_obj_absent(self):
+        r = self.lib.opt_obj_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
+    def test_opt_seq_present(self):
+        # Option[seq[byte]] — native E2b + CBOR.
+        r = self.lib.opt_seq_request(True)
+        self.assertTrue(r.is_ok())
+        v = r.value.value
+        self.assertIsNotNone(v)
+        # CBOR wrapper maps `seq[byte]` (incl. nested in Option) to bytes;
+        # native ctypes wrapper materialises into a list[int]. Both are
+        # acceptable — assert content equivalence.
+        self.assertEqual(bytes(v) if isinstance(v, list) else v, bytes([1, 2, 3, 4]))
+
+    def test_opt_seq_absent(self):
+        r = self.lib.opt_seq_request(False)
+        self.assertTrue(r.is_ok())
+        self.assertIsNone(r.value.value)
+
+    def test_bytes_echo_request_roundtrip(self):
+        # Inbound `seq[byte]` byte-string probe — cbor2 encodes Python
+        # `bytes` as CBOR byte string (major type 2), which the Nim
+        # provider expects. CBOR-only.
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("bytes_echo_request only registered in CBOR build")
+        r = self.lib.bytes_echo_request(bytes([10, 20, 30, 40, 50]))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 5)
+        self.assertEqual(r.value.first, 10)
+        self.assertEqual(r.value.last, 50)
+
+    def test_bytes_echo_request_empty(self):
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("bytes_echo_request only registered in CBOR build")
+        r = self.lib.bytes_echo_request(b"")
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 0)
+        self.assertEqual(r.value.first, -1)
+        self.assertEqual(r.value.last, -1)
+
+    def test_scan_request_forward(self):
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("scan_request only registered in CBOR build")
+        from typemappingtestlib import KeyRange
+        kr = KeyRange(startKey="lo", stopKey="hi")
+        r = self.lib.scan_request("scan", kr, False)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(len(r.value.rows), 3)
+        self.assertEqual(r.value.rows[0].key, "0:lo")
+        self.assertEqual(r.value.rows[2].key, "2:lo")
+        self.assertEqual(r.value.rows[0].payload, "scan-row-0:hi")
+
+    def test_scan_request_reverse(self):
+        if _BUILD_DIR_NAME != "build_cbor":
+            self.skipTest("scan_request only registered in CBOR build")
+        from typemappingtestlib import KeyRange
+        kr = KeyRange(startKey="lo", stopKey="hi")
+        r = self.lib.scan_request("scan", kr, True)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(len(r.value.rows), 3)
+        self.assertEqual(r.value.rows[0].key, "2:lo")
+        self.assertEqual(r.value.rows[2].key, "0:lo")
 
 
 # ---------------------------------------------------------------------------

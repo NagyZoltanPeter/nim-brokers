@@ -108,7 +108,9 @@ proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      return primRustHint(resolveUnderlyingType(t))
+      # Recurse via outer mapper so distinct/alias over compound types
+      # (e.g. `distinct seq[byte]`) maps to `Vec<u8>` rather than the "" fallback.
+      return nimTypeToRustHint(resolveUnderlyingType(t))
   ""
 
 proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
@@ -329,6 +331,19 @@ proc generateCborRustFile*(
     if entry.kind == atkObject and not entry.name.endsWith("CborArgs"):
       objectNames.add(entry.name)
 
+  # A "scalar payload" is a primitive (non-object) broker type — `type X =
+  # int32` — registered as a distinct alias of its underlying primitive.
+  # Its CBOR wire value is a bare scalar; the Rust surface uses the
+  # `pub type X = <prim>` alias directly. Such a type is an emittable
+  # request response / event payload despite having no object fields.
+  proc isScalarPayload(name: string): bool {.compileTime.} =
+    name.len > 0 and isTypeRegistered(name) and
+      lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
+      primRustHint(resolveUnderlyingType(name)).len > 0
+
+  proc isEmittablePayload(name: string): bool {.compileTime.} =
+    name in objectNames or isScalarPayload(name)
+
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     rs.add("// -------- Generated payload types --------\n\n")
 
@@ -396,6 +411,10 @@ proc generateCborRustFile*(
       rs.add("    pub " & f.name & ": " & hint & ",\n")
       anyField = true
     if not anyField:
+      # Zero-field payload (a `void` broker type). `#[serde(skip)]` keeps the
+      # placeholder field off the wire so the struct round-trips the empty
+      # `{}` CBOR map a payload-less request / event carries.
+      rs.add("    #[serde(skip)]\n")
       rs.add("    _phantom: (),\n")
     rs.add("}\n\n")
 
@@ -562,7 +581,7 @@ proc generateCborRustFile*(
   for e in requestEntries:
     if e.responseTypeName.len == 0:
       continue
-    if e.responseTypeName notin objectNames:
+    if not isEmittablePayload(e.responseTypeName):
       rs.add(
         "    // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
           "' is not a registered object type.\n\n"
@@ -582,21 +601,41 @@ proc generateCborRustFile*(
 
     let methodName = e.apiName
     var sigParams = "&self"
-    var argsStructFields = ""
+    var argsStructDecl = ""
+    var argsStructInit = ""
     if e.argFields.len > 0:
+      argsStructDecl.add("        #[derive(Serialize)]\n")
+      argsStructDecl.add("        struct __Args {\n")
       for (n, t) in e.argFields:
         sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
-        argsStructFields.add("            \"" & n & "\": " & n & ",\n")
+        # `seq[byte]` and `Option[seq[byte]]` need `#[serde(with =
+        # "serde_bytes")]` so ciborium encodes them as CBOR byte strings
+        # (major type 2). The Nim cbor_serialization decoder rejects the
+        # default array-of-int form with "Expected: byte string but
+        # found: array".
+        let lowered = t.toLowerAscii().strip()
+        if lowered == "seq[byte]":
+          argsStructDecl.add("            #[serde(with = \"serde_bytes\")]\n")
+        elif lowered == "option[seq[byte]]":
+          argsStructDecl.add(
+            "            #[serde(with = \"::serde_bytes\", default, skip_serializing_if = \"Option::is_none\")]\n"
+          )
+        argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
+        argsStructInit.add("            " & n & ",\n")
+      argsStructDecl.add("        }\n")
 
     rs.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
         "> {\n"
     )
     if e.argFields.len > 0:
-      # Build a serde_json::Value::Object for args, then encode via ciborium.
-      rs.add("        let args = serde_json::json!({\n")
-      rs.add(argsStructFields)
-      rs.add("        });\n")
+      # Build a typed args struct (so `#[serde(with = "serde_bytes")]`
+      # annotations on `Vec<u8>` fields take effect during ciborium
+      # encoding) instead of going through `serde_json::Value`.
+      rs.add(argsStructDecl)
+      rs.add("        let args = __Args {\n")
+      rs.add(argsStructInit)
+      rs.add("        };\n")
       rs.add("        let mut buf: Vec<u8> = Vec::new();\n")
       rs.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
       rs.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
@@ -631,7 +670,7 @@ proc generateCborRustFile*(
   # Per-event subscribe / unsubscribe.
   rs.add("    // ---- Event registration ----\n\n")
   for ev in eventEntries:
-    if ev.typeName notin objectNames:
+    if not isEmittablePayload(ev.typeName):
       rs.add(
         "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
           "' is not a registered object type.\n\n"
@@ -642,13 +681,17 @@ proc generateCborRustFile*(
     # Build per-field type hints + per-field destructure args. The user
     # callback signature is `Fn(field1, field2, ...)` — parity with the
     # native-mode wrapper so the same client code drives either build.
-    let entry = lookupTypeEntry(ev.typeName)
     var hintParts: seq[string] = @[]
     var destructureArgs: seq[string] = @[]
-    for f in entry.fields:
-      let hint = nimTypeToRustHint(f.nimType)
-      hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
-      destructureArgs.add("v." & f.name)
+    if isScalarPayload(ev.typeName):
+      # Scalar payload: the decoded `v` IS the value — one bare arg.
+      hintParts.add(primRustHint(resolveUnderlyingType(ev.typeName)))
+      destructureArgs.add("v")
+    else:
+      for f in lookupTypeEntry(ev.typeName).fields:
+        let hint = nimTypeToRustHint(f.nimType)
+        hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
+        destructureArgs.add("v." & f.name)
     let fnBound = hintParts.join(", ")
     rs.add(
       "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &

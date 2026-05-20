@@ -14,6 +14,8 @@ mod lib;
 mod lib;
 
 use lib::{Tag, Typemappingtestlib};
+#[cfg(feature = "cbor")]
+use lib::KeyRange;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -286,6 +288,89 @@ fn test_dual_sig_with_label() {
         check_eq!(&v.label, &"hello".to_string());
         check_eq!(v.counter, 7);
     }
+    lib.shutdown();
+}
+
+// ===========================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `value` field; CBOR mode exposes it as the bare `i32` type alias.
+// ===========================================================================
+
+fn test_primitive_int_result_request() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.int_result_request(21);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        #[cfg(feature = "cbor")]
+        check_eq!(*v, 42); // CBOR: IntResultRequest is the bare i32 alias
+        #[cfg(not(feature = "cbor"))]
+        check_eq!(v.value, 42); // native: struct with a single `value` field
+    }
+    lib.shutdown();
+}
+
+fn test_primitive_simple_int_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let received: SafeList<i64> = list_new();
+    let received_cb = received.clone();
+    let h = lib.on_simple_int_event(move |v: i64| {
+        list_push(&received_cb, v);
+    });
+    check_ne!(h, 0u64);
+
+    let _ = lib.int_result_request(5); // provider emits SimpleIntEvent(value * 10)
+    let received_w = received.clone();
+    wait_for_default(|| list_size(&received_w) >= 1);
+
+    check_eq!(list_size(&received), 1usize);
+    check_eq!(list_snapshot(&received)[0], 50i64);
+
+    lib.off_simple_int_event(h);
+    lib.shutdown();
+}
+
+// ===========================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. The result carries only an
+// ok/err signal; the event callback takes no payload argument.
+// ===========================================================================
+
+fn test_void_action_request() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let ok = lib.void_action_request("go".to_string());
+    check!(ok.is_ok());
+
+    let bad = lib.void_action_request("".to_string()); // provider rejects empty
+    check!(!bad.is_ok());
+
+    lib.shutdown();
+}
+
+fn test_void_ping_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+
+    let received: SafeList<i32> = list_new();
+    let received_cb = received.clone();
+    let h = lib.on_void_ping(move || {
+        list_push(&received_cb, 1);
+    });
+    check_ne!(h, 0u64);
+
+    let _ = lib.void_action_request("trigger".to_string()); // provider emits VoidPing
+    let received_w = received.clone();
+    wait_for_default(|| list_size(&received_w) >= 1);
+
+    check_eq!(list_size(&received), 1usize);
+
+    lib.off_void_ping(h);
     lib.shutdown();
 }
 
@@ -1360,6 +1445,165 @@ fn test_obj_as_param() {
     lib.shutdown();
 }
 
+// Native + CBOR Option[int32] probe (Phase E1).
+fn test_opt_scalar_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_scalar_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value, Some(42i32));
+    }
+    lib.shutdown();
+}
+
+fn test_opt_scalar_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_scalar_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value, None::<i32>);
+    }
+    lib.shutdown();
+}
+
+// Phase E2a — Option[string]. Native + CBOR.
+fn test_opt_string_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_string_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), Some("hello".to_string()));
+    }
+    lib.shutdown();
+}
+
+fn test_opt_string_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_string_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), None::<String>);
+    }
+    lib.shutdown();
+}
+
+// Phase E3 — Option[Tag] (Option of a registered object). Native + CBOR.
+fn test_opt_obj_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_obj_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.value.is_some());
+        if let Some(t) = &v.value {
+            check_eq!(&t.key, &"ok".to_string());
+            check_eq!(&t.value, &"yes".to_string());
+        }
+    }
+    lib.shutdown();
+}
+
+fn test_opt_obj_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_obj_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.value.is_none());
+    }
+    lib.shutdown();
+}
+
+// Option[seq[byte]] probe — works in BOTH native (E2b) and CBOR builds.
+// Wrapper maps to `Option<Vec<u8>>`.
+fn test_opt_seq_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_seq_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), Some(vec![1u8, 2, 3, 4]));
+    }
+    lib.shutdown();
+}
+
+fn test_opt_seq_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_seq_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.value.clone(), None::<Vec<u8>>);
+    }
+    lib.shutdown();
+}
+
+// Inbound `seq[byte]` probe — verifies the Rust args struct serialises
+// `Vec<u8>` as a CBOR byte string (via `#[serde(with = "serde_bytes")]`)
+// rather than a sequence-of-int that the Nim decoder rejects.
+#[cfg(feature = "cbor")]
+fn test_bytes_echo_request_roundtrip() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.bytes_echo_request(vec![10u8, 20, 30, 40, 50]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 5i32);
+        check_eq!(v.first, 10i32);
+        check_eq!(v.last, 50i32);
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_bytes_echo_request_empty() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.bytes_echo_request(Vec::<u8>::new());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 0i32);
+        check_eq!(v.first, -1i32);
+        check_eq!(v.last, -1i32);
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_scan_request_forward() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let kr = KeyRange { startKey: "lo".to_string(), stopKey: "hi".to_string() };
+    let r = lib.scan_request("scan".to_string(), kr, false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.rows.len(), 3);
+        check_eq!(&v.rows[0].key, &"0:lo".to_string());
+        check_eq!(&v.rows[2].key, &"2:lo".to_string());
+        check_eq!(&v.rows[0].payload, &"scan-row-0:hi".to_string());
+    }
+    lib.shutdown();
+}
+
+#[cfg(feature = "cbor")]
+fn test_scan_request_reverse() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let kr = KeyRange { startKey: "lo".to_string(), stopKey: "hi".to_string() };
+    let r = lib.scan_request("scan".to_string(), kr, true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.rows.len(), 3);
+        check_eq!(&v.rows[0].key, &"2:lo".to_string());
+        check_eq!(&v.rows[2].key, &"0:lo".to_string());
+    }
+    lib.shutdown();
+}
+
 fn test_obj_seq_result_empty() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -2419,6 +2663,11 @@ fn main() {
     run_test("test_events_counter_changed", test_events_counter_changed);
     run_test("test_events_off_stops_delivery", test_events_off_stops_delivery);
 
+    run_test("test_primitive_int_result_request", test_primitive_int_result_request);
+    run_test("test_primitive_simple_int_event", test_primitive_simple_int_event);
+    run_test("test_void_action_request", test_void_action_request);
+    run_test("test_void_ping_event", test_void_ping_event);
+
     println!("\n--- TestContextSeparation ---");
     run_test("test_context_independent_counters", test_context_independent_counters);
     run_test("test_context_independent_echo", test_context_independent_echo);
@@ -2505,8 +2754,22 @@ fn main() {
     run_test("test_obj_seq_param_single", test_obj_seq_param_single);
     run_test("test_obj_seq_param_multiple", test_obj_seq_param_multiple);
     run_test("test_obj_seq_param_string_encoding", test_obj_seq_param_string_encoding);
+    run_test("test_opt_scalar_present", test_opt_scalar_present);
+    run_test("test_opt_scalar_absent", test_opt_scalar_absent);
+    run_test("test_opt_string_present", test_opt_string_present);
+    run_test("test_opt_string_absent", test_opt_string_absent);
+    run_test("test_opt_seq_present", test_opt_seq_present);
+    run_test("test_opt_seq_absent", test_opt_seq_absent);
+    run_test("test_opt_obj_present", test_opt_obj_present);
+    run_test("test_opt_obj_absent", test_opt_obj_absent);
     #[cfg(feature = "cbor")]
-    run_test("test_obj_as_param", test_obj_as_param);
+    {
+        run_test("test_obj_as_param", test_obj_as_param);
+        run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
+        run_test("test_bytes_echo_request_empty", test_bytes_echo_request_empty);
+        run_test("test_scan_request_forward", test_scan_request_forward);
+        run_test("test_scan_request_reverse", test_scan_request_reverse);
+    }
     run_test("test_obj_seq_result_empty", test_obj_seq_result_empty);
     run_test("test_obj_seq_result_length", test_obj_seq_result_length);
     run_test("test_obj_seq_result_keys", test_obj_seq_result_keys);

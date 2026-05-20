@@ -35,6 +35,24 @@ import ./helper/broker_utils, ./api_common
 
 export api_common
 
+proc typeNodeOf*(ftype: string): NimNode {.compileTime.} =
+  ## Convert a stringified field type (e.g. `"int32"`, `"seq[byte]"`,
+  ## `"array[4, int32]"`, `"Tag"`) back into a structured AST node that
+  ## downstream type mappers (`toCFieldType`, `nimTypeToCpp`,
+  ## `nimTypeToPyAnnotation`, etc.) can pattern-match on. A simple
+  ## identifier round-trips via `ident()`; anything containing brackets
+  ## goes through `parseExpr` so we get a proper `nnkBracketExpr` rather
+  ## than a malformed single-ident node.
+  let trimmed = ftype.strip()
+  if '[' in trimmed:
+    try:
+      return parseExpr(trimmed)
+    except ValueError as e:
+      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
+    except CatchableError as e:
+      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
+  ident(trimmed)
+
 proc generateApiType*(
     body: NimNode, emitTypeDefinition = true
 ): NimNode {.compileTime.} =
@@ -51,13 +69,33 @@ proc generateApiType*(
   if not parsed.hasInlineFields:
     error("ApiType requires an inline object definition with fields", body)
 
-  # Register fields in compile-time accumulator
+  # Register fields in compile-time accumulator. Use `repr` rather than `$`
+  # because `$` on a NimNode panics for `nnkBracketExpr` (e.g. `seq[byte]`,
+  # `array[4, int32]`) when the inner idents have not been symbol-bound —
+  # which is the case for synthetic bodies built by api_type_resolver from
+  # external types.
+  proc nodeToTypeStr(n: NimNode): string =
+    if n.kind == nnkSym or n.kind == nnkIdent:
+      $n
+    else:
+      n.repr.strip()
+
   var fields: seq[(string, string)] = @[]
   for i in 0 ..< parsed.fieldNames.len:
-    fields.add(($parsed.fieldNames[i], $parsed.fieldTypes[i]))
+    fields.add(
+      (nodeToTypeStr(parsed.fieldNames[i]), nodeToTypeStr(parsed.fieldTypes[i]))
+    )
   registerApiFfiStruct(typeName, fields)
 
   result = newStmtList()
+
+  # CItem + encode proc + native struct emission are native-ABI only. CBOR
+  # mode reads the schema directly via `gApiTypeRegistry`, so we can skip
+  # all of the native-only codegen below — and that's required for inner
+  # objects whose fields contain `seq[T]` / distinct-over-seq, since the
+  # CItem layout has no count companion to pair with each `pointer` field.
+  when brokerFfiMode == mfCbor:
+    return result
 
   # 1. Emit normal Nim type definition (copy original body) — skipped for
   #    auto-resolved external types where the type is already defined.
@@ -87,7 +125,7 @@ proc generateApiType*(
 
   var cItemFields = newTree(nnkRecList)
   for (fname, ftype) in fields:
-    let cFieldType = toCFieldType(ident(ftype))
+    let cFieldType = toCFieldType(typeNodeOf(ftype))
     cItemFields.add(
       newTree(nnkIdentDefs, postfix(ident(fname), "*"), cFieldType, newEmptyNode())
     )
@@ -131,7 +169,7 @@ proc generateApiType*(
   # 4. Generate C header struct declaration
   var headerFields: seq[(string, string)] = @[]
   for (fname, ftype) in fields:
-    headerFields.add((fname, nimTypeToCOutput(ident(ftype))))
+    headerFields.add((fname, nimTypeToCOutput(typeNodeOf(ftype))))
   appendHeaderDecl(generateCStruct(typeName & "CItem", headerFields))
 
   # 5. Generate plain C++ data struct + forward decl + detail::adopt(CItem)
@@ -140,7 +178,7 @@ proc generateApiType*(
 
     var cppStruct = "struct " & typeName & " {\n"
     for (fname, ftype) in fields:
-      let cppType = nimTypeToCpp(ident(ftype))
+      let cppType = nimTypeToCpp(typeNodeOf(ftype))
       cppStruct.add("    " & cppType & " " & fname)
       if cppType in ["bool"]:
         cppStruct.add(" = false")
@@ -173,7 +211,7 @@ proc generateApiType*(
       var pyCStruct = "class " & typeName & "CItem(ctypes.Structure):\n"
       pyCStruct.add("    _fields_ = [\n")
       for (fname, ftype) in fields:
-        let ctField = nimTypeToCtypes(ident(ftype))
+        let ctField = nimTypeToCtypes(typeNodeOf(ftype))
         pyCStruct.add("        (\"" & fname & "\", " & ctField & "),\n")
       pyCStruct.add("    ]")
       gApiPyCtypesStructs.add(pyCStruct)
@@ -184,8 +222,8 @@ proc generateApiType*(
       pyDc.add("class " & typeName & ":\n")
       pyDc.add("    \"\"\"" & typeName & " data object.\"\"\"\n")
       for (fname, ftype) in fields:
-        let pyType = nimTypeToPyAnnotation(ident(ftype))
-        let pyDefault = nimTypeToPyDefault(ident(ftype))
+        let pyType = nimTypeToPyAnnotation(typeNodeOf(ftype))
+        let pyDefault = nimTypeToPyDefault(typeNodeOf(ftype))
         pyDc.add("    " & fname & ": " & pyType & " = " & pyDefault)
         pyDc.add("\n")
       gApiPyDataclasses.add(pyDc)
@@ -197,7 +235,9 @@ proc generateApiType*(
       rsFfi.add("#[derive(Debug)]\n")
       rsFfi.add("pub struct " & typeName & "CItem {\n")
       for (fname, ftype) in fields:
-        rsFfi.add("    pub " & fname & ": " & nimTypeToRustFfi(ident(ftype)) & ",\n")
+        rsFfi.add(
+          "    pub " & fname & ": " & nimTypeToRustFfi(typeNodeOf(ftype)) & ",\n"
+        )
       rsFfi.add("}")
       gApiRustFfiStructs.add(rsFfi)
 
@@ -205,7 +245,7 @@ proc generateApiType*(
       var rsSafe = "#[derive(Debug, Clone, Default)]\n"
       rsSafe.add("pub struct " & typeName & " {\n")
       for (fname, ftype) in fields:
-        rsSafe.add("    pub " & fname & ": " & nimTypeToRust(ident(ftype)) & ",\n")
+        rsSafe.add("    pub " & fname & ": " & nimTypeToRust(typeNodeOf(ftype)) & ",\n")
       rsSafe.add("}")
       gApiRustStructs.add(rsSafe)
 
@@ -214,7 +254,7 @@ proc generateApiType*(
     block:
       var goSt = "type " & typeName & " struct {\n"
       for (fname, ftype) in fields:
-        let goType = nimTypeToGo(ident(ftype))
+        let goType = nimTypeToGo(typeNodeOf(ftype))
         # Capitalize first letter for export
         let exportedName =
           if fname.len > 0 and fname[0] >= 'a' and fname[0] <= 'z':

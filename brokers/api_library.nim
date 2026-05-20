@@ -36,8 +36,9 @@ import ./internal/api_codegen_cbor_cddl
 import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
 import ./internal/api_cbor_subs_registry
+import ./internal/api_cbor_tuple
 
-export api_cbor_descriptor, api_cbor_subs_registry
+export api_cbor_descriptor, api_cbor_subs_registry, api_cbor_tuple
 
 export results, chronos, chronicles, broker_context, api_common
 

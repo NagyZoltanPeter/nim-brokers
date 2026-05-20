@@ -13,6 +13,7 @@ type ParsedBrokerType* = object
   objectDef*: NimNode
   isRefObject*: bool
   hasInlineFields*: bool
+  isVoid*: bool ## true when the declared RHS is the bare `void` type
   fieldNames*: seq[NimNode]
   fieldTypes*: seq[NimNode]
 
@@ -98,6 +99,7 @@ proc parseOneTypeDef(
   var objectDef: NimNode
   var isRefObject = false
   var hasInlineFields = false
+  var isVoid = false
 
   case rhs.kind
   of nnkObjectTy:
@@ -172,6 +174,19 @@ proc parseOneTypeDef(
       hasInlineFields = false
     else:
       error(macroName & " ref object must wrap a concrete object definition", rhs)
+  elif rhs.kind == nnkIdent and rhs.eqIdent("void"):
+    ## `void` — a payload-less broker. The bare `void` type cannot name a
+    ## broker (every `void` broker would share `typedesc[void]`, colliding
+    ## the generated `request` / `setProvider` / `emit` overloads). It is
+    ## therefore lowered to a *unique* empty `object` — a unit type — so
+    ## each broker keeps a distinct identity. `isVoid` lets broker macros
+    ## drop the now-meaningless value parameter from handler / emit
+    ## signatures; the request payload is simply the zero-field object.
+    objectDef =
+      newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), newTree(nnkRecList))
+    isRefObject = false
+    hasInlineFields = false
+    isVoid = true
   else:
     ## Non-object type / alias.
     objectDef = ensureDistinctType(rhs)
@@ -183,6 +198,7 @@ proc parseOneTypeDef(
     objectDef: objectDef,
     isRefObject: isRefObject,
     hasInlineFields: hasInlineFields,
+    isVoid: isVoid,
     fieldNames: fieldNames,
     fieldTypes: fieldTypes,
   )

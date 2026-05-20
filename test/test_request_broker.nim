@@ -673,3 +673,91 @@ suite "RequestBroker macro (POD/external types)":
     DistinctStringResponseB.clearProvider()
     ExternalDistinctResponseA.clearProvider()
     ExternalDistinctResponseB.clearProvider()
+
+## ---------------------------------------------------------------------------
+## void result type — payload-less request brokers
+## ---------------------------------------------------------------------------
+
+RequestBroker:
+  type VoidActionAsync = void
+  proc signature*(label: string): Future[Result[VoidActionAsync, string]] {.async.}
+
+RequestBroker:
+  type VoidActionZeroArg = void
+  proc signature*(): Future[Result[VoidActionZeroArg, string]] {.async.}
+
+RequestBroker(sync):
+  type VoidActionSync = void
+  proc signature*(flag: bool): Result[VoidActionSync, string]
+
+static:
+  doAssert typeof(VoidActionAsync.request("x")) is
+    Future[Result[VoidActionAsync, string]]
+  doAssert typeof(VoidActionSync.request(true)) is Result[VoidActionSync, string]
+
+suite "RequestBroker macro (void result type)":
+  test "async void request — provider runs, result carries the unit value":
+    var seen: seq[string] = @[]
+    check VoidActionAsync
+      .setProvider(
+        proc(label: string): Future[Result[VoidActionAsync, string]] {.async.} =
+          seen.add(label)
+          ok(VoidActionAsync())
+      )
+      .isOk()
+
+    let res = waitFor VoidActionAsync.request("go")
+    check res.isOk()
+    check seen == @["go"]
+
+    VoidActionAsync.clearProvider()
+
+  test "async void request — provider error propagates":
+    check VoidActionAsync
+      .setProvider(
+        proc(label: string): Future[Result[VoidActionAsync, string]] {.async.} =
+          err("rejected: " & label)
+      )
+      .isOk()
+
+    let res = waitFor VoidActionAsync.request("nope")
+    check res.isErr()
+    check res.error == "rejected: nope"
+
+    VoidActionAsync.clearProvider()
+
+  test "async void request — errors when no provider":
+    let res = waitFor VoidActionZeroArg.request()
+    check res.isErr()
+
+  test "async void zero-argument request":
+    check VoidActionZeroArg
+      .setProvider(
+        proc(): Future[Result[VoidActionZeroArg, string]] {.async.} =
+          ok(VoidActionZeroArg())
+      )
+      .isOk()
+
+    let res = waitFor VoidActionZeroArg.request()
+    check res.isOk()
+
+    VoidActionZeroArg.clearProvider()
+
+  test "sync void request — ok and err paths":
+    check VoidActionSync
+      .setProvider(
+        proc(flag: bool): Result[VoidActionSync, string] =
+          if flag:
+            ok(VoidActionSync())
+          else:
+            err("flag was false")
+      )
+      .isOk()
+
+    check VoidActionSync.request(true).isOk()
+
+    let res = VoidActionSync.request(false)
+    check res.isErr()
+    check res.error == "flag was false"
+
+    VoidActionSync.clearProvider()

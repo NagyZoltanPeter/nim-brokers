@@ -238,3 +238,71 @@ suite "EventBroker":
     await SampleEvent.dropListener(handle)
     # After await returns, all in-flight work is cancelled — safe to release resources
     check completed == false
+
+EventBroker:
+  type VoidSignal = void
+
+suite "EventBroker (void / payload-less event)":
+  asyncTest "delivers payload-less events to all listeners":
+    var a = 0
+    var b = 0
+
+    discard VoidSignal.listen(
+      proc(): Future[void] {.async: (raises: []).} =
+        inc a
+    )
+    discard VoidSignal.listen(
+      proc(): Future[void] {.async: (raises: []).} =
+        inc b
+    )
+
+    VoidSignal.emit()
+    VoidSignal.emit()
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+
+    check a == 2
+    check b == 2
+
+  asyncTest "dropListener stops delivery (void)":
+    var hits = 0
+
+    let handle = VoidSignal
+      .listen(
+        proc(): Future[void] {.async: (raises: []).} =
+          inc hits
+      )
+      .get()
+
+    VoidSignal.emit()
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+    check hits == 1
+
+    await VoidSignal.dropListener(handle)
+    VoidSignal.emit()
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+    check hits == 1
+
+  asyncTest "context-scoped payload-less events stay isolated":
+    let ctx = NewBrokerContext()
+    var defaultHits = 0
+    var ctxHits = 0
+
+    discard VoidSignal.listen(
+      proc(): Future[void] {.async: (raises: []).} =
+        inc defaultHits
+    )
+    let ctxListener: VoidSignalListenerProc = proc(): Future[void] {.
+        async: (raises: [])
+    .} =
+      inc ctxHits
+    discard VoidSignal.listen(ctx, ctxListener)
+
+    VoidSignal.emit(ctx)
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+
+    check ctxHits == 1
+    check defaultHits == 0

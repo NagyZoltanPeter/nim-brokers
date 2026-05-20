@@ -255,6 +255,77 @@ func test_dual_sig_with_label() {
 }
 
 // ============================================================================
+// TestPrimitiveBrokerTypes — non-object (primitive) request result + event
+// payload. IntResultRequest is `type X = int32`; SimpleIntEvent is
+// `type X = int64`. Native mode exposes the result as a struct with a single
+// `Value` field; CBOR mode exposes it as the bare `int32` type alias. The
+// build-tagged `intResultValue` helper bridges the two shapes.
+// ============================================================================
+
+func test_primitive_int_result_request() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.IntResultRequest(21)
+	check(err == nil, "intResultRequest is_ok")
+	checkEq(intResultValue(r), int32(42), "value") // provider returns value*2
+	lib.Close()
+}
+
+func test_primitive_simple_int_event() {
+	lib := newLib()
+	lib.CreateContext()
+
+	received := &safeList[int64]{}
+	h := lib.OnSimpleIntEvent(func(value int64) { received.push(value) })
+	checkNe(h, uint64(0), "handle != 0")
+
+	lib.IntResultRequest(5) // provider emits SimpleIntEvent(value*10)
+	waitFor(func() bool { return received.size() >= 1 })
+
+	checkEq(received.size(), 1, "received.size")
+	checkEq(received.snapshot()[0], int64(50), "value*10")
+
+	lib.OffSimpleIntEvent(h)
+	lib.Close()
+}
+
+// ============================================================================
+// TestVoidBrokerTypes — payload-less request + event. VoidActionRequest is
+// `type X = void`; VoidPing is a `void` event. The request returns only an
+// error (nil = ok); the event handler takes no payload argument.
+// ============================================================================
+
+func test_void_action_request() {
+	lib := newLib()
+	lib.CreateContext()
+
+	_, okErr := lib.VoidActionRequest("go")
+	check(okErr == nil, "voidActionRequest ok")
+
+	_, badErr := lib.VoidActionRequest("") // provider rejects empty label
+	check(badErr != nil, "voidActionRequest err on empty label")
+
+	lib.Close()
+}
+
+func test_void_ping_event() {
+	lib := newLib()
+	lib.CreateContext()
+
+	received := &safeList[int]{}
+	h := lib.OnVoidPing(func() { received.push(1) })
+	checkNe(h, uint64(0), "handle != 0")
+
+	lib.VoidActionRequest("trigger") // provider emits VoidPing
+	waitFor(func() bool { return received.size() >= 1 })
+
+	checkEq(received.size(), 1, "received.size")
+
+	lib.OffVoidPing(h)
+	lib.Close()
+}
+
+// ============================================================================
 // TestEvents
 // ============================================================================
 
@@ -1338,6 +1409,97 @@ func test_obj_seq_param_string_encoding() {
 
 // test_obj_as_param: lives in cbor_only_*.go (CBOR-gated).
 
+// Native + CBOR Option[int32] probe (Phase E1).
+func test_opt_scalar_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptScalarRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(*r.Value, int32(42), "value")
+	}
+	lib.Close()
+}
+
+func test_opt_scalar_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptScalarRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
+// Phase E2a — Option[string]. Native + CBOR.
+func test_opt_string_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptStringRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(*r.Value, "hello", "value")
+	}
+	lib.Close()
+}
+
+func test_opt_string_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptStringRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
+// Phase E2b — Option[seq[byte]]. Native + CBOR.
+func test_opt_seq_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(len(*r.Value), 4, "len")
+		checkEq((*r.Value)[0], byte(1), "byte[0]")
+		checkEq((*r.Value)[3], byte(4), "byte[3]")
+	}
+	lib.Close()
+}
+
+func test_opt_seq_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptSeqRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
+// Phase E3 — Option[Tag] (Option of a registered object). Native + CBOR.
+func test_opt_obj_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptObjRequest(true)
+	check(err == nil, "is_ok")
+	check(r.Value != nil, "value present")
+	if r.Value != nil {
+		checkEq(r.Value.Key, "ok", "key")
+		checkEq(r.Value.Value, "yes", "value")
+	}
+	lib.Close()
+}
+
+func test_opt_obj_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptObjRequest(false)
+	check(err == nil, "is_ok")
+	check(r.Value == nil, "value absent")
+	lib.Close()
+}
+
 func test_obj_seq_result_empty() {
 	lib := newLib()
 	lib.CreateContext()
@@ -1997,6 +2159,11 @@ func main() {
 	runTest("test_events_counter_changed", test_events_counter_changed)
 	runTest("test_events_off_stops_delivery", test_events_off_stops_delivery)
 
+	runTest("test_primitive_int_result_request", test_primitive_int_result_request)
+	runTest("test_primitive_simple_int_event", test_primitive_simple_int_event)
+	runTest("test_void_action_request", test_void_action_request)
+	runTest("test_void_ping_event", test_void_ping_event)
+
 	fmt.Println("\n--- TestContextSeparation ---")
 	runTest("test_context_independent_counters", test_context_independent_counters)
 	runTest("test_context_independent_echo", test_context_independent_echo)
@@ -2079,6 +2246,14 @@ func main() {
 	runTest("test_const_array_event_neg_seed", test_const_array_event_neg_seed)
 
 	fmt.Println("\n--- TestSeqObjectTypes ---")
+	runTest("test_opt_scalar_present", test_opt_scalar_present)
+	runTest("test_opt_scalar_absent", test_opt_scalar_absent)
+	runTest("test_opt_string_present", test_opt_string_present)
+	runTest("test_opt_string_absent", test_opt_string_absent)
+	runTest("test_opt_seq_present", test_opt_seq_present)
+	runTest("test_opt_seq_absent", test_opt_seq_absent)
+	runTest("test_opt_obj_present", test_opt_obj_present)
+	runTest("test_opt_obj_absent", test_opt_obj_absent)
 	runTest("test_obj_seq_param_empty", test_obj_seq_param_empty)
 	runTest("test_obj_seq_param_single", test_obj_seq_param_single)
 	runTest("test_obj_seq_param_multiple", test_obj_seq_param_multiple)

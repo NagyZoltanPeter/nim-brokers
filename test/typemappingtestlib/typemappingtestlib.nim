@@ -17,6 +17,7 @@
 
 {.push raises: [].}
 
+import std/options
 import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
@@ -117,6 +118,32 @@ RequestBroker(API):
   ): Future[Result[TypedScalarRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
+# Request Brokers — primitive (non-object) result type coverage
+# ---------------------------------------------------------------------------
+
+## VoidActionRequest: the broker type IS `void` — a payload-less request.
+## Exercises the `isVoid` codegen path: the response carries only a
+## success/error signal, no value. The provider also emits a VoidPing event.
+RequestBroker(API):
+  type VoidActionRequest = void
+
+  proc signature*(label: string): Future[Result[VoidActionRequest, string]] {.async.}
+
+## VoidPing: a payload-less (`void`) API event — a pure notification.
+EventBroker(API):
+  type VoidPing = void
+
+## IntResultRequest: the broker type IS a primitive (int32), not an object.
+## Exercises the `hasInlineFields == false` request codegen path — the C
+## result struct must carry the scalar value alongside `error_message`,
+## and every wrapper must unwrap it as a bare `int32` rather than a struct.
+## Provider returns value*2 and emits SimpleIntEvent(value*10).
+RequestBroker(API):
+  type IntResultRequest = int32
+
+  proc signature*(value: int32): Future[Result[IntResultRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
 # Request Brokers — seq[T] result coverage
 # ---------------------------------------------------------------------------
 
@@ -181,6 +208,98 @@ RequestBroker(API):
     count*: int32
 
   proc signature*(n: int32): Future[Result[TagSeqRequest, string]] {.async.}
+
+## OptSeqRequest — Phase E2b, `Option[seq[byte]]` as a result field.
+## At the C ABI this expands to THREE fields under Layout X:
+##   `value: uint8_t*`, `value_count: int32_t`, `value_has_value: bool`.
+## The bool is the source of truth for present/absent — not the
+## (nullptr, 0) pattern. A present-but-empty seq is therefore
+## distinguishable from an absent seq.
+RequestBroker(API):
+  type OptSeqRequest* = object
+    value*: Option[seq[byte]]
+
+  proc signature*(present: bool): Future[Result[OptSeqRequest, string]] {.async.}
+
+## OptScalarRequest — exercises `Option[int32]` as a result field. Phase
+## E1 of native Option support: every Option field expands at the C ABI
+## to `<name>: T` + `<name>_has_value: bool` (uniform shape; documented
+## in the codegen modules).
+RequestBroker(API):
+  type OptScalarRequest* = object
+    value*: Option[int32]
+
+  proc signature*(present: bool): Future[Result[OptScalarRequest, string]] {.async.}
+
+## OptStringRequest — Phase E2a, variable-shape Option (string). At the C
+## ABI the field expands to `value: char*` + `value_has_value: bool`.
+## Layout X is uniform: the bool is always emitted even though `nullptr`
+## could encode absent for pointer-shaped inner types — readers MUST
+## consult `value_has_value` first; `value` is undefined when absent.
+RequestBroker(API):
+  type OptStringRequest* = object
+    value*: Option[string]
+
+  proc signature*(present: bool): Future[Result[OptStringRequest, string]] {.async.}
+
+## OptObjRequest — Phase E3, Option of a registered object (`Option[Tag]`).
+## Shape (iii): the inner object is embedded by value at the C ABI —
+## `value: TagCItem` + `value_has_value: bool`. When absent the embedded
+## CItem is zero-initialised (nil cstring fields); readers MUST consult
+## `value_has_value` first.
+RequestBroker(API):
+  type OptObjRequest* = object
+    value*: Option[Tag]
+
+  proc signature*(present: bool): Future[Result[OptObjRequest, string]] {.async.}
+
+## Distinct-over-seq probe. Registered by the type resolver to keep the
+## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
+## time, but NOT used in any active broker signature: per-wrapper
+## byte-string tagging on the wire side (Rust `#[serde(with =
+## "serde_bytes")]`, jsoncons byte-string trait, cbor2 bytes coercion)
+## must propagate through distinct/alias before a round-trip with
+## `Key`-typed fields can succeed. See the inbound-bytes probe
+## (`BytesEchoRequest`) below for the byte-string round-trip support
+## that exists today.
+type Key* {.used.} = distinct seq[byte]
+
+## KeyRange — plain object input param. Object-as-input-param is
+## CBOR-only (see ObjParamRequest gating note above). Uses `string`
+## rather than `seq[byte]` to keep the wire format uniformly text-string
+## across every wrapper (per-wrapper byte-string handling for inbound
+## binary fields is a follow-up task).
+type KeyRange* = object
+  startKey*: string ## inclusive lower bound
+  stopKey*: string ## exclusive upper bound; empty = unbounded
+
+## TupleRow — named tuple alias. Per agreed Option (B) the codegen
+## emits this as a struct with the same field names in every wrapper.
+type TupleRow* = tuple[key: string, payload: string]
+
+when defined(BrokerFfiApiCBOR):
+  RequestBroker(API):
+    type ScanRequest* = object
+      rows*: seq[TupleRow]
+
+    proc signature*(
+      category: string, range: KeyRange, reverse: bool
+    ): Future[Result[ScanRequest, string]] {.async.}
+
+  ## BytesEchoRequest — exercises `seq[byte]` as an INPUT param. Each
+  ## wrapper has to encode the value as a CBOR byte string (major type 2)
+  ## or the Nim cbor_serialization decoder rejects it with "Expected:
+  ## byte string but found: array". This probe surfaces the per-wrapper
+  ## byte-string handling work that lives outside the type-shape codegen.
+  RequestBroker(API):
+    type BytesEchoRequest* = object
+      length*: int32 ## number of bytes received
+      first*: int32 ## payload[0] cast to int (-1 if empty)
+      last*: int32 ## payload[^1] cast to int (-1 if empty)
+
+    proc signature*(
+      payload: seq[byte]
+    ): Future[Result[BytesEchoRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] and seq[object] INPUT param coverage
@@ -293,6 +412,13 @@ EventBroker(API):
   type TagSeqEvent = object
     tags*: seq[Tag]
 
+## SimpleIntEvent: the event payload type IS a primitive (int64), not an
+## object. Exercises the `hasInlineFields == false` event codegen path —
+## the C callback typedef must carry a single scalar value parameter
+## instead of a struct, and every wrapper must deliver a bare int64.
+EventBroker(API):
+  type SimpleIntEvent = int64
+
 # ---------------------------------------------------------------------------
 # Provider state (per processing thread = per context)
 # ---------------------------------------------------------------------------
@@ -378,6 +504,26 @@ proc setupProviders(ctx: BrokerContext) =
         ),
       )
       return ok(TypedScalarRequest(priority: priority, jobId: jobId, nextId: nextId)),
+  )
+
+  # --- void (payload-less) request provider ---
+
+  discard VoidActionRequest.setProvider(
+    ctx,
+    proc(label: string): Future[Result[VoidActionRequest, string]] {.closure, async.} =
+      if label.len == 0:
+        return err("empty label")
+      await VoidPing.emit(gProviderCtx, VoidPing())
+      return ok(VoidActionRequest()),
+  )
+
+  # --- primitive (non-object) result provider ---
+
+  discard IntResultRequest.setProvider(
+    ctx,
+    proc(value: int32): Future[Result[IntResultRequest, string]] {.closure, async.} =
+      await SimpleIntEvent.emit(gProviderCtx, SimpleIntEvent(int64(value) * 10'i64))
+      return ok(IntResultRequest(value * 2'i32)),
   )
 
   # --- seq[T] result providers ---
@@ -491,11 +637,90 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(PrimSeqParamRequest(count: int32(values.len), total: total)),
   )
 
+  discard OptScalarRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptScalarRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptScalarRequest(value: some(42'i32)))
+      else:
+        return ok(OptScalarRequest(value: none(int32))),
+  )
+
+  discard OptStringRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptStringRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptStringRequest(value: some("hello")))
+      else:
+        return ok(OptStringRequest(value: none(string))),
+  )
+
+  discard OptObjRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptObjRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptObjRequest(value: some(Tag(key: "ok", value: "yes"))))
+      else:
+        return ok(OptObjRequest(value: none(Tag))),
+  )
+
   when defined(BrokerFfiApiCBOR):
     discard ObjParamRequest.setProvider(
       ctx,
       proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
         return ok(ObjParamRequest(summary: tag.key & "=" & tag.value)),
+    )
+
+  # --- New probe providers: Option[seq], tuple, KeyRange ---
+
+  discard OptSeqRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptSeqRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptSeqRequest(value: some(@[byte 1, 2, 3, 4])))
+      else:
+        return ok(OptSeqRequest(value: none(seq[byte]))),
+  )
+
+  when defined(BrokerFfiApiCBOR):
+    # ScanRequest provider — exercises distinct-over-seq (Key), tuple
+    # (TupleRow → struct), seq[Tuple] (rows), and object-as-param
+    # (KeyRange) in one round-trip.
+    discard BytesEchoRequest.setProvider(
+      ctx,
+      proc(
+          payload: seq[byte]
+      ): Future[Result[BytesEchoRequest, string]] {.closure, async.} =
+        let first =
+          if payload.len > 0:
+            int32(payload[0])
+          else:
+            -1'i32
+        let last =
+          if payload.len > 0:
+            int32(payload[^1])
+          else:
+            -1'i32
+        return
+          ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
+    )
+
+    discard ScanRequest.setProvider(
+      ctx,
+      proc(
+          category: string, range: KeyRange, reverse: bool
+      ): Future[Result[ScanRequest, string]] {.closure, async.} =
+        var rows: seq[TupleRow] = @[]
+        for i in 0 ..< 3:
+          let k = $i & ":" & range.startKey
+          let p = category & "-row-" & $i & ":" & range.stopKey
+          rows.add((key: k, payload: p))
+        if reverse:
+          var rev: seq[TupleRow] = @[]
+          for i in countdown(rows.len - 1, 0):
+            rev.add(rows[i])
+          rows = rev
+        return ok(ScanRequest(rows: rows)),
     )
 
   # No probe providers — see "Probe negatives" comment above for why each

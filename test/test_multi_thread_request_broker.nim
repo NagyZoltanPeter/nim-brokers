@@ -673,3 +673,40 @@ suite "RequestBroker macro (multi-thread mode)":
     MTReq.clearProvider()
     # Restore default timeout
     MTReq.setRequestTimeout(chronos.seconds(5))
+
+## ---------------------------------------------------------------------------
+## Multi-thread RequestBroker — void result type
+##
+## `type X = void` is lowered to a unique empty object; the request payload
+## travels through the MT channel as a zero-field value. `res.isOk()` carries
+## the success/failure signal, the (empty) value is constructed with `X()`.
+## ---------------------------------------------------------------------------
+
+RequestBroker(mt):
+  type MtVoidReq = void
+  proc signature*(label: string): Future[Result[MtVoidReq, string]] {.async.}
+
+suite "RequestBroker macro (multi-thread mode, void result)":
+  asyncTest "same-thread void request — ok and err paths":
+    check MtVoidReq
+      .setProvider(
+        proc(label: string): Future[Result[MtVoidReq, string]] {.async.} =
+          if label.len == 0:
+            err("empty label")
+          else:
+            ok(MtVoidReq())
+      )
+      .isOk()
+
+    let okRes = await MtVoidReq.request("go")
+    check okRes.isOk()
+
+    let errRes = await MtVoidReq.request("")
+    check errRes.isErr()
+    check errRes.error == "empty label"
+
+    MtVoidReq.clearProvider()
+
+  asyncTest "void request errors when no provider set":
+    let res = await MtVoidReq.request("x")
+    check res.isErr()
