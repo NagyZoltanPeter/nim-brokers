@@ -42,6 +42,23 @@ type Tag* = object
   key*: string
   value*: string
 
+## Inner — composite object used by the seq[Object<seq>] probes. The
+## key trait is that it carries its OWN `seq[byte]` field, so a
+## containing `seq[Inner]` exercises an inner object with a composite
+## field — the shape TYPESUPPORT.md historically marked ❌ before the
+## native ABI was retired.
+type Inner* = object
+  id*: int32
+  tag*: string
+  bytes*: seq[byte]
+
+## Slot — used by the array[N, Object] event probe. Plain primitive +
+## string fields; the point is putting it inside a fixed-size array
+## payload (`array[4, Slot]`), not the field shape itself.
+type Slot* = object
+  idx*: int32
+  name*: string
+
 ## ConstArrayLen — exercises const-defined array size in FFI codegen.
 const ConstArrayLen* = 6
 
@@ -343,18 +360,106 @@ RequestBroker(API):
   proc signature*(tag: Tag): Future[Result[ObjParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
-# Probe negatives (documented; not active brokers). See doc/TYPESUPPORT.md.
-#   - array[N, Object]:    C header emits bare 'Inner' which is undeclared
-#                          in C scope; C++ test fails with "unknown type
-#                          name 'Inner'". Native Rust + C/C++ broken;
-#                          Python ctypes correct; CBOR works.
-#   - array[N, string]:    request broker codegen rejects with
-#                          'array[N, cstring]' vs 'array[N, string]'
-#                          mismatch — fails before reaching wrappers.
-#   - seq[Object<seq>]:    api_type.nim toCFieldType(ident("seq[T]"))
-#                          fails — CItem layout requires simple-ident
-#                          field types. Inner type can't even register.
+# Previously-restricted shapes — now active CBOR brokers.
+#
+# These shapes were marked ❌ in TYPESUPPORT.md while the native ABI
+# was in play (CItem layout couldn't express them, the C header
+# emitted bare struct refs, etc.). Post Round-2 CBOR-only retirement
+# the wrappers handle every one of these correctly — wire format is
+# pure CBOR map/array nesting and each wrapper codegen recurses
+# through seq[T] / array[N, T] / inline Object the same way. They
+# now ride the parity matrix so any future regression is caught.
+#
+#   ListInnersRequest         seq[Object<seq>] as result          §1
+#   BulkInnersRequest         seq[Object<seq>] as param           §2
+#   InnersUpdatedEvent        seq[Object<seq>] as event payload   §3
+#   FixedStrArrayRequest      array[N, string] as result          §1
+#   SetTagsRequest            array[N, string] as param           §2
+#   SumPrimArrayRequest       array[N, primitive] as param        §2
+#   FixedObjArrayEvent        array[N, Object] as event payload   §3
 # ---------------------------------------------------------------------------
+
+## ListInnersRequest — returns seq[Inner], where each Inner carries
+## its own seq[byte] (composite-field-in-element-of-seq). Producer
+## echoes the requested count, fabricating bytes [i, i+1, …].
+RequestBroker(API):
+  type ListInnersRequest = object
+    items*: seq[Inner]
+
+  proc signature*(count: int32): Future[Result[ListInnersRequest, string]] {.async.}
+
+## BulkInnersRequest — accepts seq[Inner] as input param, returns the
+## sum of `id`s and total bytes-count for round-trip verification.
+RequestBroker(API):
+  type BulkInnersRequest = object
+    idSum*: int64
+    byteCount*: int64
+
+  proc signature*(
+    items: seq[Inner]
+  ): Future[Result[BulkInnersRequest, string]] {.async.}
+
+## InnersUpdatedEvent — event payload is seq[Inner]. Fired by
+## TriggerInnersUpdatedRequest below.
+EventBroker(API):
+  type InnersUpdatedEvent = object
+    items*: seq[Inner]
+
+## TriggerInnersUpdatedRequest — invokes InnersUpdatedEvent.emit with
+## a fabricated payload of N Inner records.
+RequestBroker(API):
+  type TriggerInnersUpdatedRequest = object
+    fired*: int32
+
+  proc signature*(
+    count: int32
+  ): Future[Result[TriggerInnersUpdatedRequest, string]] {.async.}
+
+## FixedStrArrayRequest — returns array[4, string]. Element i is
+## "<prefix>-<i>".
+RequestBroker(API):
+  type FixedStrArrayRequest = object
+    tags*: array[4, string]
+
+  proc signature*(
+    prefix: string
+  ): Future[Result[FixedStrArrayRequest, string]] {.async.}
+
+## SetTagsRequest — accepts array[4, string] as input param, returns
+## the concatenated joined-by-"|" form for round-trip verification.
+RequestBroker(API):
+  type SetTagsRequest = object
+    joined*: string
+
+  proc signature*(
+    tags: array[4, string]
+  ): Future[Result[SetTagsRequest, string]] {.async.}
+
+## SumPrimArrayRequest — accepts array[4, int32] as input param,
+## returns the sum.
+RequestBroker(API):
+  type SumPrimArrayRequest = object
+    total*: int64
+
+  proc signature*(
+    nums: array[4, int32]
+  ): Future[Result[SumPrimArrayRequest, string]] {.async.}
+
+## FixedObjArrayEvent — event payload is array[4, Slot]. Fired by
+## TriggerFixedObjArrayRequest below.
+EventBroker(API):
+  type FixedObjArrayEvent = object
+    slots*: array[4, Slot]
+
+## TriggerFixedObjArrayRequest — invokes FixedObjArrayEvent.emit with
+## a fabricated 4-element payload.
+RequestBroker(API):
+  type TriggerFixedObjArrayRequest = object
+    fired*: int32
+
+  proc signature*(
+    base: int32
+  ): Future[Result[TriggerFixedObjArrayRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Event Brokers — original
@@ -712,8 +817,95 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(ScanRequest(rows: rows)),
   )
 
-  # No probe providers — see "Probe negatives" comment above for why each
-  # of array[N, Object] / array[N, string] / seq[Object<seq>] is omitted.
+  # ----- Previously-restricted-shape providers (see broker decls above) -----
+
+  discard ListInnersRequest.setProvider(
+    ctx,
+    proc(count: int32): Future[Result[ListInnersRequest, string]] {.closure, async.} =
+      var items: seq[Inner] = @[]
+      for i in 0 ..< count:
+        var bs: seq[byte] = @[]
+        # i + 1 bytes, starting at byte(i). Empty seq for i == 0 keeps
+        # zero-length-byte-string round-trip in scope.
+        for j in 0 .. i:
+          bs.add(byte((i + j) and 0xFF))
+        items.add(Inner(id: i, tag: "inner-" & $i, bytes: bs))
+      return ok(ListInnersRequest(items: items)),
+  )
+
+  discard BulkInnersRequest.setProvider(
+    ctx,
+    proc(
+        items: seq[Inner]
+    ): Future[Result[BulkInnersRequest, string]] {.closure, async.} =
+      var idSum: int64 = 0
+      var byteCount: int64 = 0
+      for it in items:
+        idSum += int64(it.id)
+        byteCount += int64(it.bytes.len)
+      return ok(BulkInnersRequest(idSum: idSum, byteCount: byteCount)),
+  )
+
+  discard TriggerInnersUpdatedRequest.setProvider(
+    ctx,
+    proc(
+        count: int32
+    ): Future[Result[TriggerInnersUpdatedRequest, string]] {.closure, async.} =
+      var items: seq[Inner] = @[]
+      for i in 0 ..< count:
+        var bs: seq[byte] = @[]
+        for j in 0 .. i:
+          bs.add(byte((i + j) and 0xFF))
+        items.add(Inner(id: i, tag: "evt-" & $i, bytes: bs))
+      await InnersUpdatedEvent.emit(gProviderCtx, InnersUpdatedEvent(items: items))
+      return ok(TriggerInnersUpdatedRequest(fired: count)),
+  )
+
+  discard FixedStrArrayRequest.setProvider(
+    ctx,
+    proc(
+        prefix: string
+    ): Future[Result[FixedStrArrayRequest, string]] {.closure, async.} =
+      var tags: array[4, string]
+      for i in 0 .. 3:
+        tags[i] = prefix & "-" & $i
+      return ok(FixedStrArrayRequest(tags: tags)),
+  )
+
+  discard SetTagsRequest.setProvider(
+    ctx,
+    proc(
+        tags: array[4, string]
+    ): Future[Result[SetTagsRequest, string]] {.closure, async.} =
+      return ok(SetTagsRequest(joined: tags[0] & "|" & tags[1] & "|" & tags[2] & "|" & tags[3])),
+  )
+
+  discard SumPrimArrayRequest.setProvider(
+    ctx,
+    proc(
+        nums: array[4, int32]
+    ): Future[Result[SumPrimArrayRequest, string]] {.closure, async.} =
+      return ok(
+        SumPrimArrayRequest(
+          total: int64(nums[0]) + int64(nums[1]) + int64(nums[2]) + int64(nums[3])
+        )
+      ),
+  )
+
+  discard TriggerFixedObjArrayRequest.setProvider(
+    ctx,
+    proc(
+        base: int32
+    ): Future[Result[TriggerFixedObjArrayRequest, string]] {.closure, async.} =
+      let slots: array[4, Slot] = [
+        Slot(idx: base, name: "alpha"),
+        Slot(idx: base + 1, name: "beta"),
+        Slot(idx: base + 2, name: ""),
+        Slot(idx: base + 3, name: "delta with spaces"),
+      ]
+      await FixedObjArrayEvent.emit(gProviderCtx, FixedObjArrayEvent(slots: slots))
+      return ok(TriggerFixedObjArrayRequest(fired: 4)),
+  )
 
 # ---------------------------------------------------------------------------
 # Library registration
