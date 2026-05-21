@@ -101,26 +101,59 @@ responseSlots × align8(slotHeaderBytes + maxResponseBytes)`.
 ## 4. Type-driven default sizing
 
 When `maxPayloadBytes` / `maxResponseBytes` is left at its default the
-macro inspects the type AST at compile time and picks a size class:
+macro inspects the type AST at compile time and picks a size class.
+The classifier walks the type recursively — an `Option[T]` recurses
+into `T`, an `array[N, T]` recurses into `T` — so the bucket reported
+in the compile-time hint always reflects the worst-case wire-bound
+payload, never an arbitrary outer-bracket fallback.
 
-| Type shape | Auto cell size |
-|---|---|
-| scalar (`bool`, `int*`, `uint*`, `float*`, `byte`, `char`) | **64 B** |
-| `string` | **4 KB** |
-| `seq[string]` | **16 KB** |
-| `seq[byte]` / `seq[uint8]` | **64 KB** |
-| `array[N, T]` | classified by `T` |
-| `seq[<other primitive>]` | 4 KB |
-| alias / external / unresolvable | **8 KB + compile-time warning** |
+| Type shape | Auto cell size | Origin tag emitted |
+|---|---|---|
+| scalar (`bool`, `int*`, `uint*`, `float*`, `byte`, `char`) | **64 B** | `auto:scalar` (object body) / `auto:scalar:<name>` (bare type) |
+| `string` | **4 KB** | `auto:string` |
+| `seq[byte]` / `seq[uint8]` | **64 KB** | `auto:seq[byte]` |
+| `seq[string]` | **16 KB** | `auto:seq[string]` |
+| `seq[<other primitive>]` | 4 KB | `auto:seq[<T>]` |
+| `array[N, T]` | bucket of `T` (recursive) | inherits T's origin |
+| `Option[T]` | bucket of `T` (recursive) | `auto:Option[<inner-reason>]` |
+| `Option[seq[byte]]` | **64 KB** (= inner `seq[byte]`) | `auto:Option[seq[byte]]` |
+| `Option[scalar]` | **64 B** | `auto:Option[scalar:<name>]` |
+| `void` / zero-field body | **64 B** (envelope only) | `auto:void` |
+| inline `object` | max over classified fields | inherits dominant field's origin |
+| alias / external / unresolvable | **8 KB + compile-time warning** | `auto:unclassifiable:<repr>` |
 
 For an `object` type the cell is sized to fit the largest classified
-field.
+field (`classifyFieldsMax`).
+
+`void`-bodied brokers — typed as `type Foo = void` for an event, or a
+zero-arg `proc signature*(): Future[Result[Foo, string]]` paired with
+`type Foo = void` for a request — collapse to the **scalar bucket
+(64 B)** rather than the conservative 1 KB / 64 KB safety default.
+A payload-less notification only ships the CBOR envelope, so a
+larger cell would pin idle slab/respPool memory for no reason. For a
+single zero-field `RequestBroker(mt): type X = void` this is the
+difference between **40 KB and 16 MB idle RAM per context**.
+
+`Option[T]` recurses into `T` rather than falling into the
+`unclassifiable` bucket. This is both more accurate and safer:
+without the recursion `Option[seq[byte]]` silently under-allocated
+to 8 KB while its inner `seq[byte]` can carry 64 KB, which would
+surface as a runtime cell-too-small error rather than a clean
+compile-time hint.
 
 When the classifier emits a warning it means it could not introspect
-the type (typically because it's an alias or a forward-declared external
-type). The build still succeeds with an 8 KB fallback, but you should
-provide `maxPayloadBytes = N` / `maxResponseBytes = N` explicitly so
-the size matches your actual payload.
+the type (typically because it's an alias to a non-primitive, or a
+forward-declared external type). The build still succeeds with an
+8 KB fallback, but you should provide `maxPayloadBytes = N` /
+`maxResponseBytes = N` explicitly so the size matches your actual
+payload. The fix is usually one line:
+
+```nim
+# `Address` is an external object — classifier can't introspect it
+EventBroker(mt, maxPayloadBytes = 256):
+  type Connected = object
+    peer*: Address
+```
 
 ## 5. Presets
 
@@ -166,7 +199,9 @@ The provenance tag `[origin]` per field:
 | `default` | unchanged from the module's default |
 | `kwarg` | explicit `<knob> = <value>` in the macro call |
 | `preset:<name>` | inherited from a `preset = <name>` kwarg |
-| `auto:<reason>` | derived by the type-driven default (e.g. `auto:string`, `auto:seq[byte]`, `auto:scalar:int64`) |
+| `auto:<reason>` | derived by the type-driven default. Examples: `auto:scalar` (object body whose biggest field is a scalar) / `auto:scalar:int64` (bare scalar type at classifier root) / `auto:string` / `auto:seq[byte]` / `auto:seq[string]` |
+| `auto:void` | broker body is `type X = void` or has zero fields — cell collapsed to the 64 B scalar bucket (envelope only) |
+| `auto:Option[<inner-reason>]` | `Option[T]` — recursed into T and inherited its bucket (e.g. `auto:Option[seq[byte]]` = 64 KB, `auto:Option[scalar:int64]` = 64 B) |
 | `auto:unclassifiable:<...>` | fallback for a type the classifier couldn't resolve — pair with a compile-time `{.warning.}` |
 
 Idle RAM is an estimate (per-element bytes are approximate and exclude
@@ -188,10 +223,52 @@ EventBroker(mt):
     seqNum*: uint32
 
 # Hint: [brokers] EventBroker(Tick): queueDepth=256 [default],
-#       slabCapacity=1024 [default], maxPayloadBytes=64 [auto:scalar:int64],
+#       slabCapacity=1024 [default], maxPayloadBytes=64 [auto:scalar],
 #       freeListShards=4 [default]
 #       — idle RAM: ring≈6.0 KB, slab≈92.0 KB, total≈98.0 KB
 ```
+
+### Notification-only (void) event — minimal RAM footprint
+
+```nim
+EventBroker(mt):
+  type Heartbeat = void
+
+# Hint: [brokers] EventBroker(Heartbeat): … maxPayloadBytes=64 [auto:void] …
+#       — idle RAM: total≈102.0 KB
+```
+
+The same shape applies to a notification-only request:
+
+```nim
+RequestBroker(mt):
+  type Ack = void
+  proc signature*(): Future[Result[Ack, string]] {.async.}
+
+# Hint: [brokers] RequestBroker(Ack): maxPayloadBytes=64 [auto:void],
+#       maxResponseBytes=64 [auto:void] … — idle RAM: total≈40.0 KB
+```
+
+Without the `auto:void` collapse this would pin **16 MB** for the response
+pool of every notification-style RequestBroker.
+
+### Optional field — sized by the inner type, not by the `Option` wrapper
+
+```nim
+import std/options
+
+EventBroker(mt):
+  type ChunkReady = object
+    blob*: Option[seq[byte]]    # → auto:Option[seq[byte]] = 64 KB
+    label*: string              # → auto:string = 4 KB
+# The object bucket = max(64 KB, 4 KB) = 64 KB.
+# Hint: maxPayloadBytes=65536 [auto:Option[seq[byte]]]
+```
+
+Compare to before the fix: `Option[seq[byte]]` fell into the
+`unclassifiable` arm at 8 KB — too small for the wire-bound 64 KB,
+so a large emit would have returned `err(...)` at runtime. The
+recursive `Option[T]` classification eliminates that failure mode.
 
 ### Bursty event broadcast with a preset and a payload override
 

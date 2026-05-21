@@ -1,7 +1,7 @@
 import std/[os, strutils]
 
 # Package
-version = "2.0.1"
+version = "3.0.0"
 author = "Nagy Zoltan Peter"
 description =
   "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
@@ -9,7 +9,7 @@ license = "MIT"
 skipDirs = @["tests", "examples", "tools"]
 
 # Dependencies
-requires "nim >= 2.0.0"
+requires "nim >= 2.2.4"
 requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
