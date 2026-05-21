@@ -1004,6 +1004,42 @@ class TestPreviouslyRestrictedShapes(unittest.TestCase):
         self.assertEqual(snap[3].name, "delta with spaces")
         self.lib.off_fixed_obj_array_event(h)
 
+    # ----- Last-three-❓ probes -----
+
+    def test_nested_obj_inline_field(self):
+        r = self.lib.nested_obj_request("k", "v")
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.label, "k=v")
+        self.assertEqual(r.value.nested.key, "k")
+        self.assertEqual(r.value.nested.value, "v")
+
+    def test_set_slots_obj_array_param(self):
+        slots = [
+            Slot(idx=1, name="alpha"),
+            Slot(idx=2, name="beta"),
+            Slot(idx=3, name=""),
+            Slot(idx=4, name="delta"),
+        ]
+        r = self.lib.set_slots_request(slots)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.summary, "alpha|beta||delta")
+
+    def test_str_array_event(self):
+        received: list[list[str]] = []
+        evt = threading.Event()
+
+        def cb(_lib, words):
+            received.append([str(w) for w in words])
+            evt.set()
+
+        h = self.lib.on_str_array_event(cb)
+        self.lib.trigger_str_array_request("word")
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        snap = received[0]
+        self.assertEqual(snap, ["word-0", "word-1", "word-2", "word-3"])
+        self.lib.off_str_array_event(h)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

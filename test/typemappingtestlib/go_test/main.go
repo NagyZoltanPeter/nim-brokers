@@ -2265,6 +2265,59 @@ func test_fixed_obj_array_event() {
 	lib.Close()
 }
 
+// --- Last-three-❓ probes ---------------------------------------------------
+
+func test_nested_obj_inline_field() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.NestedObjRequest("k", "v")
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Label, "k=v", "label")
+	checkEq(r.Nested.Key, "k", "nested.key")
+	checkEq(r.Nested.Value, "v", "nested.value")
+	lib.Close()
+}
+
+func test_set_slots_obj_array_param() {
+	lib := newLib()
+	lib.CreateContext()
+	slots := []typemappingtestlib.Slot{
+		{Idx: 1, Name: "alpha"},
+		{Idx: 2, Name: "beta"},
+		{Idx: 3, Name: ""},
+		{Idx: 4, Name: "delta"},
+	}
+	r, err := lib.SetSlotsRequest(slots)
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Summary, "alpha|beta||delta", "summary")
+	lib.Close()
+}
+
+func test_str_array_event() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[[]string]{}
+	h := lib.OnStrArrayEvent(func(words []string) {
+		cp := make([]string, len(words))
+		copy(cp, words)
+		evts.push(cp)
+	})
+	_, err := lib.TriggerStrArrayRequest("word")
+	checkEq(err, error(nil), "trigger err")
+	waitFor(func() bool { return evts.size() >= 1 })
+	checkEq(evts.size(), 1, "events")
+	snap := evts.at(0)
+	checkEq(len(snap), 4, "words len")
+	if len(snap) == 4 {
+		checkEq(snap[0], "word-0", "[0]")
+		checkEq(snap[1], "word-1", "[1]")
+		checkEq(snap[2], "word-2", "[2]")
+		checkEq(snap[3], "word-3", "[3]")
+	}
+	lib.OffStrArrayEvent(h)
+	lib.Close()
+}
+
 // ============================================================================
 // main — runs all tests in cpp order.
 // ============================================================================
@@ -2429,6 +2482,9 @@ func main() {
 	runTest("test_set_tags_array_param", test_set_tags_array_param)
 	runTest("test_sum_prim_array_param", test_sum_prim_array_param)
 	runTest("test_fixed_obj_array_event", test_fixed_obj_array_event)
+	runTest("test_nested_obj_inline_field", test_nested_obj_inline_field)
+	runTest("test_set_slots_obj_array_param", test_set_slots_obj_array_param)
+	runTest("test_str_array_event", test_str_array_event)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

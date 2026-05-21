@@ -46,7 +46,7 @@ The field appears inside the `Result<T>` payload struct returned by a request me
 | Plain `enum` | ✅ | ✅ | ✅ | ✅ |
 | `distinct intN` (incl. type aliases of primitives) | ✅ | ✅ | ✅ | ✅ |
 | Object (all primitive/string fields) — used as the *whole result type* | ✅ | ✅ | ✅ | ✅ |
-| Object (all primitive/string fields) — embedded as an *inline field* of another object | ❓ ¹ | ❓ ¹ | ❓ ¹ | ❓ ¹ |
+| Object (all primitive/string fields) — embedded as an *inline field* of another object | ✅ ¹ | ✅ ¹ | ✅ ¹ | ✅ ¹ |
 | `seq[byte]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[primitive]` (e.g. `seq[int64]`) | ✅ | ✅ | ✅ | ✅ |
 | `seq[string]` | ✅ | ✅ | ✅ | ✅ |
@@ -76,7 +76,7 @@ The type appears in the request method signature on the *caller* side.
 | `seq[Object<seq>]` | ✅ ² | ✅ ² | ✅ ² | ✅ ² |
 | `array[N, primitive]` | ✅ ⁴ | ✅ ⁴ | ✅ ⁴ | ✅ ⁴ |
 | `array[N, string]` | ✅ ³ | ✅ ³ | ✅ ³ | ✅ ³ |
-| `array[N, Object]` | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ |
+| `array[N, Object]` | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ |
 | `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ | ✅ | ✅ | ✅ |
 
 ## Section 3 — Event PAYLOAD field types
@@ -94,18 +94,18 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
 | `seq[Object]` (prim/string fields) | ✅ | ✅ | ✅ | ✅ |
 | `seq[Object<seq>]` | ✅ ² | ✅ ² | ✅ ² | ✅ ² |
 | `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ |
-| `array[N, string]` | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ |
+| `array[N, string]` | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ |
 | `array[N, Object]` | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ |
 
 ## Footnotes
 
-1. **Object as inline field** — e.g. `type Outer = object; inner: Inner`
-   where `Inner` is a separate registered Object held directly (not via
-   `seq` / `array` / `Option`). CBOR map-encoding nests naturally and
-   the wrappers' `seq[Object]` / `array[N, Object]` cases prove the
-   wrapper codegen recurses correctly through composite fields, so this
-   almost certainly works — but no parity test exercises the direct
-   inline form yet. Treat as untested until a probe is added.
+1. **Object as inline field** works end-to-end on all wrappers.
+   Validated by `test_nested_obj_inline_field` against the
+   `NestedObjRequest` broker, whose result struct carries a `Tag`
+   directly as a field (not via `seq` / `array` / `Option`). The
+   wrappers emit the nested struct + its `JSONCONS_ALL_MEMBER_TRAITS`
+   / dataclass / `#[derive(Deserialize)]` / cbor-tag registration
+   inline and round-trip the values byte-identical.
 
 2. **`seq[Object<seq>]` works end-to-end on all wrappers.** Validated
    by `test_list_inners_result_*`, `test_bulk_inners_param_roundtrip`,
@@ -129,17 +129,18 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
    length-on-decode semantics as footnote 3 — the wrapper passes a
    length-N vector / list / slice and the Nim side validates.
 
-5. **`array[N, Object]` as request param** — has full coverage as a
-   *result* field (§1) and as an *event* payload (§3, footnote 7), but
-   no parity test exercises the param direction. The wrapper codegen
-   path is shared with `array[N, string]` / `array[N, primitive]`
-   params, so behaviour almost certainly matches — treat as untested
-   until probed.
+5. **`array[N, Object]` as request param** works end-to-end on all
+   wrappers. Validated by `test_set_slots_obj_array_param`: the
+   `SetSlotsRequest` broker accepts a fixed-size array of `Slot`
+   structs, joins their `name` fields, and returns the result —
+   exercising both the wrapper-side serialization of an array of
+   nested objects and the Nim-side decode + provider invocation.
 
-6. **`array[N, string]` in events** — array-in-event is exercised by
-   `array[N, primitive]` and `array[N, Object]` (footnote 7); the
-   string element variant is missing a probe but rides the same event
-   codegen path.
+6. **`array[N, string]` in events** works end-to-end on all wrappers.
+   Validated by `test_str_array_event` against the `StrArrayEvent`
+   broker (fired by `TriggerStrArrayRequest`). Wrappers deliver the
+   four strings as their natural list type (`std::span<const
+   std::string>`, `List[str]`, `Vec<String>`, `[]string`).
 
 7. **`array[N, Object]` in events** — validated by
    `test_fixed_obj_array_event`. The wrappers deliver the slots as a
@@ -187,7 +188,7 @@ Field-by-field, every type is in a green row of all three sections
 | Request **result** type — `Future[Result[WakuMessage, string]]` | ✅ | All fields green; same shape as the validated `Tag`-style objects. |
 | Event **payload** — `EventBroker(API): type WakuMessageReceived = object` with these fields | ✅ | Same shape as `TagSeqEvent` / `PrimScalarEvent`, all green in the parity matrix. |
 | Request **parameter** — `proc signature(msg: WakuMessage)` | ✅ | Object-as-param is supported on all wrappers (Section 2). |
-| Field of *another* registered Object | ❓ | Inline-nested Object case is untested (footnote 1). |
+| Field of *another* registered Object | ✅ | Inline-nested Object validated by `test_nested_obj_inline_field` (footnote 1). |
 | `seq[WakuMessage]` — batched delivery | ✅ | Covered by the `seq[Object<seq>]` row — `WakuMessage` carries `seq[byte]` fields, the exact composite-inside-element shape (footnote 2). |
 
 ```rust

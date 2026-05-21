@@ -2463,6 +2463,58 @@ static void test_fixed_obj_array_event() {
     lib.shutdown();
 }
 
+// --- Last-three-❓ probes: inline-nested Object, array[N, Object]
+// --- param, array[N, string] event.
+
+static void test_nested_obj_inline_field() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.nestedObjRequest("k", "v");
+    CHECK(r.isOk());
+    CHECK_EQ(r->label, std::string("k=v"));
+    CHECK_EQ(r->nested.key, std::string("k"));
+    CHECK_EQ(r->nested.value, std::string("v"));
+    lib.shutdown();
+}
+
+static void test_set_slots_obj_array_param() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    std::vector<Slot> slots{
+        Slot{1, "alpha"},
+        Slot{2, "beta"},
+        Slot{3, ""},
+        Slot{4, "delta"},
+    };
+    auto r = lib.setSlotsRequest(slots);
+    CHECK(r.isOk());
+    CHECK_EQ(r->summary, std::string("alpha|beta||delta"));
+    lib.shutdown();
+}
+
+static void test_str_array_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::vector<std::string>> received;
+    auto h = lib.onStrArrayEvent(
+        [&received](Typemappingtestlib&, std::span<const std::string> words) {
+            std::vector<std::string> snapshot(words.begin(), words.end());
+            received.push(std::move(snapshot));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerStrArrayRequest("word");
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto snap = received.at(0);
+    CHECK_EQ(snap.size(), 4u);
+    CHECK_EQ(snap[0], std::string("word-0"));
+    CHECK_EQ(snap[1], std::string("word-1"));
+    CHECK_EQ(snap[2], std::string("word-2"));
+    CHECK_EQ(snap[3], std::string("word-3"));
+    lib.offStrArrayEvent(h);
+    lib.shutdown();
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -2634,6 +2686,9 @@ int main() {
     RUN(test_set_tags_array_param);
     RUN(test_sum_prim_array_param);
     RUN(test_fixed_obj_array_event);
+    RUN(test_nested_obj_inline_field);
+    RUN(test_set_slots_obj_array_param);
+    RUN(test_str_array_event);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

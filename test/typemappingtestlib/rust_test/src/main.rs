@@ -2757,6 +2757,61 @@ fn test_fixed_obj_array_event() {
     lib.shutdown();
 }
 
+// --- Last-three-❓ probes -------------------------------------------------
+
+fn test_nested_obj_inline_field() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.nested_obj_request("k".to_string(), "v".to_string());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.label, &"k=v".to_string());
+        check_eq!(&v.nested.key, &"k".to_string());
+        check_eq!(&v.nested.value, &"v".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_set_slots_obj_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let slots = vec![
+        Slot { idx: 1, name: "alpha".to_string() },
+        Slot { idx: 2, name: "beta".to_string() },
+        Slot { idx: 3, name: "".to_string() },
+        Slot { idx: 4, name: "delta".to_string() },
+    ];
+    let r = lib.set_slots_request(slots);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.summary, &"alpha|beta||delta".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_str_array_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<String>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_str_array_event(move |words: Vec<String>| list_push(&cb, words));
+    let _ = lib.trigger_str_array_request("word".to_string());
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let words = &snap[0];
+        check_eq!(words.len(), 4usize);
+        check_eq!(&words[0], &"word-0".to_string());
+        check_eq!(&words[1], &"word-1".to_string());
+        check_eq!(&words[2], &"word-2".to_string());
+        check_eq!(&words[3], &"word-3".to_string());
+    }
+    lib.off_str_array_event(h);
+    lib.shutdown();
+}
+
 // ===========================================================================
 // main
 // ===========================================================================
@@ -2926,6 +2981,9 @@ fn main() {
     run_test("test_set_tags_array_param", test_set_tags_array_param);
     run_test("test_sum_prim_array_param", test_sum_prim_array_param);
     run_test("test_fixed_obj_array_event", test_fixed_obj_array_event);
+    run_test("test_nested_obj_inline_field", test_nested_obj_inline_field);
+    run_test("test_set_slots_obj_array_param", test_set_slots_obj_array_param);
+    run_test("test_str_array_event", test_str_array_event);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

@@ -462,6 +462,51 @@ RequestBroker(API):
   ): Future[Result[TriggerFixedObjArrayRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
+# Closing the last ❓ cells in TYPESUPPORT.md (§1 row 8, §2 array-Object
+# param, §3 array[N, string] event).
+# ---------------------------------------------------------------------------
+
+## NestedObjRequest — Object with a directly-inlined Object field
+## (not via seq / array / Option). Closes §1 footnote 1: the bare
+## inline-nested-Object shape. Holds a `Tag` directly + a label.
+RequestBroker(API):
+  type NestedObjRequest = object
+    label*: string
+    nested*: Tag
+
+  proc signature*(
+    key: string, value: string
+  ): Future[Result[NestedObjRequest, string]] {.async.}
+
+## SetSlotsRequest — accepts array[4, Slot] as input param. Closes §2
+## footnote 5: array[N, Object] in the parameter direction (result +
+## event already covered). Returns joined slot names for verification.
+RequestBroker(API):
+  type SetSlotsRequest = object
+    summary*: string
+
+  proc signature*(
+    slots: array[4, Slot]
+  ): Future[Result[SetSlotsRequest, string]] {.async.}
+
+## StrArrayEvent — event payload is array[4, string]. Closes §3
+## footnote 6: array[N, string] in the event direction. Fired by
+## TriggerStrArrayRequest below.
+EventBroker(API):
+  type StrArrayEvent = object
+    words*: array[4, string]
+
+## TriggerStrArrayRequest — invokes StrArrayEvent.emit with a
+## fabricated 4-string payload built from a caller-supplied prefix.
+RequestBroker(API):
+  type TriggerStrArrayRequest = object
+    fired*: int32
+
+  proc signature*(
+    prefix: string
+  ): Future[Result[TriggerStrArrayRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
 # Event Brokers — original
 # ---------------------------------------------------------------------------
 
@@ -905,6 +950,46 @@ proc setupProviders(ctx: BrokerContext) =
       ]
       await FixedObjArrayEvent.emit(gProviderCtx, FixedObjArrayEvent(slots: slots))
       return ok(TriggerFixedObjArrayRequest(fired: 4)),
+  )
+
+  # ----- Closing the last ❓ cells -----
+
+  discard NestedObjRequest.setProvider(
+    ctx,
+    proc(
+        key: string, value: string
+    ): Future[Result[NestedObjRequest, string]] {.closure, async.} =
+      return ok(
+        NestedObjRequest(
+          label: key & "=" & value, nested: Tag(key: key, value: value)
+        )
+      ),
+  )
+
+  discard SetSlotsRequest.setProvider(
+    ctx,
+    proc(
+        slots: array[4, Slot]
+    ): Future[Result[SetSlotsRequest, string]] {.closure, async.} =
+      return ok(
+        SetSlotsRequest(
+          summary:
+            slots[0].name & "|" & slots[1].name & "|" & slots[2].name & "|" &
+            slots[3].name
+        )
+      ),
+  )
+
+  discard TriggerStrArrayRequest.setProvider(
+    ctx,
+    proc(
+        prefix: string
+    ): Future[Result[TriggerStrArrayRequest, string]] {.closure, async.} =
+      var words: array[4, string]
+      for i in 0 .. 3:
+        words[i] = prefix & "-" & $i
+      await StrArrayEvent.emit(gProviderCtx, StrArrayEvent(words: words))
+      return ok(TriggerStrArrayRequest(fired: 4)),
   )
 
 # ---------------------------------------------------------------------------
