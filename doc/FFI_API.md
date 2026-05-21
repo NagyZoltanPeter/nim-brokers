@@ -55,12 +55,12 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [3. `registerBrokerLibrary`](#3-registerbrokerlibrary)
     - [4. How to build with it](#4-how-to-build-with-it)
       - [Required Nim flags](#required-nim-flags)
-      - [ABI strategy flags](#abi-strategy-flags)
+      - [ABI strategy flag](#abi-strategy-flag)
       - [Optional language wrapper flags](#optional-language-wrapper-flags)
       - [Diagnostic flags](#diagnostic-flags)
       - [Worked examples](#worked-examples)
       - [Why `--nimMainPrefix` matters (POSIX)](#why---nimmainprefix-matters-posix)
-      - [External dependencies for CBOR-mode wrappers](#external-dependencies-for-cbor-mode-wrappers)
+      - [External dependencies for wrappers](#external-dependencies-for-wrappers)
       - [Convenience nimble tasks](#convenience-nimble-tasks)
   - [Lifecycle Model](#lifecycle-model)
     - [Per-context creation](#per-context-creation)
@@ -431,8 +431,10 @@ RequestBroker(API):
 ```
 
 `DeviceInfo` is auto-discovered from the `seq[DeviceInfo]` field and
-auto-registered. The CItem struct, encode proc, C header struct, C++ struct, and
-Python dataclass are all generated automatically.
+auto-registered. The C++ struct + jsoncons traits, the Python
+`@dataclass`, the Rust `#[derive(Serialize, Deserialize)]` struct, the
+Go struct with `cbor` tags, and the CDDL schema entry are all
+generated automatically.
 
 ### How It Works
 
@@ -697,41 +699,49 @@ are already ready for use.
 
 This is why the examples do not need a post-create sleep.
 
-The generated C API returns a small result struct with:
+The C ABI surface for context creation is:
 
-- `ctx`
-- `error_message`
+```c
+uint32_t <lib>_createContext(const char** errOut);
+```
 
-When startup fails, `ctx` is zero and `error_message` contains a descriptive
-message that must be released with `free_<lib>_create_context_result(...)`.
+On success it returns a non-zero context id and leaves `*errOut`
+untouched. On failure it returns 0 and writes a heap-allocated
+diagnostic cstring to `*errOut` — the caller MUST release it with
+`<lib>_freeBuffer(errOut)` (cstrings emitted by the runtime live in
+the same shared-heap arena as response buffers). The C++ / Python /
+Rust / Go wrappers wrap this into their idiomatic `Result` /
+exception / `Result<T, String>` surface and free the error string
+automatically.
 
 Sequence overview:
 
 ```mermaid
 sequenceDiagram
   actor F as Foreign caller
-  participant C as mylib_createContext()
+  participant C as &lt;lib&gt;_createContext
   participant D as Delivery thread
   participant P as Processing thread
   participant R as Context registry
-  F->>+C: create context
+  F->>+C: createContext(&errOut)
   C->>C: ensure Nim runtime initialized
-  C->>C: allocate BrokerContext
+  C->>C: allocate BrokerContext + per-ctx couriers
   C-)D: start delivery thread
-  D->>D: install event registration provider
+  D->>D: register event-courier poller, start dispatch loop
   D-->>C: deliveryReady = true
   C-)P: start processing thread
-  P->>P: run setupProviders(ctx)
+  P->>P: setupProviders(ctx) + installAllListeners
+  P->>P: register request-courier poller, start dispatch loop
   P-->>C: processingReady = true
   C->>R: publish active context
   C-->>-F: return ctx
-  Note over F,C: createContext() blocks until both worker threads are ready
+  Note over F,C: createContext returns only after BOTH threads are ready
 ```
 
 ### Post-create configuration
 
-`InitializeRequest` is the request broker type used for configuration after the
-context exists.
+`InitializeRequest` is the request broker type used for configuration
+after the context exists.
 
 Typical responsibilities:
 
@@ -742,10 +752,18 @@ Typical responsibilities:
 
 #### Dynamic provider registration via `InitializeRequest`
 
-In `setupProviders(ctx)`, the `InitializeRequest` provider and `ShutdownRequest` provider must be registered directly on the context so the generated `mylib_initialize(...)` and `mylib_shutdown(...)` exports are immediately usable.
+In `setupProviders(ctx)`, the `InitializeRequest` and `ShutdownRequest`
+providers must be registered on the context so they are immediately
+callable through the typed wrapper (`lib.initializeRequest(...)` /
+`lib.shutdownRequest()`) — which under the hood dispatches via
+`<lib>_call(ctx, "initialize_request", ...)` /
+`<lib>_call(ctx, "shutdown_request", ...)`.
 
-However, `InitializeRequest` can also be used as a dynamic registration point for other providers.
-This enables configuration-driven provider registration and use different implementations for the same API surface.
+`InitializeRequest` can also be used as a dynamic registration point
+for additional providers — call `setProvider` on the other broker
+types from inside the `InitializeRequest` provider closure. This
+enables configuration-driven provider registration without baking the
+choice into `setupProviders`.
 
 
 ### Shutdown
@@ -866,7 +884,7 @@ sequenceDiagram
 
   P->>L: emit(event) (same-thread asyncSpawn)
 
-  alt foreignSubsCount &gt; 0
+  alt foreignSubsCount &gt;
     L->>L: cborEncodeShared(payload)
     L->>R: tryEnqueue(EventMsg{name, ctx, buf, len})
     L--)D: fireBrokerSignal
@@ -918,15 +936,15 @@ Properties:
 ```mermaid
 sequenceDiagram
   actor F as Foreign caller thread
-  participant W as &lt;lib&gt;.hpp method
-  participant C as &lt;lib&gt;_call (C ABI)
+  participant W as <lib>.hpp method
+  participant C as <lib>_call (C ABI)
   participant R as Request courier ring
   participant S as Response slot
   participant P as Processing thread
   participant H as provider closure
   F->>W: typed method call
   W->>W: CBOR-encode args
-  W->>C: _call(ctx, apiName, reqBuf, reqLen, &amp;out)
+  W->>C: _call(ctx, apiName, reqBuf, reqLen, out)
   C->>S: claimSlot — block via Lock+Cond
   C->>R: tryEnqueue(CborCallMsg)
   C-)P: fireBrokerSignal
@@ -1040,9 +1058,9 @@ That proc is the main hook for:
 
 ### Batch request inputs
 
-For request parameters that need to cross the foreign-function boundary as a
-collection, prefer `seq[T]` where `T` is a plain Nim object type defined before
-the broker macro.
+For request parameters that need to cross the foreign-function boundary
+as a collection, prefer `seq[T]` where `T` is a plain Nim object type
+defined before the broker macro.
 
 Example:
 
@@ -1063,80 +1081,124 @@ RequestBroker(API):
 
 Why this shape is preferred:
 
-- The type auto-resolution system discovers `AddDeviceSpec` from the proc
-  parameter and generates a stable foreign representation for each item:
-  a C `*CItem` struct, a C++ value type, and a Python dataclass plus
-  `ctypes.Structure`
-- the generated request export can pass the batch as pointer plus count at the
-  C ABI boundary and reconstruct `seq[AddDeviceSpec]` on the Nim side
-- the same declaration maps cleanly into the generated C++, Python, and C
-  surfaces without handwritten marshalling
+- The type auto-resolution system discovers `AddDeviceSpec` from the
+  proc parameter and registers it in `gApiTypeRegistry`. Each language
+  wrapper then emits a typed representation of the item — a C++ struct
+  with `JSONCONS_ALL_MEMBER_TRAITS`, a Python `@dataclass`, a Rust
+  `#[derive(Serialize, Deserialize)]` struct, a Go struct with cbor
+  tags — so consumer code passes a `vector<AddDeviceSpec>` /
+  `list[AddDeviceSpec]` / `Vec<AddDeviceSpec>` / `[]AddDeviceSpec`
+  directly without touching CBOR by hand.
+- On the wire the batch becomes a single CBOR array nested inside the
+  request envelope; the Nim adapter CBOR-decodes the whole batch into
+  `seq[AddDeviceSpec]` before invoking the provider. No per-item C
+  ABI crossing.
 
-In contrast, literal tuple sequences are not a good fit for the current FFI
-generator because tuple items do not participate in the type registry that
-drives foreign struct generation.
+In contrast, literal tuple sequences are not a good fit for the
+codegen because tuple items do not participate in the type registry
+that drives the per-language typed representations.
 
 Current limitation:
 
-- `RequestBroker(API)` supports at most two signature categories for a broker
-  type: one zero-argument signature and one argument-bearing signature
-- the zero-argument form is optional; it is auto-generated only when no
-  signatures are declared at all
-- if you need to add a batch form such as `AddDevice(devices: seq[AddDeviceSpec])`,
-  and the broker already has another argument-bearing signature, replace that
-  signature or model the variants as separate request broker types
+- `RequestBroker(API)` supports at most two signature categories for a
+  broker type: one zero-argument signature and one argument-bearing
+  signature. When both exist they get distinct apiNames (the
+  zero-arg variant gets a `_query` / `_default` suffix; the
+  arg-bearing variant gets a `_with_args` suffix — see
+  `api_request_broker_cbor.nim` `zeroApiSuffix` / `argApiSuffix`).
+- The zero-argument form is auto-generated only when no signatures
+  are declared at all.
+- If you need to add a batch form such as
+  `AddDevice(devices: seq[AddDeviceSpec])`, and the broker already
+  has another argument-bearing signature, replace that signature or
+  model the variants as separate request broker types.
 
 ### Event callback ABI
 
-The generated C event ABI now includes two identity parameters ahead of the
-event payload:
-
-- `ctx`, the library context that emitted the event
-- `userData`, an opaque pointer supplied by the foreign caller during
-  registration
-
-For an event such as `DeviceDiscovered`, the generated C typedef looks like:
+Every event in a library shares the **same** C-level callback typedef
+— the typed event signature lives only in the language wrappers, not
+at the C ABI. The C-level shape is:
 
 ```c
-typedef void (*DeviceDiscoveredCCallback)(
-  uint32_t ctx,
-  void* userData,
-  int64_t deviceId,
-  const char* name,
-  const char* deviceType,
-  const char* address
-);
+typedef void (*<lib>EventCallback)(
+    uint32_t ctx,
+    const char* eventName,
+    const void* payloadBuf,
+    int32_t payloadLen,
+    void* userData);
 ```
 
-The matching registration export is:
+Registration is one shared C export, parameterized by `eventName`:
 
 ```c
-uint64_t mylib_onDeviceDiscovered(
-  uint32_t ctx,
-  DeviceDiscoveredCCallback callback,
-  void* userData
-);
+uint64_t <lib>_subscribe(
+    uint32_t ctx,
+    const char* eventName,
+    <lib>EventCallback cb,
+    void* userData);
+
+int32_t  <lib>_unsubscribe(
+    uint32_t ctx,
+    const char* eventName,
+    uint64_t handle);
 ```
 
-This shape has two purposes:
+The parameters:
 
-- `ctx` tells the callback which library instance emitted the event
-- `userData` lets the foreign caller carry its own ownership or routing token
-  through the C ABI unchanged
+- `ctx` tells the callback which library instance emitted the event.
+- `eventName` is the snake_case wire name of the broker (e.g.
+  `device_discovered`); the receiver dispatches on it to find the
+  right typed decoder.
+- `payloadBuf` / `payloadLen` carry the CBOR-encoded payload. The
+  buffer is owned by the Nim runtime and is valid only for the
+  duration of the callback — copy if you need to keep it.
+- `userData` is an opaque pointer the foreign caller supplied during
+  `_subscribe`; the Nim runtime stores it and passes it back
+  unchanged. It is the standard hook for per-subscription routing /
+  ownership tokens.
 
-The Nim runtime does not interpret `userData`; it only stores it and passes it
-back to the callback.
+The language wrappers (C++/Python/Rust/Go) generate per-event typed
+handler signatures on top of this shared C callback. For
+`DeviceDiscovered { deviceId: int64; name, deviceType, address:
+string }` the C++ wrapper exposes:
+
+```cpp
+lib.onDeviceDiscovered([](Mylib& self,
+                          int64_t deviceId,
+                          std::string_view name,
+                          std::string_view deviceType,
+                          std::string_view address) {
+    // ...
+});
+```
+
+Under the hood the wrapper registers a single C trampoline whose body
+CBOR-decodes `payloadBuf` into a `DeviceDiscovered` POD struct, then
+unpacks the fields and forwards to the user lambda. Python / Rust /
+Go follow the same pattern with their respective idioms.
 
 ### Data ownership for request results
 
-The generated C request exports return C structs that may own allocated strings
-or arrays.
+Every `void*` crossing the C ABI is allocated by Nim and freed by Nim:
 
-Foreign code must free them using the generated `free_*_result(...)` function.
-For registered libraries these functions are library-prefixed, for example
-`mylib_free_initialize_result(...)`.
+- **Request buffer** (`reqBuf` in `<lib>_call`): allocated by the
+  caller via `<lib>_allocBuffer(size)`, ownership transfers into the
+  call; the Nim processing thread frees it after copying the bytes
+  off.
+- **Response buffer** (`outBuf` returned from `<lib>_call`): allocated
+  by the Nim processing thread (`allocShared0`); ownership transfers
+  to the foreign caller. The caller MUST call `<lib>_freeBuffer(buf)`
+  after decoding the response.
+- **Event payload buffer** (`payloadBuf` in the event callback):
+  allocated by the Nim processing thread; valid only inside the
+  callback. The runtime frees it after the synchronous fan-out
+  completes — do NOT call `_freeBuffer` on it.
 
-The generated C++ and Python wrappers hide that cleanup automatically.
+The generated C++, Python, Rust, and Go wrappers hide all of this
+automatically: they call `_freeBuffer` after CBOR-decoding the
+response, and the event-callback trampoline keeps `payloadBuf` alive
+only for the duration of the user closure. Pure-C consumers calling
+the raw ABI must follow the rules above explicitly.
 
 ---
 
@@ -1450,282 +1512,161 @@ generated output deterministic.
 
 ## Type Mapping Reference
 
-This section shows exactly how every Nim type that can appear in a broker
-declaration is translated through each layer of the FFI stack.
+> The authoritative per-wrapper type-mapping reference lives in
+> [`doc/TYPE_SURFACE.md`](TYPE_SURFACE.md) (Nim → wrapper cheat-sheet)
+> and [`doc/TYPESUPPORT.md`](TYPESUPPORT.md) (support matrix with
+> footnoted defects). This section is the orientation summary; for the
+> full per-language table go to those docs.
 
-### Legend
+### The two layers that matter
 
-The pipeline has four named representations for each type:
+Every Nim type in a broker declaration goes through two layers:
 
-| Representation | Description |
-|---|---|
-| **Nim source** | The type as written in the broker macro body |
-| **C ABI struct field** | The field type inside a `CItem` / `CResult` `{.exportc.}` struct |
-| **C header** | The type as written in the generated `.h` file |
-| **C++ wrapper** | The type used in the generated `.hpp` struct and method signatures |
-| **Python ctypes** | The field type in the generated `ctypes.Structure._fields_` list |
-| **Python dataclass** | The type annotation in the generated `@dataclass` |
+1. **CBOR wire encoding** — uniform across all consumers. Nim
+   primitives map to standard CBOR major types; `string` → text
+   string (major 3); `seq[byte]` → byte string (major 2); `seq[T]` →
+   array (major 4); `object` → map (major 5) with string keys;
+   `distinct T` is transparent on the wire (encoded as its underlying
+   type); enums are encoded as their integer value.
+2. **Typed language wrapper** — each wrapper emits an idiomatic typed
+   representation that the consumer sees. The wrapper internally
+   CBOR-encodes / decodes against the same wire form, so any
+   `seq[Foo]` in Nim arrives as `std::vector<Foo>` in C++,
+   `list[Foo]` in Python, `Vec<Foo>` in Rust, `[]Foo` in Go — without
+   the consumer touching CBOR.
 
-Result structs always carry an additional `char* error_message` / `cstring`
-field not shown in the per-type rows below. Count fields for `seq[T]`
-(`int32_t foo_count`) are also omitted from individual rows but are noted in
-the seq section.
+The C ABI itself stays the fixed 11 functions documented in [C
+API](#c-api); it has no per-type structs.
 
----
+### Cheat-sheet (high level)
 
-### Primitive scalars
+| Nim source | C++ wrapper | Python wrapper | Rust wrapper | Go wrapper |
+|---|---|---|---|---|
+| primitive scalar (`int32`, `uint64`, `float`, `bool`, …) | matching fixed-width type | `int` / `float` / `bool` | matching fixed-width type | matching fixed-width type |
+| `string` | `std::string` / `std::string_view` (event args) | `str` | `String` / `&str` (event args) | `string` |
+| `seq[byte]` | `std::vector<uint8_t>` | `bytes` | `Vec<u8>` (CBOR byte string) | `[]byte` |
+| `seq[T]` (other element types) | `std::vector<T>` | `list[T]` | `Vec<T>` | `[]T` |
+| `array[N, T]` | `std::array<T, N>` | `list[T]` | `Vec<T>` | `[]T` |
+| `object` | `struct` with `JSONCONS_ALL_MEMBER_TRAITS` | `@dataclass` | `#[derive(Serialize, Deserialize)] struct` | struct with `cbor:"name"` tags |
+| `type E = enum …` | `enum class E : int32_t` | `class E(enum.IntEnum)` | `#[repr(i32)] enum E` + `From<i32>` | `type E int32` + `const` group |
+| `type Foo = distinct T` | `using Foo = T;` typed alias | `Foo = T  # distinct T` | `pub type Foo = T;` | `type Foo T` |
 
-| Nim | C ABI (`cint` etc.) | C header | C++ wrapper | Python ctypes | Python annotation |
-|---|---|---|---|---|---|
-| `int` / `int32` | `cint` | `int32_t` | `int32_t` | `ctypes.c_int32` | `int` |
-| `int8` | `int8` | `int8_t` | `int8_t` | `ctypes.c_int8` | `int` |
-| `int16` | `int16` | `int16_t` | `int16_t` | `ctypes.c_int16` | `int` |
-| `int64` | `int64` | `int64_t` | `int64_t` | `ctypes.c_int64` | `int` |
-| `uint` / `uint32` | `cuint` | `uint32_t` | `uint32_t` | `ctypes.c_uint32` | `int` |
-| `uint8` / `byte` | `uint8` | `uint8_t` | `uint8_t` | `ctypes.c_uint8` | `int` |
-| `uint16` | `uint16` | `uint16_t` | `uint16_t` | `ctypes.c_uint16` | `int` |
-| `uint64` | `uint64` | `uint64_t` | `uint64_t` | `ctypes.c_uint64` | `int` |
-| `float` / `float64` | `cdouble` | `double` | `double` | `ctypes.c_double` | `float` |
-| `float32` | `cfloat` | `float` | `float` | `ctypes.c_float` | `float` |
-| `bool` | `bool` | `bool` | `bool` | `ctypes.c_bool` | `bool` |
-| `pointer` | `pointer` | `void*` | `void*` | `ctypes.c_void_p` | `object` |
-| `BrokerContext` | `uint32` | `uint32_t` | `uint32_t` | `ctypes.c_uint32` | `int` |
+Plain Nim type aliases (`type Foo = Bar`, no `distinct`) are
+transparent — they don't survive Nim's typed-macro phase, so the
+wrapper sees the underlying type. Use `distinct` when you need the
+named alias to appear in the wrapper surface.
 
----
-
-### String types
-
-| Nim | C ABI | C struct field | C++ struct / param | Python ctypes | Python annotation |
-|---|---|---|---|---|---|
-| `string` (result field) | `cstring` | `char*` | `std::string` | `ctypes.c_char_p` | `str` |
-| `string` (input param) | `cstring` | `const char*` | `const std::string&` | `ctypes.c_char_p` | `str` |
-| `cstring` | `cstring` | `const char*` | `const std::string&` | `ctypes.c_char_p` | `str` |
-
-In Python, string result fields are decoded from `bytes` to `str` with
-`.decode("utf-8")` in the generated extraction code. Input string parameters
-are encoded with `.encode("utf-8")` before the `ctypes` call.
-
----
-
-### Object types
-
-Plain Nim `object` types are the primary unit of structured data at the FFI
-boundary. The type auto-resolver generates a parallel `CItem` struct for each
-one.
-
-| Nim | C ABI (internal) | C header | C++ wrapper struct | Python ctypes | Python annotation |
-|---|---|---|---|---|---|
-| `type Foo* = object` | `FooCItem {.exportc.}` | `typedef struct { … } FooCItem;` | `struct Foo { … };` | `class FooCItem(ctypes.Structure)` | `Foo` (dataclass) |
-
-Field types within the struct follow the primitive, string, and nested rules
-from the other sections.
-
-When an object type is used as a result field (`result: Foo`) it appears
-directly as a nested struct field. When it is the element type of a `seq[Foo]`
-it appears as a pointer `FooCItem*` (C) / `std::vector<Foo>` (C++) / decoded
-list of `Foo` dataclass instances (Python).
-
----
-
-### `seq[T]` — dynamic arrays
-
-`seq[T]` is split into a pointer field plus a count field at the C ABI
-boundary. The naming convention is `fieldName` + `fieldName_count`.
-
-#### `seq[object]` — sequence of a custom struct
-
-| Layer | Representation |
-|---|---|
-| Nim | `devices: seq[DeviceInfo]` |
-| C ABI struct | `pointer devices; int32 devices_count` |
-| C struct field | `DeviceInfoCItem* devices; int32_t devices_count;` |
-| C++ struct field | `std::vector<DeviceInfo> devices` |
-| C++ input param | `const std::vector<DeviceInfo>& devices` |
-| Python ctypes | `("devices", ctypes.c_void_p), ("devices_count", ctypes.c_int32)` |
-| Python dataclass | `devices: list[DeviceInfo] = field(default_factory=list)` |
-| Python extraction | cast `c_void_p` to `ctypes.POINTER(DeviceInfoCItem)`, loop and reconstruct `DeviceInfo` dataclasses |
-| Python input | build `DeviceInfoCItem` array, pass pointer + `len()` |
-
-#### `seq[string]` — sequence of strings
-
-| Layer | Representation |
-|---|---|
-| Nim | `tags: seq[string]` |
-| C ABI struct | `pointer tags; int32 tags_count` |
-| C struct field | `char** tags; int32_t tags_count;` |
-| C++ struct field | `std::vector<std::string> tags` |
-| Python ctypes | `("tags", ctypes.c_void_p), ("tags_count", ctypes.c_int32)` |
-| Python dataclass | `tags: list[str] = field(default_factory=list)` |
-| Python extraction | cast to `ctypes.POINTER(ctypes.c_char_p)`, decode each element |
-| Python input | encode each string, build `c_char_p` array, pass pointer + `len()` |
-
-#### `seq[primitive]` — sequence of a primitive type (e.g. `seq[byte]`)
-
-| Layer | Representation |
-|---|---|
-| Nim | `rawData: seq[byte]` |
-| C ABI struct | `pointer rawData; int32 rawData_count` |
-| C struct field | `uint8_t* rawData; int32_t rawData_count;` |
-| C++ struct field | `std::vector<uint8_t> rawData` |
-| Python ctypes | `("rawData", ctypes.c_void_p), ("rawData_count", ctypes.c_int32)` |
-| Python dataclass | `rawData: list[int] = field(default_factory=list)` |
-| Python extraction | cast to `ctypes.POINTER(ctypes.c_uint8)`, append each element |
-| Python input | build `(ctypes.c_uint8 * len(...))`, pass pointer + `len()` |
-
-The primitive element type follows the scalar mapping table. `seq[int32]`
-produces `int32_t*` / `ctypes.c_int32`, `seq[float32]` produces `float*` /
-`ctypes.c_float`, and so on.
-
----
-
-### `array[N, T]` — fixed-size arrays
-
-Fixed-size arrays stay inline (no pointer or count field) at every layer.
-
-| Layer | Representation (example: `array[4, int32]`) |
-|---|---|
-| Nim | `capabilities: array[4, int32]` |
-| C ABI struct | `array[4, cint] capabilities` |
-| C struct field | `int32_t capabilities[4];` |
-| C++ struct field | `std::array<int32_t, 4> capabilities` |
-| C++ input param | `const std::array<int32_t, 4>& capabilities` |
-| Python ctypes | `("capabilities", ctypes.c_int32 * 4)` |
-| Python dataclass | `capabilities: list[int] = field(default_factory=list)` |
-| Python extraction | `list(c.capabilities)` |
-| Python input | build `(ctypes.c_int32 * 4)(*capabilities)`, pass pointer |
-
-The element type follows the scalar mapping. `array[N, float32]` produces
-`float32 capabilities[N]` in C and `ctypes.c_float * N` in Python.
-
----
-
-### Enum types
-
-Nim enums are exported as C `typedef enum` with integer values, and as Python
-`IntEnum` subclasses.
-
-| Layer | Representation (example: `DeviceStatus`) |
-|---|---|
-| Nim declaration | `type DeviceStatus* = enum dsUnknown = 0, dsOnline = 1, …` |
-| C ABI struct field | `cint status` |
-| C header typedef | `typedef enum { DEVICE_STATUS_DS_UNKNOWN = 0, … } DeviceStatus;` |
-| C struct field | `DeviceStatus status;` |
-| C++ struct / param | `DeviceStatus status` (same enum typedef via `#include`) |
-| Python ctypes | `("status", ctypes.c_int32)` |
-| Python typedef | `class DeviceStatus(enum.IntEnum): …` (emitted before structs) |
-| Python dataclass | `status: DeviceStatus = 0` |
-| Python extraction | `DeviceStatus(c.status)` — wraps raw int in the IntEnum |
-| Python callback arg | `DeviceStatus(status)` — forwarded as IntEnum to Python callback |
-
-Enum value names are rendered as `SNAKE_CASE_OF_TYPE_SNAKE_CASE_OF_VALUE` in
-C (e.g. `DEVICE_STATUS_DS_ONLINE`). The Python IntEnum uses the same naming.
-
----
-
-### Distinct types
-
-Nim `distinct` types generate a C typedef to their underlying primitive type
-and a Python type alias.
-
-| Layer | Representation (example: `SensorId = distinct int32`) |
-|---|---|
-| Nim declaration | `type SensorId* = distinct int32` |
-| C ABI struct field | `cint sensorId` (resolved to underlying `cint`) |
-| C header typedef | `typedef int32_t SensorId;` |
-| C struct field | `SensorId sensorId;` (typedef'd name) |
-| C++ struct / param | resolves to underlying type (`int32_t`) |
-| Python ctypes | `("sensorId", ctypes.c_int32)` (resolved to underlying ctypes type) |
-| Python typedef | `SensorId = int  # distinct int32` |
-| Python dataclass | `sensorId: SensorId = 0` |
-| Python extraction | `c.sensorId` (raw scalar; `SensorId` is just `int`) |
-
-For `Timestamp = distinct int64`, the C typedef is `int64_t`, the Python alias
-is `Timestamp = int`.
-
-> **Note:** Plain type aliases (`type Foo = Bar`) are transparent in Nim's
-> type system and cannot be preserved through `typed` macro parameters. Use
-> `distinct` when a named C typedef is required.
-
----
-
-### Composite example: full struct
-
-The following shows how `GetSensorData` — which uses all four non-trivial type
-forms — maps through every layer:
+### Composite example
 
 ```nim
 type GetSensorData = object
   sensorId*: SensorId      # distinct int32
-  rawData*:  seq[byte]     # seq[primitive]
+  rawData*:  seq[byte]     # CBOR byte string
   status*:   DeviceStatus  # enum
 ```
 
-**C struct** (`GetSensorDataCResult` in `mylib.h`):
-
-```c
-typedef struct {
-    char*        error_message;
-    int32_t      sensorId;
-    uint8_t*     rawData;
-    int32_t      rawData_count;
-    DeviceStatus status;
-} GetSensorDataCResult;
-```
-
-**C++ struct** (inside `mylib.hpp`):
+becomes (decoded by each wrapper from the same CBOR payload):
 
 ```cpp
+// C++
 struct GetSensorData {
-    std::string             errorMessage;
-    int32_t                 sensorId{};
-    std::vector<uint8_t>    rawData;
-    DeviceStatus            status{};
+  SensorId             sensorId{};   // using SensorId = int32_t;
+  std::vector<uint8_t> rawData;
+  DeviceStatus         status{};     // enum class DeviceStatus : int32_t
 };
 ```
 
-**Python ctypes structure** (inside `mylib.py`):
-
 ```python
-class GetSensorDataCResult(ctypes.Structure):
-    _fields_ = [
-        ("error_message", ctypes.c_char_p),
-        ("sensorId",      ctypes.c_int32),
-        ("rawData",       ctypes.c_void_p),
-        ("rawData_count", ctypes.c_int32),
-        ("status",        ctypes.c_int32),
-    ]
-```
-
-**Python dataclass**:
-
-```python
+# Python
 @dataclass
 class GetSensorData:
-    sensorId: SensorId            = 0
-    rawData:  list[int]           = field(default_factory=list)
-    status:   DeviceStatus        = 0
+    sensorId: SensorId = 0       # SensorId = int
+    rawData: bytes = b""
+    status: DeviceStatus = DeviceStatus(0)
 ```
+
+```rust
+// Rust
+#[derive(Debug, Serialize, Deserialize)]
+struct GetSensorData {
+    #[serde(rename = "sensorId")]
+    sensor_id: SensorId,        // pub type SensorId = i32;
+    #[serde(rename = "rawData", with = "serde_bytes")]
+    raw_data: Vec<u8>,
+    status: DeviceStatus,       // #[repr(i32)] enum DeviceStatus { … }
+}
+```
+
+```go
+// Go
+type GetSensorData struct {
+    SensorId SensorId `cbor:"sensorId"` // type SensorId int32
+    RawData  []byte   `cbor:"rawData"`
+    Status   DeviceStatus `cbor:"status"` // type DeviceStatus int32
+}
+```
+
+All four decode from the **same** CBOR bytes — there is no per-wrapper
+ABI struct. The wrapper layer is the only place a typed representation
+exists.
 
 ---
 
 ### Event callback signatures
 
-For events, types appear in the generated callback typedef and in the C++/Python
-wrapper callback signatures.
+Recall that the C ABI is uniform: every event in a library shares one
+`<lib>EventCallback(ctx, eventName, payloadBuf, payloadLen, userData)`
+typedef and the single `<lib>_subscribe` export (see [Event callback
+ABI](#event-callback-abi)). The per-event typed signature is a
+**wrapper-layer** construct: each wrapper emits a per-event subscribe
+method that registers a single shared C trampoline whose body
+CBOR-decodes `payloadBuf` into the event's struct, unpacks the
+fields, and forwards to the user closure.
 
-| Nim field type | C callback param | C++ callback param | Python callback param |
-|---|---|---|---|
-| `int64` | `int64_t` | `int64_t` | `int` |
-| `string` | `const char*` | `const std::string_view` | `str` (decoded) |
-| `bool` | `bool` | `bool` | `bool` |
-| `enum E` | `E` (typedef enum) | `E` | `E` (IntEnum, wrapped) |
-| `distinct T` | resolved C type | resolved C++ type | `int` / `float` (alias) |
-| `seq[T]` | `void*, int32_t count` | `std::span<const T>` | `list[T]` (decoded in trampoline) |
-| `array[N,T]` | `const elemType* ptr, int32_t count` | `std::span<const T>` | `list[T]` (decoded from pointer+count in trampoline) |
+For an event such as
+`DeviceDiscovered { deviceId: int64; name, deviceType, address: string }`
+the wrappers expose:
 
-C++ and Python event callbacks receive an owner parameter before the payload
-fields: `Mylib& owner` in C++, `owner: Mylib` in Python. The C ABI callback
-receives `uint32_t ctx, void* userData` as the first two arguments instead.
+```cpp
+// C++ — first arg is the library handle for re-entrant calls
+lib.onDeviceDiscovered([](Mylib& owner,
+                          int64_t deviceId,
+                          std::string_view name,
+                          std::string_view deviceType,
+                          std::string_view address) { /* … */ });
+```
+
+```python
+# Python — first arg is the library handle
+def on_device_discovered(owner, device_id, name, device_type, address):
+    ...
+lib.onDeviceDiscovered(on_device_discovered)
+```
+
+```rust
+// Rust — first arg is provided by the dispatcher
+lib.on_device_discovered(|owner: &Mylib,
+                          device_id: i64,
+                          name: String,
+                          device_type: String,
+                          address: String| { /* … */ });
+```
+
+```go
+// Go — handler takes only the typed payload fields; the dispatcher
+// keeps the library handle out of the function signature for
+// idiomatic Go closure capture
+lib.OnDeviceDiscovered(func(deviceId int64,
+                            name, deviceType, address string) { /* … */ })
+```
+
+`seq[T]` event fields decode to `std::vector<T>` / `list[T]` /
+`Vec<T>` / `[]T` respectively — same as the request mapping above.
+
+See `doc/TYPE_SURFACE.md` for the full per-wrapper event signature
+table including `seq[Object]`, `array[N, T]`, and the
+ergonomic divergences in the Go wrapper (no `&self` capture, explicit
+`Off<Event>(handle)`).
 
 ---
 
