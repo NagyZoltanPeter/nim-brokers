@@ -85,11 +85,70 @@ nimble alltests
 
 ## Debug
 
-As nim-brokers are macro heavy, in order to inspect generated AST during compilation:
+nim-brokers is macro-heavy. To inspect the Nim code that the broker
+macros (and `registerBrokerLibrary`) emit, compile any project that
+uses them with `-d:brokerDebug`:
 
 ```
 nim c -d:brokerDebug ...
 ```
+
+Every macro expansion is dumped to its own file under
+`build/broker_debug/`, rendered back to Nim source for offline
+examination. Layout for an FFI library example:
+
+```
+build/broker_debug/
+  ├── InitializeRequest__RequestBrokerApi.gen.nim
+  ├── ShutdownRequest__RequestBrokerApi.gen.nim
+  ├── ListDevices__RequestBrokerApi.gen.nim
+  ├── DeviceStatusChanged__EventBrokerApi.gen.nim
+  ├── ...
+  ├── <BrokerType>__RequestBrokerMt.gen.nim   ← underlying MT broker
+  ├── <BrokerType>__EventBrokerMt.gen.nim       (one per API broker —
+  │                                              the (API) layer wraps it)
+  └── <libName>__BrokerLibrary.gen.nim   ← `registerBrokerLibrary` output:
+                                           the FFI C-ABI surface,
+                                           lifecycle, courier wiring,
+                                           dispatch table (~1000 lines
+                                           for a non-trivial library)
+```
+
+Each file opens with a seven-line header naming the role, the broker
+type, and a context note (e.g. `apiName='initialize_request'`). The
+rest is pure ASCII Nim source — open in your editor, `diff` against
+a previous build, or pipe through `nph` for prettier formatting.
+
+#### Compile-flag reference
+
+| Flag | Effect |
+|---|---|
+| `-d:brokerDebug` | Enable the dump. |
+| `-d:brokerDebugDir=<path>` | Override the output directory (default `build/broker_debug`). |
+| `-d:brokerDebugStdout` | *Also* echo the generated AST to stdout — the historical "print to console" behaviour. Default is file-only because the FFI lib stub alone is ~1000 lines and would drown the build log. |
+
+#### Examples
+
+```sh
+# 1. Default — dump under build/broker_debug/
+nim c -d:BrokerFfiApi -d:brokerDebug --threads:on --app:lib --path:. \
+  --outdir:examples/ffiapi/nimlib/build --nimMainPrefix:mylib \
+  examples/ffiapi/nimlib/mylib.nim
+
+# 2. Custom dump location (and ALSO echo to console)
+nim c -d:brokerDebug -d:brokerDebugDir=/tmp/mylib_ast \
+  -d:brokerDebugStdout ...
+
+# 3. Single-file view on demand
+cat build/broker_debug/*.gen.nim > all.gen.nim
+
+# 4. Prettier formatting per broker
+nph build/broker_debug/<libName>__BrokerLibrary.gen.nim
+```
+
+Files are overwritten on rebuild; stale entries from earlier builds
+are NOT auto-cleaned. `rm -rf build/broker_debug` before compiling
+if you want a fresh snapshot.
 
 ## Types of Brokers
 
