@@ -45,7 +45,7 @@ Current test task coverage:
 - `nimble runTypeMapTestLibGo` — Go parity matrix for the typemappingtestlib, iterates `--mm:orc` and `--mm:refc` (requires Go 1.21+ on PATH)
 - `nimble runTypeMapTestLibCpp` / `runTypeMapTestLibPy` — C++ / Python parity, also iterate both memory managers
 - `nimble runFfiExample{Cpp,Py,Rust,Go}` — wrapper smoke-test examples, also iterate both memory managers
-- Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; Windows always runs `orc` only (refc + chronos thread-pool is unsafe — see Known Limitations).
+- Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; the default iterates both. Windows + refc is CI-green; the historical `skipRefcOnWindows` carve-out is currently disabled (see `doc/LIMITATION.md` §2.2 for the platform-level caveat).
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -337,7 +337,7 @@ test/
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **nim-brokers** (5402 symbols, 9580 relationships, 226 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **nim-brokers** (5476 symbols, 9719 relationships, 228 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

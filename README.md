@@ -712,20 +712,23 @@ Per-request (cross-thread only, transient — no shared-heap alloc per call):
 
 ## Platform & Nim Version Support
 
-Single-thread brokers run on every supported platform under both `--mm:orc`
-and `--mm:refc`. Multi-thread (`(mt)`) brokers and the Broker FFI API have
-narrow, documented carve-outs — refc on Windows is unsupported, refc on
-macOS + Nim 2.2.4 + debug skips a defined set of stress tests, and Nim
-versions older than 2.2.0 are unsupported.
+Every supported platform × Nim version × memory manager combination
+is CI-green on every PR. The only build floor is **Nim ≥ 2.2.0**
+(2.0.x had upstream refc bugs we don't work around). One caveat
+applies on Windows + refc: don't call Nim allocators from your own
+`RegisterWaitForSingleObject` callbacks — see
+[LIMITATION.md](doc/LIMITATION.md) §2.2 for the hazard analysis.
 
-Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`**. ORC has no known
-limitations on any supported platform.
+Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`** for the
+smoothest experience; **Nim ≥ 2.2.4 + refc** also fully supported on
+every platform.
 
-See [LIMITATION.md](doc/LIMITATION.md) for the full support matrix, the
-per-platform issue analysis (Windows refc + chronos thread-pool callback,
-macOS + 2.2.4 stdlib `Channel[T].send` regression, devel allocator
-regression, etc.), and the compile-time test-exclusion mechanism used to
-keep CI green on the known-fragile combos.
+The companion [`doc/design/LESSONS_LEARNED.md`](doc/design/LESSONS_LEARNED.md)
+preserves the diagnostic history of the issues that closed during
+the Round-2 retirement: stdlib `Channel[T]` allocator races, chronos
+Future allocator pressure under high-frequency FFI RPC,
+provider-thread teardown ordering, and the Windows-refc-chronos
+hazard that turned out narrower than feared.
 
 ### Windows toolchain requirements
 
@@ -735,7 +738,7 @@ produces cross-heap crashes). When running the AddressSanitizer tasks,
 `clang_rt.asan_dynamic-x86_64.dll` from
 `C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\` must also be on
 `PATH`; the `memcheck_ci.yml` workflow handles this for CI. See
-LIMITATION.md → §2.1 for the toolchain rationale.
+LIMITATION.md → §3 for the toolchain rationale.
 
 ## License
 

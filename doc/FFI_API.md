@@ -526,7 +526,7 @@ toggles.
 |------|---------|
 | `--threads:on` | The FFI API runtime spawns a delivery and a processing thread per context. |
 | `--app:lib` | Produce a shared library (`.so` / `.dylib` / `.dll`) instead of an executable. |
-| `--mm:orc` *or* `--mm:refc` | Both are supported. ORC is recommended; refc has documented carve-outs (see [LIMITATION.md](LIMITATION.md)). |
+| `--mm:orc` *or* `--mm:refc` | Both are supported on every platform. ORC is the recommended default; refc is CI-green across Linux / macOS / Windows with one Windows-specific caveat documented in [LIMITATION.md](LIMITATION.md) §2.2 (don't allocate from `RegisterWaitForSingleObject` callbacks). |
 | `--nimMainPrefix:<libname>` | POSIX only. Must match the `name:` field of `registerBrokerLibrary` (see "Why it matters" below). On Windows the flag is intentionally **omitted** — using it triggers a Nim codegen bug under the LLVM toolchain. |
 | `--path:.` | Make the project root visible so `import brokers/...` resolves. |
 | `--outdir:build` | Keep `.so` and generated wrapper artifacts out of the source tree. |
@@ -606,7 +606,7 @@ does not match the `name:` field of `registerBrokerLibrary`, the library
 fails to link.
 
 On Windows the flag is omitted intentionally (see `nimMainPrefixFlag` in
-[brokers.nimble](../brokers.nimble) and [LIMITATION.md](LIMITATION.md) §2.1).
+[brokers.nimble](../brokers.nimble) and [LIMITATION.md](LIMITATION.md) §3.1).
 
 #### External dependencies for wrappers
 
