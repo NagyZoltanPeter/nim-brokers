@@ -8,15 +8,20 @@ evidence-backed: ✅ entries are validated by the parity test suite
 confirmed broken by direct probe; ❓ entries are untested.
 
 **Pure C is not in the matrix.** The typed-C wrapper is deferred — see
-`doc/CBOR_Refactoring.md` §10. Pure-C consumers currently see only the
-raw 11-function CBOR ABI and must hand-encode payloads against it.
+`doc/design/CBOR_Refactoring.md` §10. Pure-C consumers currently see
+only the raw 11-function CBOR ABI and must hand-encode payloads against
+it.
 
 ## ABI mode
 
 CBOR is the only FFI mode. Activate codegen with `-d:BrokerFfiApi`. The
-native per-type C codegen was retired — see `doc/CBOR_Refactoring.md`.
+native per-type C codegen was retired — see `doc/design/CBOR_Refactoring.md`.
 The historical `-d:BrokerFfiApiNative` and transitional
-`-d:BrokerFfiApiCBOR` flags no longer exist.
+`-d:BrokerFfiApiCBOR` flags no longer exist. Restrictions documented in
+earlier revisions of this file that referenced `api_type.nim` /
+`toCFieldType` / the `CItem` layout no longer apply — every such cell
+has been re-probed and migrated to ✅ where the parity tests now lock
+the behaviour in.
 
 ## Legend
 
@@ -46,9 +51,9 @@ The field appears inside the `Result<T>` payload struct returned by a request me
 | `seq[primitive]` (e.g. `seq[int64]`) | ✅ | ✅ | ✅ | ✅ |
 | `seq[string]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[Object]` (Object has prim/string fields only) | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` (the inner object contains its own `seq[T]`) | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
+| `seq[Object<seq>]` (the inner object contains its own `seq[T]`) | ✅ ² | ✅ ² | ✅ ² | ✅ ² |
 | `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ |
-| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
+| `array[N, string]` | ✅ ³ | ✅ ³ | ✅ ³ | ✅ ³ |
 | `array[N, Object]` | ✅ | ✅ | ✅ | ✅ |
 | `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ | ✅ | ✅ | ✅ |
 | `tuple[a: T, b: U, ...]` (named) | ✅ | ✅ | ✅ | ✅ |
@@ -68,10 +73,10 @@ The type appears in the request method signature on the *caller* side.
 | `seq[primitive]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[string]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[Object]` (prim/string fields only) | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
-| `array[N, primitive]` | ❓ ⁴ | ❓ ⁴ | ❓ ⁴ | ❓ ⁴ |
-| `array[N, string]` | ❌ ³ | ❌ ³ | ❌ ³ | ❌ ³ |
-| `array[N, Object]` | ❓ ⁴ | ❓ ⁴ | ❓ ⁴ | ❓ ⁴ |
+| `seq[Object<seq>]` | ✅ ² | ✅ ² | ✅ ² | ✅ ² |
+| `array[N, primitive]` | ✅ ⁴ | ✅ ⁴ | ✅ ⁴ | ✅ ⁴ |
+| `array[N, string]` | ✅ ³ | ✅ ³ | ✅ ³ | ✅ ³ |
+| `array[N, Object]` | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ |
 | `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ | ✅ | ✅ | ✅ |
 
 ## Section 3 — Event PAYLOAD field types
@@ -87,49 +92,74 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
 | `seq[primitive]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[string]` | ✅ | ✅ | ✅ | ✅ |
 | `seq[Object]` (prim/string fields) | ✅ | ✅ | ✅ | ✅ |
-| `seq[Object<seq>]` | ❌ ² | ❌ ² | ❌ ² | ❌ ² |
+| `seq[Object<seq>]` | ✅ ² | ✅ ² | ✅ ² | ✅ ² |
 | `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ |
-| `array[N, string]` | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ |
-| `array[N, Object]` | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ | ❓ ⁵ |
+| `array[N, string]` | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ | ❓ ⁶ |
+| `array[N, Object]` | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ |
 
 ## Footnotes
 
 1. **Object as inline field** — e.g. `type Outer = object; inner: Inner`
-   with both registered. CBOR map-encoding nests naturally, and the
-   schema registry walks nested object fields, so this almost certainly
-   works on every wrapper, but no test exercises it. Treat as untested
-   until a probe is added.
+   where `Inner` is a separate registered Object held directly (not via
+   `seq` / `array` / `Option`). CBOR map-encoding nests naturally and
+   the wrappers' `seq[Object]` / `array[N, Object]` cases prove the
+   wrapper codegen recurses correctly through composite fields, so this
+   almost certainly works — but no parity test exercises the direct
+   inline form yet. Treat as untested until a probe is added.
 
-2. **`seq[Object<seq>]` — inner object contains a composite field.**
-   The codegen restricts `seq[T]` element objects to those with
-   primitive / string / Option fields only. An inner object that itself
-   contains a `seq[T]` field cannot register as an element type and the
-   outer composite never reaches codegen. Affects every wrapper equally.
+2. **`seq[Object<seq>]` works end-to-end on all wrappers.** Validated
+   by `test_list_inners_result_*`, `test_bulk_inners_param_roundtrip`,
+   and `test_inners_updated_event` in the parity suite. `Inner` carries
+   `seq[byte]` inside, then sits inside `seq[Inner]` on the outer
+   broker — the very shape earlier revisions of this file marked ❌.
+   The historical restriction was a side-effect of the retired native
+   ABI's `CItem` layout requiring simple-ident field types; the CBOR
+   codegen has no such restriction.
 
-3. **`array[N, string]`** — the macro rejects `array[N, string]` because
-   the wrapper-side codegen does not currently emit a fixed-size string
-   array translation. Use `seq[string]` instead.
+3. **`array[N, string]` works end-to-end on all wrappers.** Validated
+   by `test_fixed_str_array_result` (§1) and `test_set_tags_array_param`
+   (§2). Wrappers translate `array[N, string]` to their
+   variable-length list types (`std::vector<std::string>`,
+   `List[str]`, `Vec<String>`, `[]string`); the Nim side range-checks
+   the length on decode. If the wrapper passes a length other than
+   `N` the broker returns a clean `err(...)`.
 
-4. **`array[N, T]` as request param** — every test exercises
-   `array[N, T]` only as a *result* field, never as a parameter. No
-   end-to-end coverage; treat as suspect until probed.
+4. **`array[N, primitive]` as request param** — validated by
+   `test_sum_prim_array_param` for `array[4, int32]`. Same
+   length-on-decode semantics as footnote 3 — the wrapper passes a
+   length-N vector / list / slice and the Nim side validates.
 
-5. **`array[N, string]` / `array[N, Object]` in events** — no empirical
-   data. The event codegen path is independent from the request path,
-   so behaviour may differ; treat as untested until probed.
+5. **`array[N, Object]` as request param** — has full coverage as a
+   *result* field (§1) and as an *event* payload (§3, footnote 7), but
+   no parity test exercises the param direction. The wrapper codegen
+   path is shared with `array[N, string]` / `array[N, primitive]`
+   params, so behaviour almost certainly matches — treat as untested
+   until probed.
+
+6. **`array[N, string]` in events** — array-in-event is exercised by
+   `array[N, primitive]` and `array[N, Object]` (footnote 7); the
+   string element variant is missing a probe but rides the same event
+   codegen path.
+
+7. **`array[N, Object]` in events** — validated by
+   `test_fixed_obj_array_event`. The wrappers deliver the slots as a
+   length-N list/span of the typed element struct.
 
 ## Recommended idioms
 
 To stay safely inside the green cells:
 
-1. **Use `seq[T]` over `array[N, T]` when the element is `string`.**
-   Fixed-size arrays of strings are rejected (footnote 3). Fixed-size
-   arrays of primitives and (as a result field) Objects are safe.
-2. **Keep object field types flat or `seq[primitive]`.** A registered
-   Object whose fields are all primitives, strings, or `seq[primitive]`
-   is universally safe. Adding a `seq[CompositeT]` field inside an
-   element-type object makes the *enclosing* `seq[Outer]` impossible
-   (footnote 2).
+1. **Prefer `seq[T]` over `array[N, T]` when N varies between
+   instances.** Both work; `seq[T]` is naturally variable-length while
+   `array[N, T]` enforces a runtime length check on decode. Use the
+   array form when N is a true protocol-level invariant.
+2. **Composite object fields are fine.** A registered Object can carry
+   `seq[byte]`, `seq[T]`, `array[N, T]`, `Option[T]`, or nested objects
+   in any combination. The earlier "keep object field types flat"
+   guidance was a native-ABI artifact and no longer applies.
+3. **Nested types auto-register.** Plain Nim `object` / `enum` /
+   `distinct` types referenced in a broker signature are discovered
+   and registered automatically — no `ApiType` annotation needed.
 
 ## Worked example: `WakuMessage`
 
@@ -158,6 +188,7 @@ Field-by-field, every type is in a green row of all three sections
 | Event **payload** — `EventBroker(API): type WakuMessageReceived = object` with these fields | ✅ | Same shape as `TagSeqEvent` / `PrimScalarEvent`, all green in the parity matrix. |
 | Request **parameter** — `proc signature(msg: WakuMessage)` | ✅ | Object-as-param is supported on all wrappers (Section 2). |
 | Field of *another* registered Object | ❓ | Inline-nested Object case is untested (footnote 1). |
+| `seq[WakuMessage]` — batched delivery | ✅ | Covered by the `seq[Object<seq>]` row — `WakuMessage` carries `seq[byte]` fields, the exact composite-inside-element shape (footnote 2). |
 
 ```rust
 // Rust — pass the whole object directly
