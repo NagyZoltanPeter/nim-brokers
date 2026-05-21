@@ -42,8 +42,7 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [Source Layout](#source-layout)
     - [Module Dependency Graph](#module-dependency-graph)
     - [Codegen Module Responsibilities](#codegen-module-responsibilities)
-      - [Native-mode language outputs](#native-mode-language-outputs)
-      - [CBOR-mode language outputs](#cbor-mode-language-outputs)
+      - [Language outputs](#language-outputs)
     - [Compile-Time Data Flow](#compile-time-data-flow)
   - [Type Auto-Resolution](#type-auto-resolution)
     - [Usage](#usage)
@@ -91,10 +90,9 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [What it does not guarantee](#what-it-does-not-guarantee)
     - [Callback behavior](#callback-behavior)
     - [Provider behavior](#provider-behavior)
-  - [Future Phases](#future-phases)
-    - [Phase 3: CBOR Tunnel Surface](#phase-3-cbor-tunnel-surface)
-    - [Phase 4: Rust / Go Codegen](#phase-4-rust--go-codegen)
-    - [Adding a New Language Surface](#adding-a-new-language-surface)
+  - [Future Work](#future-work)
+    - [Typed C surface](#typed-c-surface)
+    - [Adding a new language surface](#adding-a-new-language-surface)
   - [Type Mapping Reference](#type-mapping-reference)
     - [Legend](#legend)
     - [Primitive scalars](#primitive-scalars)
@@ -128,14 +126,18 @@ Typical consumers are:
 
 The FFI API solution provides:
 
-- C-callable request functions for API request brokers - for `native` ABI only
-- C-callable event registration functions for API event brokers - for `native` ABI only
-- a generated library lifecycle API
-- a generated C header (`<lib>.h`)
-- a generated C++ wrapper header (`<lib>.hpp`) that includes the C header
+- a fixed 11-function CBOR C ABI (see `## C API` below) that every
+  library exports identically — same shape regardless of how many
+  request / event brokers are declared
+- a generated library lifecycle API (`<lib>_initialize`,
+  `<lib>_createContext`, `<lib>_shutdown`, `<lib>_version`)
+- a generated C header (`<lib>.h`) declaring the CBOR ABI + the
+  per-library event-callback typedef
+- a generated C++ wrapper header (`<lib>.hpp`) with typed methods that
+  CBOR-encode / decode internally (always emitted)
 - an optional generated Python wrapper module (`<lib>.py`)
-- an optional generated Rust wrapper module (`<lib>_rs/<lib>.rs`)
-- an optional generated Go wrapper module (`<lib>_go/<lib>.go`)
+- an optional generated Rust wrapper crate (`<lib>_rs/`)
+- an optional generated Go wrapper module (`<lib>_go/`)
 
 
 The FFI API is designed around a per-library-context runtime model. Each call to
@@ -145,11 +147,10 @@ threads and broker registrations.
 ### Layered Architecture
 
 A single Nim API definition — one library or module written once with
-`RequestBroker(API)`, `EventBroker(API)`, and `registerBrokerLibrary` — can be
-compiled into either of two C ABI flavors. Each flavor produces its own,
-ABI-specific C header, but every supported language binding above sits behind
-**one unified, idiomatic interface** so consumers never have to know which ABI
-their library was built against.
+`RequestBroker(API)`, `EventBroker(API)`, and `registerBrokerLibrary` —
+compiles into a fixed CBOR C ABI plus an idiomatic typed wrapper for
+each supported language. Consumer code talks to the typed wrapper; the
+CBOR encode / decode is contained inside the wrapper.
 
 ```mermaid
 flowchart TB
@@ -163,52 +164,46 @@ flowchart TB
         AppGo["Go app"]
     end
 
-    subgraph Wrappers["Unified Language Bindings (single API per language)"]
+    subgraph Wrappers["Typed Language Bindings"]
         direction LR
-        WCpp["&lt;lib&gt;.hpp<br/>(C++ wrapper class)"]
-        WPy["&lt;lib&gt;.py<br/>(Python ctypes / cbor2)"]
-        WRs["&lt;lib&gt;_rs/<br/>(Rust crate)"]
-        WGo["&lt;lib&gt;_go/<br/>(Go module)"]
+        WCpp["&lt;lib&gt;.hpp<br/>(C++ wrapper class<br/>jsoncons)"]
+        WPy["&lt;lib&gt;.py<br/>(Python ctypes + cbor2)"]
+        WRs["&lt;lib&gt;_rs/<br/>(Rust crate<br/>ciborium + serde)"]
+        WGo["&lt;lib&gt;_go/<br/>(Go module<br/>fxamacker/cbor)"]
     end
 
-    subgraph CABI["C ABI Surface (build-time choice)"]
+    subgraph CABI["C ABI Surface"]
         direction LR
-        Native["<b>Native ABI</b><br/>typed C functions<br/>one export per request/event<br/><i>&lt;lib&gt;.h</i>"]
-        Cbor["<b>CBOR ABI</b><br/>fixed 11-function ABI<br/>CBOR-encoded payloads<br/><i>&lt;lib&gt;.h (CBOR shape)</i>"]
+        Cbor["<b>CBOR ABI</b><br/>fixed 11-function ABI<br/>+ one event-callback typedef<br/>CBOR-encoded payloads<br/><i>&lt;lib&gt;.h</i>"]
     end
 
     subgraph Nim["Nim Library (single source)"]
         direction TB
         UserApi["User API definition<br/>RequestBroker(API) / EventBroker(API)<br/>registerBrokerLibrary"]
-        Runtime["Generated runtime<br/>lifecycle • delivery thread • processing thread"]
+        Runtime["Generated runtime<br/>lifecycle • delivery thread • processing thread<br/>request courier • event courier"]
         Brokers["MT brokers + chronos<br/>(EventBroker mt / RequestBroker mt)"]
         UserApi --> Runtime --> Brokers
     end
 
     AppNim --> Brokers
-    AppC --> Native
+    AppC --> Cbor
     AppCpp --> WCpp
     AppPy --> WPy
     AppRs --> WRs
     AppGo --> WGo
 
-    WCpp --> Native
     WCpp --> Cbor
-    WPy --> Native
     WPy --> Cbor
-    WRs --> Native
     WRs --> Cbor
-    WGo --> Native
     WGo --> Cbor
 
-    Native --> Nim
     Cbor --> Nim
 
     classDef abi fill:#fef3c7,stroke:#b45309,color:#000
     classDef wrap fill:#dbeafe,stroke:#1d4ed8,color:#000
     classDef nim fill:#dcfce7,stroke:#15803d,color:#000
     classDef app fill:#f3f4f6,stroke:#374151,color:#000
-    class Native,Cbor abi
+    class Cbor abi
     class WCpp,WPy,WRs,WGo wrap
     class UserApi,Runtime,Brokers nim
     class AppNim,AppC,AppCpp,AppPy,AppRs,AppGo app
@@ -216,19 +211,17 @@ flowchart TB
 
 **Key invariants of the layering:**
 
-| Layer | Per-library count | What changes per ABI mode | What stays identical |
-|-------|-------------------|----------------------------|-----------------------|
-| Nim source | 1 | nothing — same source compiles both modes | the user API definition |
-| C ABI / `<lib>.h` | 1 (per build) | function shape (typed exports vs. fixed 11-fn CBOR ABI) | header filename |
-| Language wrapper | 1 per language | internal marshaling (direct cgo/ctypes vs. CBOR encode/decode) | the public class/struct, method names, signatures |
-| Consumer code | 1 | nothing | source compiles unchanged against either build |
+| Layer | Per-library count | What it does |
+|-------|-------------------|--------------|
+| Nim source | 1 | declares brokers + providers; mode-agnostic |
+| C ABI / `<lib>.h` | 1 | fixed 11-function CBOR ABI + event-callback typedef |
+| Language wrapper | 1 per language | typed methods; CBOR encode / decode internally |
+| Consumer code | 1 | uses the typed wrapper; sees no CBOR |
 
-The CBOR ABI exists for environments where a stable, narrow C surface and
-self-describing wire format are preferable to a typed-but-wide native ABI
-(e.g. for plug-in distribution, language runtimes without good cgo/ctypes
-ergonomics, or schema-evolution requirements). The native ABI exists for
-zero-overhead in-process embedding. The wrapper layer is the abstraction that
-makes this choice invisible to application code.
+The CBOR ABI offers a stable, narrow C surface and a self-describing
+wire format. The typed wrapper layer hides the CBOR encode / decode
+from application code, so consumers work against an idiomatic
+language-native interface.
 
 ---
 
@@ -239,70 +232,65 @@ The FFI API system is split into focused modules, each owning one concern.
 ### Source Layout
 
 The FFI API codegen lives under `brokers/internal/`. It is split into a
-mode-agnostic core (schema, type resolution, lifecycle), a **native**-mode
-codegen layer (one module per output language), and a parallel **CBOR**-mode
-codegen layer (one module per output language plus shared codec helpers).
+mode-agnostic core (schema, type resolution, lifecycle) and the
+CBOR-mode codegen layer (one module per output language plus shared
+codec helpers).
 
 ```
 brokers/
-  api_library.nim                  registerBrokerLibrary — lifecycle, runtime
-                                   threads, mode dispatch, file orchestration
+  api_library.nim                  registerBrokerLibrary — lifecycle,
+                                   processing + delivery threads,
+                                   request courier wiring, event courier
+                                   wiring, file orchestration
   internal/
-    api_ffi_mode.nim               BrokerFfiMode enum + brokerFfiMode flag
-                                   (Native vs CBOR — driven by -d: flags)
     api_schema.nim                 Compile-time type registry
                                    (ApiTypeEntry, gApiTypeRegistry)
     api_type_resolver.nim          Two-phase external-type auto-resolution
-    api_type.nim                   Deprecated ApiType shim (warns; use plain
-                                   Nim types)
-    api_common.nim                 Re-export hub + legacy bridge + runtime
-                                   memory helpers (alloc/free across ABI)
+    api_type.nim                   Deprecated ApiType shim (warns; use
+                                   plain Nim types)
+    api_common.nim                 Re-export hub + runtime memory helpers
+                                   (alloc/free across the ABI)
 
-    # Native-mode brokers
-    api_request_broker.nim         RequestBroker(API) macro + deferred codegen
-    api_event_broker.nim           EventBroker(API) macro + deferred codegen
+    # CBOR-mode broker codegen
+    api_request_broker_cbor.nim    CBOR RequestBroker(API) codegen +
+                                   per-method adapter (envelope
+                                   encode / decode)
+    api_event_broker_cbor.nim      CBOR EventBroker(API) codegen +
+                                   per-event entry registration
 
-    # Native-mode language codegen (one file per language surface)
-    api_codegen_nim.nim            Nim->C ABI type mapping (toCFieldType ...)
-    api_codegen_c.nim              C type mapping + .h generation
-    api_codegen_cpp.nim            C++ type mapping + .hpp generation
-    api_codegen_python.nim         Python type mapping + .py generation
-    api_codegen_rust.nim           Rust type mapping + Cargo crate generation
-                                   (<lib>_rs/Cargo.toml + src/lib.rs)
-    api_codegen_go.nim             Go type mapping + cgo module generation
-                                   (<lib>_go/go.mod + <lib>.go +
-                                   <lib>_callbacks.c)
-    api_codegen_cmake.nim          <lib>Config.cmake package emission for
-                                   find_package(<lib> CONFIG REQUIRED)
+    # CBOR runtime helpers
+    api_cbor_codec.nim             BrokerCbor flavor, encode / decode
+                                   helpers, distinct / enum bindings
+    api_cbor_descriptor.nim        Stable runtime descriptor types for
+                                   the discovery API
+    api_cbor_subs_registry.nim     Shared-heap registry of foreign event
+                                   subscribers (lock-protected; safe
+                                   under --mm:refc)
+    api_cbor_courier.nim           Request-side courier ring + per-call
+                                   response slots (foreign _call →
+                                   processing thread)
+    api_cbor_event_courier.nim     Event-side courier ring
+                                   (fire-and-forget; processing thread →
+                                   delivery thread)
 
-    # CBOR-mode brokers
-    api_request_broker_cbor.nim    CBOR RequestBroker(API) codegen + per-method
-                                   adapter (envelope encode/decode)
-    api_event_broker_cbor.nim      CBOR EventBroker(API) codegen + per-event
-                                   entry registration
-
-    # CBOR-mode shared runtime + language codegen
-    api_cbor_codec.nim             BrokerCbor flavor, encode/decode helpers,
-                                   distinct/enum bindings
-    api_cbor_descriptor.nim        Stable runtime descriptor types for the
-                                   discovery API
-    api_cbor_subs_registry.nim     Per-context CBOR event subscriber registry
+    # CBOR language codegen (one module per output surface)
     api_codegen_cbor_h.nim         Fixed 11-function CBOR C header
     api_codegen_cbor_hpp.nim       jsoncons-backed C++ wrapper
     api_codegen_cbor_py.nim        cbor2-backed Python wrapper
-    api_codegen_cbor_rust.nim      ciborium+serde-backed Rust crate
+    api_codegen_cbor_rust.nim      ciborium + serde-backed Rust crate
     api_codegen_cbor_go.nim        fxamacker/cbor-backed Go module
     api_codegen_cbor_cddl.nim      <lib>.cddl schema emission
+    api_codegen_cmake.nim          <lib>Config.cmake package emission
 
     # Multi-thread broker runtime (the FFI API runtime builds on these)
-    mt_broker_common.nim           Shared MT runtime (thread id/gen, dispatch
-                                   loop, signal helpers)
+    mt_broker_common.nim           Shared MT runtime (thread id/gen,
+                                   dispatch loop, signal helpers)
     mt_event_broker.nim            EventBroker(mt) macro
     mt_request_broker.nim          RequestBroker(mt) macro
 
     helper/
-      broker_utils.nim             Shared AST parsing (parseSingleTypeDef,
-                                   parseTypeDefs)
+      broker_utils.nim             Shared AST parsing
+                                   (parseSingleTypeDef, parseTypeDefs)
 ```
 
 ### Module Dependency Graph
@@ -310,27 +298,25 @@ brokers/
 ```
 helper/broker_utils.nim       (no API deps)
         |
-api_ffi_mode.nim -- api_schema.nim -- api_type_resolver.nim
-        |                  |
-        |                  +--> native codegen
-        |                  |      api_codegen_nim/c/cpp/python/rust/go.nim
-        |                  |      api_codegen_cmake.nim
-        |                  |
-        |                  +--> cbor codegen
-        |                         api_cbor_codec.nim
-        |                         api_cbor_descriptor.nim
-        |                         api_cbor_subs_registry.nim
-        |                         api_codegen_cbor_{h,hpp,py,rust,go,cddl}.nim
+api_schema.nim -- api_type_resolver.nim
         |
-api_common.nim   (re-exports all codegen modules + legacy bridge + runtime
-                  memory helpers)
+        +--> CBOR codegen
+                api_cbor_codec.nim
+                api_cbor_descriptor.nim
+                api_cbor_subs_registry.nim
+                api_cbor_courier.nim
+                api_cbor_event_courier.nim
+                api_codegen_cbor_{h,hpp,py,rust,go,cddl}.nim
+                api_codegen_cmake.nim
         |
-        +--> api_request_broker.nim       | native-mode brokers
-        +--> api_event_broker.nim         |
-        +--> api_request_broker_cbor.nim  | cbor-mode brokers
-        +--> api_event_broker_cbor.nim    |
+api_common.nim   (re-exports schema + type resolver +
+                  runtime memory helpers)
         |
-api_library.nim   (lifecycle, runtime threads, mode dispatch,
+        +--> api_request_broker_cbor.nim
+        +--> api_event_broker_cbor.nim
+        |
+api_library.nim   (lifecycle, two threads per context,
+                   request + event courier wiring,
                    file orchestration via generate*File procs)
 ```
 
@@ -359,34 +345,25 @@ Each language codegen module owns:
    (`generateCHeaderFile`, `generateCppHeaderFile`, `generatePythonFile`,
    `generateRustCrate`, `generateGoModule`, ...).
 
-#### Native-mode language outputs
+#### Language outputs
 
 | Module | Output file(s) | Notes |
 |--------|----------------|-------|
-| `api_codegen_nim.nim` | (AST only) | Nim->C ABI mapping for `{.exportc.}` structs; no file written. |
-| `api_codegen_c.nim` | `<lib>.h` | Always emitted. Per-request typed structs + free helpers + event typedefs. |
-| `api_codegen_cpp.nim` | `<lib>.hpp` | Always emitted. Owner-aware `EventDispatcher<>` template; non-copyable wrapper class. |
-| `api_codegen_python.nim` | `<lib>.py` | Opt-in via `-d:BrokerFfiApiGenPy`. ctypes wrapper + dataclasses + IntEnum typedefs. |
-| `api_codegen_rust.nim` | `<lib>_rs/Cargo.toml`, `src/lib.rs` | Opt-in via `-d:BrokerFfiApiGenRust`. Hand-written `extern "C"` (no bindgen). |
-| `api_codegen_go.nim` | `<lib>_go/go.mod`, `<lib>.go`, `<lib>_callbacks.c` | Opt-in via `-d:BrokerFfiApiGenGo`. cgo with companion `.c` for typed trampolines. |
-| `api_codegen_cmake.nim` | `<lib>Config.cmake` | CMake package config exposing `mylib::mylib` (C) and `mylib::mylib_cpp` (C++) IMPORTED targets. |
-
-#### CBOR-mode language outputs
-
-| Module | Output file(s) | Notes |
-|--------|----------------|-------|
-| `api_codegen_cbor_h.nim` | `<lib>.h` | Fixed 11-function C ABI + one event-callback typedef. |
-| `api_codegen_cbor_hpp.nim` | `<lib>.hpp` | C++ wrapper backed by jsoncons; same public surface as native. |
-| `api_codegen_cbor_py.nim` | `<lib>.py` | Python wrapper backed by `cbor2`. |
-| `api_codegen_cbor_rust.nim` | `<lib>_rs/Cargo.toml`, `src/lib.rs` | Rust crate using `ciborium` + `serde` (per-method `__Env<T>` envelope). |
-| `api_codegen_cbor_go.nim` | `<lib>_go/<lib>_cbor.go` | Go file using `github.com/fxamacker/cbor/v2` (build tag `cbor`). |
-| `api_codegen_cbor_cddl.nim` | `<lib>.cddl` | CDDL schema for the CBOR surface; also returned by `<lib>_getSchema()` at runtime. |
+| `api_codegen_cbor_h.nim` | `<lib>.h` | Fixed 11-function C ABI + one event-callback typedef. Always emitted. |
+| `api_codegen_cbor_hpp.nim` | `<lib>.hpp` | C++ wrapper backed by jsoncons. Always emitted. |
+| `api_codegen_cbor_py.nim` | `<lib>.py` | Python wrapper backed by `cbor2`. Opt-in via `-d:BrokerFfiApiGenPy`. |
+| `api_codegen_cbor_rust.nim` | `<lib>_rs/Cargo.toml`, `src/lib.rs` | Rust crate using `ciborium` + `serde` (per-method `__Env<T>` envelope). Opt-in via `-d:BrokerFfiApiGenRust`. |
+| `api_codegen_cbor_go.nim` | `<lib>_go/go.mod`, `<lib>.go`, `<lib>_cbor.go` | Go module using `github.com/fxamacker/cbor/v2`. Opt-in via `-d:BrokerFfiApiGenGo`. |
+| `api_codegen_cbor_cddl.nim` | `<lib>.cddl` | CDDL schema for the CBOR surface; also returned by `<lib>_getSchema()` at runtime. Always emitted. |
+| `api_codegen_cmake.nim` | `<lib>Config.cmake` | CMake package config exposing `mylib::mylib` (C) and `mylib::mylib_cpp` (C++) IMPORTED targets. Always emitted. |
 
 The shared CBOR runtime helpers (`api_cbor_codec.nim`,
-`api_cbor_descriptor.nim`, `api_cbor_subs_registry.nim`) are imported by the
-broker codegen modules (`api_request_broker_cbor.nim`,
-`api_event_broker_cbor.nim`) but not by the language-specific codegen
-modules — those only read from the schema registry.
+`api_cbor_descriptor.nim`, `api_cbor_subs_registry.nim`,
+`api_cbor_courier.nim`, `api_cbor_event_courier.nim`) are imported by
+the broker codegen modules (`api_request_broker_cbor.nim`,
+`api_event_broker_cbor.nim`) and by `api_library.nim`'s lifecycle
+codegen, but not by the language-specific codegen modules — those
+only read from the schema registry.
 
 ### Compile-Time Data Flow
 
@@ -402,20 +379,32 @@ modules — those only read from the schema registry.
    a. getTypeImpl() extracts fields
    b. Recursion for nested object types
    c. Registers in gApiTypeRegistry
-   d. Generates CItem type + encode proc
-   e. Appends to all language accumulators (C, C++, Python)
+   d. Appends to per-language CBOR codegen accumulators (C, C++, Python,
+      Rust, Go, CDDL)
 
-4. Deferred broker codegen expands (runs after step 3):
+4. Deferred broker codegen (api_request_broker_cbor /
+   api_event_broker_cbor) expands after step 3:
    a. lookupFfiStruct() succeeds — registry populated
-   b. Generates CResult struct, encode proc, exported C functions
-   c. Appends to all language accumulators
+   b. Generates the per-method / per-event adapter that
+      CBOR-encodes / decodes the typed Nim payload at the ABI edge
+   c. Registers the entry in gApiCborRequestEntries /
+      gApiCborEventEntries for api_library.nim to wire later
 
 5. registerBrokerLibrary macro:
-   a. Generates lifecycle code (createContext, shutdown, threads)
-   b. Calls file generators:
-      - generateCHeaderFile()   → <libName>.h
-      - generateCppHeaderFile() → <libName>.hpp
-      - generatePythonFile()    → <libName>.py
+   a. Generates lifecycle code (createContext, shutdown,
+      processing + delivery threads, request courier + event courier
+      allocation / shutdown, per-event listener installers including the
+      atomic-counter fast path and dropAllListeners cleanup hook)
+   b. Generates _call dispatch case statement, _subscribe / _unsubscribe
+      C exports, _listApis / _getSchema discovery exports
+   c. Calls file generators:
+      - generateCborHeaderFile()  → <libName>.h
+      - generateCborHppFile()     → <libName>.hpp
+      - generateCborPyFile()      → <libName>.py        (opt-in)
+      - generateCborRustCrate()   → <libName>_rs/...    (opt-in)
+      - generateCborGoModule()    → <libName>_go/...    (opt-in)
+      - generateCborCddlFile()    → <libName>.cddl
+      - generateCmakeConfigFile() → <libName>Config.cmake
 ```
 
 ---
@@ -502,15 +491,18 @@ RequestBroker(API):
 
 This generates:
 
-- in `native` ABI mode:
-  - a C result struct - in `native` ABI mode.
-  - a C-exported request function such as `mylib_get_device(...)` once the broker is registered into a library
-  - a library-prefixed `mylib_free_*_result(...)` function for result-owned memory
-- in `cbor` ABI mode:
-  - a C-exported ABI is just a tunelling interface that must be used with known semantics.
-  - The actual CBOR ABI is discoverable by '*_listApis' and '*_getApiSchema'.
-  
-- C++ wrapper that shares same public interface across ABI modes. Python/Rust/Go wrapper methods built from the same declaration
+- a per-method adapter on the Nim side that CBOR-decodes the args,
+  invokes the provider closure, and CBOR-encodes the response — wired
+  into the per-library `<lib>_call` dispatch case statement
+- a typed wrapper method on every emitted language surface (C++ /
+  Python / Rust / Go) that CBOR-encodes the args, calls `<lib>_call`,
+  and CBOR-decodes the response into the typed `Result<T, String>`
+- a runtime entry in `<lib>_listApis()` / `<lib>_getSchema()` so the
+  CBOR ABI is discoverable from foreign code without prior knowledge
+
+The C ABI itself stays fixed at 11 functions regardless of how many
+request brokers a library declares — the per-method routing lives
+inside `<lib>_call(apiName, ...)`.
 
 ### 2. `EventBroker(API)`
 
@@ -589,14 +581,14 @@ the transitional `-d:BrokerFfiApiCBOR` alias have been removed.
 
 #### Optional language wrapper flags
 
-C and C++ headers are always emitted. The remaining language wrappers are
-opt-in and can be combined freely with either ABI mode.
+C and C++ headers are always emitted. The remaining language wrappers
+are opt-in.
 
 | Flag | Generates | Output relative to `--outdir` |
 |------|-----------|-------------------------------|
-| `-d:BrokerFfiApiGenPy` | `<lib>.py` (ctypes / cbor2) | `<lib>.py` |
-| `-d:BrokerFfiApiGenRust` | `<lib>_rs/` Cargo crate | `<lib>_rs/Cargo.toml`, `src/lib.rs` |
-| `-d:BrokerFfiApiGenGo` | `<lib>_go/` Go module | `<lib>_go/go.mod`, `<lib>.go`, `<lib>_callbacks.c` (native), `<lib>_cbor.go` (CBOR) |
+| `-d:BrokerFfiApiGenPy` | `<lib>.py` (ctypes + cbor2) | `<lib>.py` |
+| `-d:BrokerFfiApiGenRust` | `<lib>_rs/` Cargo crate (ciborium + serde) | `<lib>_rs/Cargo.toml`, `src/lib.rs` |
+| `-d:BrokerFfiApiGenGo` | `<lib>_go/` Go module (fxamacker/cbor) | `<lib>_go/go.mod`, `<lib>.go`, `<lib>_cbor.go` |
 
 The CMake package config (`<lib>Config.cmake`) and, in CBOR mode, the
 `<lib>.cddl` schema are emitted unconditionally next to the `.h`/`.hpp`.
@@ -652,29 +644,33 @@ fails to link.
 On Windows the flag is omitted intentionally (see `nimMainPrefixFlag` in
 [brokers.nimble](../brokers.nimble) and [LIMITATION.md](LIMITATION.md) §2.1).
 
-#### External dependencies for CBOR-mode wrappers
+#### External dependencies for wrappers
 
 | Wrapper | Dependency | How to get it |
 |---------|------------|---------------|
 | C++ | `jsoncons` headers under `vendor/jsoncons/include` | `nimble fetchVendor` (or `git submodule update --init --recursive`) |
 | Python | `cbor2` package | `pip install --user cbor2` |
-| Rust | `ciborium` + `serde` + `serde_json` + `serde_bytes` | Cargo fetches them automatically when `--features cbor` is used. Native-mode Rust needs only the toolchain. |
-| Go | `github.com/fxamacker/cbor/v2` | `go mod tidy` fetches it during the CBOR build. Native-mode Go needs only the toolchain. |
-
-Native-mode wrappers have no third-party dependencies beyond the language
-toolchain itself.
+| Rust | `ciborium` + `serde` + `serde_json` + `serde_bytes` | Cargo fetches them automatically. |
+| Go | `github.com/fxamacker/cbor/v2` | `go mod tidy` fetches it during the build. |
 
 #### Convenience nimble tasks
 
-The repository ships ready-made tasks that already pass every flag above. They
-are the easiest way to reproduce a working build.
+The repository ships ready-made tasks that already pass every flag above.
+They are the easiest way to reproduce a working build.
 
-- `nimble buildFfiExample` — native shared library only
-- `nimble buildFfiExamplePy` / `buildFfiExampleRust` / `buildFfiExampleGo` — same plus the named wrapper
-- `nimble buildFfiExampleCbor` — CBOR shared library
-- `nimble runFfiExampleC` / `runFfiExampleCpp` / `runFfiExamplePy` / `runFfiExampleRust` / `runFfiExampleGo` — rebuild + run the matching consumer
-- `nimble runFfiExampleCborCpp` / `runFfiExampleCborRust` / `runFfiExampleCborGo` — CBOR-mode counterparts
-- `nimble testApi` / `testApiCbor` / `testFfiApi` / `testFfiApiCpp` / `testFfiApiCmake` — unit and integration tests
+- `nimble buildFfiExampleCbor` — build the CBOR shared library
+- `nimble runFfiExampleCborCpp` / `runFfiExampleCborPy` /
+  `runFfiExampleCborRust` / `runFfiExampleCborGo` — rebuild + run the
+  matching consumer against the CBOR library
+- `nimble testApiCbor` — CBOR codec round-trips, library lifecycle,
+  event subscribe, discovery API, and the typemappingtestlib parity
+  matrix across `--mm:orc` / `--mm:refc` × debug / release
+- `nimble runTypeMapTestLibCborCpp` / `…Py` / `…Rust` / `…Go` —
+  per-language parity matrices
+- `nimble runFfiBenchEventStress` — Part D-4/D-5 event dispatch stress
+  drivers (mixed audience / no-foreign / no-nim / shutdown drain /
+  slow-callback non-blocking proof)
+- `nimble runFfiBenchEvent` — Part D-6 event-dispatch microbenchmark
 
 ---
 
@@ -866,21 +862,25 @@ sequenceDiagram
   participant L as Per-event handler
   participant R as Event courier ring
   participant D as Delivery thread
-  actor F as Foreign callback
-  P->>L: emit(event) — same-thread asyncSpawn
-  alt foreignSubsCount == 0
-    L-)P: return (fast path; no encode, no courier)
-  else foreignSubsCount > 0
-    L->>L: cborEncodeShared(payload) → shared-heap buf
-    L->>R: tryEnqueue(EventMsg)
-    L-)D: fireBrokerSignal
+  participant F as Foreign callback
+
+  P->>L: emit(event) (same-thread asyncSpawn)
+
+  alt foreignSubsCount &gt; 0
+    L->>L: cborEncodeShared(payload)
+    L->>R: tryEnqueue(EventMsg{name, ctx, buf, len})
+    L--)D: fireBrokerSignal
     D->>R: tryDequeue
-    D->>D: snapshot SubsRegistry[(ctx, eventName)]
-    D->>F: callback(ctx, name, buf, len, userData)  × N subscribers
+    D->>D: snapshot SubsRegistry[(ctx, name)]
+    loop for each subscriber
+      D->>F: callback(ctx, name, buf, len, userData)
+    end
     D->>D: deallocShared(buf)
+  else foreignSubsCount == 0 (fast path)
+    L-->>P: return (no encode, no allocation, no courier)
   end
-  Note over D,F: Foreign callbacks execute on the delivery thread
-  Note over D,F: A slow callback blocks the delivery thread, not the processing thread
+
+  Note over P,D: A slow foreign callback occupies the delivery thread,<br/>not the processing thread that emitted the event
 ```
 
 `<EventType>.dropAllListeners(ctx)` from Nim code fires a companion
@@ -891,41 +891,58 @@ code drops listeners.
 
 ### Request behavior
 
-API request brokers use the same multi-thread request broker runtime as
-`RequestBroker(mt)`.
+API request brokers route every `<lib>_call(...)` from a foreign thread
+through the per-context **request courier** (`api_cbor_courier.nim`).
+Properties:
 
-That means:
-
-- same-thread requests call the provider directly
-- cross-thread requests are routed through an `AsyncChannel`
-- the provider thread owns the provider closure
-- one provider exists per broker type per broker context
+- Single C ABI entry point: `<lib>_call(ctx, apiName, reqBuf, reqLen,
+  outBuf, outLen, outStatus)`. The typed wrapper methods (per-request
+  in `<lib>.hpp` / `<lib>.py` / Rust / Go) CBOR-encode their args, call
+  `_call`, then CBOR-decode the response.
+- The foreign thread claims one of N response slots (lock + cond),
+  enqueues a POD `CborCallMsg{apiName, reqBuf, reqLen, slotIdx}` into
+  the shared-heap MPSC ring, fires the processing thread's broker
+  dispatch signal, then blocks on the slot's condvar.
+- The processing thread's `brokerDispatchLoop` coroutine wakes on the
+  signal, drains the ring, dispatches each message on a chronos
+  `asyncSpawn`. The async handler CBOR-decodes, calls the typed
+  provider closure, CBOR-encodes the result, and writes it into the
+  slot — which signals the cond and unblocks the caller.
+- One provider exists per request broker type per broker context.
+- Buffer ownership: every shared-heap buffer crossing the ABI is
+  allocated by Nim (`<lib>_allocBuffer` on the foreign side, or
+  `allocShared0` on the processing thread for responses) and freed by
+  Nim (`<lib>_freeBuffer` on the foreign side after the wrapper
+  decodes the response).
 
 ```mermaid
 sequenceDiagram
-  actor F as Foreign caller
-  participant X as generated *_request* export
-  participant B as RequestBroker(mt)
+  actor F as Foreign caller thread
+  participant W as &lt;lib&gt;.hpp method
+  participant C as &lt;lib&gt;_call (C ABI)
+  participant R as Request courier ring
+  participant S as Response slot
   participant P as Processing thread
   participant H as provider closure
-  F->>+X: blocking C / C++ / Python request call
-  X->>+B: request(ctx, args)
-  alt caller already on processing thread
-    B->>+H: invoke provider directly
-    H-->>B: Result[T, string]
-    deactivate H
-  else caller on foreign thread
-    B-)P: enqueue request on AsyncChannel
-    P->>+H: invoke provider on processing thread
-    H-->>P: Result[T, string]
-    deactivate H
-    P-->>B: completed result
-  end
-  B-->>X: marshalled C result
-  deactivate B
-  X-->>F: return to caller
-  deactivate X
-  Note over F,X: Foreign request call blocks until the provider finishes
+  F->>W: typed method call
+  W->>W: CBOR-encode args
+  W->>C: _call(ctx, apiName, reqBuf, reqLen, &amp;out)
+  C->>S: claimSlot — block via Lock+Cond
+  C->>R: tryEnqueue(CborCallMsg)
+  C-)P: fireBrokerSignal
+  Note over F,S: foreign thread now blocks on slot.cond
+  P->>R: tryDequeue (poller, drained per signal)
+  P->>P: asyncSpawn handleCourierMsg
+  P->>P: CBOR-decode args
+  P->>H: invoke provider
+  H-->>P: Result[T, string]
+  P->>P: CBOR-encode response
+  P->>S: completeSlot — signal cond
+  S-->>C: unblock with respBuf + status
+  C-->>W: return outBuf, outLen, status
+  W->>W: CBOR-decode response
+  W-->>F: typed Result[T, string]
+  Note over F,W: Foreign request call blocks until the provider finishes
   Note over P,H: Provider code always runs on the processing thread
 ```
 
@@ -1127,35 +1144,49 @@ The generated C++ and Python wrappers hide that cleanup automatically.
 
 ### C API
 
-The generated C surface contains:
-
-- lifecycle functions
-- one exported request function per API request broker signature
-- one free function per request result type
-- event callback typedefs and `on/off` registration functions
-
-Example:
+Every library exposes the **same fixed 11-function CBOR ABI**, plus one
+event-callback typedef. The C ABI is intentionally narrow — typed
+methods live in the language wrappers above. Pure-C consumers see only
+the raw CBOR ABI; the typed-C surface is on the deferred work list
+(see `doc/CBOR_Refactoring.md` §10).
 
 ```c
-typedef struct {
-  uint32_t ctx;
-  const char* error_message;
-} mylibCreateContextResult;
+// Fixed across all libraries:
+const char*   <lib>_version(void);                                   // owned by Nim; do not free
+int32_t       <lib>_initialize(void);                                // once-per-process Nim init
+uint32_t      <lib>_createContext(const char** errOut);              // returns ctx id, 0 on error
+int32_t       <lib>_shutdown(uint32_t ctx);                          // tear down ctx + threads
+void*         <lib>_allocBuffer(int32_t size);                       // Nim-side allocShared0
+void          <lib>_freeBuffer(void* buf);                           // Nim-side deallocShared
+int32_t       <lib>_call(                                            // request dispatch
+                  uint32_t ctx,
+                  const char* apiName,
+                  void* reqBuf, int32_t reqLen,
+                  void** outBuf, int32_t* outLen);
+uint64_t      <lib>_subscribe(                                       // event subscribe
+                  uint32_t ctx,
+                  const char* eventName,
+                  <lib>EventCallback cb,
+                  void* userData);
+int32_t       <lib>_unsubscribe(                                     // event unsubscribe
+                  uint32_t ctx,
+                  const char* eventName,
+                  uint64_t handle);
+int32_t       <lib>_listApis(void** outBuf, int32_t* outLen);        // discovery: CBOR list of methods
+int32_t       <lib>_getSchema(void** outBuf, int32_t* outLen);       // discovery: CDDL schema bytes
 
-mylibCreateContextResult mylib_createContext(void);
-void free_mylib_create_context_result(mylibCreateContextResult* r);
-void mylib_shutdown(uint32_t ctx);
-
-InitializeRequestCResult mylib_initialize(uint32_t ctx, const char* configPath);
-void mylib_free_initialize_result(InitializeRequestCResult* r);
-
-uint64_t mylib_onDeviceDiscovered(
-  uint32_t ctx,
-  DeviceDiscoveredCCallback callback,
-  void* userData
-);
-void mylib_offDeviceDiscovered(uint32_t ctx, uint64_t handle);
+// Per-library typedef (one declaration per library, generated):
+typedef void (*<lib>EventCallback)(
+    uint32_t ctx,
+    const char* eventName,
+    const void* payloadBuf, int32_t payloadLen,
+    void* userData);
 ```
+
+Wire format: every payload buffer is CBOR. `apiName` and `eventName`
+are NUL-terminated ASCII strings selected from the discovery API. The
+typed wrapper layer (`<lib>.hpp` / `.py` / Rust / Go) is what most
+consumers actually use.
 
 ### C++ wrapper
 
@@ -1383,85 +1414,37 @@ Request providers run on the processing thread and may be async. That means:
 
 ---
 
-## Future Phases
+## Future Work
 
-The modular codegen architecture is designed to support additional transport and
-language surfaces without changing existing modules.
+### Typed C surface
 
-### Phase 3: CBOR Tunnel Surface
+Pure-C consumers currently see only the raw 11-function CBOR ABI;
+typed accessors for C are tracked in `doc/CBOR_Refactoring.md` §10 and
+will use the same compile-time schema registry the C++ wrapper
+already consumes. The other four wrapper languages (C++, Python,
+Rust, Go) already expose fully typed surfaces.
 
-A buffer-based transport layer for languages that prefer buffer FFI over
-per-field C ABI interop.
-
-**Design:**
-
-- New `api_codegen_cbor.nim` module — follows the same pattern as existing
-  codegen modules (type mapping, accumulators, file generator)
-- Adds `appendCborRequest(entry)` / `appendCborEvent(entry)` accumulator
-  helpers called during broker macro expansion
-- Generates CBOR encode/decode logic per schema entry using the compile-time
-  type registry (`gApiTypeRegistry`)
-- Only 3 generic C exports instead of per-type exports:
-  - `<lib>_invoke(ctx, requestId, cborBuffer, len)` → CBOR-encoded result
-  - `<lib>_subscribe(ctx, eventId, callback, userData)` → handle
-  - `<lib>_free_buffer(buffer)`
-- Generates a schema manifest file (`<libName>.schema.json`) describing all
-  request/event types, field names, and CBOR tags — consumed by external
-  tooling and language-specific code generators
-
-**Advantages over C ABI for some consumers:**
-
-- Single stable FFI surface (3 functions) regardless of how many broker types
-  exist
-- Schema-driven — external tools can generate bindings without reading Nim
-  source
-- Natural fit for languages with strong serialization support (Rust serde,
-  Go encoding)
-
-### Phase 4: Rust / Go Codegen
-
-Language-specific binding generators that consume the CBOR tunnel rather than
-the C ABI directly.
-
-**Rust (`api_codegen_rust.nim`):**
-
-- Generates a `.rs` file with `#[derive(Deserialize)]` structs matching the
-  schema
-- Thin invoke wrappers that serialize arguments to CBOR, call the tunnel, and
-  deserialize results
-- Event subscription wrappers with idiomatic Rust callback signatures
-
-
-**Go (`api_codegen_go.nim`):**
-
-- Generates a `.go` file with CBOR-tagged structs
-- Thin CGo wrapper around the 3 tunnel exports
-- Idiomatic Go error returns instead of result structs
-
-**Both modules:**
-
-- Follow the same codegen module pattern: type mapping, accumulators, file
-  generator
-- Read from the same compile-time type registry (`gApiTypeRegistry`)
-- No changes needed to existing C, C++, or Python codegen modules
-
-
-### Adding a New Language Surface
+### Adding a new language surface
 
 The codegen architecture makes adding a new language straightforward:
 
-1. Create `api_codegen_<lang>.nim` with:
+1. Create `brokers/internal/api_codegen_cbor_<lang>.nim` with:
    - Type mapping procs (Nim types → target language types)
    - Compile-time accumulators (`{.compileTime.}` string sequences)
-   - A file generator proc that reads accumulators and writes the output file
-2. Import and export from `api_codegen_c.nim` for shared helpers
-3. Call the accumulator helpers from existing sites in `api_type.nim`,
-   `api_request_broker.nim`, and `api_event_broker.nim`
-4. Call the file generator from `api_library.nim`
+   - A file generator proc that reads the accumulators and writes the
+     output file(s)
+2. Append to the accumulators from `autoRegisterApiType` and the per-
+   broker codegen modules (`api_request_broker_cbor`,
+   `api_event_broker_cbor`)
+3. Call the file generator from `api_library.nim`'s
+   `registerBrokerLibraryCborImpl`
+4. Gate the whole thing behind an opt-in flag
+   (`-d:BrokerFfiApiGen<Lang>`) so the new wrapper does not become a
+   mandatory dependency
 
-No existing codegen modules need modification. The compile-time accumulator
-pattern ensures each module is independently testable and the generated output
-is deterministic.
+No existing codegen modules need modification. The compile-time
+accumulator pattern keeps each module independently testable and the
+generated output deterministic.
 
 ---
 
