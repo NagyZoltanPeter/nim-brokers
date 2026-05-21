@@ -1595,9 +1595,9 @@ proc registerBrokerLibraryCborImpl(
         $entries.len & " request adapters, " & $eventEntries.len & " event entries",
     )
     when defined(brokerDebugStdout):
-      echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" &
-        libName & "' with " & $entries.len & " request adapters and " &
-        $eventEntries.len & " event entries"
+      echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
+        "' with " & $entries.len & " request adapters and " & $eventEntries.len &
+        " event entries"
       echo result.repr
 
 {.pop.}

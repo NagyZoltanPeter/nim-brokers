@@ -838,9 +838,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   )
 
   when defined(brokerDebug):
-    writeBrokerDebug(
-      "RequestBroker", typeDisplayName, result, header = "mode=" & $mode
-    )
+    writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)
     when defined(brokerDebugStdout):
       echo result.repr
 

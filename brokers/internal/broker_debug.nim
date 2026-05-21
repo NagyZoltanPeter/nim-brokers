@@ -39,10 +39,7 @@ const brokerDebugDirOverride {.strdefine: "brokerDebugDir".}: string = ""
 proc brokerDebugDir*(): string {.compileTime.} =
   ## Directory under which dump files are written. Override via
   ## `-d:brokerDebugDir=<path>`.
-  if brokerDebugDirOverride.len > 0:
-    brokerDebugDirOverride
-  else:
-    "build/broker_debug"
+  if brokerDebugDirOverride.len > 0: brokerDebugDirOverride else: "build/broker_debug"
 
 proc sanitizeFileNamePart(s: string): string {.compileTime.} =
   ## Coerce `s` to a portable filename fragment. Conservative —

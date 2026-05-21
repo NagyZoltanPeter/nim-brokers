@@ -28,6 +28,8 @@ What is nim-brokers?
   - [Installation](#installation)
   - [Testing](#testing)
   - [Debug](#debug)
+      - [Compile-flag reference](#compile-flag-reference)
+      - [Examples](#examples)
   - [Types of Brokers](#types-of-brokers)
     - [EventBroker](#eventbroker)
     - [RequestBroker](#requestbroker)
@@ -40,11 +42,7 @@ What is nim-brokers?
   - [Broker FFI API](#broker-ffi-api)
     - [FFI\_API detailed documentation](#ffi_api-detailed-documentation)
     - [Type-support matrix](#type-support-matrix)
-    - [FFI API strategies: CBOR vs Native](#ffi-api-strategies-cbor-vs-native)
-    - [Native FFI strategy](#native-ffi-strategy)
-    - [CBOR FFI strategy](#cbor-ffi-strategy)
-    - [Comparison](#comparison)
-    - [Interface parity of strategies](#interface-parity-of-strategies)
+    - [FFI API strategy](#ffi-api-strategy)
       - [Torpedo Duel — a richer FFI API example](#torpedo-duel--a-richer-ffi-api-example)
   - [Some more details...](#some-more-details)
     - [Non-Object Types](#non-object-types)
@@ -53,7 +51,7 @@ What is nim-brokers?
     - [RequestBroker (single-thread, async)](#requestbroker-single-thread-async)
     - [EventBroker(mt) — example](#eventbrokermt--example)
     - [RequestBroker(mt) — example](#requestbrokermt--example)
-    - [Comparison](#comparison-1)
+    - [Comparison](#comparison)
   - [Platform \& Nim Version Support](#platform--nim-version-support)
     - [Windows toolchain requirements](#windows-toolchain-requirements)
   - [License](#license)
@@ -85,8 +83,8 @@ nimble alltests
 
 ## Debug
 
-nim-brokers is macro-heavy. To inspect the Nim code that the broker
-macros (and `registerBrokerLibrary`) emit, compile any project that
+nim-brokers is macro-heavy - better say it generates all the boilerplate around your interfaces and dispatch machinery. 
+To inspect the Nim code that the broker macros (and `registerBrokerLibrary`) emit, compile any project that
 uses them with `-d:brokerDebug`:
 
 ```
@@ -201,7 +199,7 @@ RequestBroker:
     text*: string
 
   proc signature*(): Future[Result[Greeting, string]] {.async.}
-  proc signature*(lang: string): Future[Result[Greeting, string]] {.async.}
+  proc signature*(to: string): Future[Result[Greeting, string]] {.async.}
 
 # Implementation is dynamically set:
 Greeting.setProvider(
@@ -209,9 +207,15 @@ Greeting.setProvider(
     ok(Greeting(text: "hello"))
 )
 
+Greeting.setProvider(
+  proc(to: string): Future[Result[Greeting, string]] {.async.} =
+    ok(Greeting(text: "hello " & to))
+)
+
 # use it from anywhere where the definition is visible:
 let res = await Greeting.request()
 assert res.isOk()
+echo res.get().text  # "hello"
 
 Greeting.clearProvider()
 ```
