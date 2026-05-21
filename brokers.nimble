@@ -98,11 +98,18 @@ proc skipRefcOnWindows(opt, label: string): bool =
   ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
   ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
   ## phase, so the same code is safe under --mm:orc.
-  when defined(windows):
-    if "--mm:refc" in opt or "refc" == opt:
-      echo "Skipping " & label & " (" & opt &
-        ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
-      return true
+  ##
+  ## TEMPORARILY DISABLED — refc-on-Windows is forced through CI so we
+  ## can observe whether the channel-dispatch refactor + Round-2 CBOR
+  ## work has actually closed the failure mode. Restore the body when
+  ## the experiment ends (or wrap the experiment in a kill switch).
+  discard opt
+  discard label
+  # when defined(windows):
+  #   if "--mm:refc" in opt or "refc" == opt:
+  #     echo "Skipping " & label & " (" & opt &
+  #       ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
+  #     return true
   false
 
 proc memoryManagerMatrix(): seq[string] =
@@ -113,13 +120,15 @@ proc memoryManagerMatrix(): seq[string] =
   ##   (e.g. `MM=refc nimble runTypeMapTestLibPy`) — run that one only.
   ## - Otherwise, run both `orc` and `refc` so the parity matrix is
   ##   exercised end-to-end under both memory managers.
-  ## - On Windows, drop `refc` even from the default matrix — see
-  ##   `skipRefcOnWindows` for the chronos thread-pool / refc-GC
-  ##   conflict that makes that combo unsafe.
+  ##
+  ## TEMPORARILY: Windows runs the same orc+refc default — see the
+  ## `skipRefcOnWindows` doc-block for the (commented-out) historical
+  ## reason refc was excluded. Restore the branch below when the
+  ## experiment ends.
   if existsEnv("MM"):
     @[getEnv("MM")]
-  elif defined(windows):
-    @["orc"]
+  # elif defined(windows):
+  #   @["orc"]
   else:
     @["orc", "refc"]
 
