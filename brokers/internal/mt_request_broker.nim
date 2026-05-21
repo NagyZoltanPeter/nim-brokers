@@ -28,6 +28,7 @@ import results
 import ./helper/broker_utils, ../broker_context
 
 import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
+import ./broker_debug
 export results, chronos, chronicles, broker_context, mt_broker_common, mt_config
 
 # Capacity defaults moved to `mt_config.nim` and re-exported via the
@@ -1470,7 +1471,9 @@ proc generateMtRequestBroker*(
   )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)
+    when defined(brokerDebugStdout):
+      echo result.repr
 
   return result
 

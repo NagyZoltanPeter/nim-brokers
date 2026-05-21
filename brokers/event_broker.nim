@@ -87,6 +87,7 @@
 import std/[macros, strutils, tables]
 import chronos, chronicles, results
 import ./internal/helper/broker_utils, ./broker_context
+import ./internal/broker_debug
 
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_event_broker
@@ -558,7 +559,9 @@ proc generateEventBroker(body: NimNode): NimNode =
     result.add(typedescEmitProcCtx)
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("EventBroker", sanitized, result)
+    when defined(brokerDebugStdout):
+      echo result.repr
 
 macro EventBroker*(args: varargs[untyped]): untyped =
   ## Single-thread default mode, or explicit mode selector with optional kwargs.

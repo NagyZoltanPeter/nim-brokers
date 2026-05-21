@@ -40,6 +40,7 @@ import ./internal/api_cbor_tuple
 import ./internal/api_cbor_courier
 import ./internal/api_cbor_event_courier
 import ./internal/mt_broker_common
+import ./internal/broker_debug
 
 export api_cbor_descriptor, api_cbor_subs_registry, api_cbor_tuple, api_cbor_courier
 export api_cbor_event_courier
@@ -1586,10 +1587,18 @@ proc registerBrokerLibraryCborImpl(
   )
 
   when defined(brokerDebug):
-    echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" & libName &
-      "' with " & $entries.len & " request adapters and " & $eventEntries.len &
-      " event entries"
-    echo result.repr
+    writeBrokerDebug(
+      "BrokerLibrary",
+      libName,
+      result,
+      header =
+        $entries.len & " request adapters, " & $eventEntries.len & " event entries",
+    )
+    when defined(brokerDebugStdout):
+      echo "[brokers/cbor] registerBrokerLibraryCborImpl emitted runtime for '" &
+        libName & "' with " & $entries.len & " request adapters and " &
+        $eventEntries.len & " event entries"
+      echo result.repr
 
 {.pop.}
 

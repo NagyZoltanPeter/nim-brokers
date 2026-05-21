@@ -43,7 +43,8 @@ import
   ./api_common,
   ./api_cbor_codec,
   ./api_schema,
-  ./api_type_resolver
+  ./api_type_resolver,
+  ./broker_debug
 
 # `api_type_resolver` re-export: `autoRegisterApiType` is emitted into the
 # user-library AST by the broker macros and must resolve at the user's
@@ -390,9 +391,13 @@ proc generateApiCborRequestBrokerImpl(
     registerCborRequestEntry(apiName & argApiSuffix, $adapterIdent, typeName, fields)
 
   when defined(brokerDebug):
-    echo "[brokers/cbor] RequestBroker(API) for '" & typeName & "' (apiName='" & apiName &
-      "')"
-    echo result.repr
+    writeBrokerDebug(
+      "RequestBrokerApi", typeName, result, header = "apiName='" & apiName & "'"
+    )
+    when defined(brokerDebugStdout):
+      echo "[brokers/cbor] RequestBroker(API) for '" & typeName & "' (apiName='" &
+        apiName & "')"
+      echo result.repr
 
 {.pop.}
 

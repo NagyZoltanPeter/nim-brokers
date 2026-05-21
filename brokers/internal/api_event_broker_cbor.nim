@@ -28,6 +28,7 @@ import std/[macros, strutils]
 import ./helper/broker_utils, ./mt_event_broker, ./mt_config, ./api_common, ./api_schema
 import ./api_request_broker_cbor # for registerCborObjectType
 import ./api_type_resolver
+import ./broker_debug
 
 # `api_type_resolver` re-export: see note in `api_request_broker_cbor.nim`
 # — `autoRegisterApiType` is emitted into user code by broker macros and
@@ -63,9 +64,13 @@ proc generateApiCborEventBrokerImpl(body: NimNode, cfg: MtEvtCfg): NimNode =
   registerCborEventEntry(apiName, typeName)
 
   when defined(brokerDebug):
-    echo "[brokers/cbor] EventBroker(API) for '" & typeName & "' (eventName='" & apiName &
-      "')"
-    echo result.repr
+    writeBrokerDebug(
+      "EventBrokerApi", typeName, result, header = "eventName='" & apiName & "'"
+    )
+    when defined(brokerDebugStdout):
+      echo "[brokers/cbor] EventBroker(API) for '" & typeName & "' (eventName='" &
+        apiName & "')"
+      echo result.repr
 
 {.pop.}
 

@@ -35,7 +35,8 @@ import
   ./mt_broker_common,
   ./mt_queue,
   ./mt_codec,
-  ./mt_config
+  ./mt_config,
+  ./broker_debug
 
 export results, chronos, broker_context, chronicles, mt_broker_common, mt_config
 
@@ -899,4 +900,6 @@ proc generateMtEventBroker*(
   )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("EventBrokerMt", typeDisplayName, result)
+    when defined(brokerDebugStdout):
+      echo result.repr

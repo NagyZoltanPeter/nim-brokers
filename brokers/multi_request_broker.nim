@@ -104,6 +104,7 @@ import chronos
 import results
 import ./internal/helper/broker_utils
 import ./broker_context
+import ./internal/broker_debug
 
 export results, chronos, broker_context
 
@@ -740,4 +741,6 @@ macro MultiRequestBroker*(body: untyped): untyped =
       )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("MultiRequestBroker", sanitized, result)
+    when defined(brokerDebugStdout):
+      echo result.repr

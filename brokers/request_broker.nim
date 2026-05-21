@@ -161,6 +161,7 @@ from std/sequtils import keepItIf
 import chronos
 import results
 import ./internal/helper/broker_utils, ./broker_context
+import ./internal/broker_debug
 
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_request_broker
@@ -837,7 +838,11 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug(
+      "RequestBroker", typeDisplayName, result, header = "mode=" & $mode
+    )
+    when defined(brokerDebugStdout):
+      echo result.repr
 
   return result
 
