@@ -99,18 +99,17 @@ proc newCborCourier*(slotCount: int): ptr CborCourier =
   ## the same, so the slot pool gates the ring (a `_call` always claims a
   ## slot before enqueuing, so the ring cannot overflow).
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
-  c.ring.buf = cast[ptr UncheckedArray[CborCallMsg]](
-    allocShared0(slotCount * sizeof(CborCallMsg))
-  )
+  c.ring.buf =
+    cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))
   c.ring.cap = slotCount
   c.ring.head = 0
   c.ring.tail = 0
   c.ring.count = 0
   initLock(c.ring.lock)
   c.slotCount = slotCount
-  c.slots = cast[ptr UncheckedArray[CborRespSlot]](
-    allocShared0(slotCount * sizeof(CborRespSlot))
-  )
+  c.slots = cast[ptr UncheckedArray[CborRespSlot]](allocShared0(
+    slotCount * sizeof(CborRespSlot)
+  ))
   for i in 0 ..< slotCount:
     initLock(c.slots[i].lock)
     initCond(c.slots[i].cond)

@@ -378,8 +378,7 @@ proc findCargoExe(): string =
     quit "Cargo (Rust toolchain) not found. Install rustup or add cargo to PATH."
   result = "cargo"
 
-task runFfiExampleCborRust,
-  "Build the FFI API example library (CBOR mode)":
+task runFfiExampleCborRust, "Build the FFI API example library (CBOR mode)":
   buildFfiExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
     " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
@@ -687,8 +686,7 @@ task probeWinTlsUninitRefc,
   "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
   runProbeWinTlsUninit("refc")
 
-task runTorpedoExampleCborRust,
-  "Build the Torpedo Duel FFI library (CBOR mode)":
+task runTorpedoExampleCborRust, "Build the Torpedo Duel FFI library (CBOR mode)":
   buildTorpedoExampleCborLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
     " run --manifest-path examples/torpedo/rust_example/Cargo.toml"

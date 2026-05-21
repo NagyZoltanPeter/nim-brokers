@@ -211,6 +211,7 @@ proc registerBrokerLibraryCborImpl(
   let ctxEntryIdent = ident(libName & "CborCtxEntry")
   let procThreadArgIdent = ident(libName & "CborThreadArg")
   let procThreadProcIdent = ident(libName & "CborProcessingThread")
+  let delivThreadProcIdent = ident(libName & "CborDeliveryThread")
   let ctxsIdent = ident("g" & libName & "CborCtxs")
   let ctxsLockIdent = ident("g" & libName & "CborCtxsLock")
   let ctxsInitIdent = ident("g" & libName & "CborCtxsInit")
@@ -404,7 +405,9 @@ proc registerBrokerLibraryCborImpl(
           ctx: BrokerContext
           shutdownFlag: Atomic[int]
           processingReady: Atomic[int]
+          deliveryReady: Atomic[int]
           processingErrorMessage: cstring
+          deliveryErrorMessage: cstring
           # Part C — buffer courier. `courier` is allocated in
           # `_createContext` and freed in `_shutdown`. `courierSignal` is
           # the processing thread's broker dispatch signal, published by
@@ -416,6 +419,7 @@ proc registerBrokerLibraryCborImpl(
         `ctxEntryIdent` = object
           ctx: BrokerContext
           procThread: Thread[ptr `procThreadArgIdent`]
+          delivThread: Thread[ptr `procThreadArgIdent`]
           arg: ptr `procThreadArgIdent`
           active: bool
 
@@ -683,6 +687,69 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # ------------------------------------------------------------------
+  # Delivery thread proc (one per ctx). Part D, phase D-2: owns event
+  # listener installation and foreign-callback fan-out. Provider `.emit`
+  # on the processing thread is now genuinely cross-thread for events
+  # with foreign subscribers — the MT EventBroker's typed-slab path
+  # delivers the event to the delivery thread's bucket, where the
+  # per-event handler (registered by `installAllListenersIdent` below)
+  # runs the CBOR encode + foreign callback fan-out OFF the processing
+  # thread. Slow foreign callbacks therefore no longer block providers.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `delivThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
+        setThreadBrokerContext(arg.ctx)
+
+        # Publish the delivery thread's broker dispatch signal first so
+        # the MT EventBroker bucket created by `installAllListenersIdent`
+        # picks it up as its `listenerSignal` (cross-thread emits from
+        # the processing thread wake this thread via that signal).
+        discard getOrInitBrokerSignal()
+
+        # Install all per-event listeners on THIS thread. The MT
+        # EventBroker captures the calling thread's identity at
+        # `.listen()` time; emits from any other thread will therefore
+        # take the cross-thread slab path and fan out here.
+        let installCatchRes = catch:
+          `installAllListenersIdent`(arg.ctx)
+        if installCatchRes.isErr():
+          arg.deliveryErrorMessage = allocCStringCopy(
+            "event listener install raised: " & installCatchRes.error.msg
+          )
+          arg.deliveryReady.store(-1, moRelease)
+          return
+        let installRes = installCatchRes.get()
+        if installRes.isErr():
+          arg.deliveryErrorMessage =
+            allocCStringCopy("event listener install failed: " & installRes.error())
+          arg.deliveryReady.store(-1, moRelease)
+          return
+
+        # Start the shared broker dispatch loop on this thread so the
+        # MT EventBroker's per-bucket pollers (registered by `.listen`)
+        # run and drain cross-thread event deliveries.
+        ensureBrokerDispatchStarted()
+
+        arg.deliveryReady.store(1, moRelease)
+
+        proc awaitShutdown(flag: ptr Atomic[int]) {.async: (raises: []).} =
+          while flag[].load(moAcquire) != 1:
+            let s = catch:
+              await sleepAsync(milliseconds(5))
+            if s.isErr():
+              discard
+
+        waitFor awaitShutdown(addr arg.shutdownFlag)
+        # Drain + tear down the dispatch loop before this thread exits.
+        # Any in-flight cross-thread event delivery completes here; any
+        # in-flight foreign callback runs synchronously inside the
+        # listener handler and returns before the loop exits.
+        stopBrokerDispatchHere()
+
+  )
+
+  # ------------------------------------------------------------------
   # Processing thread proc (one per ctx). Runs setupProviders then loops
   # on a chronos event loop until shutdownFlag is set.
   # ------------------------------------------------------------------
@@ -713,22 +780,11 @@ proc registerBrokerLibraryCborImpl(
             arg.processingReady.store(-1, moRelease)
             return
 
-        # Install event listeners so subscriptions arriving any time after
-        # createContext returns will receive emitted events.
-        let installCatchRes = catch:
-          `installAllListenersIdent`(arg.ctx)
-        if installCatchRes.isErr():
-          arg.processingErrorMessage = allocCStringCopy(
-            "event listener install raised: " & installCatchRes.error.msg
-          )
-          arg.processingReady.store(-1, moRelease)
-          return
-        let installRes = installCatchRes.get()
-        if installRes.isErr():
-          arg.processingErrorMessage =
-            allocCStringCopy("event listener install failed: " & installRes.error())
-          arg.processingReady.store(-1, moRelease)
-          return
+        # Part D phase D-2: event listener installation moved to the
+        # delivery thread proc. Processing thread no longer touches
+        # event listeners — `_createContext` guarantees delivery thread
+        # is fully ready (listeners installed + dispatch loop running)
+        # before this thread is spawned.
 
         # ----------------------------------------------------------------
         # Part C — buffer courier. The processing thread owns CBOR decode,
@@ -810,8 +866,8 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # ------------------------------------------------------------------
-  # `<lib>_createContext` — spawn ctx + processing thread, await ready.
-  # `<lib>_shutdown` — signal, join, free.
+  # `<lib>_createContext` — spawn delivery + processing threads, await ready.
+  # `<lib>_shutdown` — signal, join both, free.
   # ------------------------------------------------------------------
   result.add(
     quote do:
@@ -831,7 +887,9 @@ proc registerBrokerLibraryCborImpl(
         arg.ctx = bctx
         arg.shutdownFlag.store(0, moRelaxed)
         arg.processingReady.store(0, moRelaxed)
+        arg.deliveryReady.store(0, moRelaxed)
         arg.processingErrorMessage = nil
+        arg.deliveryErrorMessage = nil
         # Part C — courier: 64 response slots = ceiling on concurrent
         # in-flight `<lib>_call`s; a call past that fails fast.
         arg.courier = newCborCourier(64)
@@ -842,6 +900,47 @@ proc registerBrokerLibraryCborImpl(
         entry.arg = arg
         entry.active = true
 
+        # Part D — spawn delivery thread BEFORE the processing thread so
+        # the delivery thread is live (and can receive cross-thread events)
+        # before any provider emits.
+        let delivCreateRes = catch:
+          createThread(entry.delivThread, `delivThreadProcIdent`, arg)
+        if delivCreateRes.isErr():
+          if not errOut.isNil:
+            errOut[] = allocCStringCopy(
+              "Failed to spawn delivery thread: " & delivCreateRes.error.msg
+            )
+          freeCborCourier(arg.courier)
+          deallocShared(arg)
+          deallocShared(entry)
+          return 0'u32
+
+        # Poll for deliveryReady.
+        block:
+          var waitedMs = 0
+          const timeoutMs = 5000
+          var status = 0
+          while waitedMs < timeoutMs:
+            status = arg.deliveryReady.load(moAcquire).int
+            if status != 0:
+              break
+            sleep(1)
+            inc waitedMs
+          if status != 1:
+            arg.shutdownFlag.store(1, moRelease)
+            joinThread(entry.delivThread)
+            if not errOut.isNil:
+              if not arg.deliveryErrorMessage.isNil:
+                errOut[] = arg.deliveryErrorMessage
+                arg.deliveryErrorMessage = nil
+              else:
+                errOut[] = allocCStringCopy("delivery thread did not become ready")
+            freeCborCourier(arg.courier)
+            deallocShared(arg)
+            deallocShared(entry)
+            return 0'u32
+
+        # Spawn processing thread.
         let createRes = catch:
           createThread(entry.procThread, `procThreadProcIdent`, arg)
         if createRes.isErr():
@@ -849,6 +948,8 @@ proc registerBrokerLibraryCborImpl(
             errOut[] = allocCStringCopy(
               "Failed to spawn processing thread: " & createRes.error.msg
             )
+          arg.shutdownFlag.store(1, moRelease)
+          joinThread(entry.delivThread)
           freeCborCourier(arg.courier)
           deallocShared(arg)
           deallocShared(entry)
@@ -867,6 +968,7 @@ proc registerBrokerLibraryCborImpl(
 
         if status != 1:
           arg.shutdownFlag.store(1, moRelease)
+          joinThread(entry.delivThread)
           joinThread(entry.procThread)
           if not errOut.isNil:
             if not arg.processingErrorMessage.isNil:
@@ -915,17 +1017,19 @@ proc registerBrokerLibraryCborImpl(
               inc waitedMs
 
         entryToShutdown.arg.shutdownFlag.store(1, moRelease)
+        # Part D: join delivery thread first — it must finish any
+        # in-flight foreign callbacks before we tear down the processing
+        # thread (which owns the providers that emitted those events).
+        joinThread(entryToShutdown.delivThread)
         joinThread(entryToShutdown.procThread)
-        # Phase 10: free this ctx's subscription state *after* the
-        # processing thread is joined. The processing thread is the
-        # delivery thread, so the join is the only barrier we need to
-        # guarantee no concurrent listener is mid-snapshot.
+        # Free this ctx's subscription state after both threads are
+        # joined — no concurrent listener can be mid-snapshot.
         subsRegistryFreeForCtx(`subsRegIdent`, ctx)
         if not entryToShutdown.arg.processingErrorMessage.isNil:
           freeCString(entryToShutdown.arg.processingErrorMessage)
-        # Part C — free the courier. Phase 1a: `<lib>_call` does not yet
-        # use the courier, so freeing right after joinThread is safe (no
-        # in-flight calls). Phase 1b adds the inFlight-counter wait.
+        if not entryToShutdown.arg.deliveryErrorMessage.isNil:
+          freeCString(entryToShutdown.arg.deliveryErrorMessage)
+        # Part C — free the courier after both threads joined.
         freeCborCourier(entryToShutdown.arg.courier)
         deallocShared(entryToShutdown.arg)
 

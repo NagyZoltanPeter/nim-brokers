@@ -166,8 +166,7 @@ when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_request_broker
   export mt_config, mt_request_broker
 
-when compileOption("threads") and
-    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
+when compileOption("threads") and (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
   # Part A — native C-ABI codegen retired. The only surviving FFI strategy
   # is CBOR; `-d:BrokerFfiApiNative` becomes a hard compile error
   # (see api_ffi_mode.nim). `api_request_broker.nim` and `api_type.nim`

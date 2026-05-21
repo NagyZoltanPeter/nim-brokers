@@ -691,8 +691,7 @@ proc setupProviders(ctx: BrokerContext) =
           int32(payload[^1])
         else:
           -1'i32
-      return
-        ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
+      return ok(BytesEchoRequest(length: int32(payload.len), first: first, last: last)),
   )
 
   discard ScanRequest.setProvider(

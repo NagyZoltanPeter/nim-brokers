@@ -299,11 +299,42 @@ Files touched, in approximate order of edit volume:
 
 | File | Change |
 |---|---|
-| `brokers/internal/api_event_broker_cbor.nim` | Per-event emit wrapper splits into the three lanes shown in §5. Foreign subscribe/unsubscribe stop posting to the MT EventBroker; they go into the new `foreignSubs` table + atomic counter. |
-| `brokers/api_library.nim` (event installer + courier infrastructure) | Add `eventCourier` ring + signal per library, mirror of the request courier. `eventCourierPoll` registered on the delivery thread via the existing `registerBrokerPoller`. Subscribe/unsubscribe entry points update the atomic counter. |
+| `brokers/api_library.nim` (event installer + courier infrastructure) | Per-event handler (`api_library.nim:540-599`) splits into the three lanes shown in §5. Add `eventCourier` ring + signal per library, mirror of the request courier. `eventCourierPoll` registered on the delivery thread via the existing `registerBrokerPoller`. Subscribe/unsubscribe entry points update the atomic counter. `dropAllListeners` hook clears foreign subs via `subsRegistryRemoveAllForKey` + resets `foreignSubsCount` (see §8a). |
+| `brokers/internal/api_event_broker_cbor.nim` | **Compile-time only** — no runtime code. Registers event entries in `gApiCborEventEntries` for `api_library.nim` to wire at `registerBrokerLibrary` expansion time. No Part D changes needed. |
 | `brokers/internal/mt_event_broker.nim` | **No changes.** The MT EventBroker continues to serve pure-Nim listeners unmodified. The FFI lane forks upstream of it. |
 | `brokers/internal/api_event_broker.nim` (single-thread) | **No changes.** Same-thread Nim listeners still hit the direct-dispatch path in the MT broker's same-thread arm; nothing for the single-thread broker module to do. |
 | `test/typemappingtestlib/typemappingtestlib.nim` | No source change; existing parity tests cover the FFI lane and the same-thread Nim lane already. New tests added in `test/ffibench/` for stress + shutdown (see §9). |
+
+## 8a. `dropAllListeners` and FFI subscriber cleanup
+
+The MT EventBroker's `dropAllListeners` is **synchronous and callable
+from any thread** (`mt_event_broker.nim:683`). It clears same-thread
+`tvHandlers` immediately and sends a `CtrlClearListeners` sentinel to
+cross-thread buckets. However, it has **no awareness of `SubsRegistry`**
+— foreign subscriber entries survive the drop.
+
+After `dropAllListeners` without cleanup:
+- The MT EventBroker listener (the handler at `api_library.nim:559`
+  that does `subsRegistrySnapshot` → CBOR encode → foreign callback
+  fanout) is removed.
+- But `SubsRegistry` still holds the `SubNode` entries — orphaned.
+  No foreign callback fires (the handler that reads them is gone), but:
+  - `foreignSubsCount` stays > 0 → emit fast-path still tries to
+    encode + enqueue into the courier for nothing.
+  - Stale `SubNode` entries leak until `_shutdown` calls
+    `subsRegistryFreeForCtx`.
+
+**Fix (wired in D-3):** Each per-event installer in `api_library.nim`
+registers a companion cleanup hook. When `dropAllListeners` fires for
+a given `(ctx, eventType)`, the hook calls
+`subsRegistryRemoveAllForKey(subsReg, ctx, eventName)` and resets the
+per-event `foreignSubsCount` atomic to 0. This is safe under the
+existing `SubsRegistry` lock — no delivery-thread dispatch needed,
+just a registry mutation.
+
+The hook is naturally per-event-type because the MT EventBroker's
+generated `dropAllListenersImpl` is type-specific — each knows its own
+event name at codegen time.
 
 ## 9. Test plan
 
@@ -341,6 +372,7 @@ audiences cost nothing.
 | Shutdown ordering — provider emits during teardown drain | high | Per-bucket "shutting down" atomic flag, checked emit-side before enqueuing. Once set, drain runs to completion without races. Stress test `stress_event_shutdown.cpp` must validate this under ASAN + `--mm:refc` and `--mm:orc`. |
 | Performance regression for pure-Nim audience due to the atomic-counter load | very low | One acquire-load per emit. Measurable in a tight loop but in absolute terms is sub-nanosecond on modern x86 / ARM. Acceptable. |
 | Delivery thread join blocks on a stuck foreign callback at shutdown | med | The delivery-thread shutdown sequence must drain pending fanouts first, but in-flight foreign callbacks return on their own. If a foreign callback hangs (faulty integration), shutdown hangs too — but that's a foreign-side bug, not ours. Document in `doc/FFI_API.md` so integrators know callbacks must be bounded-time. |
+| `dropAllListeners` leaves orphaned foreign subs in `SubsRegistry` | med | MT EventBroker's `dropAllListeners` is synchronous, callable from any thread, and has no awareness of `SubsRegistry`. Without cleanup, `foreignSubsCount` stays > 0 (wasted encodes) and `SubNode` entries leak until `_shutdown`. D-3 wires a per-event cleanup hook that calls `subsRegistryRemoveAllForKey` + resets the atomic counter. See §8a. |
 
 ## 11. Sequencing & effort
 
@@ -354,7 +386,7 @@ then applies the courier optimization on top.
 |---|---|---|---|
 | 1 | **D-1 Restore delivery thread (no behavior change yet)** | Per-context delivery thread spawned by `<lib>_createContext` *before* the processing thread (so listeners are live before any emit can fire). Mirror master's pattern (`delivThreadArgIdent`, `delivThread: Thread[...]`, `deliveryReady: Atomic[int]` on `startupState`). Body: `setThreadBrokerContext(ctx)` → await shutdown (chronos sleep loop) → on shutdown drain + free. No event handlers move yet — the thread is created and joined but does nothing else. `<lib>_shutdown` flips `shutdownFlag`, joins both threads in the right order (delivery first, then processing — mirrors master). Existing tests must pass unchanged. | 1.5 d |
 | 2 | **D-2 Move event handlers to delivery thread** | `installAllListenersIdent(arg.ctx)` moves from processing-thread body (api_library.nim:719) to delivery-thread body. Per-event handler closure (`api_library.nim:540-599`) now runs on the delivery thread. Provider `.emit` on the processing thread becomes genuinely cross-thread — MT EventBroker takes its typed-slab cross-thread path for every event with a foreign subscriber. **Slow foreign callbacks no longer block the provider.** This is the architectural restoration; cost-wise it's neutral-to-slightly-worse than D-1 baseline (MT slab is now exercised where the same-thread fast path used to apply). Existing parity matrix must stay green. | 1 d |
-| 3 | **D-3 Event courier ring + atomic-counter fast path** | Add `brokers/internal/api_cbor_event_courier.nim` (mirror of `api_cbor_courier.nim` minus the response-slot machinery — events are fire-and-forget). Per-context `eventCourier: ptr CborEventCourier` allocated in `_createContext`, freed in `_shutdown` after both threads join. Add `foreignSubsCount: Atomic[int]` updated on subscribe/unsubscribe via the existing `subsRegistry` lock. Rewrite the per-event handler so the FFI fan-out goes through the courier ring (encode-once-on-emit-thread, opaque buffer crosses, delivery thread dequeues + fans out). Nim listeners keep going through MT EventBroker (Lane 1/2 unchanged). Existing parity matrix stays green. | 2 d |
+| 3 | **D-3 Event courier ring + atomic-counter fast path + `dropAllListeners` cleanup** | Add `brokers/internal/api_cbor_event_courier.nim` (mirror of `api_cbor_courier.nim` minus the response-slot machinery — events are fire-and-forget). Per-context `eventCourier: ptr CborEventCourier` allocated in `_createContext`, freed in `_shutdown` after both threads join. Add `foreignSubsCount: Atomic[int]` updated on subscribe/unsubscribe via the existing `subsRegistry` lock. Rewrite the per-event handler so the FFI fan-out goes through the courier ring (encode-once-on-emit-thread, opaque buffer crosses, delivery thread dequeues + fans out). Nim listeners keep going through MT EventBroker (Lane 1/2 unchanged). **Also wire `dropAllListeners` cleanup (§8a):** each per-event installer registers a companion hook so that when the MT EventBroker's `dropAllListeners` fires, it also calls `subsRegistryRemoveAllForKey` + resets `foreignSubsCount` for that event type. Existing parity matrix stays green. | 2 d |
 | 4 | **D-4 Stress drivers — mixed audience / no-foreign / no-nim** | Add `test/ffibench/stress_event_mixed_audience.cpp`, `stress_event_no_foreign.cpp`, `stress_event_no_nim.cpp`. The no-foreign driver asserts zero CBOR encodes happen on emit (instrument `allocShared` counts); the no-nim driver asserts MT slab is not touched (instrument slab counts); the mixed driver asserts every audience receives every event with no cross-talk. Wire into existing nimble tasks. | 0.5 d |
 | 5 | **D-5 Shutdown drain + ASAN lifecycle stress** | Per-bucket `shuttingDown: Atomic[int]` flag in the event courier; emit-side checks it after the counter probe; `<lib>_shutdown` sets it before draining. Add `stress_event_shutdown.cpp` mirroring `test/ffibench/stress_shutdown.cpp`: emit at sustained rate, call `<lib>_shutdown(ctx)` mid-stream, assert every queued buffer is freed exactly once (ASAN-clean). Run under ASAN + valgrind in both `--mm:orc` and `--mm:refc`. Also add a slow-callback test (callback sleeps 100 ms) confirming the provider thread is not blocked — proves the delivery-thread restoration was actually needed. | 1.5 d |
 | 6 | **D-6 Bench harness extension** | Add `test/ffibench/bench_event_driver.cpp` measuring (a) emit-only with no foreign subscribers (atomic-counter fast path), (b) emit + one foreign subscriber (full courier path), (c) emit + N foreign subscribers (fan-out amortization), (d) emit + nim listeners only (Lane 1/2 cost). Capture numbers; extend `doc/bench_baseline.md`. The (a) → (b) delta quantifies the courier's per-call overhead; the (b) → (c) delta quantifies the fan-out efficiency. | 0.5 d |

@@ -52,9 +52,7 @@ RequestBroker(API):
     length*: int32
     checksum*: int32
 
-  proc signature*(
-    payload: seq[int32]
-  ): Future[Result[VecRequest, string]] {.async.}
+  proc signature*(payload: seq[int32]): Future[Result[VecRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Providers

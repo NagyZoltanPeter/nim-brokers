@@ -92,8 +92,7 @@ when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_event_broker
   export mt_config, mt_event_broker
 
-when compileOption("threads") and
-    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
+when compileOption("threads") and (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
   # Part A — native C-ABI codegen retired. See note in request_broker.nim.
   import ./internal/api_event_broker_cbor
   export api_event_broker_cbor
