@@ -105,6 +105,31 @@ proc skipRefcOnWindows(opt, label: string): bool =
       return true
   false
 
+proc memoryManagerMatrix(): seq[string] =
+  ## Returns the set of `--mm:` values the wrapper / example tasks
+  ## should iterate over.
+  ##
+  ## - If `MM` is set in the environment, honour the explicit choice
+  ##   (e.g. `MM=refc nimble runTypeMapTestLibPy`) — run that one only.
+  ## - Otherwise, run both `orc` and `refc` so the parity matrix is
+  ##   exercised end-to-end under both memory managers.
+  ## - On Windows, drop `refc` even from the default matrix — see
+  ##   `skipRefcOnWindows` for the chronos thread-pool / refc-GC
+  ##   conflict that makes that combo unsafe.
+  if existsEnv("MM"):
+    @[getEnv("MM")]
+  elif defined(windows):
+    @["orc"]
+  else:
+    @["orc", "refc"]
+
+proc setMM(mm: string) =
+  ## Helper for the matrix loops: pins `MM` for the duration of one
+  ## library rebuild + foreign-side run. The matrix loop reassigns
+  ## per iteration; the env var also leaks back to the caller's shell,
+  ## but that's the same behaviour the existing single-shot tasks had.
+  putEnv("MM", mm)
+
 proc cmakeWindowsConfigureExtras(): string =
   ## On Windows we drive cmake with Ninja + clang/clang++ + lld, pin the
   ## release UCRT and select RelWithDebInfo. The default Visual Studio
@@ -446,10 +471,14 @@ proc findCargoExe(): string =
     quit "Cargo (Rust toolchain) not found. Install rustup or add cargo to PATH."
   result = "cargo"
 
-task runFfiExampleRust, "Build the FFI API example library ":
-  buildFfiExampleLibrary(generateRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+task runFfiExampleRust,
+  "Build the FFI example library + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
 
 proc findGoExe(): string =
   ## Returns the `go` toolchain invocation token. Like cargo via rustup,
@@ -482,11 +511,14 @@ task buildFfiExampleGo,
   buildFfiExampleLibrary(generateGo = true)
 
 task runFfiExampleGo,
-  "Build the FFI API example library  + run the Go example":
-  buildFfiExampleLibrary(generateGo = true)
-  writeFfiGoModFor("build")
-  withDir "examples/ffiapi/go_example":
-    exec quoteArg(findGoExe()) & " run ."
+  "Build the FFI API example library + run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(generateGo = true)
+    writeFfiGoModFor("build")
+    withDir "examples/ffiapi/go_example":
+      exec quoteArg(findGoExe()) & " run ."
 
 # ---------------------------------------------------------------------------
 # FFI build of mylib.nim + the same cpp_example/main.cpp.
@@ -502,17 +534,23 @@ task buildFfiExampleCpp,
   buildFfiCmakeTarget("example_cpp")
 
 task runFfiExampleCpp,
-  "Build and run the C++ FFI example application against the library":
-  buildFfiExampleLibrary()
-  buildFfiCmakeTarget("example_cpp")
-  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
+  "Build and run the C++ FFI example application against the library (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary()
+    buildFfiCmakeTarget("example_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
 task runFfiExamplePy,
-  "Build the FFI example library + Python wrapper and run the SAME python_example/main.py against it":
-  buildFfiExampleLibrary(true)
-  putEnv("MYLIB_BUILD_DIR", "build")
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("examples/ffiapi/python_example/main.py")
+  "Build the FFI example library + Python wrapper and run python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(true)
+    putEnv("MYLIB_BUILD_DIR", "build")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/ffiapi/python_example/main.py")
 
 # FFI build of the typemapping test library: compiles
 # test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApi
@@ -552,20 +590,26 @@ proc typeMapTestLibCmakeDir(): string =
   "test/typemappingtestlib/cmake-build"
 
 task runTypeMapTestLibCpp,
-  "Build the parity library + run the C++ parity test against it":
-  buildTypeMapTestLib()
-  let cmakeDir = typeMapTestLibCmakeDir()
-  let srcDir = "test/typemappingtestlib"
-  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
-    cmakeWindowsConfigureExtras()
-  exec "cmake --build " & quoteArg(cmakeDir)
-  exec quoteArg("test/typemappingtestlib/build/test_typemappingtestlib")
+  "Build the parity library + run the C++ parity test against it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib()
+    let cmakeDir = typeMapTestLibCmakeDir()
+    let srcDir = "test/typemappingtestlib"
+    exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
+      cmakeWindowsConfigureExtras()
+    exec "cmake --build " & quoteArg(cmakeDir)
+    exec quoteArg("test/typemappingtestlib/build/test_typemappingtestlib")
 
 task runTypeMapTestLibRust,
-  "Build the parity library + Rust wrapper and run the Rust parity test":
-  buildTypeMapTestLib(genRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
+  "Build the parity library + Rust wrapper and run the Rust parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(genRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
 
 proc writeTypeMapGoModFor(buildDir: string) =
   let modPath = "test/typemappingtestlib/go_test/go.mod"
@@ -586,21 +630,27 @@ proc writeTypeMapGoModFor(buildDir: string) =
       exec quoteArg(findGoExe()) & " mod tidy"
 
 task runTypeMapTestLibGo,
-  "Build the parity library + Go wrapper and run the Go parity test":
-  buildTypeMapTestLib(genGo = true)
-  writeTypeMapGoModFor("build")
-  withDir "test/typemappingtestlib/go_test":
-    exec quoteArg(findGoExe()) & " run ."
+  "Build the parity library + Go wrapper and run the Go parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(genGo = true)
+    writeTypeMapGoModFor("build")
+    withDir "test/typemappingtestlib/go_test":
+      exec quoteArg(findGoExe()) & " run ."
 
 task runTypeMapTestLibPy,
-  "Build the parity library + Python wrapper and run the unified Python parity test against it":
-  buildTypeMapTestLib(true)
-  # The test_typemappingtestlib.py driver runs against the FFI
-  # builds; selection is via TYPEMAP_BUILD_DIR which points at the
-  # build output that holds the matching generated .py wrapper.
-  putEnv("TYPEMAP_BUILD_DIR", "build")
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
+  "Build the parity library + Python wrapper and run the Python parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibPy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(true)
+    # The test_typemappingtestlib.py driver runs against the FFI
+    # build; selection is via TYPEMAP_BUILD_DIR which points at the
+    # build output that holds the matching generated .py wrapper.
+    putEnv("TYPEMAP_BUILD_DIR", "build")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
 proc setAsanEnv() =
   putEnv("MallocNanoZone", "0")

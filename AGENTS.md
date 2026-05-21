@@ -41,8 +41,11 @@ Current test task coverage:
 
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
 - `nimble testApi` — FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the Nim-side typemappingtestlib parity matrix across ORC/refc × debug/release
-- `nimble runTypeMapTestLibRust` — Rust parity matrix for the typemappingtestlib (requires stable Rust 1.75+ via rustup)
-- `nimble runTypeMapTestLibGo` — Go parity matrix for the typemappingtestlib (requires Go 1.21+ on PATH)
+- `nimble runTypeMapTestLibRust` — Rust parity matrix for the typemappingtestlib, iterates `--mm:orc` and `--mm:refc` by default (requires stable Rust 1.75+ via rustup)
+- `nimble runTypeMapTestLibGo` — Go parity matrix for the typemappingtestlib, iterates `--mm:orc` and `--mm:refc` (requires Go 1.21+ on PATH)
+- `nimble runTypeMapTestLibCpp` / `runTypeMapTestLibPy` — C++ / Python parity, also iterate both memory managers
+- `nimble runFfiExample{Cpp,Py,Rust,Go}` — wrapper smoke-test examples, also iterate both memory managers
+- Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; Windows always runs `orc` only (refc + chronos thread-pool is unsafe — see Known Limitations).
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -334,7 +337,7 @@ test/
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **nim-brokers** (5405 symbols, 9583 relationships, 226 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **nim-brokers** (5402 symbols, 9580 relationships, 226 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

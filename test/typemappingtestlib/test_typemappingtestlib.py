@@ -167,10 +167,9 @@ class TestRequests(unittest.TestCase):
 
 class TestPrimitiveBrokerTypes(unittest.TestCase):
     """IntResultRequest = int32 and SimpleIntEvent = int64 — broker types
-    that are bare primitives rather than objects. The native wrapper exposes
-    the result as a dataclass with a single `value` field and the event
-    callback as a bare scalar. CBOR-mode codegen for these patterns is not
-    yet implemented, so the wrapper omits the method/handler there."""
+    that are bare primitives rather than objects. The wrapper exposes
+    `IntResultRequest` as the underlying `int` alias and SimpleIntEvent
+    delivers the payload as a bare scalar to the callback."""
 
     def setUp(self):
         self.lib = _make_lib()
@@ -179,18 +178,14 @@ class TestPrimitiveBrokerTypes(unittest.TestCase):
         self.lib.shutdown()
 
     def test_int_result_request(self):
-        if not hasattr(self.lib, "int_result_request"):
-            self.skipTest("primitive request result not yet emitted by codegen")
         r = self.lib.int_result_request(21)
         self.assertTrue(r.is_ok(), r.error)
-        # Native mode: IntResultRequest is a dataclass with a `value` field.
-        # CBOR mode: IntResultRequest is the bare `int` alias.
-        actual = r.value.value if hasattr(r.value, "value") else r.value
-        self.assertEqual(actual, 42)  # provider returns value * 2
+        # `IntResultRequest` is a `distinct int32` alias, exposed by the
+        # Python wrapper as the bare `int` itself rather than a wrapper
+        # dataclass.
+        self.assertEqual(r.value, 42)  # provider returns value * 2
 
     def test_simple_int_event(self):
-        if not hasattr(self.lib, "on_simple_int_event"):
-            self.skipTest("primitive event payload not yet emitted by codegen")
         received = []
         ev = threading.Event()
 
