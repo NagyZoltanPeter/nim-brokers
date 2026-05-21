@@ -922,7 +922,9 @@ proc setupProviders(ctx: BrokerContext) =
     proc(
         tags: array[4, string]
     ): Future[Result[SetTagsRequest, string]] {.closure, async.} =
-      return ok(SetTagsRequest(joined: tags[0] & "|" & tags[1] & "|" & tags[2] & "|" & tags[3])),
+      return ok(
+        SetTagsRequest(joined: tags[0] & "|" & tags[1] & "|" & tags[2] & "|" & tags[3])
+      ),
   )
 
   discard SumPrimArrayRequest.setProvider(
@@ -960,9 +962,7 @@ proc setupProviders(ctx: BrokerContext) =
         key: string, value: string
     ): Future[Result[NestedObjRequest, string]] {.closure, async.} =
       return ok(
-        NestedObjRequest(
-          label: key & "=" & value, nested: Tag(key: key, value: value)
-        )
+        NestedObjRequest(label: key & "=" & value, nested: Tag(key: key, value: value))
       ),
   )
 

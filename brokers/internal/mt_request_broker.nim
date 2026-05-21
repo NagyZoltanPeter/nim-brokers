@@ -171,7 +171,8 @@ proc generateMtRequestBroker*(
         warning(
           "[brokers] RequestBroker(" & typeDisplayName &
             ") could not auto-size request payload (" & cls.reason &
-            "); falling back to " & $cls.bytes & " B. Override with `maxPayloadBytes = N`."
+            "); falling back to " & $cls.bytes &
+            " B. Override with `maxPayloadBytes = N`."
         )
     else:
       cfg.maxPayloadBytes = ScalarBytes

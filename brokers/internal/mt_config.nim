@@ -388,7 +388,10 @@ proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
         $t[0]
       else:
         # nnkDotExpr: lhs.rhs — use rhs as the primary name.
-        if t[0].len >= 2 and t[0][1].kind == nnkIdent: $t[0][1] else: t[0].repr
+        if t[0].len >= 2 and t[0][1].kind == nnkIdent:
+          $t[0][1]
+        else:
+          t[0].repr
     if outer == "seq":
       let inner = t[1]
       if inner.kind == nnkIdent:

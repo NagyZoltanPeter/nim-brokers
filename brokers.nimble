@@ -421,8 +421,7 @@ proc buildBenchLibWithMM(mm: string, release: bool) =
     flags.add(" -d:release")
   exec "nim c " & flags & " test/ffibench/benchlib.nim"
 
-task perftestFfi,
-  "FFI perftest from C++ (5×500×512B; orc + refc × debug + release)":
+task perftestFfi, "FFI perftest from C++ (5×500×512B; orc + refc × debug + release)":
   ## Companion to `nimble perftest` on the FFI side. Mirrors the same
   ## 5 × 500 × 512 B shape via test/ffibench/perf_driver.cpp so the
   ## numbers line up directly against the Nim-direct baseline printed
@@ -441,8 +440,7 @@ task perftestFfi,
       exec "cmake --build test/ffibench/cmake-build --target perf_driver"
       exec "test/ffibench/build/perf_driver"
 
-task runFfiBenchEvent,
-  "Build benchlib (release/orc) + bench_event_driver and run it":
+task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and run it":
   ## Part D-6 — captures the per-emit cost across four scenarios:
   ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
   ##   (b) 1 foreign subscriber             — full courier path
@@ -547,8 +545,7 @@ proc writeFfiGoModFor(buildDir: string) =
     withDir "examples/ffiapi/go_example":
       exec quoteArg(findGoExe()) & " mod tidy"
 
-task buildFfiExampleGo,
-  "Build the FFI API example library  + generated Go wrapper":
+task buildFfiExampleGo, "Build the FFI API example library  + generated Go wrapper":
   buildFfiExampleLibrary(generateGo = true)
 
 task runFfiExampleGo,
@@ -565,8 +562,7 @@ task runFfiExampleGo,
 # FFI build of mylib.nim + the same cpp_example/main.cpp.
 # ---------------------------------------------------------------------------
 
-task buildFfiExample,
-  "Build FFI API example library (into nimlib/build)":
+task buildFfiExample, "Build FFI API example library (into nimlib/build)":
   buildFfiExampleLibrary()
 
 task buildFfiExampleCpp,
@@ -611,9 +607,7 @@ proc buildTypeMapTestLib(
     " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
-  flags.add(
-    nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib")
-  )
+  flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
   if release:
     flags.add(" -d:release")
   if genPy:
@@ -866,8 +860,7 @@ proc writeTorpedoGoModFor(buildDir: string) =
     withDir "examples/torpedo/go_example":
       exec quoteArg(findGoExe()) & " mod tidy"
 
-task runTorpedoExampleGo,
-  "Build the Torpedo Duel FFI library  + run the Go example":
+task runTorpedoExampleGo, "Build the Torpedo Duel FFI library  + run the Go example":
   buildTorpedoExampleLibrary(generateGo = true)
   writeTorpedoGoModFor("build")
   withDir "examples/torpedo/go_example":
@@ -875,8 +868,7 @@ task runTorpedoExampleGo,
 
 # FFI build of the torpedo example. Same torpedolib.nim source +
 # same cpp_example/main.cpp, compiled against the FFI codegen output.
-task buildTorpedoExample,
-  "Build the torpedo FFI example library (into nimlib/build)":
+task buildTorpedoExample, "Build the torpedo FFI example library (into nimlib/build)":
   buildTorpedoExampleLibrary()
 
 task buildTorpedoExampleCpp,
