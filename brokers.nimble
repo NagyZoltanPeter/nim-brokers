@@ -375,6 +375,23 @@ task runFfiBenchEventStressAsan,
   runFfiBenchEventStressAsanFor("orc")
   runFfiBenchEventStressAsanFor("refc")
 
+task runFfiBenchEvent,
+  "Build benchlib (CBOR mode, release/orc) + bench_event_driver and run it":
+  ## Part D-6 — captures the per-emit cost across four scenarios:
+  ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
+  ##   (b) 1 foreign subscriber             — full courier path
+  ##   (c) M foreign subscribers            — encode-amortize-fanout
+  ##   (d) K same-thread Nim listeners      — Lane 1 cost in isolation
+  ## Output is CSV on stdout; numbers are captured in doc/bench_baseline.md.
+  exec "nim c -d:release -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build_cbor --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build " &
+    "-DCMAKE_BUILD_TYPE=Release"
+  exec "cmake --build test/ffibench/cmake-build --target bench_event_driver"
+  exec "test/ffibench/build_cbor/bench_event_driver"
+
 task perftest, "Run performance and stress tests":
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]

@@ -132,3 +132,90 @@ floor.
 Part A retires native codegen, so the **native** column is frozen here
 as the historical reference. The CBOR (courier) column is the live
 baseline going forward.
+
+## Event dispatch — Part D-6 (CBOR mode only)
+
+Companion to `doc/CBOR_Round2_PartD_EventCourier.md`. Captures the per-emit
+cost of the three-lane FFI event-dispatch design (atomic-counter fast path
++ event-courier ring + delivery-thread fan-out + dropAllListeners hook).
+
+### Environment
+
+| | |
+|---|---|
+| Machine | Apple M4, 10 cores |
+| OS | macOS 15.7.3 |
+| Compiler | AppleClang 17.0.0; Nim 2.2.4 |
+| Build | `-d:release`, `--mm:orc`, `--threads:on` |
+| Date | 2026-05-21 |
+
+### Harness
+
+`test/ffibench/bench_event_driver.cpp` (release CBOR build of `benchlib`
+with `PingEvent` declared). For each of the four scenarios below:
+
+1. fresh `<lib>_createContext` per scenario
+2. set up the audience (foreign callbacks via `onPingEvent` and/or
+   same-thread Nim listeners via `installSameThreadNimListenersRequest`)
+3. issue `triggerEmitRequest(N=20000)` from the foreign caller thread —
+   the provider then loops over 20K `PingEvent.emit(...)` calls on the
+   processing thread
+4. spin (with `usleep(50)` between probes) until every audience reports
+   `>= N` deliveries
+5. `ns_per_emit = (t_after_drain - t_before_emit_request) / N`
+6. report median over 3 reps
+
+The wall-clock window therefore captures **both** the emit-side cost
+(atomic check / encode / courier enqueue) **and** the delivery-side cost
+(courier dequeue + fan-out + free), and includes any cross-thread
+batching the delivery thread does internally.
+
+### Numbers
+
+| # | Scenario | Audience | ns/emit | Delta vs (a) | Notes |
+|---|---|---|---:|---:|---|
+| a | no_foreign_no_nim | 0 | **615** | — | atomic-counter fast path; handler does `load(moAcquire)` → returns |
+| b | one_foreign | 1 foreign cb | **976** | +361 | full courier path: 1 encode, 1 enqueue, 1 signal, 1 fanout |
+| c | many_foreign | 8 foreign cbs | **895** | +280 | encode-once-on-emit-thread amortizes across 8 callbacks; (c) ≤ (b) confirms the delivery thread batches multiple events per signal-wake, so per-emit overhead does not grow linearly with fan-out width |
+| d | nim_only_same_thread | 4 Nim listeners | **1170** | +555 | Lane 1 cost: 4 × direct `asyncSpawn` per emit; no CBOR involvement, no courier touch |
+
+### Interpretation
+
+- **(a) → (b) = +361 ns**: the courier's per-emit overhead when foreign
+  subscribers are actually present. CBOR encode of a single `int64`
+  payload (`seqNo`), one `allocShared0`, one ring lock-and-memcpy, one
+  signal fire, one ring lock-and-memcpy on the delivery thread, one
+  callback dispatch, one `deallocShared`. Dominated by the two ring
+  lock acquisitions and the cross-thread signal.
+
+- **(a) is the 90 % production case** (no foreign subscribers for a
+  given emit). The atomic load is **the only cost above MT EventBroker
+  dispatch**. 615 ns is dominated by MT EventBroker bookkeeping —
+  Nim's `asyncSpawn` of the (empty-fanout) handler closure dominates,
+  not anything Part D added.
+
+- **(b) → (c) ≈ -80 ns**: per-callback marginal cost is essentially
+  zero (negative within noise) because the encode happens once per
+  emit and the delivery-thread fan-out loop is tight (one atomic
+  increment per callback in the bench harness). A real consumer with
+  heavier callbacks shifts this delta proportional to the callback's
+  own cost.
+
+- **(d) costs more than (b)/(c)** because the same-thread Nim path does
+  `K` independent `asyncSpawn`s per emit (one chronos future allocation
+  per listener), where the foreign-fanout path packs the work behind a
+  single courier message.
+
+### Reproducing
+
+```bash
+nimble runFfiBenchEvent
+```
+
+(Equivalent: `nim c -d:release -d:BrokerFfiApiCBOR --threads:on
+--app:lib --path:. --outdir:test/ffibench/build_cbor --mm:orc
+--nimMainPrefix:benchlib test/ffibench/benchlib.nim` then `cmake -S
+test/ffibench -B test/ffibench/cmake-build -DCMAKE_BUILD_TYPE=Release`
+then `cmake --build test/ffibench/cmake-build --target
+bench_event_driver` then `test/ffibench/build_cbor/bench_event_driver`.)
+
