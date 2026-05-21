@@ -5,10 +5,11 @@ project(mylib_examples C CXX)
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
 # CBOR is the only FFI mode (the native codegen was retired — see
-# doc/CBOR_Refactoring.md). MYLIB_DIR can still be overridden at configure
-# time; by default it points at the -d:BrokerFfiApiCBOR build output.
+# doc/design/CBOR_Refactoring.md). MYLIB_DIR can be overridden at
+# configure time; by default it points at the standard
+# -d:BrokerFfiApi build output.
 if(NOT MYLIB_DIR)
-    set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
+    set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
 endif()
 
 # Subdir name used for embedded RPATH — keeps the example binary

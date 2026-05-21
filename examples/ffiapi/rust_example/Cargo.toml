@@ -1,6 +1,6 @@
 # Cargo manifest for the mylib Rust FFI example.
 #
-#   cargo run   # builds against the CBOR FFI library in nimlib/build_cbor/
+#   cargo run   # builds against the FFI library in nimlib/build/
 #
 # The generated wrapper crate is included as a module via #[path].
 

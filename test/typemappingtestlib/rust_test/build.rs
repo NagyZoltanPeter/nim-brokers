@@ -3,7 +3,7 @@
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let lib_dir = format!("{}/../build_cbor", manifest);
+    let lib_dir = format!("{}/../build", manifest);
 
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=dylib=typemappingtestlib");

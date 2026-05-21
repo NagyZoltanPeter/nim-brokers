@@ -5,11 +5,12 @@ project(torpedo_examples CXX)
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
 # CBOR is the only FFI mode (the native codegen was retired — see
-# doc/CBOR_Refactoring.md). TORPEDOLIB_DIR can still be overridden at
-# configure time; by default it points at the -d:BrokerFfiApiCBOR build
-# output and the C++ target pulls in jsoncons headers.
+# doc/design/CBOR_Refactoring.md). TORPEDOLIB_DIR can be overridden at
+# configure time; by default it points at the standard
+# -d:BrokerFfiApi build output and the C++ target pulls in jsoncons
+# headers.
 if(NOT TORPEDOLIB_DIR)
-    set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
+    set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
 endif()
 
 get_filename_component(TORPEDOLIB_DIRNAME "${TORPEDOLIB_DIR}" NAME)

@@ -2,9 +2,9 @@
 // type mapping through the generated Rust wrapper (typemappingtestlib_rs).
 // One Rust function per C++ test, preserved in the same order.
 //
-//     cargo run   # builds against the CBOR FFI library in build_cbor/
+//     cargo run   # builds against the FFI library in build/
 
-#[path = "../../build_cbor/typemappingtestlib_rs/src/lib.rs"]
+#[path = "../../build/typemappingtestlib_rs/src/lib.rs"]
 mod lib;
 
 use lib::{Inner, KeyRange, Slot, Tag, Typemappingtestlib};

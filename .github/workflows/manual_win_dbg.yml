@@ -10,8 +10,8 @@ on:
         type: choice
         options:
           - test
-          - testApiCbor
-          - test testApiCbor
+          - testApi
+          - test testApi
 
 permissions:
   contents: read

@@ -3,12 +3,12 @@ project(ffibench_cpp_driver CXX)
 
 # Phase 0 microbenchmark driver — see doc/CBOR_Refactoring.md §7.3.
 # CBOR is the only FFI mode (the native codegen was retired). BENCH_DIR
-# can still be overridden at configure time; by default it points at the
-# CBOR build output.
+# can be overridden at configure time; by default it points at the
+# standard FFI build output.
 option(ASAN "Enable AddressSanitizer on the C++ drivers (lib must also be ASAN-built)" OFF)
 
 if(NOT BENCH_DIR)
-    set(BENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
+    set(BENCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
 endif()
 
 get_filename_component(BENCH_DIR "${BENCH_DIR}" ABSOLUTE)

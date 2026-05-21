@@ -7,11 +7,11 @@ option(ASAN "Enable AddressSanitizer (requires clang)" OFF)
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
 # CBOR is the only FFI mode (the native codegen was retired — see
-# doc/CBOR_Refactoring.md). TYPEMAPTEST_DIR can still be overridden at
-# configure time; by default it points at the -d:BrokerFfiApi build
-# output and the C++ test pulls in jsoncons headers.
+# doc/design/CBOR_Refactoring.md). TYPEMAPTEST_DIR can be overridden
+# at configure time; by default it points at the -d:BrokerFfiApi
+# build output and the C++ test pulls in jsoncons headers.
 if(NOT TYPEMAPTEST_DIR)
-    set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
+    set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
 endif()
 
 get_filename_component(TYPEMAPTEST_DIR "${TYPEMAPTEST_DIR}" ABSOLUTE)
@@ -19,7 +19,7 @@ get_filename_component(TYPEMAPTEST_DIR "${TYPEMAPTEST_DIR}" ABSOLUTE)
 if(NOT EXISTS "${TYPEMAPTEST_DIR}/typemappingtestlib.hpp")
     message(FATAL_ERROR
         "typemappingtestlib.hpp not found in ${TYPEMAPTEST_DIR}.\n"
-        "Run  nimble buildTypeMapTestLibCbor  first.")
+        "Run  nimble buildTypeMapTestLib  first.")
 endif()
 
 add_library(typemappingtestlib SHARED IMPORTED)

@@ -523,16 +523,10 @@ This demonstrates several things that a trivial example cannot:
 Build and run from the repository root:
 
 ```sh
-# native strategy builds:
 nimble runTorpedoExampleCpp
 nimble runTorpedoExamplePy
 nimble runTorpedoExampleRust
 nimble runTorpedoExampleGo
-# CBOR strategy builds:
-nimble runTorpedoExampleCborCpp
-nimble runTorpedoExampleCborPy
-nimble runTorpedoExampleCborRust
-nimble runTorpedoExampleCborGo
 ```
 
 See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full

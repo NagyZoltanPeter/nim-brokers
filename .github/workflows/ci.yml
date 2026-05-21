@@ -92,13 +92,13 @@ jobs:
         shell: bash
         run: nimble test --verbose
 
-      - name: Run nimble testApiCbor
-        # Nim-side CBOR matrix (codec + library init + event subscribe +
-        # discovery API + typemappingtestlib_cbor parity). Doesn't compile
+      - name: Run nimble testApi
+        # Nim-side API matrix (codec + library init + event subscribe +
+        # discovery API + typemappingtestlib parity). Doesn't compile
         # any C++ consumer, so no jsoncons fetch is needed here — that's
         # only required by the `examples` job below.
         shell: bash
-        run: nimble testApiCbor --verbose
+        run: nimble testApi --verbose
 
   examples:
     runs-on: ubuntu-latest
@@ -124,47 +124,47 @@ jobs:
           cmake --version
           python3 --version
 
-      - name: Install Python cbor2 (CBOR Python wrapper dep)
+      - name: Install Python cbor2 (Python wrapper dep)
         run: python3 -m pip install --user cbor2
 
-      - name: Fetch jsoncons (CBOR C++ wrapper dep)
+      - name: Fetch jsoncons (C++ wrapper dep)
         run: |
           if [ ! -d vendor/jsoncons ]; then
             git clone --depth 1 --branch v1.0.0 \
               https://github.com/danielaparker/jsoncons.git vendor/jsoncons
           fi
 
-      - name: Run CBOR C++ FFI example
-        run: nimble runFfiExampleCborCpp -y --verbose
+      - name: Run C++ FFI example
+        run: nimble runFfiExampleCpp -y --verbose
 
-      - name: Run CBOR Python FFI example
-        run: nimble runFfiExampleCborPy -y --verbose
+      - name: Run Python FFI example
+        run: nimble runFfiExamplePy -y --verbose
 
-      - name: Run CBOR Python parity matrix
-        run: nimble runTypeMapTestLibCborPy -y --verbose
+      - name: Run Python parity matrix
+        run: nimble runTypeMapTestLibPy -y --verbose
 
-      - name: Run CBOR C++ parity matrix
-        run: nimble runTypeMapTestLibCborCpp -y --verbose
+      - name: Run C++ parity matrix
+        run: nimble runTypeMapTestLibCpp -y --verbose
 
       - name: Set up Rust toolchain (stable, MSRV 1.75)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Rust FFI example (CBOR mode)
-        run: nimble runFfiExampleCborRust -y --verbose
+      - name: Run Rust FFI example
+        run: nimble runFfiExampleRust -y --verbose
 
-      - name: Run Rust parity matrix (CBOR mode)
-        run: nimble runTypeMapTestLibCborRust -y --verbose
+      - name: Run Rust parity matrix
+        run: nimble runTypeMapTestLibRust -y --verbose
 
       - name: Set up Go toolchain (1.21)
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
 
-      - name: Run Go FFI example (CBOR mode)
-        run: nimble runFfiExampleCborGo -y --verbose
+      - name: Run Go FFI example
+        run: nimble runFfiExampleGo -y --verbose
 
-      - name: Run Go parity matrix (CBOR mode)
-        run: nimble runTypeMapTestLibCborGo -y --verbose
+      - name: Run Go parity matrix
+        run: nimble runTypeMapTestLibGo -y --verbose
 
   nph:
     runs-on: ubuntu-latest

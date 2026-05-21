@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Unified Python parity test for typemappingtestlib (native + CBOR).
+"""Python parity test for typemappingtestlib.
 
-Drives the same generated Python wrapper API on both the native FFI
-build and the CBOR FFI build. Selection is by environment:
+Drives the generated Python wrapper API of the FFI library. The
+`TYPEMAP_BUILD_DIR` env var selects the build subdirectory (defaults
+to `build`, matching `nimble runTypeMapTestLibPy`).
 
-    TYPEMAP_BUILD_DIR=build       # default — native FFI wrapper
-    TYPEMAP_BUILD_DIR=build_cbor  # CBOR-mode wrapper
-
-Both wrappers expose:
+The wrapper exposes:
     class Typemappingtestlib:
         def create_context() -> Result[None]
         def valid_context() -> bool
@@ -182,7 +180,7 @@ class TestPrimitiveBrokerTypes(unittest.TestCase):
 
     def test_int_result_request(self):
         if not hasattr(self.lib, "int_result_request"):
-            self.skipTest("primitive request result not yet emitted in CBOR build")
+            self.skipTest("primitive request result not yet emitted by codegen")
         r = self.lib.int_result_request(21)
         self.assertTrue(r.is_ok(), r.error)
         # Native mode: IntResultRequest is a dataclass with a `value` field.
@@ -192,7 +190,7 @@ class TestPrimitiveBrokerTypes(unittest.TestCase):
 
     def test_simple_int_event(self):
         if not hasattr(self.lib, "on_simple_int_event"):
-            self.skipTest("primitive event payload not yet emitted in CBOR build")
+            self.skipTest("primitive event payload not yet emitted by codegen")
         received = []
         ev = threading.Event()
 
@@ -480,12 +478,8 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.first, "alpha")
 
     def test_obj_as_param(self):
-        # Object-as-request-param probe. The broker is gated to CBOR mode
-        # in the Nim source — native C/C++/Python/Rust all fail for this
-        # pattern (see doc/TYPESUPPORT.md, Section 2). We only assert when
-        # running against the CBOR build.
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("obj_param_request only registered in CBOR build")
+        # Object-as-request-param — universally supported now that the
+        # native ABI was retired (see doc/TYPESUPPORT.md §2).
         r = self.lib.obj_param_request(Tag(key="k", value="v"))
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.summary, "k=v")
@@ -544,9 +538,7 @@ class TestSeqObject(unittest.TestCase):
     def test_bytes_echo_request_roundtrip(self):
         # Inbound `seq[byte]` byte-string probe — cbor2 encodes Python
         # `bytes` as CBOR byte string (major type 2), which the Nim
-        # provider expects. CBOR-only.
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("bytes_echo_request only registered in CBOR build")
+        # provider expects.
         r = self.lib.bytes_echo_request(bytes([10, 20, 30, 40, 50]))
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.length, 5)
@@ -554,8 +546,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.last, 50)
 
     def test_bytes_echo_request_empty(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("bytes_echo_request only registered in CBOR build")
         r = self.lib.bytes_echo_request(b"")
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.length, 0)
@@ -563,8 +553,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.last, -1)
 
     def test_scan_request_forward(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("scan_request only registered in CBOR build")
         from typemappingtestlib import KeyRange
         kr = KeyRange(startKey="lo", stopKey="hi")
         r = self.lib.scan_request("scan", kr, False)
@@ -575,8 +563,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.rows[0].payload, "scan-row-0:hi")
 
     def test_scan_request_reverse(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("scan_request only registered in CBOR build")
         from typemappingtestlib import KeyRange
         kr = KeyRange(startKey="lo", stopKey="hi")
         r = self.lib.scan_request("scan", kr, True)

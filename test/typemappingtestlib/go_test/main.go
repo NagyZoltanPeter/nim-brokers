@@ -1,8 +1,7 @@
 // Go port of test_typemappingtestlib.cpp — covers every Nim→C→Go type
 // mapping through the generated Go wrapper (typemappingtestlib package).
 //
-//     go run .                # native FFI build  (build/)
-//     go run -tags cbor .     # CBOR FFI build    (build_cbor/)
+//     go run .   # links against build/ (FFI build)
 
 package main
 
@@ -1407,7 +1406,7 @@ func test_obj_seq_param_string_encoding() {
 	lib.Close()
 }
 
-// test_obj_as_param: lives in cbor_only_*.go (CBOR-gated).
+// test_obj_as_param: lives in extras.go.
 
 // Native + CBOR Option[int32] probe (Phase E1).
 func test_opt_scalar_present() {
@@ -2445,7 +2444,7 @@ func main() {
 	runTest("test_obj_seq_param_single", test_obj_seq_param_single)
 	runTest("test_obj_seq_param_multiple", test_obj_seq_param_multiple)
 	runTest("test_obj_seq_param_string_encoding", test_obj_seq_param_string_encoding)
-	runCborOnly() // test_obj_as_param (CBOR-only)
+	runExtras() // test_obj_as_param + bytes_echo + scan_request
 	runTest("test_obj_seq_result_empty", test_obj_seq_result_empty)
 	runTest("test_obj_seq_result_length", test_obj_seq_result_length)
 	runTest("test_obj_seq_result_keys", test_obj_seq_result_keys)

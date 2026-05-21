@@ -64,7 +64,7 @@ func test_scan_request_reverse() {
 	lib.Close()
 }
 
-func runCborOnly() {
+func runExtras() {
 	runTest("test_obj_as_param", test_obj_as_param)
 	runTest("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip)
 	runTest("test_bytes_echo_request_empty", test_bytes_echo_request_empty)
@@ -72,6 +72,6 @@ func runCborOnly() {
 	runTest("test_scan_request_reverse", test_scan_request_reverse)
 }
 
-// intResultValue extracts the scalar from a CBOR-mode IntResultRequest,
-// which is the bare `int32` type alias.
+// intResultValue extracts the scalar from an IntResultRequest, which
+// is the bare `int32` type alias.
 func intResultValue(r typemappingtestlib.IntResultRequest) int32 { return int32(r) }

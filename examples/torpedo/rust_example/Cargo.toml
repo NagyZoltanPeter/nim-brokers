@@ -1,6 +1,6 @@
 # Cargo manifest for the torpedo Rust FFI example.
 #
-#   cargo run   # builds against the CBOR FFI library in nimlib/build_cbor/
+#   cargo run   # builds against the FFI library in nimlib/build/
 
 [package]
 name = "torpedo_rust_example"

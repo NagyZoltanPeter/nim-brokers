@@ -3,7 +3,7 @@
 # Mirrors test_typemappingtestlib.{cpp,py}: verifies the Rust wrapper
 # correctly handles the full Nim → Rust type matrix the codegen supports.
 #
-#   cargo run   # builds against the CBOR FFI library in build_cbor/
+#   cargo run   # builds against the FFI library in build/
 
 [package]
 name = "typemappingtestlib_rust"

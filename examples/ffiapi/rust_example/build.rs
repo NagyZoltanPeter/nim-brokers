@@ -1,9 +1,9 @@
 // build.rs — wires the Rust example to the libmylib shared library
-// produced by the Nim CBOR build in nimlib/build_cbor/.
+// produced by the Nim FFI build in nimlib/build/.
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let lib_dir = format!("{}/../nimlib/build_cbor", manifest);
+    let lib_dir = format!("{}/../nimlib/build", manifest);
 
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=dylib=mylib");

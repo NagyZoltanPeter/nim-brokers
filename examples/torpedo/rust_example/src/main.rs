@@ -6,9 +6,9 @@
 // both own/enemy boards, fleet status, meta panels, and a tail of the
 // event log driven by the broker callbacks.
 //
-//     cargo run   # builds against the CBOR FFI library in nimlib/build_cbor/
+//     cargo run   # builds against the FFI library in nimlib/build/
 
-#[path = "../../nimlib/build_cbor/torpedolib_rs/src/lib.rs"]
+#[path = "../../nimlib/build/torpedolib_rs/src/lib.rs"]
 mod torpedolib;
 
 use std::collections::VecDeque;

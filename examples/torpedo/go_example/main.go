@@ -6,8 +6,7 @@
 // both own/enemy boards, fleet status, meta panels, and a tail of the
 // event log driven by the broker callbacks.
 //
-//     go run .                # native FFI build (nimlib/build/)
-//     go run -tags cbor .     # CBOR FFI build   (nimlib/build_cbor/)
+//     go run .   # links against nimlib/build/ (FFI build)
 
 package main
 

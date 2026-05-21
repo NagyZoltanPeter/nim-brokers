@@ -1,12 +1,11 @@
 // Device Monitor — Go wrapper example.
 //
 // Functional parity with cpp_example/main.cpp: same event printouts,
-// same request flow, same listener-removal pattern. The single source
-// compiles for both build modes — the generated wrapper module exposes
-// an identical Go API in either mode.
+// same request flow, same listener-removal pattern. Linked against
+// the FFI library produced by `nimble buildFfiExample` into
+// nimlib/build/.
 //
-//     go run .                # native FFI build  (nimlib/build/)
-//     go run -tags cbor .     # CBOR FFI build    (nimlib/build_cbor/)
+//     go run .
 
 package main
 
