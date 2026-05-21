@@ -7,7 +7,7 @@
 #[path = "../../build_cbor/typemappingtestlib_rs/src/lib.rs"]
 mod lib;
 
-use lib::{KeyRange, Tag, Typemappingtestlib};
+use lib::{Inner, KeyRange, Slot, Tag, Typemappingtestlib};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2621,6 +2621,143 @@ fn test_seq_object_event_concurrent_listeners_and_requesters() {
 }
 
 // ===========================================================================
+// TestPreviouslyRestrictedShapes — formerly ❌ in TYPESUPPORT.md.
+// ===========================================================================
+
+fn test_list_inners_result_empty() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.list_inners_request(0);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.items.is_empty());
+    }
+    lib.shutdown();
+}
+
+fn test_list_inners_result_count_and_fields() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.list_inners_request(3);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.items.len(), 3usize);
+        check_eq!(v.items[0].id, 0);
+        check_eq!(&v.items[0].tag, &"inner-0".to_string());
+        check_eq!(&v.items[0].bytes, &vec![0u8]);
+        check_eq!(v.items[2].id, 2);
+        check_eq!(&v.items[2].tag, &"inner-2".to_string());
+        check_eq!(&v.items[2].bytes, &vec![2u8, 3, 4]);
+    }
+    lib.shutdown();
+}
+
+fn test_bulk_inners_param_roundtrip() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let gen = lib.list_inners_request(5);
+    check!(gen.is_ok());
+    let items: Vec<Inner> = gen.value().map(|v| v.items.clone()).unwrap_or_default();
+    let r = lib.bulk_inners_request(items);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.idSum, 10i64);
+        check_eq!(v.byteCount, 15i64);
+    }
+    lib.shutdown();
+}
+
+fn test_inners_updated_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<Inner>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_inners_updated_event(move |items: Vec<Inner>| list_push(&cb, items));
+    let _ = lib.trigger_inners_updated_request(4);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let items = &snap[0];
+        check_eq!(items.len(), 4usize);
+        check_eq!(items[0].id, 0);
+        check_eq!(&items[0].tag, &"evt-0".to_string());
+        check_eq!(&items[0].bytes, &vec![0u8]);
+        check_eq!(items[3].id, 3);
+        check_eq!(&items[3].bytes, &vec![3u8, 4, 5, 6]);
+    }
+    lib.off_inners_updated_event(h);
+    lib.shutdown();
+}
+
+fn test_fixed_str_array_result() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.fixed_str_array_request("tag".to_string());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.tags.len(), 4usize);
+        check_eq!(&v.tags[0], &"tag-0".to_string());
+        check_eq!(&v.tags[1], &"tag-1".to_string());
+        check_eq!(&v.tags[2], &"tag-2".to_string());
+        check_eq!(&v.tags[3], &"tag-3".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_set_tags_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.set_tags_request(vec![
+        "alpha".to_string(),
+        "beta".to_string(),
+        "".to_string(),
+        "delta".to_string(),
+    ]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.joined, &"alpha|beta||delta".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_sum_prim_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.sum_prim_array_request(vec![10i32, 20, 30, 40]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.total, 100i64);
+    }
+    lib.shutdown();
+}
+
+fn test_fixed_obj_array_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<Slot>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_fixed_obj_array_event(move |slots: Vec<Slot>| list_push(&cb, slots));
+    let _ = lib.trigger_fixed_obj_array_request(100);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let slots = &snap[0];
+        check_eq!(slots.len(), 4usize);
+        check_eq!(slots[0].idx, 100);
+        check_eq!(&slots[0].name, &"alpha".to_string());
+        check_eq!(&slots[2].name, &"".to_string());
+        check_eq!(slots[3].idx, 103);
+        check_eq!(&slots[3].name, &"delta with spaces".to_string());
+    }
+    lib.off_fixed_obj_array_event(h);
+    lib.shutdown();
+}
+
+// ===========================================================================
 // main
 // ===========================================================================
 
@@ -2779,6 +2916,16 @@ fn main() {
     run_test("test_seq_object_event_callback_data_correctness", test_seq_object_event_callback_data_correctness);
     run_test("test_seq_object_event_rapid_fire_no_leak", test_seq_object_event_rapid_fire_no_leak);
     run_test("test_seq_object_event_concurrent_listeners_and_requesters", test_seq_object_event_concurrent_listeners_and_requesters);
+
+    println!("\n--- TestPreviouslyRestrictedShapes ---");
+    run_test("test_list_inners_result_empty", test_list_inners_result_empty);
+    run_test("test_list_inners_result_count_and_fields", test_list_inners_result_count_and_fields);
+    run_test("test_bulk_inners_param_roundtrip", test_bulk_inners_param_roundtrip);
+    run_test("test_inners_updated_event", test_inners_updated_event);
+    run_test("test_fixed_str_array_result", test_fixed_str_array_result);
+    run_test("test_set_tags_array_param", test_set_tags_array_param);
+    run_test("test_sum_prim_array_param", test_sum_prim_array_param);
+    run_test("test_fixed_obj_array_event", test_fixed_obj_array_event);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

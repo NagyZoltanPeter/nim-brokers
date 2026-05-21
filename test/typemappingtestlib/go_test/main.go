@@ -2132,6 +2132,140 @@ func test_seq_object_event_concurrent_listeners_and_requesters() {
 }
 
 // ============================================================================
+// TestPreviouslyRestrictedShapes — formerly ❌ in TYPESUPPORT.md.
+// ============================================================================
+
+func test_list_inners_result_empty() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.ListInnersRequest(0)
+	checkEq(err, error(nil), "no err")
+	checkEq(len(r.Items), 0, "items empty")
+	lib.Close()
+}
+
+func test_list_inners_result_count_and_fields() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.ListInnersRequest(3)
+	checkEq(err, error(nil), "no err")
+	checkEq(len(r.Items), 3, "items len")
+	if len(r.Items) == 3 {
+		checkEq(r.Items[0].Id, int32(0), "items[0].id")
+		checkEq(r.Items[0].Tag, "inner-0", "items[0].tag")
+		checkEq(len(r.Items[0].Bytes), 1, "items[0].bytes len")
+		checkEq(r.Items[0].Bytes[0], byte(0), "items[0].bytes[0]")
+		checkEq(r.Items[2].Id, int32(2), "items[2].id")
+		checkEq(r.Items[2].Tag, "inner-2", "items[2].tag")
+		checkEq(len(r.Items[2].Bytes), 3, "items[2].bytes len")
+		checkEq(r.Items[2].Bytes[0], byte(2), "items[2].bytes[0]")
+		checkEq(r.Items[2].Bytes[2], byte(4), "items[2].bytes[2]")
+	}
+	lib.Close()
+}
+
+func test_bulk_inners_param_roundtrip() {
+	lib := newLib()
+	lib.CreateContext()
+	gen, err := lib.ListInnersRequest(5)
+	checkEq(err, error(nil), "gen err")
+	r, err2 := lib.BulkInnersRequest(gen.Items)
+	checkEq(err2, error(nil), "bulk err")
+	checkEq(r.IdSum, int64(10), "idSum")
+	checkEq(r.ByteCount, int64(15), "byteCount")
+	lib.Close()
+}
+
+func test_inners_updated_event() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[[]typemappingtestlib.Inner]{}
+	h := lib.OnInnersUpdatedEvent(func(items []typemappingtestlib.Inner) {
+		cp := make([]typemappingtestlib.Inner, len(items))
+		for i, it := range items {
+			bs := make([]byte, len(it.Bytes))
+			copy(bs, it.Bytes)
+			cp[i] = typemappingtestlib.Inner{Id: it.Id, Tag: it.Tag, Bytes: bs}
+		}
+		evts.push(cp)
+	})
+	_, err := lib.TriggerInnersUpdatedRequest(4)
+	checkEq(err, error(nil), "trigger err")
+	waitFor(func() bool { return evts.size() >= 1 })
+	checkEq(evts.size(), 1, "events")
+	snap := evts.at(0)
+	checkEq(len(snap), 4, "items len")
+	if len(snap) == 4 {
+		checkEq(snap[0].Id, int32(0), "snap[0].id")
+		checkEq(snap[0].Tag, "evt-0", "snap[0].tag")
+		checkEq(len(snap[0].Bytes), 1, "snap[0].bytes len")
+		checkEq(snap[3].Id, int32(3), "snap[3].id")
+		checkEq(len(snap[3].Bytes), 4, "snap[3].bytes len")
+	}
+	lib.OffInnersUpdatedEvent(h)
+	lib.Close()
+}
+
+func test_fixed_str_array_result() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.FixedStrArrayRequest("tag")
+	checkEq(err, error(nil), "no err")
+	checkEq(len(r.Tags), 4, "tags len")
+	if len(r.Tags) == 4 {
+		checkEq(r.Tags[0], "tag-0", "tags[0]")
+		checkEq(r.Tags[1], "tag-1", "tags[1]")
+		checkEq(r.Tags[2], "tag-2", "tags[2]")
+		checkEq(r.Tags[3], "tag-3", "tags[3]")
+	}
+	lib.Close()
+}
+
+func test_set_tags_array_param() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.SetTagsRequest([]string{"alpha", "beta", "", "delta"})
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Joined, "alpha|beta||delta", "joined")
+	lib.Close()
+}
+
+func test_sum_prim_array_param() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.SumPrimArrayRequest([]int32{10, 20, 30, 40})
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Total, int64(100), "total")
+	lib.Close()
+}
+
+func test_fixed_obj_array_event() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[[]typemappingtestlib.Slot]{}
+	h := lib.OnFixedObjArrayEvent(func(slots []typemappingtestlib.Slot) {
+		cp := make([]typemappingtestlib.Slot, len(slots))
+		copy(cp, slots)
+		evts.push(cp)
+	})
+	_, err := lib.TriggerFixedObjArrayRequest(100)
+	checkEq(err, error(nil), "trigger err")
+	waitFor(func() bool { return evts.size() >= 1 })
+	checkEq(evts.size(), 1, "events")
+	snap := evts.at(0)
+	checkEq(len(snap), 4, "slots len")
+	if len(snap) == 4 {
+		checkEq(snap[0].Idx, int32(100), "snap[0].idx")
+		checkEq(snap[0].Name, "alpha", "snap[0].name")
+		checkEq(snap[2].Name, "", "snap[2].name empty")
+		checkEq(snap[3].Idx, int32(103), "snap[3].idx")
+		checkEq(snap[3].Name, "delta with spaces", "snap[3].name")
+	}
+	lib.OffFixedObjArrayEvent(h)
+	lib.Close()
+}
+
+// ============================================================================
 // main — runs all tests in cpp order.
 // ============================================================================
 
@@ -2285,6 +2419,16 @@ func main() {
 	runTest("test_seq_object_event_callback_data_correctness", test_seq_object_event_callback_data_correctness)
 	runTest("test_seq_object_event_rapid_fire_no_leak", test_seq_object_event_rapid_fire_no_leak)
 	runTest("test_seq_object_event_concurrent_listeners_and_requesters", test_seq_object_event_concurrent_listeners_and_requesters)
+
+	fmt.Println("\n--- TestPreviouslyRestrictedShapes ---")
+	runTest("test_list_inners_result_empty", test_list_inners_result_empty)
+	runTest("test_list_inners_result_count_and_fields", test_list_inners_result_count_and_fields)
+	runTest("test_bulk_inners_param_roundtrip", test_bulk_inners_param_roundtrip)
+	runTest("test_inners_updated_event", test_inners_updated_event)
+	runTest("test_fixed_str_array_result", test_fixed_str_array_result)
+	runTest("test_set_tags_array_param", test_set_tags_array_param)
+	runTest("test_sum_prim_array_param", test_sum_prim_array_param)
+	runTest("test_fixed_obj_array_event", test_fixed_obj_array_event)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)
