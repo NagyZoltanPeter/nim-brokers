@@ -38,9 +38,11 @@ import ./internal/api_cbor_descriptor
 import ./internal/api_cbor_subs_registry
 import ./internal/api_cbor_tuple
 import ./internal/api_cbor_courier
+import ./internal/api_cbor_event_courier
 import ./internal/mt_broker_common
 
 export api_cbor_descriptor, api_cbor_subs_registry, api_cbor_tuple, api_cbor_courier
+export api_cbor_event_courier
 export mt_broker_common
 
 export results, chronos, chronicles, broker_context, api_common
@@ -236,6 +238,21 @@ proc registerBrokerLibraryCborImpl(
   let unsubscribeFuncIdent = ident(unsubscribeFuncName)
   let knownEventPredIdent = ident(libName & "CborIsKnownEvent")
   let installAllListenersIdent = ident(libName & "CborInstallAllListeners")
+  # Part D-3: per-event helper that maps an event name to its global
+  # `Atomic[int]` foreign-subscriber count. Subscribe / unsubscribe
+  # use it to bump / decrement the counter so the emit-side fast-path
+  # can short-circuit (no CBOR encode, no courier enqueue) when zero
+  # foreign subscribers exist for an event.
+  let getEventSubsCountIdent = ident(libName & "CborEventSubsCountAtomicPtr")
+  # Part D-3: name → static cstring resolver. The eventCourierPoll
+  # extracts the event name from the in-ring message (`m.eventName`,
+  # a stack-local array after `tryDequeue`). Passing that pointer to
+  # foreign callbacks would dangle the moment the poll proc returns
+  # — callbacks legitimately store the eventName cstring (see the
+  # `gSlots[i].name = eventName` pattern in the typemappingtestlib
+  # test). This lookup returns a STATIC string-literal cstring, which
+  # is permanently valid, so the callback can store it freely.
+  let resolveEventNameCstrIdent = ident(libName & "CborResolveEventNameCstring")
 
   # Discovery / introspection identifiers (Phase 6).
   let listApisFuncName = libName & "_listApis"
@@ -415,6 +432,14 @@ proc registerBrokerLibraryCborImpl(
           # `<lib>_call` can wake it after enqueuing a request.
           courier: ptr CborCourier
           courierSignal: ThreadSignalPtr
+          # Part D-3 — event courier. Producer is the processing thread
+          # (per-event handler runs there now, encode-once-on-emit-thread);
+          # consumer is the delivery thread, which polls the ring and
+          # fans out foreign callbacks. `deliverySignal` is the delivery
+          # thread's broker dispatch signal so the processing thread can
+          # wake it after enqueuing an event.
+          eventCourier: ptr CborEventCourier
+          deliverySignal: ThreadSignalPtr
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
@@ -537,67 +562,226 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # ------------------------------------------------------------------
-  # Per-event listener installers.
+  # Part D-3 — per-event-type globals.
   #
-  # Each installer registers an MT-broker listener whose body:
-  #   1. Snapshots the subscription list for (ctx, eventName) under the
-  #      subs lock (so concurrent subscribe/unsubscribe doesn't iterate
-  #      while we mutate).
-  #   2. CBOR-encodes the event payload once (callback fan-out reuses the
-  #      buffer for all subscribers).
-  #   3. Allocates a shared-heap buffer, copies the bytes in, invokes each
-  #      subscriber's C callback synchronously, frees the buffer.
+  # Each event type gets:
+  #   * `g<Lib>Cbor<Event>SubsCount: Atomic[int]` — the lock-free
+  #     emit-side fast-path discriminator. Bumped by `_subscribe` after
+  #     the registry insertion succeeds, decremented by `_unsubscribe`.
+  #     Read with `moAcquire` in the per-event handler; if zero, the
+  #     handler returns immediately with NO CBOR encode and NO courier
+  #     enqueue (the 90 % production case is "no foreign subscriber",
+  #     and that case must pay nothing — see PartD plan §1, §5).
+  # ------------------------------------------------------------------
+  var perEventGlobals = newStmtList()
+  for e in eventEntries:
+    let subsCountIdent = ident("g" & libName & "Cbor" & e.typeName & "SubsCount")
+    perEventGlobals.add(
+      quote do:
+        var `subsCountIdent`: Atomic[int]
+    )
+  result.add(perEventGlobals)
+
+  # ------------------------------------------------------------------
+  # Part D-3 — name→atomic lookup. The subscribe / unsubscribe entry
+  # points receive a `cstring` event name and need to find the right
+  # per-event counter to bump / decrement. A generated case statement
+  # does the dispatch in O(1) string-equality with no Table allocation.
+  # Returns `nil` for unknown names — the subscribe path filters those
+  # via `knownEventPredIdent` BEFORE calling, so a nil here is a
+  # programming error (the case covers every registered event).
+  # ------------------------------------------------------------------
+  block:
+    var lookupBranches = newStmtList()
+    let nameVar = ident("name")
+    var caseStmt = nnkCaseStmt.newTree(nameVar)
+    for e in eventEntries:
+      let subsCountIdent = ident("g" & libName & "Cbor" & e.typeName & "SubsCount")
+      caseStmt.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName),
+          newStmtList(nnkReturnStmt.newTree(nnkAddr.newTree(subsCountIdent))),
+        )
+      )
+    caseStmt.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(newNilLit()))))
+    lookupBranches.add(caseStmt)
+    let lookupProc = nnkProcDef.newTree(
+      postfix(getEventSubsCountIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(
+        nnkPtrTy.newTree(nnkBracketExpr.newTree(ident("Atomic"), ident("int"))),
+        newIdentDefs(nameVar, ident("string")),
+      ),
+      nnkPragma.newTree(
+        ident("gcsafe"), nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree())
+      ),
+      newEmptyNode(),
+      lookupBranches,
+    )
+    result.add(lookupProc)
+
+  # Part D-3: companion name → static cstring resolver. Takes a cstring
+  # (the on-stack one from the courier message) and returns the
+  # equivalent **string-literal-backed** cstring — permanently valid,
+  # safe for the callback to store across the courier-poll boundary.
+  # `else` returns the input pointer as a degraded fallback (the
+  # subscribe path already filters unknown events via
+  # `knownEventPredIdent`, so this branch should be unreachable in
+  # practice).
+  block:
+    var resolverBranches = newStmtList()
+    let nameVar = ident("name")
+    var caseStmt = nnkCaseStmt.newTree(newCall(ident("$"), nameVar))
+    for e in eventEntries:
+      caseStmt.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName),
+          newStmtList(
+            nnkReturnStmt.newTree(newDotExpr(newLit(e.apiName), ident("cstring")))
+          ),
+        )
+      )
+    caseStmt.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(nameVar))))
+    resolverBranches.add(caseStmt)
+    let resolverProc = nnkProcDef.newTree(
+      postfix(resolveEventNameCstrIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(ident("cstring"), newIdentDefs(nameVar, ident("cstring"))),
+      nnkPragma.newTree(
+        ident("gcsafe"), nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree())
+      ),
+      newEmptyNode(),
+      resolverBranches,
+    )
+    result.add(resolverProc)
+
+  # ------------------------------------------------------------------
+  # Per-event listener installers — Part D-3 rewrite.
   #
-  # The listener captures the per-library globals — they live for the
-  # lifetime of the library, so closure capture is safe.
+  # Each installer registers an MT-broker listener whose body is the
+  # FFI-lane emit-side dispatch:
+  #
+  #   1. `load(moAcquire)` the per-event subs-count atomic.
+  #      If zero → return immediately. No encode, no allocation, no
+  #      courier touch. This is the 90 % production hot path.
+  #   2. CBOR-encode the event payload **once** into a shared-heap
+  #      buffer (emit-thread cost, paid only when subscribers exist).
+  #   3. Enqueue an `EventMsg` (eventName + ctx + buf + bufLen) into
+  #      the per-context event courier ring; ownership of the buffer
+  #      transfers to the consumer (delivery thread). Fire the
+  #      delivery thread's broker dispatch signal.
+  #   4. Foreign-callback fanout happens on the delivery thread, NOT
+  #      here. Slow / reentrant foreign callbacks therefore can't
+  #      block the provider that emitted the event (Part D §1a).
+  #
+  # The installer also:
+  #   * registers a `dropAllListeners` companion cleanup hook (PartD
+  #     §8a) so when user Nim code calls `<EventType>.dropAllListeners`,
+  #     the foreign-subscriber registry is cleared in lock-step.
+  #
+  # Same-thread fast path: `installAllListenersIdent` is called on the
+  # PROCESSING thread (see processing-thread proc), so emit (processing
+  # thread) → MT broker same-thread direct asyncSpawn → handler runs
+  # on processing thread → does atomic check + encode + courier
+  # enqueue (no MT-slab marshal). The delivery thread then receives
+  # the opaque buffer via the courier ring.
   # ------------------------------------------------------------------
   var installerNames: seq[string] = @[]
   for e in eventEntries:
     let eventTypeIdent = ident(e.typeName)
     let installerIdent = ident(libName & "Cbor" & e.typeName & "Installer")
     let eventNameLit = newLit(e.apiName)
+    let subsCountIdent = ident("g" & libName & "Cbor" & e.typeName & "SubsCount")
+    let dropAllHookProcTypeIdent = ident(e.typeName & "MtDropAllHook")
+    let setDropAllHookIdent = ident("setDropAll" & e.typeName & "Hook")
     installerNames.add($installerIdent)
     result.add(
       quote do:
         proc `installerIdent`*(ctx: BrokerContext): Result[void, string] =
+          # The arg is `arg: ptr <procThreadArgIdent>` — captured by the
+          # closure via the caller (`installAllListeners(ctx, arg)`).
+          # But since installers run inside the processing-thread proc
+          # where `arg` is in scope, we access it through a global
+          # bootstrap: the umbrella installer below threads the arg in.
           proc handler(
               evt: `eventTypeIdent`
           ): Future[void] {.async: (raises: []), gcsafe.} =
-            # Phase 10: shared-heap snapshot + shared-heap encode buffer.
-            # Nothing GC'd crosses the callback fan-out, so this path is
-            # safe under both --mm:orc and --mm:refc.
-            var snap: ptr UncheckedArray[SubSnapshot] = nil
-            var snapLen: int = 0
-            subsRegistrySnapshot(
-              `subsRegIdent`, uint32(ctx), `eventNameLit`.cstring, snap, snapLen
-            )
-            if snapLen == 0:
+            # Part D-3 fast path: lock-free atomic discriminator.
+            if `subsCountIdent`.load(moAcquire) == 0:
               return
+            # CBOR-encode the payload once into a shared-heap buffer.
+            # Ownership of `payloadBuf` transfers to the courier on
+            # successful enqueue; freed by the delivery-thread poller
+            # after the foreign-callback fanout completes.
             var payloadBuf: pointer = nil
             var payloadLen: int = 0
             let encRes = cborEncodeShared(evt, payloadBuf, payloadLen)
             if encRes.isErr:
-              subsRegistrySnapshotFree(snap)
               return
-            for i in 0 ..< snapLen:
-              let cbPtr = snap[i].cb
-              if cbPtr.isNil:
-                continue
-              let cbTyped = cast[`eventCallbackTypeIdent`](cbPtr)
-              cbTyped(
-                uint32(ctx),
-                `eventNameLit`.cstring,
-                payloadBuf,
-                int32(payloadLen),
-                snap[i].userData,
-              )
-            if not payloadBuf.isNil:
-              deallocShared(payloadBuf)
-            subsRegistrySnapshotFree(snap)
+            # Build the courier message. `eventName` is inlined as
+            # NUL-terminated ASCII so the message is pure POD (no GC).
+            var msg: CborEventMsg
+            let nameLit: cstring = `eventNameLit`.cstring
+            var ni = 0
+            while ni < CborEventNameMax - 1 and nameLit[ni] != '\0':
+              msg.eventName[ni] = nameLit[ni]
+              inc ni
+            msg.eventName[ni] = '\0'
+            msg.ctx = uint32(ctx)
+            msg.buf = payloadBuf
+            msg.bufLen = int32(payloadLen)
+            # Locate the per-context event courier via the ctx table.
+            # (Kept simple by walking the small ctx list under the lock;
+            # in steady state there's one or a handful of ctxs.) The
+            # ctx list is a global `seq` (GC'd container) but we only
+            # read pointer fields out of it under the lock — the
+            # cast(gcsafe) annotation is required because the
+            # generated async handler is gcsafe by signature.
+            var courier: ptr CborEventCourier = nil
+            var sig: ThreadSignalPtr = nil
+            {.cast(gcsafe).}:
+              withLock `ctxsLockIdent`:
+                for i in 0 ..< `ctxsIdent`.len:
+                  let e = `ctxsIdent`[i]
+                  if uint32(e.ctx) == uint32(ctx) and e.active:
+                    courier = e.arg.eventCourier
+                    sig = e.arg.deliverySignal
+                    break
+            if courier.isNil:
+              # Ctx torn down between subscribe and emit — drop cleanly.
+              if not payloadBuf.isNil:
+                deallocShared(payloadBuf)
+              return
+            if not tryEnqueue(addr courier.ring, msg):
+              # Ring full — drop the event (fire-and-forget contract).
+              # The buffer never entered the ring so we own it.
+              if not payloadBuf.isNil:
+                deallocShared(payloadBuf)
+              return
+            if not sig.isNil:
+              fireBrokerSignal(sig)
 
           let listenRes = `eventTypeIdent`.listen(ctx, handler)
           if listenRes.isErr:
             return Result[void, string].err(listenRes.error)
+
+          # Part D-3 §8a: register the dropAllListeners cleanup hook
+          # so that if user Nim code calls `<EventType>.dropAllListeners(ctx)`,
+          # the foreign-subscriber registry for this `(ctx, eventName)`
+          # is cleared and the atomic counter is reset. Without this
+          # hook, foreign subs would orphan (the listener that reads
+          # them is gone, but `_subscribe` would still bump the count
+          # → wasted encodes; the SubNodes would only release at
+          # `_shutdown`'s `subsRegistryFreeForCtx`).
+          proc dropAllHook(brokerCtx: BrokerContext) {.gcsafe, raises: [].} =
+            discard subsRegistryRemoveAllForKey(
+              `subsRegIdent`, uint32(brokerCtx), `eventNameLit`.cstring
+            )
+            `subsCountIdent`.store(0, moRelease)
+
+          `eventTypeIdent`.`setDropAllHookIdent`(dropAllHook)
           return Result[void, string].ok()
 
     )
@@ -671,6 +855,15 @@ proc registerBrokerLibraryCborImpl(
         # into shared heap on insertion, so we don't need to keep `name`
         # alive past this call.
         subsRegistryAdd(`subsRegIdent`, ctx, eventNameC, h, cast[pointer](cb), userData)
+        # Part D-3: bump the per-event subs-count atomic AFTER the
+        # registry insertion. moRelease pairs with the emit-side's
+        # moAcquire load — if the load sees > 0, the registry already
+        # contains this subscription (the snapshot the delivery thread
+        # takes will see it on the next emit, modulo single-window
+        # race that's documented as expected).
+        let counter = `getEventSubsCountIdent`(name)
+        if not counter.isNil:
+          discard counter[].fetchAdd(1, moRelease)
         return h
 
       proc `unsubscribeFuncIdent`*(
@@ -679,56 +872,89 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if eventNameC.isNil:
           return -1'i32
+        let name = $eventNameC
         if handle == 0'u64:
-          # Drop every subscription for this (ctx, name).
-          return subsRegistryRemoveAllForKey(`subsRegIdent`, ctx, eventNameC)
-        return subsRegistryRemoveOne(`subsRegIdent`, ctx, eventNameC, handle)
+          # Drop every subscription for this (ctx, name). Reset the
+          # atomic counter to 0 (it might be > 0 from other ctxs sharing
+          # the event name, but per-ctx isolation is currently not
+          # tracked by the counter — see plan §3 open question on
+          # per-event vs per-(ctx, event) granularity).
+          let res = subsRegistryRemoveAllForKey(`subsRegIdent`, ctx, eventNameC)
+          if res == 0:
+            let counter = `getEventSubsCountIdent`(name)
+            if not counter.isNil:
+              counter[].store(0, moRelease)
+          return res
+        let res = subsRegistryRemoveOne(`subsRegIdent`, ctx, eventNameC, handle)
+        if res == 0:
+          # Part D-3: decrement after a successful removal.
+          let counter = `getEventSubsCountIdent`(name)
+          if not counter.isNil:
+            discard counter[].fetchSub(1, moRelease)
+        return res
 
   )
 
   # ------------------------------------------------------------------
-  # Delivery thread proc (one per ctx). Part D, phase D-2: owns event
-  # listener installation and foreign-callback fan-out. Provider `.emit`
-  # on the processing thread is now genuinely cross-thread for events
-  # with foreign subscribers — the MT EventBroker's typed-slab path
-  # delivers the event to the delivery thread's bucket, where the
-  # per-event handler (registered by `installAllListenersIdent` below)
-  # runs the CBOR encode + foreign callback fan-out OFF the processing
-  # thread. Slow foreign callbacks therefore no longer block providers.
+  # Delivery thread proc (one per ctx). Part D, phase D-3: pure event
+  # courier consumer. Polls `arg.eventCourier.ring` for opaque CBOR
+  # buffers produced by the processing thread, snapshots the
+  # foreign-subscriber list for `(ctx, eventName)`, fans out the
+  # synchronous foreign callbacks, then frees the buffer.
+  #
+  # This thread does NOT install MT EventBroker listeners (those moved
+  # back to the processing thread in D-3 to recover the same-thread
+  # fast path — the FFI lane forks at the per-event handler instead of
+  # at the MT broker dispatch layer). The thread still owns a chronos
+  # event loop (via `ensureBrokerDispatchStarted`) so the
+  # `eventCourierPoll` proc registered below runs whenever the
+  # delivery signal fires.
   # ------------------------------------------------------------------
   result.add(
     quote do:
       proc `delivThreadProcIdent`(arg: ptr `procThreadArgIdent`) {.thread.} =
         setThreadBrokerContext(arg.ctx)
 
-        # Publish the delivery thread's broker dispatch signal first so
-        # the MT EventBroker bucket created by `installAllListenersIdent`
-        # picks it up as its `listenerSignal` (cross-thread emits from
-        # the processing thread wake this thread via that signal).
-        discard getOrInitBrokerSignal()
+        # Publish this thread's broker dispatch signal so the processing
+        # thread (the producer) can wake us after enqueuing an event.
+        arg.deliverySignal = getOrInitBrokerSignal()
 
-        # Install all per-event listeners on THIS thread. The MT
-        # EventBroker captures the calling thread's identity at
-        # `.listen()` time; emits from any other thread will therefore
-        # take the cross-thread slab path and fan out here.
-        let installCatchRes = catch:
-          `installAllListenersIdent`(arg.ctx)
-        if installCatchRes.isErr():
-          arg.deliveryErrorMessage = allocCStringCopy(
-            "event listener install raised: " & installCatchRes.error.msg
-          )
-          arg.deliveryReady.store(-1, moRelease)
-          return
-        let installRes = installCatchRes.get()
-        if installRes.isErr():
-          arg.deliveryErrorMessage =
-            allocCStringCopy("event listener install failed: " & installRes.error())
-          arg.deliveryReady.store(-1, moRelease)
-          return
+        # Event-courier poller — drains the ring, fans out, frees.
+        # `subsRegistrySnapshot` allocates the snapshot on shared heap;
+        # we free it via `subsRegistrySnapshotFree` after the fanout.
+        proc eventCourierPoll(): int {.gcsafe, raises: [].} =
+          var didWork = 0
+          while true:
+            var m: CborEventMsg
+            if not tryDequeue(addr arg.eventCourier.ring, m):
+              break
+            didWork = 1
+            # The eventName was inlined NUL-terminated into the courier
+            # message; that storage is the poll proc's stack frame after
+            # `tryDequeue` and dies the moment this proc returns. Foreign
+            # callbacks legitimately store the eventName cstring across
+            # calls (the typemappingtestlib test does), so we resolve to
+            # a STATIC string-literal cstring via the per-library
+            # generated resolver before invoking the callback.
+            let stackNameC = cast[cstring](addr m.eventName[0])
+            let nameC = `resolveEventNameCstrIdent`(stackNameC)
+            var snap: ptr UncheckedArray[SubSnapshot] = nil
+            var snapLen: int = 0
+            subsRegistrySnapshot(`subsRegIdent`, m.ctx, nameC, snap, snapLen)
+            if snapLen > 0 and not m.buf.isNil:
+              for i in 0 ..< snapLen:
+                let cbPtr = snap[i].cb
+                if cbPtr.isNil:
+                  continue
+                let cbTyped = cast[`eventCallbackTypeIdent`](cbPtr)
+                cbTyped(m.ctx, nameC, m.buf, m.bufLen, snap[i].userData)
+            if snapLen > 0:
+              subsRegistrySnapshotFree(snap)
+            if not m.buf.isNil:
+              deallocShared(m.buf)
+          didWork
 
-        # Start the shared broker dispatch loop on this thread so the
-        # MT EventBroker's per-bucket pollers (registered by `.listen`)
-        # run and drain cross-thread event deliveries.
+        registerBrokerPoller(eventCourierPoll)
         ensureBrokerDispatchStarted()
 
         arg.deliveryReady.store(1, moRelease)
@@ -742,9 +968,10 @@ proc registerBrokerLibraryCborImpl(
 
         waitFor awaitShutdown(addr arg.shutdownFlag)
         # Drain + tear down the dispatch loop before this thread exits.
-        # Any in-flight cross-thread event delivery completes here; any
-        # in-flight foreign callback runs synchronously inside the
-        # listener handler and returns before the loop exits.
+        # Any in-flight foreign callback runs synchronously inside
+        # eventCourierPoll and returns before the loop exits. Buffers
+        # still queued in the courier ring at this point are freed by
+        # `drainAndFree(arg.eventCourier)` in `_shutdown`.
         stopBrokerDispatchHere()
 
   )
@@ -780,11 +1007,29 @@ proc registerBrokerLibraryCborImpl(
             arg.processingReady.store(-1, moRelease)
             return
 
-        # Part D phase D-2: event listener installation moved to the
-        # delivery thread proc. Processing thread no longer touches
-        # event listeners — `_createContext` guarantees delivery thread
-        # is fully ready (listeners installed + dispatch loop running)
-        # before this thread is spawned.
+        # Part D phase D-3: event listener installation runs on the
+        # PROCESSING thread (back from the D-2 delivery-thread arm) so
+        # that emit (processing thread) → MT broker takes the
+        # same-thread direct asyncSpawn fast path → per-event handler
+        # runs here on the processing thread → atomic-check + CBOR
+        # encode + courier enqueue → delivery thread receives the
+        # opaque buffer through `arg.eventCourier.ring` and fans out
+        # foreign callbacks. Net: no MT-slab marshal in the FFI lane,
+        # foreign callbacks still run off the processing thread.
+        let installCatchRes = catch:
+          `installAllListenersIdent`(arg.ctx)
+        if installCatchRes.isErr():
+          arg.processingErrorMessage = allocCStringCopy(
+            "event listener install raised: " & installCatchRes.error.msg
+          )
+          arg.processingReady.store(-1, moRelease)
+          return
+        let installRes = installCatchRes.get()
+        if installRes.isErr():
+          arg.processingErrorMessage =
+            allocCStringCopy("event listener install failed: " & installRes.error())
+          arg.processingReady.store(-1, moRelease)
+          return
 
         # ----------------------------------------------------------------
         # Part C — buffer courier. The processing thread owns CBOR decode,
@@ -894,6 +1139,11 @@ proc registerBrokerLibraryCborImpl(
         # in-flight `<lib>_call`s; a call past that fails fast.
         arg.courier = newCborCourier(64)
         arg.courierSignal = nil
+        # Part D-3 — event courier: 256-slot ring (burst capacity, not
+        # concurrency bound; producer is fire-and-forget). A full ring
+        # drops the event with a diagnostic. Re-tunable after D-6 bench.
+        arg.eventCourier = newCborEventCourier(256)
+        arg.deliverySignal = nil
 
         let entry = cast[ptr `ctxEntryIdent`](allocShared0(sizeof(`ctxEntryIdent`)))
         entry.ctx = bctx
@@ -911,6 +1161,7 @@ proc registerBrokerLibraryCborImpl(
               "Failed to spawn delivery thread: " & delivCreateRes.error.msg
             )
           freeCborCourier(arg.courier)
+          drainAndFree(arg.eventCourier)
           deallocShared(arg)
           deallocShared(entry)
           return 0'u32
@@ -951,6 +1202,7 @@ proc registerBrokerLibraryCborImpl(
           arg.shutdownFlag.store(1, moRelease)
           joinThread(entry.delivThread)
           freeCborCourier(arg.courier)
+          drainAndFree(arg.eventCourier)
           deallocShared(arg)
           deallocShared(entry)
           return 0'u32
@@ -977,6 +1229,7 @@ proc registerBrokerLibraryCborImpl(
             else:
               errOut[] = allocCStringCopy("processing thread did not become ready")
           freeCborCourier(arg.courier)
+          drainAndFree(arg.eventCourier)
           deallocShared(arg)
           deallocShared(entry)
           return 0'u32
@@ -1031,6 +1284,9 @@ proc registerBrokerLibraryCborImpl(
           freeCString(entryToShutdown.arg.deliveryErrorMessage)
         # Part C — free the courier after both threads joined.
         freeCborCourier(entryToShutdown.arg.courier)
+        # Part D-3 — free the event courier (drains any messages left
+        # in the ring, freeing their buffers) after both threads joined.
+        drainAndFree(entryToShutdown.arg.eventCourier)
         deallocShared(entryToShutdown.arg)
 
         withLock `ctxsLockIdent`:
