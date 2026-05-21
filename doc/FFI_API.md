@@ -2,36 +2,6 @@
 
 Single Pure Nim library interface to be used from other Nim apps/modules or from foreign languages through a C ABI.
 
-> ⚠️ **Status — native FFI codegen retired.**
->
-> The native per-type C-export FFI codegen surface (typed `.h` / `.hpp`
-> headers plus per-language `.py` / Rust / Go wrappers, originally
-> selectable via the historical `-d:BrokerFfiApiNative` flag) was
-> retired. CBOR is the only FFI mode going forward; the build flag is
-> `-d:BrokerFfiApi` (the `-d:BrokerFfiApiCBOR` and `-d:BrokerFfiApiNative`
-> aliases have been removed).
->
-> Every section below that refers to the native codegen, the typed C
-> header, per-type C export functions, CItem structs, or the native vs.
-> CBOR mode selector should be read as historical / archived material
-> describing the pre-retirement state.
->
-> Authoritative references for the surviving CBOR surface:
-> - `doc/CBOR_Refactoring.md` — the Phase 1 + 2 plan and current shape
->   of the `_call` path (including the buffer-courier rework that
->   eliminates the typed marshal round-trip and the momentary chronos
->   loop on foreign threads).
-> - `doc/TYPESUPPORT.md` — type-support matrix for the four language
->   wrappers (Python, C++, Rust, Go) in CBOR-only form.
-> - `doc/TYPE_SURFACE.md` — Nim → wrapper type mapping cheat-sheet.
-> - `doc/MT_vs_CBOR_Marshalling.md` — companion analysis comparing the
->   MT broker's typed marshalling to the CBOR transport.
->
-> Pure-C consumers temporarily have only the raw 11-function CBOR ABI
-> (`<lib>_initialize`, `_createContext`, `_call`, `_subscribe`, etc.) —
-> the typed C wrapper is the deferred "CBOR-derived typed C functional
-> interface" tracked in `CBOR_Refactoring.md` §10.
-
 ## Table of Contents
 
 - [Broker FFI API](#broker-ffi-api)
@@ -94,18 +64,9 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [Typed C surface](#typed-c-surface)
     - [Adding a new language surface](#adding-a-new-language-surface)
   - [Type Mapping Reference](#type-mapping-reference)
-    - [Legend](#legend)
-    - [Primitive scalars](#primitive-scalars)
-    - [String types](#string-types)
-    - [Object types](#object-types)
-    - [`seq[T]` — dynamic arrays](#seqt--dynamic-arrays)
-      - [`seq[object]` — sequence of a custom struct](#seqobject--sequence-of-a-custom-struct)
-      - [`seq[string]` — sequence of strings](#seqstring--sequence-of-strings)
-      - [`seq[primitive]` — sequence of a primitive type (e.g. `seq[byte]`)](#seqprimitive--sequence-of-a-primitive-type-eg-seqbyte)
-    - [`array[N, T]` — fixed-size arrays](#arrayn-t--fixed-size-arrays)
-    - [Enum types](#enum-types)
-    - [Distinct types](#distinct-types)
-    - [Composite example: full struct](#composite-example-full-struct)
+    - [The two layers that matter](#the-two-layers-that-matter)
+    - [Cheat-sheet (high level)](#cheat-sheet-high-level)
+    - [Composite example](#composite-example)
     - [Event callback signatures](#event-callback-signatures)
   - [Related Documents](#related-documents)
 
@@ -118,10 +79,13 @@ It is intended for cases where a Nim component should be consumed from foreign
 languages while still using nim-brokers internally for typed request/response
 and event delivery.
 
+Foreign interface generation is activated with __-d:BrokerFfiApi__ at compile time.
+> __In abscence of that flag__, the broker macros still work but Event/RequestBroker definitions just fall back to MultiThread brokers without emitting any FFI codegen or C exports.
+> __Still usable from Nim.__
+
 Typical consumers are:
 
-- plain C applications
-- C++ applications through the generated wrapper class
+- C++/Rust/Go applications through the generated wrapper class
 - Python applications through the generated ctypes wrapper
 
 The FFI API solution provides:
@@ -157,7 +121,6 @@ flowchart TB
     subgraph App["Consumer Application"]
         direction LR
         AppNim["Nim app"]
-        AppC["C app"]
         AppCpp["C++ app"]
         AppPy["Python app"]
         AppRs["Rust app"]
@@ -186,7 +149,6 @@ flowchart TB
     end
 
     AppNim --> Brokers
-    AppC --> Cbor
     AppCpp --> WCpp
     AppPy --> WPy
     AppRs --> WRs
@@ -206,7 +168,7 @@ flowchart TB
     class Cbor abi
     class WCpp,WPy,WRs,WGo wrap
     class UserApi,Runtime,Brokers nim
-    class AppNim,AppC,AppCpp,AppPy,AppRs,AppGo app
+    class AppNim,AppCpp,AppPy,AppRs,AppGo app
 ```
 
 **Key invariants of the layering:**
@@ -719,7 +681,7 @@ Sequence overview:
 ```mermaid
 sequenceDiagram
   actor F as Foreign caller
-  participant C as &lt;lib&gt;_createContext
+  participant C as <lib>_createContext
   participant D as Delivery thread
   participant P as Processing thread
   participant R as Context registry
