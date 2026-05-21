@@ -890,11 +890,6 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
       let cfg = parseMtReqKwargs(split.kwargs)
       generateMtRequestBroker(body, cfg)
   of rbApi:
-    if split.kwargs.len > 0:
-      error(
-        "RequestBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
-        split.kwargs[0],
-      )
     when not compileOption("threads"):
       {.
         error:
@@ -903,9 +898,18 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
       .}
     else:
       when defined(BrokerFfiApi):
-        generateApiCborRequestBroker(body)
+        # Validate kwargs at the outer macro for clear error origin,
+        # then hand them to the deferred codegen which re-parses into
+        # MtReqCfg. RequestBroker(API) runs on the same MT lane
+        # underneath, so it accepts the same capacity knobs as
+        # RequestBroker(mt) (queueDepth / slabCapacity /
+        # maxPayloadBytes / responseSlots / maxResponseBytes /
+        # freeListShards / preset).
+        discard parseMtReqKwargs(split.kwargs)
+        generateApiCborRequestBroker(body, split.kwargs)
       else:
-        generateMtRequestBroker(body, defaultMtReqCfg())
+        let cfg = parseMtReqKwargs(split.kwargs)
+        generateMtRequestBroker(body, cfg)
   of rbAsync, rbSync:
     if split.kwargs.len > 0:
       error(

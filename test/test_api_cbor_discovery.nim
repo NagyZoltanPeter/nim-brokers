@@ -35,7 +35,9 @@ RequestBroker(API):
 
   proc signature*(value: int32): Future[Result[Echo, string]] {.async.}
 
-EventBroker(API):
+# Regression coverage for `EventBroker(API, ...)` kwargs surface —
+# must accept the same capacity knobs as `EventBroker(mt, ...)`.
+EventBroker(API, queueDepth = 128, maxPayloadBytes = 512):
   type Heartbeat = object
     seqNo*: int64
     label*: string

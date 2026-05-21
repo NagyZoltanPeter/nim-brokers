@@ -36,14 +36,19 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
-RequestBroker(API):
+# Regression coverage for the API broker kwargs surface — the
+# `(API, ...)` macro must accept the same capacity / preset knobs as
+# `(mt, ...)` because the MT lane is what carries the broker
+# internally. Two flavours below: a named built-in preset, and
+# individual kwargs overriding defaults.
+RequestBroker(API, preset = tinyFootprint):
   type GetStatus = object
     online*: bool
     counter*: int32
 
   proc signature*(): Future[Result[GetStatus, string]] {.async.}
 
-RequestBroker(API):
+RequestBroker(API, queueDepth = 64, maxPayloadBytes = 256, maxResponseBytes = 512):
   type AddNumbers = object
     sum*: int64
 

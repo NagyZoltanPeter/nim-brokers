@@ -604,11 +604,6 @@ macro EventBroker*(args: varargs[untyped]): untyped =
       let cfg = parseMtEvtKwargs(split.kwargs)
       generateMtEventBroker(body, cfg)
   of ebApi:
-    if split.kwargs.len > 0:
-      error(
-        "EventBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
-        split.kwargs[0],
-      )
     when not compileOption("threads"):
       {.
         error:
@@ -617,9 +612,16 @@ macro EventBroker*(args: varargs[untyped]): untyped =
       .}
     else:
       when defined(BrokerFfiApi):
-        generateApiCborEventBroker(body)
+        # Validate kwargs at the outer macro so errors point at the
+        # user's call site, then pass them through to the deferred
+        # codegen which re-parses them into an MtEvtCfg (the API
+        # broker rides the same MT lane internally, so the same
+        # capacity knobs apply).
+        discard parseMtEvtKwargs(split.kwargs)
+        generateApiCborEventBroker(body, split.kwargs)
       else:
-        generateMtEventBroker(body, defaultMtEvtCfg())
+        let cfg = parseMtEvtKwargs(split.kwargs)
+        generateMtEventBroker(body, cfg)
   of ebDefault:
     if split.kwargs.len > 0:
       error(

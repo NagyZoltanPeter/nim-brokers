@@ -274,6 +274,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 ### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)
 
 - `RequestBroker(API)` and `EventBroker(API)` generate C ABI entry points and wrapper metadata in addition to the normal broker interfaces.
+- `RequestBroker(API, ...)` / `EventBroker(API, ...)` accept the **same capacity / preset kwargs as their `(mt, ...)` counterparts** — the API broker rides the multi-thread lane internally, so `queueDepth`, `slabCapacity`, `maxPayloadBytes`, `responseSlots`, `maxResponseBytes`, `freeListShards`, and `preset = <name>` are all valid. Omitting kwargs yields `defaultMtEvtCfg()` / `defaultMtReqCfg()`.
 - `registerBrokerLibrary` ties API request/event brokers into a complete shared-library surface. It is a no-op when compiled without `-d:BrokerFfiApi`, so client code never needs a `when defined(BrokerFfiApi):` guard around it.
 - `api_library` is always imported as part of the `brokers` package; no conditional import is needed in client code.
 - External types used in broker signatures are auto-discovered and registered — plain Nim `object` types do not need any `ApiType` annotation. The deprecated `ApiType` macro still compiles with a warning.

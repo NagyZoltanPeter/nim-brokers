@@ -39,6 +39,7 @@ import std/[macros, strutils]
 import
   ./helper/broker_utils,
   ./mt_request_broker,
+  ./mt_config,
   ./api_common,
   ./api_cbor_codec,
   ./api_schema,
@@ -50,7 +51,7 @@ import
 # `api_request_broker` re-export chain (retired in Part A); re-export it
 # explicitly here so user code never needs a direct
 # `import brokers/internal/api_type_resolver`.
-export mt_request_broker, api_common, api_cbor_codec, api_type_resolver
+export mt_request_broker, mt_config, api_common, api_cbor_codec, api_type_resolver
 
 # ---------------------------------------------------------------------------
 # Schema registration
@@ -282,7 +283,9 @@ proc emitArgAdapter(
 # Public entry point
 # ---------------------------------------------------------------------------
 
-proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueError].} =
+proc generateApiCborRequestBrokerImpl(
+    body: NimNode, cfg: MtReqCfg
+): NimNode {.raises: [ValueError].} =
   ## Deferred-phase codegen for `RequestBroker(API)` under CBOR mode.
   ## Runs after the typed-phase `autoRegisterApiType` calls have populated
   ## `gApiTypeRegistry` for any external types referenced in the broker
@@ -292,8 +295,10 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
   result = newStmtList()
 
   # 1. Emit the underlying MT broker (typed Nim<->Nim dispatch on the
-  #    processing thread, identical to the native path).
-  result.add(generateMtRequestBroker(copyNimTree(body)))
+  #    processing thread, identical to the native path). Capacity
+  #    config flows in from the outer RequestBroker(API, ...) kwargs —
+  #    same knobs as RequestBroker(mt).
+  result.add(generateMtRequestBroker(copyNimTree(body), cfg))
 
   # 2. Parse the response type identifier and register its fields in the
   #    schema so wrapper codegen can emit typed structs for it.
@@ -391,24 +396,41 @@ proc generateApiCborRequestBrokerImpl(body: NimNode): NimNode {.raises: [ValueEr
 
 {.pop.}
 
-macro generateApiCborRequestBrokerDeferred*(body: untyped): untyped =
+macro generateApiCborRequestBrokerDeferred*(args: varargs[untyped]): untyped =
   ## Typed-phase deferred codegen entry point. By the time this expands,
   ## any preceding `autoRegisterApiType` calls have already populated
   ## `gApiTypeRegistry`, so wrapper codegen can introspect external
   ## enum / distinct / object types without falling back to TODO stubs.
-  generateApiCborRequestBrokerImpl(body)
+  ##
+  ## Args layout: [body, kw0, kw1, ...]. Kwargs are forwarded as raw
+  ## `nnkExprEqExpr` nodes from `generateApiCborRequestBroker` and
+  ## re-parsed here into an MtReqCfg.
+  if args.len == 0:
+    error("generateApiCborRequestBrokerDeferred requires a body", args)
+  let body = args[0]
+  var kwargs: seq[NimNode]
+  for i in 1 ..< args.len:
+    kwargs.add(args[i])
+  let cfg = parseMtReqKwargs(kwargs)
+  generateApiCborRequestBrokerImpl(body, cfg)
 
 {.push raises: [].}
 
-proc generateApiCborRequestBroker*(body: NimNode): NimNode =
+proc generateApiCborRequestBroker*(body: NimNode, kwargs: seq[NimNode]): NimNode =
   ## Two-phase entry point — mirrors the native
-  ## `generateApiRequestBroker` pattern.
+  ## `generateApiRequestBroker` pattern. Kwargs are passed through the
+  ## deferred macro call as raw nodes so the typed-phase expansion sees
+  ## the original literal values for `parseMtReqKwargs`.
   result = newStmtList()
 
   let externalIdents = discoverExternalTypes(body)
   if externalIdents.len > 0:
     result.add(emitAutoRegistrations(externalIdents))
 
-  result.add(newCall(ident("generateApiCborRequestBrokerDeferred"), copyNimTree(body)))
+  let deferred =
+    newCall(ident("generateApiCborRequestBrokerDeferred"), copyNimTree(body))
+  for kw in kwargs:
+    deferred.add(copyNimTree(kw))
+  result.add(deferred)
 
 {.pop.}
