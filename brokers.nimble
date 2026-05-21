@@ -324,6 +324,23 @@ task test, "Run all single and multi-threaded broker tests":
         continue
       test opt, f
 
+task runFfiBenchEventStress,
+  "Build benchlib (CBOR mode) + the Part D-4 event dispatch stress drivers and run them":
+  # Build the benchlib shared library into test/ffibench/build_cbor/.
+  exec "nim c -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build_cbor --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  # Configure + build the three D-4 drivers via the existing CMake project.
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build"
+  exec "cmake --build test/ffibench/cmake-build " &
+    "--target stress_event_mixed_audience " & "--target stress_event_no_foreign " &
+    "--target stress_event_no_nim"
+  # Run each in sequence; non-zero exit propagates through `exec`.
+  exec "test/ffibench/build_cbor/stress_event_mixed_audience"
+  exec "test/ffibench/build_cbor/stress_event_no_foreign"
+  exec "test/ffibench/build_cbor/stress_event_no_nim"
+
 task perftest, "Run performance and stress tests":
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]

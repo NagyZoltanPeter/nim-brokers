@@ -75,3 +75,7 @@ endfunction()
 add_ffibench_target(bench_driver bench_driver.cpp)
 add_ffibench_target(stress_mt stress_mt.cpp)
 add_ffibench_target(stress_shutdown stress_shutdown.cpp)
+# Part D-4 — three-lane event dispatch contract stress drivers.
+add_ffibench_target(stress_event_mixed_audience stress_event_mixed_audience.cpp)
+add_ffibench_target(stress_event_no_foreign stress_event_no_foreign.cpp)
+add_ffibench_target(stress_event_no_nim stress_event_no_nim.cpp)
