@@ -124,7 +124,7 @@ proc buildFfiExampleCborFlags(
     generatePy = false, generateRust = false, generateGo = false
 ): string =
   result =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("mylib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build_cbor", "mylib"))
@@ -149,7 +149,7 @@ proc buildTorpedoExampleCborFlags(
     generatePy = false, generateRust = false, generateGo = false
 ): string =
   result =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
   result.add(nimMainPrefixFlag("torpedolib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build_cbor", "torpedolib"))
@@ -327,7 +327,7 @@ task test, "Run all single and multi-threaded broker tests":
 task runFfiBenchEventStress,
   "Build benchlib (CBOR mode) + the Part D-4/D-5 event dispatch stress drivers and run them":
   # Build the benchlib shared library into test/ffibench/build_cbor/.
-  exec "nim c -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " &
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " &
     "--outdir:test/ffibench/build_cbor --mm:orc " &
     "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
   # Configure + build the five event-stress drivers via the existing CMake project.
@@ -353,8 +353,8 @@ proc runFfiBenchEventStressAsanFor(mm: string) =
   ## sanitizer report aborts the process.
   let buildDir = "test/ffibench/build_cbor_asan"
   let cmakeDir = "test/ffibench/cmake-build-cbor-asan"
-  exec "nim c -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " & "--outdir:" &
-    buildDir & " --mm:" & mm & " " & "--nimMainPrefix:benchlib -d:useMalloc " &
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " & "--outdir:" & buildDir &
+    " --mm:" & mm & " " & "--nimMainPrefix:benchlib -d:useMalloc " &
     "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
     "--passL:-fsanitize=address --debugger:native " & "test/ffibench/benchlib.nim"
   mkDir(cmakeDir)
@@ -383,7 +383,7 @@ task runFfiBenchEvent,
   ##   (c) M foreign subscribers            — encode-amortize-fanout
   ##   (d) K same-thread Nim listeners      — Lane 1 cost in isolation
   ## Output is CSV on stdout; numbers are captured in doc/bench_baseline.md.
-  exec "nim c -d:release -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " &
+  exec "nim c -d:release -d:BrokerFfiApi --threads:on --app:lib --path:. " &
     "--outdir:test/ffibench/build_cbor --mm:orc " &
     "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
   mkDir("test/ffibench/cmake-build")
@@ -428,10 +428,10 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
   ]
   for (f, prefix) in cborApiTests:
     for opt in [
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR --mm:refc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR -d:release --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
         continue
@@ -515,7 +515,7 @@ task runFfiExampleCborPy,
     quoteArg("examples/ffiapi/python_example/main.py")
 
 # CBOR build of the typemapping test library: compiles
-# test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApiCBOR
+# test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApi
 # into build_cbor/ and drives test_typemappingtestlib.{cpp,py} against
 # that build.
 proc buildTypeMapTestLibCbor(
@@ -528,7 +528,7 @@ proc buildTypeMapTestLibCbor(
       "orc"
   let release = existsEnv("RELEASE")
   var flags =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --mm:" & mm &
+    "-d:BrokerFfiApi --threads:on --app:lib --mm:" & mm &
     " --path:. --outdir:test/typemappingtestlib/build_cbor"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())

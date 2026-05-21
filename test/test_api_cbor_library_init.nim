@@ -1,5 +1,5 @@
 ## Integration tests for the CBOR FFI runtime emitted by
-## `registerBrokerLibrary` under `-d:BrokerFfiApiCBOR`.
+## `registerBrokerLibrary` under `-d:BrokerFfiApi`.
 ##
 ## The test binary inlines the broker library (no .so loading) and drives
 ## the generated C exports as ordinary Nim procs. This exercises:

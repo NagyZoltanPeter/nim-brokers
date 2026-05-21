@@ -7,7 +7,7 @@
 ##   - VecRequest  — a variable-size payload case (echo seq[int32])
 ##
 ## After the native FFI codegen retirement (Phase 2 of CBOR_Refactoring),
-## only the `-d:BrokerFfiApiCBOR` build is reachable; the historical
+## only the `-d:BrokerFfiApi` build is reachable; the historical
 ## native baseline captured in doc/bench_baseline.md is the reference
 ## point for evaluating future optimizations against this same driver.
 

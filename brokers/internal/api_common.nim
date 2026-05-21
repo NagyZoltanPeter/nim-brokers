@@ -18,11 +18,9 @@
 import std/macros
 
 import ./api_schema
-import ./api_ffi_mode
 import ./api_outdir
 
 export api_schema
-export api_ffi_mode
 export api_outdir
 
 # ---------------------------------------------------------------------------

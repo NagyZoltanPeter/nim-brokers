@@ -92,7 +92,7 @@ when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_event_broker
   export mt_config, mt_event_broker
 
-when compileOption("threads") and (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR)):
+when compileOption("threads") and defined(BrokerFfiApi):
   # Part A — native C-ABI codegen retired. See note in request_broker.nim.
   import ./internal/api_event_broker_cbor
   export api_event_broker_cbor
@@ -616,7 +616,7 @@ macro EventBroker*(args: varargs[untyped]): untyped =
           "Compile with `--threads:on` to use API EventBroker."
       .}
     else:
-      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR):
+      when defined(BrokerFfiApi):
         generateApiCborEventBroker(body)
       else:
         generateMtEventBroker(body, defaultMtEvtCfg())

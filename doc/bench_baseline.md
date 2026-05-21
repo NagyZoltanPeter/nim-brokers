@@ -212,7 +212,7 @@ batching the delivery thread does internally.
 nimble runFfiBenchEvent
 ```
 
-(Equivalent: `nim c -d:release -d:BrokerFfiApiCBOR --threads:on
+(Equivalent: `nim c -d:release -d:BrokerFfiApi --threads:on
 --app:lib --path:. --outdir:test/ffibench/build_cbor --mm:orc
 --nimMainPrefix:benchlib test/ffibench/benchlib.nim` then `cmake -S
 test/ffibench -B test/ffibench/cmake-build -DCMAKE_BUILD_TYPE=Release`

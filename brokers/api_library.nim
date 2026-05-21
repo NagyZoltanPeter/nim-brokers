@@ -1596,10 +1596,8 @@ proc registerBrokerLibraryCborImpl(
 macro registerBrokerLibrary*(body: untyped): untyped =
   ## Generates the full shared-library surface for a broker FFI library.
   ## A no-op unless `-d:BrokerFfiApi` is set, so client code never needs
-  ## a `when defined(...)` guard around it. `-d:BrokerFfiApiCBOR` is
-  ## accepted as a back-compat alias for one release; new build scripts
-  ## should pass `-d:BrokerFfiApi`.
-  when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR):
+  ## a `when defined(...)` guard around it.
+  when defined(BrokerFfiApi):
     registerBrokerLibraryImpl(body)
   else:
     newStmtList()

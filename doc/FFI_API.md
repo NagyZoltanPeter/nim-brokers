@@ -2,19 +2,19 @@
 
 Single Pure Nim library interface to be used from other Nim apps/modules or from foreign languages through a C ABI.
 
-> ⚠️ **Status — Phase 2 retirement of native FFI codegen.**
+> ⚠️ **Status — native FFI codegen retired.**
 >
-> The native per-type C-export FFI codegen surface (the `mfNative` mode
-> driven by `-d:BrokerFfiApiNative`, and its accompanying typed `.h` /
-> `.hpp` headers plus per-language `.py` / Rust / Go wrappers) was
-> retired. CBOR (`-d:BrokerFfiApiCBOR`, also the default whenever
-> `-d:BrokerFfiApi` is set) is the only FFI mode going forward.
+> The native per-type C-export FFI codegen surface (typed `.h` / `.hpp`
+> headers plus per-language `.py` / Rust / Go wrappers, originally
+> selectable via the historical `-d:BrokerFfiApiNative` flag) was
+> retired. CBOR is the only FFI mode going forward; the build flag is
+> `-d:BrokerFfiApi` (the `-d:BrokerFfiApiCBOR` and `-d:BrokerFfiApiNative`
+> aliases have been removed).
 >
-> Passing `-d:BrokerFfiApiNative` now fails with a hard compile error
-> pointing at `doc/CBOR_Refactoring.md`. Every section below that refers
-> to the native codegen, the typed C header, per-type C export functions,
-> CItem structs, or the native vs. CBOR mode selector should be read as
-> historical / archived material describing the pre-retirement state.
+> Every section below that refers to the native codegen, the typed C
+> header, per-type C export functions, CItem structs, or the native vs.
+> CBOR mode selector should be read as historical / archived material
+> describing the pre-retirement state.
 >
 > Authoritative references for the surviving CBOR surface:
 > - `doc/CBOR_Refactoring.md` — the Phase 1 + 2 plan and current shape
@@ -336,12 +336,11 @@ api_library.nim   (lifecycle, runtime threads, mode dispatch,
 
 **Key rules:**
 
-- Native and CBOR codegen are independent of each other. The active set is
-  selected at compile time by `brokerFfiMode`, which is driven by
-  `-d:BrokerFfiApiNative` / `-d:BrokerFfiApiCBOR` (or bare `-d:BrokerFfiApi`,
-  which defaults to CBOR).
-- Within a mode, language codegen modules (C, C++, Python, Rust, Go, ...)
-  have no dependencies on each other. Each owns its accumulators and type
+- CBOR is the only FFI codegen surface; activate it with
+  `-d:BrokerFfiApi`. The historical native-codegen path was retired
+  along with the `BrokerFfiMode` selector.
+- Language codegen modules (C, C++, Python, Rust, Go, ...) have no
+  dependencies on each other. Each owns its accumulators and type
   mapping procs. 
   - Adding a new language surface means adding one new module  with no changes to the existing ones.
 - `api_library.nim` is the only module that knows about every output and
@@ -576,17 +575,17 @@ toggles.
 | `--path:.` | Make the project root visible so `import brokers/...` resolves. |
 | `--outdir:build` | Keep `.so` and generated wrapper artifacts out of the source tree. |
 
-#### ABI strategy flags
+#### ABI strategy flag
 
-Pick exactly one. If none is set, `-d:BrokerFfiApi` defaults to CBOR.
+CBOR is the only supported FFI mode; activate the codegen with
+`-d:BrokerFfiApi`.
 
 | Flag | Selects | Generated C ABI shape | Wire format |
 |------|---------|-----------------------|-------------|
-| `-d:BrokerFfiApiNative` | Native ABI | One typed C export per request/event + per-result free helpers. | Native C structs. |
-| `-d:BrokerFfiApiCBOR` | CBOR ABI | Fixed 11-function ABI + one event-callback typedef. | CBOR-encoded payloads. |
-| `-d:BrokerFfiApi` | CBOR (default) | Same as `-d:BrokerFfiApiCBOR`. | CBOR. |
+| `-d:BrokerFfiApi` | CBOR ABI | Fixed 11-function ABI + one event-callback typedef. | CBOR-encoded payloads. |
 
-Setting *both* native and CBOR flags is a compile-time error.
+The historical `-d:BrokerFfiApiNative` (native typed-C export ABI) and
+the transitional `-d:BrokerFfiApiCBOR` alias have been removed.
 
 #### Optional language wrapper flags
 
@@ -611,22 +610,22 @@ The CMake package config (`<lib>Config.cmake`) and, in CBOR mode, the
 
 #### Worked examples
 
-Minimal native build of `examples/ffiapi/nimlib/mylib.nim`:
+Minimal build of `examples/ffiapi/nimlib/mylib.nim` (CBOR is the only mode):
 
 ```sh
 nim c \
-  -d:BrokerFfiApiNative \
+  -d:BrokerFfiApi \
   --threads:on --app:lib --mm:orc \
-  --path:. --outdir:examples/ffiapi/nimlib/build \
+  --path:. --outdir:examples/ffiapi/nimlib/build_cbor \
   --nimMainPrefix:mylib \
   examples/ffiapi/nimlib/mylib.nim
 ```
 
-Same source compiled in CBOR mode with all four wrapper languages:
+Same source compiled with all four wrapper languages emitted:
 
 ```sh
 nim c \
-  -d:BrokerFfiApiCBOR \
+  -d:BrokerFfiApi \
   -d:BrokerFfiApiGenPy -d:BrokerFfiApiGenRust -d:BrokerFfiApiGenGo \
   --threads:on --app:lib --mm:orc \
   --path:. --outdir:examples/ffiapi/nimlib/build_cbor \
@@ -637,7 +636,7 @@ nim c \
 Inspect the AST that the macros produce:
 
 ```sh
-nim c -d:brokerDebug -d:BrokerFfiApiCBOR \
+nim c -d:brokerDebug -d:BrokerFfiApi \
       --threads:on --app:lib --path:. --outdir:build \
       --nimMainPrefix:mylib examples/ffiapi/nimlib/mylib.nim
 ```

@@ -9,15 +9,15 @@ Derived from the codegen mappers in
 
 ## ABI mode
 
-CBOR (`-d:BrokerFfiApiCBOR`, also the default whenever `-d:BrokerFfiApi`
-is set) is the only FFI mode. It exposes a fixed 11-function C ABI;
-payloads ride as CBOR bytes. Only the C++ / Rust / Go / Python wrappers
-carry the typed surface — pure-C consumers currently see only the raw
-ABI (see `doc/CBOR_Refactoring.md` §10 for the deferred typed-C work).
+CBOR is the only FFI mode. Activate codegen with `-d:BrokerFfiApi`. It
+exposes a fixed 11-function C ABI; payloads ride as CBOR bytes. Only the
+C++ / Rust / Go / Python wrappers carry the typed surface — pure-C
+consumers currently see only the raw ABI (see `doc/CBOR_Refactoring.md`
+§10 for the deferred typed-C work).
 
 The native per-type C codegen was retired — see `doc/CBOR_Refactoring.md`.
-Trying to compile with `-d:BrokerFfiApiNative` is a hard error pointing
-back to that document.
+The historical `-d:BrokerFfiApiNative` and transitional
+`-d:BrokerFfiApiCBOR` flags no longer exist.
 
 ---
 

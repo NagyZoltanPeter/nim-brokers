@@ -351,12 +351,11 @@ frequency from a foreign caller thread. CBOR-mode FFI is unaffected on
 the same platform / MM combination. ORC is unaffected. Linux+refc is
 unaffected. Windows+refc is unsupported for unrelated reasons (§2.1).
 
-**Reproducer.** [`examples/torpedo/cpp_example`](../examples/torpedo/cpp_example).
-Build with `nim c -d:BrokerFfiApiNative --threads:on --app:lib --mm:refc`
-plus the CMake project under `examples/torpedo`, run with `--fast`.
-Crashes within a few seconds (debug) or after the duel completes (release).
-The CBOR-mode build of the **same C++ source** against the same broker
-types works cleanly under refc.
+**Reproducer (historical).** This limitation applied to the now-retired
+native FFI codegen path. The CBOR-mode build (`-d:BrokerFfiApi`, the
+only mode going forward) of the same C++ source against the same broker
+types works cleanly under refc — the native repro is preserved here
+only as a record of why native codegen was retired.
 
 **Crash signature.**
 
@@ -413,12 +412,8 @@ issues a request).
 
 **Recommendation.**
 1. If you can use **`--mm:orc`**, do — there is no §2.7 on ORC.
-2. If you must use `--mm:refc` on macOS, choose **CBOR-mode FFI**
-   (`-d:BrokerFfiApiCBOR`) — there is no §2.7 in CBOR-mode.
-3. If you must use native-mode FFI + refc on macOS, throttle your
-   cross-thread RPC frequency to well below the race window. Empirically,
-   workloads at < ~20 RPC/sec are fine; > 100 RPC/sec on a single foreign
-   thread reliably triggers §2.7.
+2. CBOR-mode FFI (`-d:BrokerFfiApi`, the only mode going forward) has no
+   §2.7 — the issue was specific to the now-retired native codegen path.
 
 **Upstream issue.** The original hypothesis (chronos Future allocator
 race) turned out to be downstream of a structural issue in our code: the

@@ -8,7 +8,7 @@ option(ASAN "Enable AddressSanitizer (requires clang)" OFF)
 # ---------------------------------------------------------------------------
 # CBOR is the only FFI mode (the native codegen was retired — see
 # doc/CBOR_Refactoring.md). TYPEMAPTEST_DIR can still be overridden at
-# configure time; by default it points at the -d:BrokerFfiApiCBOR build
+# configure time; by default it points at the -d:BrokerFfiApi build
 # output and the C++ test pulls in jsoncons headers.
 if(NOT TYPEMAPTEST_DIR)
     set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")

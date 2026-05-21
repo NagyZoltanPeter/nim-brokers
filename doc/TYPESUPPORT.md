@@ -13,10 +13,10 @@ raw 11-function CBOR ABI and must hand-encode payloads against it.
 
 ## ABI mode
 
-CBOR (`-d:BrokerFfiApiCBOR`, also the default whenever `-d:BrokerFfiApi`
-is set) is the only FFI mode. The native per-type C codegen was retired
-— see `doc/CBOR_Refactoring.md`. Trying to compile with
-`-d:BrokerFfiApiNative` is a hard compile error.
+CBOR is the only FFI mode. Activate codegen with `-d:BrokerFfiApi`. The
+native per-type C codegen was retired — see `doc/CBOR_Refactoring.md`.
+The historical `-d:BrokerFfiApiNative` and transitional
+`-d:BrokerFfiApiCBOR` flags no longer exist.
 
 ## Legend
 

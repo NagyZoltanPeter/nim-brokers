@@ -463,52 +463,29 @@ Architecture, threading behavior, lifecycle requirements, generated API surface,
 
 [Type-support matrix](doc/TYPESUPPORT.md) is available in a separate document.
 
-For the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go) × each FFI mode (native / CBOR), with footnoted defects, recommended idioms, and a worked example.
+For the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go), with footnoted defects, recommended idioms, and a worked example.
 
-### FFI API strategies: CBOR vs Native
+### FFI API strategy
 
-Currently developer can choose two major path, decision might be driven on API surface and usage needs.
+The FFI surface is **CBOR-only**. The historical "native" C-ABI codegen
+was retired (see `doc/CBOR_Refactoring.md`); the only build flag is now
+`-d:BrokerFfiApi`.
 
-### Native FFI strategy
+The CBOR strategy serializes all transmittable data into CBOR blobs at the
+ABI boundary and decodes / encodes on the wrapper side. Benefits over the
+old native path: reduced memory allocations, a single fixed ABI shape that
+ports cleanly across languages with CBOR support, and the ability to
+transmit complex structs / collections without a per-type C struct.
 
-This translates every Request/Event -Broker API interface into a plain export C ABI with typed structs and free helpers. The generated header is self-contained and does not require any external dependencies. Buffer ownership rules are per-helper and documented in the generated header. 
+Every library collapses to the same fixed 11-function C ABI plus a single
+event-callback typedef, with CBOR as the on-wire format. Wrappers carry
+the typed surface and decode / encode through language-specific CBOR
+libraries like `jsoncons` (C++), `cbor2` (Python), `ciborium` (Rust), or
+`github.com/fxamacker/cbor` (Go). Buffer ownership rule: every `void*`
+crossing the ABI is allocated by Nim and freed by Nim.
 
-While it is a good strategy where the API surface is reasonable small and transmits mainly primitive types and no complex structs or collections.
-
-Strategy flag: `-d:BrokerFfiApiNative`. This is an explicit opt-in; the default is CBOR.
-
-### CBOR FFI strategy
-
-The CBOR strategy is the **default** FFI surface.
-It is built on top of the idea of serializing all transmittable data into CBOR blobs at the ABI boundary, and decoding/encoding on the wrapper side.
-
-This has great advantages over `native` because of reduced memory allocations and unifies the interface can be easily ported to other languages with CBOR support. It also allows to transmit complex data structures and collections without the need of defining a C struct for each of them.
-
-It collapses every library to the same fixed 10-function C ABI plus a single
-event-callback typedef, with CBOR as the on-wire format. Wrappers
-carry the typed surface and decode/encode through language specific CBOR libraries like `jsoncons`
-(C++) or `cbor2` (Python). Buffer ownership rule: every `void*` crossing the ABI is allocated by Nim and freed by Nim.
-
-The major difference from the native strategy is that the generated header is C++ and is not self-contained and requires the wrapper's CBOR library as a dependency. 
-
-> :exclamation:The generated API surface is in parity with the native strategy above the C ABI layer. The same C++ / Python / Rust / Go wrapper interfaces are available regardless of the underlying ABI strategy.
-
-### Comparison
-| Aspect | Native strategy | CBOR strategy |
-|--------|-----------------|---------------|
-| C ABI surface | Per-request typed structs + free helpers | Fixed 10-function ABI + event callback typedef |
-| Wire format | Native C structs (per-language conversion) | CBOR everywhere (`jsoncons` / `cbor2`) |
-| Buffer ownership | Mixed (per-helper) | Uniform (Nim allocates, Nim frees) |
-| Discovery API | Static headers | Static `<lib>.cddl` + runtime `_listApis` / `_getSchema` |
-| Compile flag | `-d:BrokerFfiApiNative` | `-d:BrokerFfiApiCBOR` (default; also picked by bare `-d:BrokerFfiApi`) |
-
-### Interface parity of strategies
-
-The same Nim implementation can be built with either strategy without changes to the source. 
-- The generated C ABI are different. 
-- Wrapper API surface are semantically equivalent and in functional parity with each other. 
-  - C++ wrapper is always generated
-  - Python / Rust / Go wrapper can be generated for both strategies.
+C++ wrapper is always generated; Python / Rust / Go wrappers are opt-in
+via `-d:BrokerFfiApiGenPy` / `-d:BrokerFfiApiGenRust` / `-d:BrokerFfiApiGenGo`.
 
 > :exclamation: The same example source files can be compiled against either generated header with no changes!
 
