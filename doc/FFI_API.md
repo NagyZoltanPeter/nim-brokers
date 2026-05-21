@@ -784,23 +784,34 @@ This is the thread on which provider closures execute.
 
 Purpose:
 
-- hosts the generated event-listener registration broker
-- accepts `on<Event>` / `off<Event>` calls from foreign code
-- executes foreign callback trampolines for API event delivery
+- consumes the per-context **event courier ring**
+- invokes foreign callback trampolines for API event delivery
+- isolates foreign callback runtime from request providers — a slow or
+  reentrant callback blocks the delivery thread, never the processing
+  thread
 
 This is the thread that invokes C callbacks and the callback trampolines used by
 the generated C++ and Python wrappers.
 
 ### Why there are two threads
 
-The split avoids mixing foreign callback delivery with request provider logic.
+The split keeps foreign-callback fan-out off the provider thread. A
+foreign callback that sleeps 100 ms would block any request providers
+sharing the same thread (and would deadlock if the callback re-entered
+the library via `<lib>_call`). Running fan-out on a dedicated delivery
+thread eliminates both hazards.
 
 Benefits:
 
 - event callback dispatch is isolated from request execution
 - request providers can keep request-local state on the processing thread
-- event registration is always owned by the delivery thread
+- a reentrant `<lib>_call` from inside a foreign callback is serviced on
+  the processing thread (no self-deadlock)
 - shutdown ordering is predictable
+
+See `doc/CBOR_Round2_PartD_EventCourier.md` for the design rationale and
+`doc/bench_baseline.md` § "Event dispatch — Part D-6" for per-emit cost
+numbers across the three dispatch lanes.
 
 ### Startup ordering
 
@@ -809,52 +820,75 @@ The generated create function starts the threads in this order:
 1. delivery thread
 2. processing thread
 
-The delivery thread is started first so event registration requests are routable
-before the context is returned to the caller.
+The delivery thread is started first so its event-courier signal handle
+is published before any provider can emit an event. The create function
+waits for:
 
-The create function waits for:
-
-- delivery thread readiness after the event registration provider is installed
+- delivery thread readiness after its broker dispatch loop is running
+  and the event-courier poller is registered
 - processing thread readiness after `setupProviders(ctx)` completes
+  and the per-event listeners are installed
 
-The sequence above is the reason `create()` behaves synchronously even though
-the implementation starts two background threads internally.
+The sequence above is the reason `create()` behaves synchronously even
+though the implementation starts two background threads internally.
 
 ### Event behavior
 
-When foreign code registers an event callback:
-
-- the registration call goes through the generated `RegisterEventListenerResult`
-  request broker
-- that request is served on the delivery thread
-- the delivery thread stores the listener handle, callback function pointer, and
-  opaque `userData` pointer
+Foreign subscribe / unsubscribe — `<lib>_subscribe(ctx, eventName, cb,
+userData)` / `<lib>_unsubscribe(ctx, eventName, handle)` — write
+directly into a shared-heap subscription registry from the foreign
+caller's thread. No request broker is involved on the registration
+path. Each successful subscribe bumps a per-event atomic counter that
+the emit-side uses as a fast-path discriminator.
 
 When the Nim side emits an API event:
 
-- the event is routed by the generated multi-thread event broker
-- same-thread delivery uses direct async dispatch
-- cross-thread delivery uses async channels
-- foreign callbacks run on the delivery thread
+- the per-event listener (registered on the **processing** thread by
+  `installAllListenersIdent`) fires via the MT EventBroker's same-thread
+  direct `asyncSpawn` fast path
+- the listener loads the per-event `foreignSubsCount` atomic. **If
+  zero (the 90 % production case), the listener returns immediately**
+  — no CBOR encode, no allocation, no courier touch.
+- otherwise the listener CBOR-encodes the payload once into a
+  shared-heap buffer, enqueues an `EventMsg(eventName, ctx, buf,
+  bufLen)` into the per-context event-courier ring, and fires the
+  delivery thread's broker dispatch signal
+- the delivery thread polls the courier ring, snapshots the foreign
+  subscriber list for `(ctx, eventName)`, invokes each callback
+  synchronously, then `deallocShared`s the buffer
+- Nim listeners (registered via `<Event>.listen(...)` from Nim code
+  inside the library) keep going through the standard MT EventBroker
+  paths unchanged — same-thread direct `asyncSpawn` or cross-thread
+  typed-slab marshalling
 
 ```mermaid
 sequenceDiagram
   participant P as Processing thread
-  participant E as API EventBroker(mt)
+  participant L as Per-event handler
+  participant R as Event courier ring
   participant D as Delivery thread
-  participant T as FFI callback trampoline
   actor F as Foreign callback
-  P->>E: emit(event)
-  alt listener already owned by processing thread
-    E-)P: dispatch directly
-  else listener owned by delivery thread
-    E-)D: route event over AsyncChannel
-    D->>T: decode payload and invoke wrapper
-    T->>F: callback(payload)
+  P->>L: emit(event) — same-thread asyncSpawn
+  alt foreignSubsCount == 0
+    L-)P: return (fast path; no encode, no courier)
+  else foreignSubsCount > 0
+    L->>L: cborEncodeShared(payload) → shared-heap buf
+    L->>R: tryEnqueue(EventMsg)
+    L-)D: fireBrokerSignal
+    D->>R: tryDequeue
+    D->>D: snapshot SubsRegistry[(ctx, eventName)]
+    D->>F: callback(ctx, name, buf, len, userData)  × N subscribers
+    D->>D: deallocShared(buf)
   end
   Note over D,F: Foreign callbacks execute on the delivery thread
-  Note over D,F: Blocking callback code stalls later callback delivery
+  Note over D,F: A slow callback blocks the delivery thread, not the processing thread
 ```
+
+`<EventType>.dropAllListeners(ctx)` from Nim code fires a companion
+hook (registered by the per-event installer) that also clears the
+foreign-subscriber registry for `(ctx, eventName)` and resets the
+`foreignSubsCount` atomic, so foreign subs cannot orphan when user Nim
+code drops listeners.
 
 ### Request behavior
 

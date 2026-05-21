@@ -282,10 +282,11 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   - `<lib>_createContext()` — per-context instance creation
   - `<lib>_shutdown(ctx)` — per-context shutdown
 - `InitializeRequest` is the post-create configuration broker; `ShutdownRequest` is the orderly teardown broker.
-- `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread installed event registration and the processing thread finished `setupProviders(ctx)`.
+- `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread has installed its event-courier poller and the processing thread has finished `setupProviders(ctx)` plus per-event listener installation.
 - The generated runtime uses two threads per created library context:
-  - **delivery thread** — owns foreign event registration and executes foreign callbacks
-  - **processing thread** — runs `setupProviders(ctx)` and executes request providers
+  - **delivery thread** — consumes the per-context event courier ring and invokes foreign callbacks. Spawned first so its broker dispatch signal is published before any emit can fire.
+  - **processing thread** — runs `setupProviders(ctx)`, installs per-event listeners (same-thread fast path for the FFI lane), executes request providers, and produces event-courier messages on emit.
+- FFI subscribe / unsubscribe (`<lib>_subscribe` / `<lib>_unsubscribe`) write the shared `SubsRegistry` directly from the foreign caller's thread and bump a per-event `Atomic[int]` counter; the emit-side reads the counter lock-free to short-circuit the courier path when no foreign subscriber is registered. See `doc/CBOR_Round2_PartD_EventCourier.md` for the three-lane dispatch design and `doc/bench_baseline.md` § "Event dispatch — Part D-6" for per-emit costs.
 - Generated C header: `<libName>.h` (pure C), C++ wrapper: `<libName>.hpp` (includes the `.h`).
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
 - Generated Rust wrapper support is optional and enabled with `-d:BrokerFfiApiGenRust`. It emits a complete Cargo crate `<libName>_rs/` (Cargo.toml + src/lib.rs) next to the `.so`. The crate declares the C ABI via hand-written `extern "C"` blocks (no bindgen / no clang dep) and exposes the same `Lib::new() / create_context() / <request>(args) -> Result<T, String> / on_<event> / off_<event> / shutdown / Drop` surface the C++ wrapper provides.
@@ -376,7 +377,7 @@ test/
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **nim-brokers** (1046 symbols, 1709 relationships, 10 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **nim-brokers** (1862 symbols, 3601 relationships, 127 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

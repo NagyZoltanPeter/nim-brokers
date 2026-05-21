@@ -125,7 +125,40 @@ References gathered while drafting:
 
 ---
 
-## 3. Part D — Event courier (priority 1)
+## 3. Part D — Event courier (priority 1) — **SHIPPED**
+
+> **Status (2026-05-21):** All seven sub-phases (D-1 through D-7) shipped
+> on `retire-native-cbor-optimize`. The §3 sketch below is the original
+> Round 2 proposal and is preserved as historical context; the
+> as-implemented design is in **`doc/CBOR_Round2_PartD_EventCourier.md`**.
+>
+> Notable differences from the §3 sketch as actually shipped:
+>
+> - The §3.1 "move encode + fan-out off the delivery thread onto the
+>   provider thread" wording captures **half** of the final design.
+>   What actually ships:
+>   - encode happens on the processing (provider) thread, as proposed;
+>   - **but foreign-callback fan-out still runs on the delivery
+>     thread** (so slow callbacks can't block providers — see §1a of
+>     the Part D doc for the slow-callback regression that drove this).
+> - §3.1 doesn't mention the **atomic-counter fast-path** that
+>   short-circuits the entire courier path when no foreign subscriber
+>   is registered for the emit. This is the 90 % production hot path
+>   — measured at 615 ns/emit vs ~975 ns/emit for the full courier
+>   path (see `doc/bench_baseline.md` § "Event dispatch — Part D-6").
+> - The §3.1 plan assumed the delivery thread already existed. It did
+>   not — the CBOR Phase-2 commit had retired it along with the native
+>   impl. **D-1 first restores the delivery thread**, then D-2 moves
+>   handlers onto it, then D-3 applies the courier optimization on
+>   top. See §11 of the Part D doc for the seven-phase sequencing.
+> - The plan called for a per-bucket `shuttingDown: Atomic[int]`
+>   flag on the courier; the existing `e.active` check inside the
+>   per-event handler turned out to be sufficient (ASAN+orc/refc
+>   confirmed). The flag was dropped from the as-shipped design.
+> - `dropAllListeners` companion cleanup hook (§8a of the Part D doc)
+>   was added during D-3 to keep `SubsRegistry` in lock-step with the
+>   MT EventBroker listener table when user Nim code drops listeners.
+>   The original §3 plan did not anticipate this.
 
 ### 3.1 The change
 
@@ -377,7 +410,7 @@ Smallest items, mostly hygiene:
 | Phase | Work | Why this order | Effort | Risk |
 |-------|------|----------------|--------|------|
 | 1 | **Part E** — flag + `ffiMode:` collapse | Mechanical, unblocks docs + ergonomic improvements before any new feature lands | 0.5–1 d | low |
-| 2 | **Part D** — event courier | Biggest correctness item; benefits from a clean compile-flag surface to design against | 4–6 d | **med-high** (shutdown race + refcount discipline) |
+| 2 | **Part D** — event courier [shipped, ~7 days] | Biggest correctness item; benefits from a clean compile-flag surface to design against | 4–6 d | **med-high** (shutdown race + refcount discipline) — both verified ASAN-clean in orc + refc; slow-callback regression also covered. See `doc/CBOR_Round2_PartD_EventCourier.md`. |
 | 3 | **Part F** — USE_CBOR ifdef sweep | Tiny, do after Part D so the event-side test sources are only edited once | 0.25 d | low |
 | 4 | **Part H** — janitorial | Catches anything that drifted during Parts D/E | 0.25–0.5 d | low |
 | 5 | **Part G** — typed C wrapper | The heaviest item; deserves its own RFC. Schedule after Parts D/E ship and stabilize. | 5–7 d | **med** (codec choice + lifetime contract) |
