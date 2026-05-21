@@ -376,8 +376,19 @@ proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
       # enum / distinct / alias / external object — can't tell at macro
       # time without resolving the symbol. Fall back to safe size.
       (UnclassifiableBytes, "unclassifiable:" & name)
-  elif t.kind == nnkBracketExpr and t.len >= 2 and t[0].kind == nnkIdent:
-    let outer = $t[0]
+  elif t.kind == nnkBracketExpr and t.len >= 2 and
+      (t[0].kind == nnkIdent or t[0].kind == nnkDotExpr):
+    # Accept both bare (`Option[T]`) and qualified
+    # (`options.Option[T]`) outer names. For the dotted form we treat
+    # the rightmost ident as the bracket name, while also retaining
+    # the fully qualified form so the existing `options.Option` arm
+    # below still matches when the user writes the full path.
+    let outer =
+      if t[0].kind == nnkIdent:
+        $t[0]
+      else:
+        # nnkDotExpr: lhs.rhs — use rhs as the primary name.
+        if t[0].len >= 2 and t[0][1].kind == nnkIdent: $t[0][1] else: t[0].repr
     if outer == "seq":
       let inner = t[1]
       if inner.kind == nnkIdent:
@@ -397,7 +408,7 @@ proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
         classifyTypeSize(t[2])
       else:
         (UnclassifiableBytes, "unclassifiable:" & t.repr)
-    elif outer == "Option" or outer == "options.Option":
+    elif outer == "Option":
       # Option[T] — wire size is bounded by T plus a one-byte CBOR
       # tag (null marker vs concrete value). Recurse into the inner
       # type and reuse its classification verbatim; the +1 byte sits
