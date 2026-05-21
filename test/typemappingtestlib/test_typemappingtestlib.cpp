@@ -2321,6 +2321,149 @@ static void test_seq_object_event_concurrent_listeners_and_requesters() {
 }
 
 // ============================================================================
+// TestPreviouslyRestrictedShapes — formerly ❌ in TYPESUPPORT.md.
+// These shapes (seq[Object<seq>], array[N, string], array[N, Object]
+// payload, array[N, primitive] param) all ride the CBOR codec
+// uniformly. The native-ABI restriction notes that documented them
+// as broken were stale after Round-2; these tests lock the behaviour
+// in.
+// ============================================================================
+
+static void test_list_inners_result_empty() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.listInnersRequest(0);
+    CHECK(r.isOk());
+    CHECK(r->items.empty());
+    lib.shutdown();
+}
+
+static void test_list_inners_result_count_and_fields() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.listInnersRequest(3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->items.size(), 3u);
+    CHECK_EQ(r->items[0].id, 0);
+    CHECK_EQ(r->items[0].tag, std::string("inner-0"));
+    CHECK_EQ(r->items[0].bytes.size(), 1u);
+    CHECK_EQ(static_cast<uint8_t>(r->items[0].bytes[0]), 0u);
+    CHECK_EQ(r->items[2].id, 2);
+    CHECK_EQ(r->items[2].tag, std::string("inner-2"));
+    CHECK_EQ(r->items[2].bytes.size(), 3u);
+    lib.shutdown();
+}
+
+static void test_bulk_inners_param_roundtrip() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    // First call result-broker to get a deterministic seq[Inner], then
+    // feed it back as the param-broker input — proves seq[Object<seq>]
+    // round-trips both directions.
+    auto gen = lib.listInnersRequest(5);
+    CHECK(gen.isOk());
+    auto r = lib.bulkInnersRequest(gen->items);
+    CHECK(r.isOk());
+    // ids 0+1+2+3+4 = 10
+    CHECK_EQ(r->idSum, 10);
+    // byte counts: 1+2+3+4+5 = 15
+    CHECK_EQ(r->byteCount, 15);
+    lib.shutdown();
+}
+
+static void test_inners_updated_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    struct Capture { int32_t id; std::string tag; size_t byteCount; };
+    SafeList<std::vector<Capture>> received;
+    auto h = lib.onInnersUpdatedEvent(
+        [&received](Typemappingtestlib&, std::span<const Inner> items) {
+            std::vector<Capture> snapshot;
+            snapshot.reserve(items.size());
+            for (const auto& it : items) {
+                snapshot.push_back(Capture{it.id, it.tag, it.bytes.size()});
+            }
+            received.push(std::move(snapshot));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerInnersUpdatedRequest(4);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto snap = received.at(0);
+    CHECK_EQ(snap.size(), 4u);
+    CHECK_EQ(snap[0].id, 0);
+    CHECK_EQ(snap[0].tag, std::string("evt-0"));
+    CHECK_EQ(snap[0].byteCount, 1u);
+    CHECK_EQ(snap[3].id, 3);
+    CHECK_EQ(snap[3].byteCount, 4u);
+    lib.offInnersUpdatedEvent(h);
+    lib.shutdown();
+}
+
+static void test_fixed_str_array_result() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.fixedStrArrayRequest("tag");
+    CHECK(r.isOk());
+    // CBOR decodes array[4, string] into std::vector<std::string>.
+    CHECK_EQ(r->tags.size(), 4u);
+    CHECK_EQ(r->tags[0], std::string("tag-0"));
+    CHECK_EQ(r->tags[1], std::string("tag-1"));
+    CHECK_EQ(r->tags[2], std::string("tag-2"));
+    CHECK_EQ(r->tags[3], std::string("tag-3"));
+    lib.shutdown();
+}
+
+static void test_set_tags_array_param() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    std::vector<std::string> tags = {"alpha", "beta", "", "delta"};
+    auto r = lib.setTagsRequest(tags);
+    CHECK(r.isOk());
+    CHECK_EQ(r->joined, std::string("alpha|beta||delta"));
+    lib.shutdown();
+}
+
+static void test_sum_prim_array_param() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    std::vector<int32_t> nums = {10, 20, 30, 40};
+    auto r = lib.sumPrimArrayRequest(nums);
+    CHECK(r.isOk());
+    CHECK_EQ(r->total, 100);
+    lib.shutdown();
+}
+
+static void test_fixed_obj_array_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    struct Capture { int32_t idx; std::string name; };
+    SafeList<std::vector<Capture>> received;
+    auto h = lib.onFixedObjArrayEvent(
+        [&received](Typemappingtestlib&, std::span<const Slot> slots) {
+            std::vector<Capture> snapshot;
+            snapshot.reserve(slots.size());
+            for (const auto& s : slots) {
+                snapshot.push_back(Capture{s.idx, s.name});
+            }
+            received.push(std::move(snapshot));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerFixedObjArrayRequest(100);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto snap = received.at(0);
+    CHECK_EQ(snap.size(), 4u);
+    CHECK_EQ(snap[0].idx, 100);
+    CHECK_EQ(snap[0].name, std::string("alpha"));
+    CHECK_EQ(snap[2].name, std::string(""));
+    CHECK_EQ(snap[3].idx, 103);
+    CHECK_EQ(snap[3].name, std::string("delta with spaces"));
+    lib.offFixedObjArrayEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -2481,6 +2624,16 @@ int main() {
     RUN(test_seq_object_event_callback_data_correctness);
     RUN(test_seq_object_event_rapid_fire_no_leak);
     RUN(test_seq_object_event_concurrent_listeners_and_requesters);
+
+    printf("\n--- TestPreviouslyRestrictedShapes ---\n");
+    RUN(test_list_inners_result_empty);
+    RUN(test_list_inners_result_count_and_fields);
+    RUN(test_bulk_inners_param_roundtrip);
+    RUN(test_inners_updated_event);
+    RUN(test_fixed_str_array_result);
+    RUN(test_set_tags_array_param);
+    RUN(test_sum_prim_array_param);
+    RUN(test_fixed_obj_array_event);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);
