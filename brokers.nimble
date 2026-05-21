@@ -409,6 +409,38 @@ task runFfiBenchEventStressAsan,
   runFfiBenchEventStressAsanFor("orc")
   runFfiBenchEventStressAsanFor("refc")
 
+proc buildBenchLibWithMM(mm: string, release: bool) =
+  ## Shared helper used by the FFI perftest task. Compiles the
+  ## benchlib shared library with the requested memory manager and
+  ## build mode into test/ffibench/build/. The C++ driver picks up
+  ## whatever lib is sitting there.
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:test/ffibench/build --mm:" &
+    mm & " --nimMainPrefix:benchlib"
+  if release:
+    flags.add(" -d:release")
+  exec "nim c " & flags & " test/ffibench/benchlib.nim"
+
+task perftestFfi,
+  "FFI perftest from C++ (5×500×512B; orc + refc × debug + release)":
+  ## Companion to `nimble perftest` on the FFI side. Mirrors the same
+  ## 5 × 500 × 512 B shape via test/ffibench/perf_driver.cpp so the
+  ## numbers line up directly against the Nim-direct baseline printed
+  ## by perf_test_multi_thread_*_broker.nim.
+  mkDir("test/ffibench/cmake-build")
+  for mm in memoryManagerMatrix():
+    for releaseTag in ["debug", "release"]:
+      let release = releaseTag == "release"
+      echo "\n=== perftestFfi: --mm:" & mm & " (" & releaseTag & ") ==="
+      buildBenchLibWithMM(mm, release)
+      # Reconfigure cmake — the cached lib has the same mtime if mm
+      # toggled, so re-invoking cmake -B ensures the linker sees the
+      # fresh dylib mtime via the regenerated build.ninja.
+      exec "cmake -S test/ffibench -B test/ffibench/cmake-build " &
+        (if release: "-DCMAKE_BUILD_TYPE=Release" else: "")
+      exec "cmake --build test/ffibench/cmake-build --target perf_driver"
+      exec "test/ffibench/build/perf_driver"
+
 task runFfiBenchEvent,
   "Build benchlib (release/orc) + bench_event_driver and run it":
   ## Part D-6 — captures the per-emit cost across four scenarios:

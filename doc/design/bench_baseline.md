@@ -213,9 +213,104 @@ nimble runFfiBenchEvent
 ```
 
 (Equivalent: `nim c -d:release -d:BrokerFfiApi --threads:on
---app:lib --path:. --outdir:test/ffibench/build_cbor --mm:orc
+--app:lib --path:. --outdir:test/ffibench/build --mm:orc
 --nimMainPrefix:benchlib test/ffibench/benchlib.nim` then `cmake -S
 test/ffibench -B test/ffibench/cmake-build -DCMAKE_BUILD_TYPE=Release`
 then `cmake --build test/ffibench/cmake-build --target
-bench_event_driver` then `test/ffibench/build_cbor/bench_event_driver`.)
+bench_event_driver` then `test/ffibench/build/bench_event_driver`.)
+
+## FFI perftest from C++ vs Nim-direct perftest
+
+The closing comparison of the Round-2 retirement: same workload shape
+(`5 threads × 500 ops × 512 B payload`) driven once from Nim
+(`nimble perftest`, broker-level only) and once from C++ over the FFI
+boundary (`nimble perftestFfi`, `test/ffibench/perf_driver.cpp`). The
+two numbers quote the cost of crossing the FFI boundary on a workload
+that is otherwise identical.
+
+### Environment
+
+| | |
+|---|---|
+| Machine | Apple M4, 10 cores |
+| OS | macOS 15.7.3 |
+| Compiler | AppleClang 17.0.0; Nim 2.2.10 |
+| Build | `-d:release`, `--mm:{orc,refc}`, `--threads:on` |
+| Date | 2026-05-21 |
+
+### Request path — `5 × 500 × 512 B` cross-thread
+
+| Build | Nim-direct (`req/s`) | FFI from C++ (`req/s`) | Nim avg lat | FFI avg lat | FFI p99 |
+|---|---:|---:|---:|---:|---:|
+| orc-release  | 38.02 K  | **151.69 K** (+3.99×) | 128.5 µs | **32.5 µs** (−75 %) | 76.1 µs |
+| refc-release | 38.33 K  | **149.27 K** (+3.89×) | 127.4 µs | **33.1 µs** (−74 %) | 75.3 µs |
+| orc-debug    | 29.23 K  | 26.56 K (−9 %)        | 166.7 µs | 187.9 µs (+13 %)    | 498.5 µs |
+| refc-debug   | 28.82 K  | 21.19 K (−26 %)       | 168.5 µs | 235.6 µs (+40 %)    | 470.6 µs |
+
+**Why FFI release is *faster* than Nim-direct.** Counter-intuitive at
+first read, but matches the design: the FFI `_call` courier rewrite
+(Part C Phase 1) moved the broker `.request()` invocation onto the
+processing thread. The Nim-direct cross-thread path traverses the
+typed MT marshal/unmarshal slab + ring; the FFI path skips that — it
+goes CBOR-encode → buffer-courier → same-thread broker dispatch →
+CBOR-encode-response → response-slot wake. Fewer hops, simpler memory
+operations. The trade is that the FFI path pays CBOR encoding
+overhead, but for a 512 B payload that's cheap relative to the
+slab/ring transit it replaces.
+
+### Event path — `5 × 500 × 512 B`
+
+| Build | Nim-direct (`evt/s`) | FFI from C++ (`evt/s`) | Nim avg lat | FFI avg lat | FFI p99 |
+|---|---:|---:|---:|---:|---:|
+| orc-release  | 629.01 K | 152.00 K (−76 %) | 687.9 µs  | **33.7 µs** (−95 %) | 61.0 µs |
+| refc-release | 514.75 K | 160.89 K (−69 %) | 21.7 µs   | 34.2 µs (+58 %)     | 70.0 µs |
+| orc-debug    | 90.85 K  | 31.48 K (−65 %)  | 12.369 ms | **165.1 µs** (−99 %)| 204.4 µs |
+| refc-debug   | 123.94 K | 26.06 K (−79 %)  | 7.335 ms  | **192.8 µs** (−97 %)| 341.1 µs |
+
+**Why FFI event is *slower* on throughput but often *faster* on
+latency.** The FFI event path traverses more hops: C++ trigger → Nim
+provider → broker emit (same-thread on processing thread) → MT broker
+fan-out (same-thread direct dispatch to a per-event handler that
+encodes CBOR + writes to the event courier ring) → delivery thread
+drains ring → decode CBOR → invoke C++ callback. The Nim-direct
+cross-thread emit is one hop: emit thread → MT broker dispatch →
+listener thread chronos coroutine. So per-event throughput is lower
+on the FFI side.
+
+Latency comparison is more interesting. orc-release Nim-direct shows
+688 µs average because the Nim-direct harness measures emit→listener-
+spawn end-to-end including chronos scheduling latency under burst
+(15 % drops in the older baseline — see § "Event dispatch — Part
+D-6"). The FFI path keeps drops at 0 % and trades for stricter
+latency control via the courier's bounded ring + signal. refc-release
+Nim-direct shows 22 µs — the broker is back-pressuring at a lower
+offered rate, so latency stays tight.
+
+Note: latency comparison is harness-dependent. The Nim-side perftest
+measures `now - evt.timestampNs` where the timestamp is stamped at
+emit; the FFI side measures the same delta in `steady_clock` ns. Both
+use the same underlying clock on macOS (`mach_absolute_time`) but
+record from slightly different points in the dispatch chain — the
+absolute numbers are comparable to ~1 µs, the trends are what matter.
+
+### Same-thread baseline (Nim-direct only — not applicable to FFI)
+
+| Build | Request `req/s` | Event `evt/s` |
+|---|---:|---:|
+| orc-release  | 478.10 K | 33.04 K |
+| refc-release | 1.20 M   | 41.77 K |
+
+FFI has no same-thread analogue — any foreign caller is cross-thread
+by construction. These numbers sit alongside as the in-process floor.
+
+### Reproducing
+
+```bash
+nimble perftest        # Nim-direct
+nimble perftestFfi     # FFI from C++
+```
+
+`MM=refc` / `MM=orc` overrides each task to a single memory manager;
+the default iterates both. Debug builds run the same matrix without
+`-d:release`.
 

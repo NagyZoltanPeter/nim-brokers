@@ -109,6 +109,33 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[GetStatsRequest, string]] {.async.}
 
+# ---------------------------------------------------------------------------
+# FFI perftest — wider PingEvent variant + emit-now-with-payload trigger.
+#
+# Mirrors the Nim-side perf_test_multi_thread_event_broker.nim shape
+# (5 emitters × 500 events × 512 B payload). Used by
+# test/ffibench/perf_driver.cpp to measure end-to-end FFI overhead vs
+# the Nim-direct numbers `nimble perftest` prints.
+#
+# The payload carries an emit-side timestamp (mono ns) so the C++
+# subscriber can compute per-event delivery latency exactly the same
+# way the Nim-side test does.
+# ---------------------------------------------------------------------------
+
+EventBroker(API):
+  type PingPayloadEvent = object
+    seqNo*: int64
+    emitTimestampNs*: int64
+    bytes*: seq[byte]
+
+RequestBroker(API):
+  type TriggerPingPayloadRequest = object
+    emitted*: int32
+
+  proc signature*(
+    count: int32, payloadSize: int32, emitTimestampNs: int64
+  ): Future[Result[TriggerPingPayloadRequest, string]] {.async.}
+
 # Shared-heap counters for the Nim audiences. Updated under moRelaxed from
 # whichever thread the listener fires on; read under moAcquire by the
 # stats provider on the processing thread.
@@ -259,6 +286,35 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   )
   if emitRes.isErr():
     return err("TriggerEmitRequest provider: " & emitRes.error())
+
+  # FFI perftest — emit `count` PingPayloadEvents from the processing
+  # thread, each carrying `payloadSize` bytes + an emit-side mono-ns
+  # timestamp. The C++ subscriber uses the timestamp to compute
+  # per-event delivery latency.
+  let pingPayloadRes = TriggerPingPayloadRequest.setProvider(
+    ctx,
+    proc(
+        count: int32, payloadSize: int32, emitTimestampNs: int64
+    ): Future[Result[TriggerPingPayloadRequest, string]] {.closure, async.} =
+      # `emitTimestampNs` is supplied by the C++ caller in the C++
+      # `std::chrono::steady_clock` domain. Nim just passes it through
+      # so the foreign callback can compute delivery latency against
+      # its own clock without a cross-language clock-domain mismatch.
+      let n = max(payloadSize, 0)
+      var payload = newSeq[byte](n)
+      for i in 0 ..< n:
+        payload[i] = byte(i and 0xFF)
+      for i in 0 ..< count:
+        discard PingPayloadEvent.emit(
+          ctx,
+          PingPayloadEvent(
+            seqNo: int64(i), emitTimestampNs: emitTimestampNs, bytes: payload
+          ),
+        )
+      return ok(TriggerPingPayloadRequest(emitted: count)),
+  )
+  if pingPayloadRes.isErr():
+    return err("TriggerPingPayloadRequest provider: " & pingPayloadRes.error())
 
   # Part D-4 — stats accessor. Reads the per-lane atomic counters.
   let statsRes = GetStatsRequest.setProvider(

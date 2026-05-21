@@ -84,3 +84,5 @@ add_ffibench_target(stress_event_shutdown stress_event_shutdown.cpp)
 add_ffibench_target(stress_event_slow_callback stress_event_slow_callback.cpp)
 # Part D-6 — event-dispatch microbenchmark driver.
 add_ffibench_target(bench_event_driver bench_event_driver.cpp)
+# Round-2 closure — FFI perftest from C++ (matches perf_test_multi_thread_*).
+add_ffibench_target(perf_driver perf_driver.cpp)
