@@ -139,30 +139,43 @@ proc generateMtRequestBroker*(
     Future[Result[`typeIdent`, string]]
 
   # ── Type-driven auto-defaults ───────────────────────────────────────
+  # Void / zero-field response and zero-arg signatures collapse to the
+  # scalar bucket: nothing larger than the Result envelope's tag bytes
+  # ever traverses the wire. Leaving the conservative 64 KB response /
+  # 1 KB payload default in place would otherwise pin a 16 MB response
+  # pool per RequestBroker for what is effectively a notification.
   var cfg = cfgIn
-  if cfg.maxResponseBytesOrigin == "default" and responseFieldTypes.len > 0:
-    let cls = classifyFieldsMax(responseFieldTypes)
-    cfg.maxResponseBytes = cls.bytes
-    cfg.maxResponseBytesOrigin = "auto:" & cls.reason
-    if cls.reason.startsWith("unclassifiable"):
-      warning(
-        "[brokers] RequestBroker(" & typeDisplayName & ") could not auto-size response (" &
-          cls.reason & "); falling back to " & $cls.bytes &
-          " B. Override with `maxResponseBytes = N`."
-      )
-  if cfg.maxPayloadBytesOrigin == "default" and argParams.len > 0:
-    var argTypes = newSeqOfCap[NimNode](argParams.len)
-    for p in argParams:
-      argTypes.add(p[p.len - 2])
-    let cls = classifyFieldsMax(argTypes)
-    cfg.maxPayloadBytes = cls.bytes
-    cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
-    if cls.reason.startsWith("unclassifiable"):
-      warning(
-        "[brokers] RequestBroker(" & typeDisplayName &
-          ") could not auto-size request payload (" & cls.reason & "); falling back to " &
-          $cls.bytes & " B. Override with `maxPayloadBytes = N`."
-      )
+  if cfg.maxResponseBytesOrigin == "default":
+    if responseFieldTypes.len > 0:
+      let cls = classifyFieldsMax(responseFieldTypes)
+      cfg.maxResponseBytes = cls.bytes
+      cfg.maxResponseBytesOrigin = "auto:" & cls.reason
+      if cls.reason.startsWith("unclassifiable"):
+        warning(
+          "[brokers] RequestBroker(" & typeDisplayName &
+            ") could not auto-size response (" & cls.reason & "); falling back to " &
+            $cls.bytes & " B. Override with `maxResponseBytes = N`."
+        )
+    else:
+      cfg.maxResponseBytes = ScalarBytes
+      cfg.maxResponseBytesOrigin = "auto:void"
+  if cfg.maxPayloadBytesOrigin == "default":
+    if argParams.len > 0:
+      var argTypes = newSeqOfCap[NimNode](argParams.len)
+      for p in argParams:
+        argTypes.add(p[p.len - 2])
+      let cls = classifyFieldsMax(argTypes)
+      cfg.maxPayloadBytes = cls.bytes
+      cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
+      if cls.reason.startsWith("unclassifiable"):
+        warning(
+          "[brokers] RequestBroker(" & typeDisplayName &
+            ") could not auto-size request payload (" & cls.reason &
+            "); falling back to " & $cls.bytes & " B. Override with `maxPayloadBytes = N`."
+        )
+    else:
+      cfg.maxPayloadBytes = ScalarBytes
+      cfg.maxPayloadBytesOrigin = "auto:void"
 
   when not defined(brokerConfigSilent):
     hint(fmtReqCfgSummary(typeDisplayName, cfg))

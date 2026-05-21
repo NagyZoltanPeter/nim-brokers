@@ -77,18 +77,26 @@ proc generateMtEventBroker*(
 
   # Apply type-driven default for maxPayloadBytes when neither a kwarg
   # nor a preset set it. Warn if the type is unclassifiable so the user
-  # knows to provide an explicit override.
+  # knows to provide an explicit override. Void / zero-field bodies
+  # collapse to the scalar bucket: a payload-less notification only
+  # ships the CBOR envelope (a handful of bytes), and the conservative
+  # 1 KB default would otherwise pin a full megabyte slab per event
+  # type for no reason.
   var cfg = cfgIn
-  if cfg.maxPayloadBytesOrigin == "default" and fieldTypes.len > 0:
-    let cls = classifyFieldsMax(fieldTypes)
-    cfg.maxPayloadBytes = cls.bytes
-    cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
-    if cls.reason.startsWith("unclassifiable"):
-      warning(
-        "[brokers] EventBroker(" & typeDisplayName & ") could not auto-size payload (" &
-          cls.reason & "); falling back to " & $cls.bytes &
-          " B. Override with `maxPayloadBytes = N`."
-      )
+  if cfg.maxPayloadBytesOrigin == "default":
+    if fieldTypes.len > 0:
+      let cls = classifyFieldsMax(fieldTypes)
+      cfg.maxPayloadBytes = cls.bytes
+      cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
+      if cls.reason.startsWith("unclassifiable"):
+        warning(
+          "[brokers] EventBroker(" & typeDisplayName & ") could not auto-size payload (" &
+            cls.reason & "); falling back to " & $cls.bytes &
+            " B. Override with `maxPayloadBytes = N`."
+        )
+    else:
+      cfg.maxPayloadBytes = ScalarBytes
+      cfg.maxPayloadBytesOrigin = "auto:void"
 
   when not defined(brokerConfigSilent):
     hint(fmtEvtCfgSummary(typeDisplayName, cfg))
