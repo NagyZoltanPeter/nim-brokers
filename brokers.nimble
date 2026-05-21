@@ -325,21 +325,55 @@ task test, "Run all single and multi-threaded broker tests":
       test opt, f
 
 task runFfiBenchEventStress,
-  "Build benchlib (CBOR mode) + the Part D-4 event dispatch stress drivers and run them":
+  "Build benchlib (CBOR mode) + the Part D-4/D-5 event dispatch stress drivers and run them":
   # Build the benchlib shared library into test/ffibench/build_cbor/.
   exec "nim c -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " &
     "--outdir:test/ffibench/build_cbor --mm:orc " &
     "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
-  # Configure + build the three D-4 drivers via the existing CMake project.
+  # Configure + build the five event-stress drivers via the existing CMake project.
   mkDir("test/ffibench/cmake-build")
   exec "cmake -S test/ffibench -B test/ffibench/cmake-build"
   exec "cmake --build test/ffibench/cmake-build " &
     "--target stress_event_mixed_audience " & "--target stress_event_no_foreign " &
-    "--target stress_event_no_nim"
+    "--target stress_event_no_nim " & "--target stress_event_shutdown " &
+    "--target stress_event_slow_callback"
   # Run each in sequence; non-zero exit propagates through `exec`.
   exec "test/ffibench/build_cbor/stress_event_mixed_audience"
   exec "test/ffibench/build_cbor/stress_event_no_foreign"
   exec "test/ffibench/build_cbor/stress_event_no_nim"
+  exec "test/ffibench/build_cbor/stress_event_shutdown"
+  exec "test/ffibench/build_cbor/stress_event_slow_callback"
+
+proc runFfiBenchEventStressAsanFor(mm: string) =
+  ## Build benchlib + the Part D-4/D-5 drivers with AddressSanitizer
+  ## under the requested memory manager (`orc` or `refc`) and run all
+  ## five drivers. The Nim library carries the sanitizer instrumentation
+  ## via -fsanitize=address + -d:useMalloc; the CMake project picks up
+  ## ASAN via -DASAN=ON. Pass = no driver exits non-zero AND no
+  ## sanitizer report aborts the process.
+  let buildDir = "test/ffibench/build_cbor_asan"
+  let cmakeDir = "test/ffibench/cmake-build-cbor-asan"
+  exec "nim c -d:BrokerFfiApiCBOR --threads:on --app:lib --path:. " & "--outdir:" &
+    buildDir & " --mm:" & mm & " " & "--nimMainPrefix:benchlib -d:useMalloc " &
+    "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
+    "--passL:-fsanitize=address --debugger:native " & "test/ffibench/benchlib.nim"
+  mkDir(cmakeDir)
+  let absBuildDir = thisDir() & "/" & buildDir
+  exec "cmake -S test/ffibench -B " & cmakeDir & " -DASAN=ON -DBENCH_DIR=" &
+    quoteArg(absBuildDir)
+  exec "cmake --build " & cmakeDir & " --target stress_event_mixed_audience " &
+    "--target stress_event_no_foreign " & "--target stress_event_no_nim " &
+    "--target stress_event_shutdown " & "--target stress_event_slow_callback"
+  exec buildDir & "/stress_event_mixed_audience"
+  exec buildDir & "/stress_event_no_foreign"
+  exec buildDir & "/stress_event_no_nim"
+  exec buildDir & "/stress_event_shutdown"
+  exec buildDir & "/stress_event_slow_callback"
+
+task runFfiBenchEventStressAsan,
+  "Run the Part D-4/D-5 event dispatch stress drivers under AddressSanitizer (orc + refc)":
+  runFfiBenchEventStressAsanFor("orc")
+  runFfiBenchEventStressAsanFor("refc")
 
 task perftest, "Run performance and stress tests":
   let mtTests =

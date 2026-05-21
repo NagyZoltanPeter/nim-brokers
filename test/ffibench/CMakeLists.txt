@@ -79,3 +79,6 @@ add_ffibench_target(stress_shutdown stress_shutdown.cpp)
 add_ffibench_target(stress_event_mixed_audience stress_event_mixed_audience.cpp)
 add_ffibench_target(stress_event_no_foreign stress_event_no_foreign.cpp)
 add_ffibench_target(stress_event_no_nim stress_event_no_nim.cpp)
+# Part D-5 — shutdown drain + slow-callback provider-non-blocking proof.
+add_ffibench_target(stress_event_shutdown stress_event_shutdown.cpp)
+add_ffibench_target(stress_event_slow_callback stress_event_slow_callback.cpp)
