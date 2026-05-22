@@ -13,11 +13,11 @@ What is nim-brokers?
    - No manual plumbing to glue with other languages.
    - Type safe, memory safe and a clean API surface on the foreign language side.
    - The same API interface is available for other Nim modules and for foreign language consumers alike at the same time.
-   - Support for `native` C ABI and `CBOR`-encoded ABI strategies.
-     - Interface parity between strategies is guarantied above C interface (C++, Python, Rust and Go wrappers' public surfaces are the same regardless of the underlying ABI strategy). 
+   - A single **CBOR-encoded C ABI** strategy (the historical `native` C-ABI codegen was retired in 3.0.0).
+     - The C++, Python, Rust and Go wrapper public surfaces are identical and idiomatic regardless of the CBOR wire format underneath. 
 
-> **Version:** current release is **2.1.0** (see `brokers.nimble`). 
-> :exclamation: Current recommended version to use is **2.1.0**.
+> **Version:** current release is **3.0.0** (see `brokers.nimble`). 
+> :exclamation: Current recommended version to use is **3.0.0**.
 > Full per-release history and feature notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Table of Contents
@@ -474,7 +474,7 @@ nim-brokers also includes a macro-based FFI API layer for exposing broker-shaped
 
 At a high level:
 
-- `RequestBroker(API)` and `EventBroker(API)` generate C-callable request and event registration functions.
+- `RequestBroker(API)` and `EventBroker(API)` expose broker requests and events through the generated CBOR C ABI (the fixed 11-function surface), callable from C and from every generated wrapper.
   - On Nim level, the `API` block is just a normal multi-thread broker definition
       - multi-request brokers are not supported on API. 
 - `registerBrokerLibrary` generates the library lifecycle exports, context registry, startup threads, and wrapper artifacts.
@@ -510,7 +510,6 @@ nimble buildFfiExamplePy / buildFfiExampleRust / buildFfiExampleGo
 Run the examples with:
 
 ```sh
-nimble runFfiExampleC
 nimble runFfiExampleCpp
 nimble runFfiExamplePy
 nimble runFfiExampleRust
