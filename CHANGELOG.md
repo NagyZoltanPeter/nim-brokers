@@ -3,6 +3,97 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.0.0] — 2026-05-22
+
+**Native C-ABI FFI strategy retired — CBOR is now the only transport. The
+Nim ↔ FFI wire path is rebuilt on per-context CBOR couriers.**
+
+> :rotating_light: **Breaking vs. 2.x.** The `native` typed-C export ABI is
+> gone. Libraries that compiled against the native per-type C structs
+> (`*CItem` / `*CResult`, per-result free helpers, pointer+count batch
+> layout) no longer build. There is no migration shim — port to the CBOR
+> surface (which has been the recommended strategy since 1.0.0). The
+> **public wrapper surface for C++ / Rust / Go / Python is unchanged**: those
+> wrappers already rode the CBOR ABI, so consumer code that used the typed
+> wrappers needs no source changes — only a rebuild.
+
+### Removed (breaking)
+
+- **Native C-ABI codegen deleted.** `api_codegen_{c,cpp,python,rust,go,nim}.nim`,
+  `api_event_broker.nim`, `api_request_broker.nim`, `api_type.nim`, and
+  `api_ffi_mode.nim` are removed. `brokers/api_library.nim` shrinks by
+  ~1080 lines; the branch nets ~12.9k deletions across 104 files.
+- **FFI build flags collapsed to a single switch.** Only `-d:BrokerFfiApi`
+  remains and it always selects CBOR. `-d:BrokerFfiApiNative` is now a hard
+  `{.fatal.}` compile error; `-d:BrokerFfiApiCBOR` was a transitional alias
+  and has been removed (bare `-d:BrokerFfiApi` covers it).
+- The `RequestBroker(API)` / `EventBroker(API)` macro dispatchers no longer
+  emit a native branch; the deprecated `ApiType` annotation and its dead
+  array-size-const pipework (`gArraySizeConsts`, `registerArraySizeConst`)
+  are gone — plain Nim `object` types are auto-resolved.
+
+### Changed — Nim ↔ FFI transport rebuilt on CBOR couriers
+
+- **Request path:** the stale `AsyncChannel` is replaced by a per-context
+  CBOR request courier (`api_cbor_courier.nim`) — a POD MPSC ring plus a
+  per-call response slot guarded by `Lock`+`Cond`. The cross-thread cost of
+  an FFI request is one ring enqueue + one signal
+  (`claimSlot → tryEnqueue → fireBrokerSignal → poller → asyncSpawn →
+  handler → completeSlot`), with no typed marshalling overhead since
+  `.request()` runs same-thread on the processing thread.
+- **Event path:** a per-context event courier (`api_cbor_event_courier.nim`)
+  drives a three-lane dispatch — (1) same-thread Nim listeners via direct
+  `asyncSpawn`, (2) cross-thread Nim listeners via the MT typed-slab path,
+  (3) foreign callbacks via the new courier ring + delivery-thread fan-out.
+  A per-bucket atomic `foreignSubsCount`, read lock-free on the emit thread,
+  short-circuits the entire FFI lane when no foreign subscriber is
+  registered (zero allocations, zero encode, zero ring touch). When a
+  foreign subscriber exists, emit costs **one CBOR encode regardless of
+  subscriber count**. See `doc/CBOR_Round2_PartD_EventCourier.md` and
+  `doc/bench_baseline.md` § "Event dispatch — Part D".
+
+### Added
+
+- **`EventBroker(API)` / `RequestBroker(API)` accept the full MT capacity /
+  preset kwargs** — `queueDepth`, `slabCapacity`, `maxPayloadBytes`,
+  `responseSlots`, `maxResponseBytes`, `freeListShards`, and `preset = <name>`
+  — since the API broker rides the multi-thread lane internally and there is
+  no second transport to size separately. Omitting kwargs yields
+  `defaultMtEvtCfg()` / `defaultMtReqCfg()`. Previously these were rejected.
+
+### Type support
+
+- With native gone, the **CBOR surface is now the sole carrier of the full
+  type matrix**: type auto-resolution emits idiomatic typed representations
+  in every wrapper (C++ struct + jsoncons traits, Python `@dataclass`, Rust
+  serde struct, Go struct with cbor tags). `seq[Object]` batches cross as a
+  single nested CBOR array decoded in the Nim adapter before the provider is
+  invoked — no per-type C struct, no pointer+count layout.
+
+### Platform support
+
+- **Full Windows support verified for both `refc` and `orc`.** The historical
+  `skipRefcOnWindows` / `memoryManagerMatrix` Windows carve-outs are disabled
+  so the entire wrapper-parity + FFI-example matrix runs `--mm:refc` *and*
+  `--mm:orc` on Windows. CI is green on Windows × Nim 2.2.4 + 2.2.10 across
+  `nimble test`, `testApi`, `runTypeMapTestLib{Cpp,Py,Rust,Go}`, and
+  `runFfiExample{Cpp,Py,Rust,Go}`. The raw `RegisterWaitForSingleObject`
+  TLS-uninit hazard still exists at the OS level (probe reproduces it on
+  refc), but broker code does not trip it — see `doc/LIMITATION.md` §2.2.
+- Support matrix (`doc/LIMITATION.md` §1.2) is solid green across
+  Linux + macOS (arm64/amd64) + Windows. Build floor is **Nim ≥ 2.2.0**
+  (2.0.x refc deterministically SIGSEGVs on `seq[object]` FFI payloads, §2.1).
+
+### Docs
+
+- `doc/FFI_API.md` swept to the as-shipped CBOR-only runtime: corrected the
+  request-path sequence diagram, cleaned the event-dispatch Mermaid diagram,
+  dropped the native ABI box from the layered-architecture diagram, and
+  replaced the native-shape "Type Mapping Reference" with a two-layer
+  model + per-wrapper cheat-sheet pointing at `doc/TYPE_SURFACE.md` /
+  `doc/TYPESUPPORT.md`. `-d:brokerDebug` now dumps generated AST to
+  per-broker files under `build/broker_debug/` (README "## Debug").
+
 ## [2.1.0] — 2026-05-22
 
 **FFI type-surface expansion — native `Option[T]`, primitive/void broker
@@ -184,7 +275,8 @@ wrappers.**
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
-[2.1.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.1.1
+[3.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.0.0
+[2.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.1.0
 [2.0.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.1
 [2.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.0
 [1.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v1.2.0
