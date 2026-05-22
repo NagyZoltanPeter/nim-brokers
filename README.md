@@ -16,8 +16,8 @@ What is nim-brokers?
    - Support for `native` C ABI and `CBOR`-encoded ABI strategies.
      - Interface parity between strategies is guarantied above C interface (C++, Python, Rust and Go wrappers' public surfaces are the same regardless of the underlying ABI strategy). 
 
-> **Version:** current release is **2.0.1** (see `brokers.nimble`). 
-> :exclamation: Current recommended version to use is **2.0.1**.
+> **Version:** current release is **2.1.0** (see `brokers.nimble`). 
+> :exclamation: Current recommended version to use is **2.1.0**.
 > Full per-release history and feature notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Table of Contents

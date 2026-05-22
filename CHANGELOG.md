@@ -3,6 +3,47 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [2.1.0] — 2026-05-22
+
+**FFI type-surface expansion — native `Option[T]`, primitive/void broker
+types, tuples, and `seq[byte]` byte-string fidelity across all five
+wrappers.**
+
+- **Native `Option[T]` end-to-end** (phases e1–e3) for scalar, `string`,
+  `seq[primitive]`, and registered-object inner types, across C / C++ /
+  Python / Rust / Go in both native and CBOR modes. Uniform C-ABI layout:
+  every `Option` field emits an explicit `<name>_has_value: bool` as the
+  source of truth (not the `(nullptr, 0)` pattern), so a present-but-empty
+  seq is distinguishable from an absent one. `Option[Object]` embeds the
+  inner `<Inner>CItem` by value (no pointer indirection); readers must
+  consult `has_value` first.
+- **Primitive broker types** — `RequestBroker(API): type X = int32`,
+  `EventBroker(API): type X = int64`. Codegen synthesises a single `value`
+  field; the result/payload surfaces as a bare scalar. Across all broker
+  variants (single-thread, MT, API) and all wrappers.
+- **Void broker types** — `type X = void`. The parser lowers `void` to a
+  unique empty object (unit type) so each broker keeps a distinct identity
+  for `typedesc` dispatch; the new `ParsedBrokerType.isVoid` flag drops the
+  value parameter. A void request carries only ok/err; a void event is a
+  payload-less notification. Single-thread void events expose an argless
+  listener/emit. CBOR C++ uses `jsoncons::json` for the empty envelope slot;
+  CBOR Rust uses a `#[serde(skip)]` placeholder.
+- **`seq[byte]` byte-string fidelity**: CBOR Python/Rust/Go inbound
+  byte-string mapping; CBOR C++ now maps `seq[byte]` to
+  `jsoncons::byte_string` (CBOR major type 2) in both directions — fixes
+  jsoncons 1.7.0 encoding `std::vector<uint8_t>` as a CBOR array. Note:
+  `byte_string` lacks `.empty()` (use `.size() == 0`).
+- **Tuple-as-struct codegen + distinct-over-compound mapping** (CBOR), with
+  per-tuple map writer/reader for wire alignment; `Option` fields partitioned
+  into the `JSONCONS_N_MEMBER_TRAITS` tail.
+- jsoncons 1.7.0 compatibility fix; distinct-over-seq registration.
+- Fixed native C++ parity build: un-gated the eight `Option` tests from
+  `#ifdef USE_CBOR`, and a missing comma in the void-event C++ trait
+  signature. Native C++ parity 114/114, CBOR 119/119.
+- New reference doc `doc/TYPE_SURFACE.md` — full Nim → C/C++/Rust/Go/Python
+  API surface type mapping. Refreshed `BrokerDesignPrezi.html` MT + FFI
+  sections; dropped the TownHall variant.
+
 ## [2.0.1] — 2026-05-13
 
 **Hotfix: allow user overloads for MT broker payload field types.**
@@ -143,6 +184,7 @@ All notable changes to **nim-brokers** are documented here. The project follows
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[2.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.1.0
 [2.0.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.1
 [2.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.0
 [1.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v1.2.0
