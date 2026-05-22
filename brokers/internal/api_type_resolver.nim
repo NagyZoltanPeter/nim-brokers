@@ -28,11 +28,9 @@
 {.push raises: [].}
 
 import std/[macros, strutils]
-import ./api_schema, ./api_type
-import ./api_codegen_c, ./api_codegen_python, ./api_codegen_rust, ./api_codegen_go
+import ./api_schema
 
-export api_schema, api_type
-export api_codegen_c, api_codegen_python
+export api_schema
 
 # ---------------------------------------------------------------------------
 # Phase 2: Typed macro that resolves a single external type
@@ -273,45 +271,6 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
 
-proc parseFieldTypeExpr(ftype: string): NimNode {.compileTime.} =
-  ## Convert a stringified field type (`"int32"`, `"seq[byte]"`,
-  ## `"array[4, int32]"`, `"Tag"`) into a properly structured type node.
-  ## A simple identifier round-trips via `ident()`; anything containing
-  ## brackets goes through `parseExpr` so we get an `nnkBracketExpr` (or
-  ## similar) that downstream `toCFieldType` etc. can pattern-match on.
-  let trimmed = ftype.strip()
-  if '[' in trimmed:
-    try:
-      return parseExpr(trimmed)
-    except ValueError as e:
-      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
-    except CatchableError as e:
-      error("could not parse FFI field type '" & trimmed & "': " & e.msg)
-  ident(trimmed)
-
-proc buildSyntheticApiTypeBody(
-    typeName: string, fields: seq[(string, string)]
-): NimNode {.compileTime.} =
-  ## Construct an AST body equivalent to what `ApiType:` receives, e.g.:
-  ##   type TypeName = object
-  ##     field1*: Type1
-  ##     field2*: Type2
-  ## This allows reuse of `generateApiType` for auto-resolved external types.
-  var recList = newTree(nnkRecList)
-  for (fname, ftype) in fields:
-    recList.add(
-      newTree(
-        nnkIdentDefs,
-        postfix(ident(fname), "*"),
-        parseFieldTypeExpr(ftype),
-        newEmptyNode(),
-      )
-    )
-  let objTy = newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), recList)
-  let typeDef = newTree(nnkTypeDef, ident(typeName), newEmptyNode(), objTy)
-  let typeSect = newTree(nnkTypeSection, typeDef)
-  result = newStmtList(typeSect)
-
 macro autoRegisterApiType*(T: typed): untyped =
   ## Phase 2: Receives a resolved type symbol, extracts fields,
   ## recursively processes nested types, registers in the schema,
@@ -347,101 +306,12 @@ macro autoRegisterApiType*(T: typed): untyped =
       for (name, ordinal) in values:
         apiValues.add(ApiEnumValue(name: name, ordinal: ordinal))
       registerTypeEntry(makeEnumEntry(typeName, apiValues))
-
-      # Generate C enum typedef in header
-      var enumDecl = "typedef enum {\n"
-      let prefix = toSnakeCase(typeName).toUpperAscii()
-      for v in apiValues:
-        enumDecl.add(
-          "    " & prefix & "_" & toSnakeCase(v.name).toUpperAscii() & " = " & $v.ordinal &
-            ",\n"
-        )
-      # `_C` suffix on the typedef name so the C enum doesn't collide
-      # with the C++ `enum class <Name>` emitted by the .hpp wrapper.
-      enumDecl.add("} " & typeName & "_C;\n")
-      appendHeaderDecl(enumDecl)
-
-      # Generate C++ enum (inherits from .h include, but add to cpp structs
-      # for namespace awareness)
-      # No separate C++ struct needed — C enum typedef is used directly
-
-      # Generate Python IntEnum class. Use the original Nim value names
-      # (e.g. `pLow`) — matches the C++ `enum class Priority { pLow, ... }`
-      # surface so the same client code that writes `Priority.pLow` works
-      # in both native- and CBOR-built Python wrappers.
-      when defined(BrokerFfiApiGenPy):
-        var pyEnum = "class " & typeName & "(enum.IntEnum):\n"
-        pyEnum.add("    \"\"\"" & typeName & " — generated from Nim enum.\"\"\"\n")
-        for v in apiValues:
-          pyEnum.add("    " & v.name & " = " & $v.ordinal & "\n")
-        gApiPyTypedefs.add(pyEnum)
-
-      when defined(BrokerFfiApiGenRust):
-        var rsEnum =
-          "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n#[repr(i32)]\npub enum " &
-          typeName & " {\n"
-        for v in apiValues:
-          rsEnum.add("    " & v.name & " = " & $v.ordinal & ",\n")
-        rsEnum.add("}\n\n")
-        if apiValues.len > 0:
-          rsEnum.add(
-            "impl Default for " & typeName & " { fn default() -> Self { " & typeName &
-              "::" & apiValues[0].name & " } }\n"
-          )
-        else:
-          rsEnum.add(
-            "impl Default for " & typeName &
-              " { fn default() -> Self { unsafe { ::std::mem::transmute(0i32) } } }\n"
-          )
-        rsEnum.add("impl From<i32> for " & typeName & " {\n")
-        rsEnum.add("    fn from(v: i32) -> Self { match v {\n")
-        for v in apiValues:
-          rsEnum.add(
-            "        " & $v.ordinal & " => " & typeName & "::" & v.name & ",\n"
-          )
-        rsEnum.add("        _ => Self::default(),\n")
-        rsEnum.add("    } }\n}\n")
-        rsEnum.add(
-          "impl From<" & typeName & "> for i32 { fn from(v: " & typeName &
-            ") -> Self { v as i32 } }"
-        )
-        gApiRustEnums.add(rsEnum)
-
-      when defined(BrokerFfiApiGenGo):
-        var goEnum = "type " & typeName & " int32\n\n"
-        goEnum.add("const (\n")
-        for i, v in apiValues:
-          goEnum.add(
-            "\t" & typeName & "_" & v.name & " " & typeName & " = " & $v.ordinal & "\n"
-          )
-        goEnum.add(")")
-        gApiGoEnums.add(goEnum)
-
-      # Emit recursive calls for nested enum dependencies (rare but possible)
       return result
 
   # Check for distinct types
   if typeImpl.kind == nnkDistinctTy:
     let baseName = resolveAliasBase(actualSym)
     registerTypeEntry(makeAliasEntry(typeName, baseName, atkDistinct))
-
-    # Generate C typedef in header
-    let cBase = nimTypeToCSuffix(ident(baseName))
-    appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
-
-    # Generate Python type alias
-    when defined(BrokerFfiApiGenPy):
-      let pyBase = nimTypeToPyAnnotation(ident(baseName))
-      gApiPyTypedefs.add(typeName & " = " & pyBase & "  # distinct " & baseName)
-
-    when defined(BrokerFfiApiGenRust):
-      let rsBase = nimTypeToRust(ident(baseName))
-      gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
-
-    when defined(BrokerFfiApiGenGo):
-      let goBase = nimTypeToGo(ident(baseName))
-      gApiGoEnums.add("type " & typeName & " = " & goBase & " // distinct " & baseName)
-
     return result
 
   # Check for alias types (sym that resolves to another sym/primitive)
@@ -451,14 +321,6 @@ macro autoRegisterApiType*(T: typed): untyped =
       let targetName = $typeInst[1]
       if targetName != typeName:
         registerTypeEntry(makeAliasEntry(typeName, targetName, atkAlias))
-        let cBase = nimTypeToCSuffix(ident(targetName))
-        appendHeaderDecl("typedef " & cBase & " " & typeName & ";\n")
-        when defined(BrokerFfiApiGenRust):
-          let rsBase = nimTypeToRust(ident(targetName))
-          gApiRustEnums.add("pub type " & typeName & " = " & rsBase & ";")
-        when defined(BrokerFfiApiGenGo):
-          let goBase = nimTypeToGo(ident(targetName))
-          gApiGoEnums.add("type " & typeName & " = " & goBase)
         return result
 
   # Tuple types — register as a synthesised object so the CBOR codegen
@@ -490,8 +352,7 @@ macro autoRegisterApiType*(T: typed): untyped =
     # named struct that wrappers emit for the same tuple type. The
     # default `write[T: tuple]` in cbor_serialization writes positional
     # CBOR arrays which decode wrappers reject as "expected map".
-    when defined(BrokerFfiApiCBOR):
-      result.add(newCall(ident("bindCborTupleMap"), actualSym))
+    result.add(newCall(ident("bindCborTupleMap"), actualSym))
     return result
 
   # Object types — existing behavior
@@ -506,14 +367,8 @@ macro autoRegisterApiType*(T: typed): untyped =
     if not isTypeRegistered(nestedName) and not isNimPrimitive(nestedName):
       result.add(newCall(ident("autoRegisterApiType"), nestedSym))
 
-  # Register this type in the schema
+  # Register this type in the schema; CBOR codegen reads gApiTypeRegistry.
   registerFromFieldTuples(typeName, fields)
-
-  # Generate CItem type, encode proc, C/C++/Python codegen —
-  # same as ApiType but driven from resolved fields.
-  # Pass emitTypeDefinition=false since the type is already defined externally.
-  let syntheticBody = buildSyntheticApiTypeBody(typeName, fields)
-  result.add(generateApiType(syntheticBody, emitTypeDefinition = false))
 
 # ---------------------------------------------------------------------------
 # Phase 1: Scan untyped AST for external type references
@@ -596,53 +451,5 @@ proc emitAutoRegistrations*(externalIdents: seq[NimNode]): NimNode {.compileTime
   result = newStmtList()
   for typeIdent in externalIdents:
     result.add(newCall(ident("autoRegisterApiType"), typeIdent))
-
-# ---------------------------------------------------------------------------
-# Array size const discovery and pre-registration
-# ---------------------------------------------------------------------------
-
-proc collectArraySizeIdents(
-    n: NimNode, found: var seq[NimNode], seen: var seq[string]
-) {.compileTime.} =
-  ## Recursively walk the AST and collect ident nodes used as the size of
-  ## `array[Size, T]` expressions. Deduplicates by name.
-  if n.kind == nnkBracketExpr and n.len == 3 and ($n[0]).toLowerAscii() == "array":
-    let sizeNode = n[1]
-    if sizeNode.kind == nnkIdent:
-      let name = sizeNode.strVal
-      if name notin seen:
-        seen.add(name)
-        found.add(sizeNode)
-  for child in n.children:
-    collectArraySizeIdents(child, found, seen)
-
-proc discoverArraySizeIdents*(body: NimNode): seq[NimNode] {.compileTime.} =
-  ## Scan an untyped macro body for identifiers used as `array[Ident, T]`
-  ## sizes. Returns ident nodes for each unique name.
-  result = @[]
-  var seen: seq[string] = @[]
-  collectArraySizeIdents(body, result, seen)
-
-{.pop.}
-
-macro registerArraySizeConst*(name: static[string], value: static[int]): untyped =
-  ## Typed pre-pass: Nim resolves the const reference at the call site
-  ## (in user scope) so we receive its int value, which we record in the
-  ## compile-time registry that `arrayNodeSize` consults.
-  registerArraySizeValue(name, value)
-  result = newStmtList()
-
-{.push raises: [].}
-
-proc emitArraySizeRegistrations*(sizeIdents: seq[NimNode]): NimNode {.compileTime.} =
-  ## Generate `registerArraySizeConst("Name", Name)` calls for each ident
-  ## used as an array size. Nim resolves the second arg via `static[int]`,
-  ## storing the int in the registry so `arrayNodeSize` can find it.
-  result = newStmtList()
-  for sizeIdent in sizeIdents:
-    let nameLit = newLit(sizeIdent.strVal)
-    result.add(
-      newCall(ident("registerArraySizeConst"), nameLit, copyNimTree(sizeIdent))
-    )
 
 {.pop.}

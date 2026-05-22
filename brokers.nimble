@@ -1,7 +1,7 @@
 import std/[os, strutils]
 
 # Package
-version = "2.0.1"
+version = "3.0.0"
 author = "Nagy Zoltan Peter"
 description =
   "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
@@ -9,7 +9,7 @@ license = "MIT"
 skipDirs = @["tests", "examples", "tools"]
 
 # Dependencies
-requires "nim >= 2.0.0"
+requires "nim >= 2.2.4"
 requires "chronos >= 4.0.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
@@ -98,12 +98,46 @@ proc skipRefcOnWindows(opt, label: string): bool =
   ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
   ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
   ## phase, so the same code is safe under --mm:orc.
-  when defined(windows):
-    if "--mm:refc" in opt or "refc" == opt:
-      echo "Skipping " & label & " (" & opt &
-        ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
-      return true
+  ##
+  ## TEMPORARILY DISABLED — refc-on-Windows is forced through CI so we
+  ## can observe whether the channel-dispatch refactor + Round-2 CBOR
+  ## work has actually closed the failure mode. Restore the body when
+  ## the experiment ends (or wrap the experiment in a kill switch).
+  discard opt
+  discard label
+  # when defined(windows):
+  #   if "--mm:refc" in opt or "refc" == opt:
+  #     echo "Skipping " & label & " (" & opt &
+  #       ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
+  #     return true
   false
+
+proc memoryManagerMatrix(): seq[string] =
+  ## Returns the set of `--mm:` values the wrapper / example tasks
+  ## should iterate over.
+  ##
+  ## - If `MM` is set in the environment, honour the explicit choice
+  ##   (e.g. `MM=refc nimble runTypeMapTestLibPy`) — run that one only.
+  ## - Otherwise, run both `orc` and `refc` so the parity matrix is
+  ##   exercised end-to-end under both memory managers.
+  ##
+  ## TEMPORARILY: Windows runs the same orc+refc default — see the
+  ## `skipRefcOnWindows` doc-block for the (commented-out) historical
+  ## reason refc was excluded. Restore the branch below when the
+  ## experiment ends.
+  if existsEnv("MM"):
+    @[getEnv("MM")]
+  # elif defined(windows):
+  #   @["orc"]
+  else:
+    @["orc", "refc"]
+
+proc setMM(mm: string) =
+  ## Helper for the matrix loops: pins `MM` for the duration of one
+  ## library rebuild + foreign-side run. The matrix loop reassigns
+  ## per iteration; the env var also leaks back to the caller's shell,
+  ## but that's the same behaviour the existing single-shot tasks had.
+  putEnv("MM", mm)
 
 proc cmakeWindowsConfigureExtras(): string =
   ## On Windows we drive cmake with Ninja + clang/clang++ + lld, pin the
@@ -118,11 +152,13 @@ proc cmakeWindowsConfigureExtras(): string =
   else:
     ""
 
+# FFI build of mylib.nim, emitting into nimlib/build/. Drives the
+# C++ example through the generated mylib.h / mylib.hpp.
 proc buildFfiExampleFlags(
     generatePy = false, generateRust = false, generateGo = false
 ): string =
   result =
-    "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build"
   result.add(nimMainPrefixFlag("mylib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build", "mylib"))
@@ -143,40 +179,11 @@ proc buildFfiExampleLibrary(
   exec "nim c " & buildFfiExampleFlags(generatePy, generateRust, generateGo) &
     " examples/ffiapi/nimlib/mylib.nim"
 
-# Parity build: SAME mylib.nim source compiled with the CBOR FFI flag,
-# emitting into nimlib/build_cbor/. Lets the existing cpp_example/main.cpp
-# compile against the CBOR-generated mylib.h / mylib.hpp — proves the
-# generated wrapper interface is shape-identical to the native build.
-proc buildFfiExampleCborFlags(
-    generatePy = false, generateRust = false, generateGo = false
-): string =
-  result =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build_cbor"
-  result.add(nimMainPrefixFlag("mylib"))
-  result.add(nimWindowsCcFlag())
-  result.add(nimWindowsImplibFlag("examples/ffiapi/nimlib/build_cbor", "mylib"))
-  if existsEnv("MM"):
-    result.add(" --mm:" & getEnv("MM"))
-  else:
-    result.add(" --mm:orc")
-  if generatePy or existsEnv("GEN_PY"):
-    result.add(" -d:BrokerFfiApiGenPy")
-  if generateRust or existsEnv("GEN_RUST"):
-    result.add(" -d:BrokerFfiApiGenRust")
-  if generateGo or existsEnv("GEN_GO"):
-    result.add(" -d:BrokerFfiApiGenGo")
-
-proc buildFfiExampleCborLibrary(
-    generatePy = false, generateRust = false, generateGo = false
-) =
-  exec "nim c " & buildFfiExampleCborFlags(generatePy, generateRust, generateGo) &
-    " examples/ffiapi/nimlib/mylib.nim"
-
 proc buildTorpedoExampleFlags(
     generatePy = false, generateRust = false, generateGo = false
 ): string =
   result =
-    "-d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build"
   result.add(nimMainPrefixFlag("torpedolib"))
   result.add(nimWindowsCcFlag())
   result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build", "torpedolib"))
@@ -197,41 +204,14 @@ proc buildTorpedoExampleLibrary(
   exec "nim c " & buildTorpedoExampleFlags(generatePy, generateRust, generateGo) &
     " examples/torpedo/nimlib/torpedolib.nim"
 
-proc buildTorpedoExampleCborFlags(
-    generatePy = false, generateRust = false, generateGo = false
-): string =
-  result =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --path:. --outdir:examples/torpedo/nimlib/build_cbor"
-  result.add(nimMainPrefixFlag("torpedolib"))
-  result.add(nimWindowsCcFlag())
-  result.add(nimWindowsImplibFlag("examples/torpedo/nimlib/build_cbor", "torpedolib"))
-  if existsEnv("MM"):
-    result.add(" --mm:" & getEnv("MM"))
-  else:
-    result.add(" --mm:orc")
-  if generatePy or existsEnv("GEN_PY"):
-    result.add(" -d:BrokerFfiApiGenPy")
-  if generateRust or existsEnv("GEN_RUST"):
-    result.add(" -d:BrokerFfiApiGenRust")
-  if generateGo or existsEnv("GEN_GO"):
-    result.add(" -d:BrokerFfiApiGenGo")
+proc ffiExamplesBuildDir(): string =
+  "examples/ffiapi/cmake-build"
 
-proc buildTorpedoExampleCborLibrary(
-    generatePy = false, generateRust = false, generateGo = false
-) =
-  exec "nim c " & buildTorpedoExampleCborFlags(generatePy, generateRust, generateGo) &
-    " examples/torpedo/nimlib/torpedolib.nim"
-
-proc ffiExamplesBuildDir(useCbor = false): string =
-  if useCbor: "examples/ffiapi/cmake-build-cbor" else: "examples/ffiapi/cmake-build"
-
-proc buildFfiCmakeTarget(target = "", useCbor = false) =
+proc buildFfiCmakeTarget(target = "") =
   let cmakeDir = "examples/ffiapi"
-  let buildDir = ffiExamplesBuildDir(useCbor)
+  let buildDir = ffiExamplesBuildDir()
   mkDir(buildDir)
-  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
-    cmakeWindowsConfigureExtras()
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -243,16 +223,14 @@ proc ffiExampleExecutablePath(exampleDir: string): string =
   else:
     joinPath(exampleDir, "build", "example")
 
-proc torpedoCmakeBuildDir(useCbor = false): string =
-  if useCbor: "examples/torpedo/cmake-build-cbor" else: "examples/torpedo/cmake-build"
+proc torpedoCmakeBuildDir(): string =
+  "examples/torpedo/cmake-build"
 
-proc buildTorpedoCmakeTarget(target = "", useCbor = false) =
+proc buildTorpedoCmakeTarget(target = "") =
   let cmakeDir = "examples/torpedo"
-  let buildDir = torpedoCmakeBuildDir(useCbor)
+  let buildDir = torpedoCmakeBuildDir()
   mkDir(buildDir)
-  let cborFlag = if useCbor: " -DUSE_CBOR=ON" else: ""
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cborFlag &
-    cmakeWindowsConfigureExtras()
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
   if target.len == 0:
     exec "cmake --build " & buildDir
   else:
@@ -348,7 +326,7 @@ proc runNph(files: seq[string], emptyMessage: string) =
       exec "nph " & quoteArg(file)
 
 task fetchVendor, "Initialize/update vendored third-party dependencies (git submodules)":
-  ## Fetches the third-party C/C++ dependencies required by the CBOR-mode FFI
+  ## Fetches the third-party C/C++ dependencies required by the FFI
   ## builds (currently jsoncons under vendor/jsoncons). Safe to run repeatedly.
   if not dirExists(".git"):
     quit "fetchVendor must be run from a git checkout (no .git directory found)."
@@ -380,6 +358,104 @@ task test, "Run all single and multi-threaded broker tests":
         continue
       test opt, f
 
+task runFfiBenchEventStress,
+  "Build benchlib  + the Part D-4/D-5 event dispatch stress drivers and run them":
+  # Build the benchlib shared library into test/ffibench/build/.
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  # Configure + build the five event-stress drivers via the existing CMake project.
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build"
+  exec "cmake --build test/ffibench/cmake-build " &
+    "--target stress_event_mixed_audience " & "--target stress_event_no_foreign " &
+    "--target stress_event_no_nim " & "--target stress_event_shutdown " &
+    "--target stress_event_slow_callback"
+  # Run each in sequence; non-zero exit propagates through `exec`.
+  exec "test/ffibench/build/stress_event_mixed_audience"
+  exec "test/ffibench/build/stress_event_no_foreign"
+  exec "test/ffibench/build/stress_event_no_nim"
+  exec "test/ffibench/build/stress_event_shutdown"
+  exec "test/ffibench/build/stress_event_slow_callback"
+
+proc runFfiBenchEventStressAsanFor(mm: string) =
+  ## Build benchlib + the Part D-4/D-5 drivers with AddressSanitizer
+  ## under the requested memory manager (`orc` or `refc`) and run all
+  ## five drivers. The Nim library carries the sanitizer instrumentation
+  ## via -fsanitize=address + -d:useMalloc; the CMake project picks up
+  ## ASAN via -DASAN=ON. Pass = no driver exits non-zero AND no
+  ## sanitizer report aborts the process.
+  let buildDir = "test/ffibench/build_asan"
+  let cmakeDir = "test/ffibench/cmake-build-asan"
+  exec "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " & "--outdir:" & buildDir &
+    " --mm:" & mm & " " & "--nimMainPrefix:benchlib -d:useMalloc " &
+    "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
+    "--passL:-fsanitize=address --debugger:native " & "test/ffibench/benchlib.nim"
+  mkDir(cmakeDir)
+  let absBuildDir = thisDir() & "/" & buildDir
+  exec "cmake -S test/ffibench -B " & cmakeDir & " -DASAN=ON -DBENCH_DIR=" &
+    quoteArg(absBuildDir)
+  exec "cmake --build " & cmakeDir & " --target stress_event_mixed_audience " &
+    "--target stress_event_no_foreign " & "--target stress_event_no_nim " &
+    "--target stress_event_shutdown " & "--target stress_event_slow_callback"
+  exec buildDir & "/stress_event_mixed_audience"
+  exec buildDir & "/stress_event_no_foreign"
+  exec buildDir & "/stress_event_no_nim"
+  exec buildDir & "/stress_event_shutdown"
+  exec buildDir & "/stress_event_slow_callback"
+
+task runFfiBenchEventStressAsan,
+  "Run the Part D-4/D-5 event dispatch stress drivers under AddressSanitizer (orc + refc)":
+  runFfiBenchEventStressAsanFor("orc")
+  runFfiBenchEventStressAsanFor("refc")
+
+proc buildBenchLibWithMM(mm: string, release: bool) =
+  ## Shared helper used by the FFI perftest task. Compiles the
+  ## benchlib shared library with the requested memory manager and
+  ## build mode into test/ffibench/build/. The C++ driver picks up
+  ## whatever lib is sitting there.
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --outdir:test/ffibench/build --mm:" &
+    mm & " --nimMainPrefix:benchlib"
+  if release:
+    flags.add(" -d:release")
+  exec "nim c " & flags & " test/ffibench/benchlib.nim"
+
+task perftestFfi, "FFI perftest from C++ (5×500×512B; orc + refc × debug + release)":
+  ## Companion to `nimble perftest` on the FFI side. Mirrors the same
+  ## 5 × 500 × 512 B shape via test/ffibench/perf_driver.cpp so the
+  ## numbers line up directly against the Nim-direct baseline printed
+  ## by perf_test_multi_thread_*_broker.nim.
+  mkDir("test/ffibench/cmake-build")
+  for mm in memoryManagerMatrix():
+    for releaseTag in ["debug", "release"]:
+      let release = releaseTag == "release"
+      echo "\n=== perftestFfi: --mm:" & mm & " (" & releaseTag & ") ==="
+      buildBenchLibWithMM(mm, release)
+      # Reconfigure cmake — the cached lib has the same mtime if mm
+      # toggled, so re-invoking cmake -B ensures the linker sees the
+      # fresh dylib mtime via the regenerated build.ninja.
+      exec "cmake -S test/ffibench -B test/ffibench/cmake-build " &
+        (if release: "-DCMAKE_BUILD_TYPE=Release" else: "")
+      exec "cmake --build test/ffibench/cmake-build --target perf_driver"
+      exec "test/ffibench/build/perf_driver"
+
+task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and run it":
+  ## Part D-6 — captures the per-emit cost across four scenarios:
+  ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
+  ##   (b) 1 foreign subscriber             — full courier path
+  ##   (c) M foreign subscribers            — encode-amortize-fanout
+  ##   (d) K same-thread Nim listeners      — Lane 1 cost in isolation
+  ## Output is CSV on stdout; numbers are captured in doc/bench_baseline.md.
+  exec "nim c -d:release -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build " &
+    "-DCMAKE_BUILD_TYPE=Release"
+  exec "cmake --build test/ffibench/cmake-build --target bench_event_driver"
+  exec "test/ffibench/build/bench_event_driver"
+
 task perftest, "Run performance and stress tests":
   let mtTests =
     ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
@@ -394,9 +470,9 @@ task perftest, "Run performance and stress tests":
         continue
       test opt, f
 
-task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
+task testApi, "Run codec unit tests + library init integration tests":
   # Codec round-trip tests (no FFI flags needed).
-  let codecTests = ["test_api_cbor_codec"]
+  let codecTests = ["test_api_codec"]
   for f in codecTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -406,74 +482,25 @@ task testApiCbor, "Run CBOR codec unit tests + library init integration tests":
     ]:
       test opt, f
 
-  # Library-init integration tests need the CBOR FFI runtime. Each test
-  # uses a different --nimMainPrefix to keep their generated NimMain
-  # symbols distinct (mirrors the native testApi convention).
-  let cborApiTests = [
-    ("test_api_cbor_library_init", "cbtest"),
-    ("test_api_cbor_discovery", "cbdisc"),
-    ("typemappingtestlib/test_typemappingtestlib_cbor", "typemappingtestlib_cbor"),
+  # Library-init integration tests need the FFI runtime.
+  # Each test uses a different --nimMainPrefix to keep their generated
+  # NimMain symbols distinct.
+  let apiTests = [
+    ("test_api_library_init", "apitest"),
+    ("test_api_discovery", "apidisc"),
+    ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
   ]
-  for (f, prefix) in cborApiTests:
+  for (f, prefix) in apiTests:
     for opt in [
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR --mm:refc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR -d:release --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiCBOR -d:release --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi --mm:refc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
+      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
       if skipRefcOnWindows(opt, f):
         continue
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
-
-task testApi, "Run FFI API broker tests":
-  let apiTests =
-    ["test_api_request_broker", "test_api_event_broker", "test_api_library_init"]
-  for f in apiTests:
-    for opt in [
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiNative --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiNative --mm:refc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiNative -d:release --mm:orc --threads:on",
-      "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApiNative -d:release --mm:refc --threads:on",
-    ]:
-      if skipRefcOnWindows(opt, f):
-        continue
-      let extraOpt =
-        if f == "test_api_library_init":
-          nimMainPrefixFlag("apitestlib")
-        else:
-          ""
-      test opt & extraOpt, f
-
-task buildFfiExample, "Build FFI API example library":
-  buildFfiExampleLibrary()
-
-task buildFfiExamplePy, "Build FFI API example library with generated Python wrapper":
-  buildFfiExampleLibrary(true)
-
-task buildFfiExamples, "Build FFI API examples — C and C++ applications (via CMake)":
-  buildFfiCmakeTarget()
-
-task buildFfiExampleC, "Build FFI API example — pure C application (via CMake)":
-  buildFfiCmakeTarget("example_c")
-
-task buildFfiExampleCpp, "Build FFI API example — modern C++ application (via CMake)":
-  buildFfiCmakeTarget("example_cpp")
-
-task runFfiExampleC, "Build and run the pure C FFI example application":
-  buildFfiExampleLibrary()
-  buildFfiCmakeTarget("example_c")
-  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/example"))
-
-task runFfiExampleCpp, "Build and run the modern C++ FFI example application":
-  buildFfiExampleLibrary()
-  buildFfiCmakeTarget("example_cpp")
-  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
-
-task runFfiExamplePy, "Build and run the Python wrapper example application":
-  buildFfiExampleLibrary(true)
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("examples/ffiapi/python_example/main.py")
 
 proc findCargoExe(): string =
   ## Returns the cargo invocation token. Resolving the symlink (rustup
@@ -483,21 +510,14 @@ proc findCargoExe(): string =
     quit "Cargo (Rust toolchain) not found. Install rustup or add cargo to PATH."
   result = "cargo"
 
-task buildFfiExampleRust,
-  "Build the FFI API example library + generated Rust wrapper crate (native mode)":
-  buildFfiExampleLibrary(generateRust = true)
-
 task runFfiExampleRust,
-  "Build the FFI API example library + run the Rust example (native mode)":
-  buildFfiExampleLibrary(generateRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
-
-task runFfiExampleCborRust,
-  "Build the FFI API example library (CBOR mode) + run the Rust example with --features cbor":
-  buildFfiExampleCborLibrary(generateRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path examples/ffiapi/rust_example/Cargo.toml"
+  "Build the FFI example library + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/ffiapi/rust_example/Cargo.toml"
 
 proc findGoExe(): string =
   ## Returns the `go` toolchain invocation token. Like cargo via rustup,
@@ -508,7 +528,7 @@ proc findGoExe(): string =
 
 proc writeFfiGoModFor(buildDir: string) =
   ## The generated Go module is emitted into either `nimlib/build/mylib_go`
-  ## or `nimlib/build_cbor/mylib_go`. Go can't conditionally pick a
+  ## or `nimlib/build/mylib_go`. Go can't conditionally pick a
   ## `replace` target by build tag, so we rewrite the example's go.mod
   ## per mode before invoking the Go toolchain.
   let modPath = "examples/ffiapi/go_example/go.mod"
@@ -516,99 +536,64 @@ proc writeFfiGoModFor(buildDir: string) =
   contents.add("module github.com/status-im/nim-brokers/examples/ffiapi/go_example\n\n")
   contents.add("go 1.21\n\n")
   contents.add("require mylib v0.0.0\n")
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
   contents.add("\nreplace mylib => ../nimlib/" & buildDir & "/mylib_go\n")
   writeFile(modPath, contents)
   # Sync go.sum + transitive deps for the cbor case.
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     withDir "examples/ffiapi/go_example":
       exec quoteArg(findGoExe()) & " mod tidy"
 
-task buildFfiExampleGo,
-  "Build the FFI API example library + generated Go wrapper module (native mode)":
+task buildFfiExampleGo, "Build the FFI API example library  + generated Go wrapper":
   buildFfiExampleLibrary(generateGo = true)
 
 task runFfiExampleGo,
-  "Build the FFI API example library + run the Go example (native mode)":
-  buildFfiExampleLibrary(generateGo = true)
-  writeFfiGoModFor("build")
-  withDir "examples/ffiapi/go_example":
-    exec quoteArg(findGoExe()) & " run ."
+  "Build the FFI API example library + run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(generateGo = true)
+    writeFfiGoModFor("build")
+    withDir "examples/ffiapi/go_example":
+      exec quoteArg(findGoExe()) & " run ."
 
-task buildFfiExampleCborGo,
-  "Build the FFI API example library (CBOR mode) + generated Go wrapper":
-  buildFfiExampleCborLibrary(generateGo = true)
+# ---------------------------------------------------------------------------
+# FFI build of mylib.nim + the same cpp_example/main.cpp.
+# ---------------------------------------------------------------------------
 
-task runFfiExampleCborGo,
-  "Build the FFI API example library (CBOR mode) + run the Go example":
-  buildFfiExampleCborLibrary(generateGo = true)
-  writeFfiGoModFor("build_cbor")
-  withDir "examples/ffiapi/go_example":
-    exec quoteArg(findGoExe()) & " run ."
-
-task testFfiApiCmake,
-  "Validate the generated <lib>Config.cmake by building a downstream consumer":
-  ## Builds the native FFI example (which emits mylibConfig.cmake next to
-  ## libmylib.{dylib,so,dll}), then drives a tiny CMake project that calls
-  ## find_package(mylib) and links smoke_c + smoke_cpp against the IMPORTED
-  ## targets. Smoke binaries create a context, validate it, and exit 0.
+task buildFfiExample, "Build FFI API example library (into nimlib/build)":
   buildFfiExampleLibrary()
-  let pkgDir = thisDir() / "examples" / "ffiapi" / "nimlib" / "build"
-  let consumerSrc = thisDir() / "test" / "cmake_consumer"
-  let consumerBuild = thisDir() / "test" / "cmake_consumer" / "cmake-build"
-  mkDir(consumerBuild)
-  exec "cmake -S " & quoteArg(consumerSrc) & " -B " & quoteArg(consumerBuild) &
-    " -DMYLIB_CPP_SMOKE=ON" & " -Dmylib_DIR=" & quoteArg(pkgDir) &
-    cmakeWindowsConfigureExtras()
-  exec "cmake --build " & quoteArg(consumerBuild)
-  let exeC =
-    when defined(windows):
-      consumerBuild / "smoke_c.exe"
-    else:
-      consumerBuild / "smoke_c"
-  let exeCpp =
-    when defined(windows):
-      consumerBuild / "smoke_cpp.exe"
-    else:
-      consumerBuild / "smoke_cpp"
-  exec quoteArg(exeC)
-  exec quoteArg(exeCpp)
 
-# ---------------------------------------------------------------------------
-# CBOR-mode parity build of the same mylib.nim + same cpp_example/main.cpp.
-# Validates that the CBOR codegen emits a wrapper interface shape-compatible
-# with the native one (same class name, same Result API, same on/off events).
-# ---------------------------------------------------------------------------
+task buildFfiExampleCpp,
+  "Build FFI API example — C++ application against the library (via CMake)":
+  buildFfiExampleLibrary()
+  buildFfiCmakeTarget("example_cpp")
 
-task buildFfiExampleCbor,
-  "Build FFI API example library (CBOR mode, into nimlib/build_cbor)":
-  buildFfiExampleCborLibrary()
+task runFfiExampleCpp,
+  "Build and run the C++ FFI example application against the library (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary()
+    buildFfiCmakeTarget("example_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
-task buildFfiExampleCborCpp,
-  "Build FFI API example — C++ application against the CBOR-mode library (via CMake)":
-  buildFfiExampleCborLibrary()
-  buildFfiCmakeTarget("example_cpp", useCbor = true)
+task runFfiExamplePy,
+  "Build the FFI example library + Python wrapper and run python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runFfiExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildFfiExampleLibrary(true)
+    putEnv("MYLIB_BUILD_DIR", "build")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/ffiapi/python_example/main.py")
 
-task runFfiExampleCborCpp,
-  "Build and run the C++ FFI example application against the CBOR-mode library":
-  buildFfiExampleCborLibrary()
-  buildFfiCmakeTarget("example_cpp", useCbor = true)
-  exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
-
-task runFfiExampleCborPy,
-  "Build the CBOR-mode FFI example library + Python wrapper and run the SAME python_example/main.py against it":
-  buildFfiExampleCborLibrary(true)
-  putEnv("MYLIB_BUILD_DIR", "build_cbor")
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("examples/ffiapi/python_example/main.py")
-
-# CBOR-mode parity build of the typemapping test library: compiles the
-# SAME test/typemappingtestlib/typemappingtestlib.nim source with
-# -d:BrokerFfiApiCBOR into build_cbor/ and drives the SAME
-# test_typemappingtestlib.{cpp,py} test code against that build (via the
-# CMake project's USE_CBOR=ON toggle for C++).
-proc buildTypeMapTestLibCbor(
+# FFI build of the typemapping test library: compiles
+# test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApi
+# into build/ and drives test_typemappingtestlib.{cpp,py} against
+# that build.
+proc buildTypeMapTestLib(
     genPy: bool = false, genRust: bool = false, genGo: bool = false
 ) =
   let mm =
@@ -618,13 +603,11 @@ proc buildTypeMapTestLibCbor(
       "orc"
   let release = existsEnv("RELEASE")
   var flags =
-    "-d:BrokerFfiApiCBOR --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/typemappingtestlib/build_cbor"
+    "-d:BrokerFfiApi --threads:on --app:lib --mm:" & mm &
+    " --path:. --outdir:test/typemappingtestlib/build"
   flags.add(nimMainPrefixFlag("typemappingtestlib"))
   flags.add(nimWindowsCcFlag())
-  flags.add(
-    nimWindowsImplibFlag("test/typemappingtestlib/build_cbor", "typemappingtestlib")
-  )
+  flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
   if release:
     flags.add(" -d:release")
   if genPy:
@@ -635,27 +618,33 @@ proc buildTypeMapTestLibCbor(
     flags.add(" -d:BrokerFfiApiGenGo")
   exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
 
-task buildTypeMapTestLibCbor, "Build the CBOR-mode type-mapping parity test library":
-  buildTypeMapTestLibCbor()
+task buildTypeMapTestLib, "Build the type-mapping parity test library":
+  buildTypeMapTestLib()
 
-proc typeMapTestLibCborCmakeDir(): string =
-  "test/typemappingtestlib/cmake-build-cbor"
+proc typeMapTestLibCmakeDir(): string =
+  "test/typemappingtestlib/cmake-build"
 
-task runTypeMapTestLibCborCpp,
-  "Build the CBOR-mode parity library + run the C++ parity test against it":
-  buildTypeMapTestLibCbor()
-  let cmakeDir = typeMapTestLibCborCmakeDir()
-  let srcDir = "test/typemappingtestlib"
-  exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) & " -DUSE_CBOR=ON" &
-    cmakeWindowsConfigureExtras()
-  exec "cmake --build " & quoteArg(cmakeDir)
-  exec quoteArg("test/typemappingtestlib/build_cbor/test_typemappingtestlib")
+task runTypeMapTestLibCpp,
+  "Build the parity library + run the C++ parity test against it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib()
+    let cmakeDir = typeMapTestLibCmakeDir()
+    let srcDir = "test/typemappingtestlib"
+    exec "cmake -S " & quoteArg(srcDir) & " -B " & quoteArg(cmakeDir) &
+      cmakeWindowsConfigureExtras()
+    exec "cmake --build " & quoteArg(cmakeDir)
+    exec quoteArg("test/typemappingtestlib/build/test_typemappingtestlib")
 
-task runTypeMapTestLibCborRust,
-  "Build the CBOR-mode parity library + Rust wrapper and run the Rust parity test":
-  buildTypeMapTestLibCbor(genRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
+task runTypeMapTestLibRust,
+  "Build the parity library + Rust wrapper and run the Rust parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(genRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
 
 proc writeTypeMapGoModFor(buildDir: string) =
   let modPath = "test/typemappingtestlib/go_test/go.mod"
@@ -665,77 +654,38 @@ proc writeTypeMapGoModFor(buildDir: string) =
   )
   contents.add("go 1.21\n\n")
   contents.add("require typemappingtestlib v0.0.0\n")
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
   contents.add(
     "\nreplace typemappingtestlib => ../" & buildDir & "/typemappingtestlib_go\n"
   )
   writeFile(modPath, contents)
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     withDir "test/typemappingtestlib/go_test":
       exec quoteArg(findGoExe()) & " mod tidy"
 
-task runTypeMapTestLibCborGo,
-  "Build the CBOR-mode parity library + Go wrapper and run the Go parity test":
-  buildTypeMapTestLibCbor(genGo = true)
-  writeTypeMapGoModFor("build_cbor")
-  withDir "test/typemappingtestlib/go_test":
-    # The test consumer keeps `-tags cbor` to gate `test_obj_as_param`
-    # in cbor_only_cbor.go (the broker definition is gated to CBOR mode
-    # because object-as-request-param fails on every native backend).
-    exec quoteArg(findGoExe()) & " run -tags cbor ."
+task runTypeMapTestLibGo,
+  "Build the parity library + Go wrapper and run the Go parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(genGo = true)
+    writeTypeMapGoModFor("build")
+    withDir "test/typemappingtestlib/go_test":
+      exec quoteArg(findGoExe()) & " run ."
 
-task runTypeMapTestLibCborPy,
-  "Build the CBOR-mode parity library + Python wrapper and run the unified Python parity test against it":
-  buildTypeMapTestLibCbor(true)
-  # The same test_typemappingtestlib.py drives both native and CBOR
-  # builds; selection is via TYPEMAP_BUILD_DIR which points at the
-  # build output that holds the matching generated .py wrapper.
-  putEnv("TYPEMAP_BUILD_DIR", "build_cbor")
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
-
-proc buildTypeMapTestLibrary(
-    mm: string = "orc",
-    release: bool = false,
-    generateRust: bool = false,
-    generateGo: bool = false,
-) =
-  var flags =
-    "-d:BrokerFfiApiNative -d:BrokerFfiApiGenPy --threads:on --app:lib --mm:" & mm &
-    " --path:. --outdir:test/typemappingtestlib/build"
-  flags.add(nimMainPrefixFlag("typemappingtestlib"))
-  flags.add(nimWindowsCcFlag())
-  flags.add(nimWindowsImplibFlag("test/typemappingtestlib/build", "typemappingtestlib"))
-  if release:
-    flags.add(" -d:release")
-  if generateRust or existsEnv("GEN_RUST"):
-    flags.add(" -d:BrokerFfiApiGenRust")
-  if generateGo or existsEnv("GEN_GO"):
-    flags.add(" -d:BrokerFfiApiGenGo")
-  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
-
-proc typeMapTestCmakeBuildDir(): string =
-  "test/typemappingtestlib/cmake-build"
-
-proc buildTypeMapTestCmakeTarget(target = "") =
-  let cmakeDir = "test/typemappingtestlib"
-  let buildDir = typeMapTestCmakeBuildDir()
-  mkDir(buildDir)
-  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
-  if target.len == 0:
-    exec "cmake --build " & buildDir
-  else:
-    exec "cmake --build " & buildDir & " --target " & target
-
-proc typeMapTestCppExecutablePath(): string =
-  when defined(windows):
-    "test/typemappingtestlib/build/test_typemappingtestlib.exe"
-  else:
-    "test/typemappingtestlib/build/test_typemappingtestlib"
-
-proc typeMapTestAsanBuildDir(): string =
-  "test/typemappingtestlib/cmake-build-asan"
+task runTypeMapTestLibPy,
+  "Build the parity library + Python wrapper and run the Python parity test (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runTypeMapTestLibPy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildTypeMapTestLib(true)
+    # The test_typemappingtestlib.py driver runs against the FFI
+    # build; selection is via TYPEMAP_BUILD_DIR which points at the
+    # build output that holds the matching generated .py wrapper.
+    putEnv("TYPEMAP_BUILD_DIR", "build")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
 proc setAsanEnv() =
   putEnv("MallocNanoZone", "0")
@@ -779,138 +729,6 @@ proc asanLinkFlags(sharedLib: bool = false): string =
     # Tell lld to emit a PDB so ASAN frames carry function/line info.
     result.add(" -Wl,/debug")
 
-proc buildTypeMapTestLibraryAsan(mm: string = "orc") =
-  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
-  # fires on memory faults inside the .dylib. Without this, Nim prints its own
-  # traceback and exits before ASAN can report the underlying heap error.
-  var flags =
-    "--cc:clang --debugger:native -d:BrokerFfiApiNative -d:BrokerFfiApiGenPy -d:noSignalHandler --threads:on --app:lib --mm:" &
-    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
-    quoteArg(asanLinkFlags(sharedLib = true)) &
-    " --path:. --outdir:test/typemappingtestlib/build-asan"
-  flags.add(nimMainPrefixFlag("typemappingtestlib"))
-  exec "nim c " & flags & " test/typemappingtestlib/typemappingtestlib.nim"
-
-proc buildTypeMapTestCmakeTargetAsan(target = "") =
-  let cmakeDir = "test/typemappingtestlib"
-  let buildDir = typeMapTestAsanBuildDir()
-  let outDir = getCurrentDir() / "test/typemappingtestlib/build-asan"
-  mkDir(buildDir)
-  # On non-Windows, the asan build pins clang/clang++ directly. On Windows,
-  # cmakeWindowsConfigureExtras() supplies Ninja+clang+lld+RelWithDebInfo+UCRT
-  # — the same toolchain we use for the non-asan path, so heap/CRT match.
-  var configure =
-    "cmake -S " & cmakeDir & " -B " & buildDir & " -DASAN=ON -DTYPEMAPTEST_DIR=" &
-    quoteArg(outDir)
-  when defined(windows):
-    configure.add(cmakeWindowsConfigureExtras())
-  else:
-    configure.add(" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++")
-  exec configure
-  if target.len == 0:
-    exec "cmake --build " & buildDir
-  else:
-    exec "cmake --build " & buildDir & " --target " & target
-
-proc typeMapTestCppAsanExecutablePath(): string =
-  when defined(windows):
-    "test/typemappingtestlib/build-asan/test_typemappingtestlib.exe"
-  else:
-    "test/typemappingtestlib/build-asan/test_typemappingtestlib"
-
-proc soElfBits(soPath: string): int =
-  ## Returns 32 or 64 for the ELF class of soPath, or 0 if it cannot be
-  ## determined (e.g. non-Linux, file tool absent).
-  let (info, rc) = gorgeEx("file " & quoteArg(soPath))
-  if rc != 0:
-    return 0
-  if "ELF 64-bit" in info:
-    return 64
-  if "ELF 32-bit" in info:
-    return 32
-  return 0
-
-proc pythonExeBits(exe: string): int =
-  ## Returns 32 or 64 for the pointer width of the given Python interpreter,
-  ## or 0 on failure.
-  let (output, rc) =
-    gorgeEx(exe & " -c \"import struct; print(struct.calcsize('P') * 8)\"")
-  if rc != 0:
-    return 0
-  try:
-    return parseInt(output.strip())
-  except ValueError:
-    return 0
-
-proc findPythonForBits(wantBits: int): string =
-  ## Return the path of the first Python interpreter whose pointer width equals
-  ## wantBits (32 or 64).  Returns "" when none is found.
-  ## Checks the obvious names/paths in order; extend the list as needed.
-  let candidates = [
-    findExe("python3"),
-    findExe("python"),
-    "/usr/bin/python3",
-    "/usr/local/bin/python3",
-    "/usr/bin/python",
-    "/usr/local/bin/python",
-  ]
-  for c in candidates:
-    if c.len > 0 and pythonExeBits(c) == wantBits:
-      return c
-  return ""
-
-task buildTypeMapTestLib, "Build the type mapping test library (C/C++/Python)":
-  buildTypeMapTestLibrary()
-
-task runTypeMapTestLibRust,
-  "Build the native typemapping parity library + Rust wrapper and run the Rust parity test":
-  buildTypeMapTestLibrary(generateRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --manifest-path test/typemappingtestlib/rust_test/Cargo.toml"
-
-task runTypeMapTestLibGo,
-  "Build the native typemapping parity library + Go wrapper and run the Go parity test":
-  buildTypeMapTestLibrary(generateGo = true)
-  writeTypeMapGoModFor("build")
-  withDir "test/typemappingtestlib/go_test":
-    exec quoteArg(findGoExe()) & " run ."
-
-task testFfiApi,
-  "Build and run the Python FFI API binding tests (orc/refc × debug/release)":
-  for mm in ["orc", "refc"]:
-    for release in [false, true]:
-      let mode = if release: "release" else: "debug"
-      echo "\n=== testFfiApi (mm:" & mm & " " & mode & ") ==="
-      if skipRefcOnWindows(mm, "testFfiApi (" & mode & ")"):
-        continue
-      buildTypeMapTestLibrary(mm, release)
-      let bits = soElfBits("test/typemappingtestlib/build/libtypemappingtestlib.so")
-      # When ELF inspection is unavailable (bits == 0) fall back to the default
-      # Python and let ctypes report any mismatch itself.
-      let python =
-        if bits == 0:
-          findPythonExe()
-        else:
-          findPythonForBits(bits)
-      if python.len == 0:
-        echo "Skipping Python tests: no " & $bits &
-          "-bit Python interpreter found to match the compiled .so."
-        continue
-      exec quoteArg(python) & " -m unittest discover -s test/typemappingtestlib -p " &
-        quoteArg("test_*.py") & " -v"
-
-task testFfiApiCpp,
-  "Build and run the C++ FFI API binding tests (orc/refc × debug/release)":
-  for mm in ["orc", "refc"]:
-    for release in [false, true]:
-      let mode = if release: "release" else: "debug"
-      echo "\n=== testFfiApiCpp (mm:" & mm & " " & mode & ") ==="
-      if skipRefcOnWindows(mm, "testFfiApiCpp (" & mode & ")"):
-        continue
-      buildTypeMapTestLibrary(mm, release)
-      buildTypeMapTestCmakeTarget("test_typemappingtestlib")
-      exec quoteArg(typeMapTestCppExecutablePath())
-
 proc testAsan(mm: string, path: string) =
   let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
   let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
@@ -926,24 +744,6 @@ proc testAsan(mm: string, path: string) =
   echo "=== RUN  " & label & " ==="
   exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
-
-task testFfiApiCppAsanOrc,
-  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, orc, debug)":
-  echo "\n=== testFfiApiCppAsanOrc (clang, mm:orc, debug) ==="
-  buildTypeMapTestLibraryAsan("orc")
-  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
-  setAsanEnv()
-  exec quoteArg(typeMapTestCppAsanExecutablePath())
-
-task testFfiApiCppAsanRefc,
-  "Build and run C++ FFI API binding tests under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testFfiApiCppAsanRefc"):
-    return
-  echo "\n=== testFfiApiCppAsanRefc (clang, mm:refc, debug) ==="
-  buildTypeMapTestLibraryAsan("refc")
-  buildTypeMapTestCmakeTargetAsan("test_typemappingtestlib")
-  setAsanEnv()
-  exec quoteArg(typeMapTestCppAsanExecutablePath())
 
 task testMtEventBrokerAsanOrc,
   "Run multi-thread event broker tests under AddressSanitizer (clang, orc, debug)":
@@ -1039,33 +839,10 @@ task probeWinTlsUninitRefc,
   "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
   runProbeWinTlsUninit("refc")
 
-task buildTorpedoExample, "Build the torpedo FFI example library":
-  buildTorpedoExampleLibrary()
-
-task buildTorpedoExamplePy,
-  "Build the torpedo FFI example library with generated Python wrapper":
-  buildTorpedoExampleLibrary(true)
-
-task runTorpedoExamplePy, "Build and run the Torpedo Duel Python text UI example":
-  buildTorpedoExampleLibrary(true)
-  exec quoteArg(findPythonExe()) & " " &
-    quoteArg("examples/torpedo/python_example/main.py")
-
-task buildTorpedoExampleRust,
-  "Build the Torpedo Duel FFI library + generated Rust wrapper crate (native mode)":
-  buildTorpedoExampleLibrary(generateRust = true)
-
-task runTorpedoExampleRust,
-  "Build the Torpedo Duel FFI library + run the Rust example (native mode)":
+task runTorpedoExampleRust, "Build the Torpedo Duel FFI library ":
   buildTorpedoExampleLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &
     " run --manifest-path examples/torpedo/rust_example/Cargo.toml"
-
-task runTorpedoExampleCborRust,
-  "Build the Torpedo Duel FFI library (CBOR mode) + run the Rust example with --features cbor":
-  buildTorpedoExampleCborLibrary(generateRust = true)
-  exec quoteArg(findCargoExe()) &
-    " run --features cbor --manifest-path examples/torpedo/rust_example/Cargo.toml"
 
 proc writeTorpedoGoModFor(buildDir: string) =
   let modPath = "examples/torpedo/go_example/go.mod"
@@ -1075,62 +852,40 @@ proc writeTorpedoGoModFor(buildDir: string) =
   )
   contents.add("go 1.21\n\n")
   contents.add("require torpedolib v0.0.0\n")
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     contents.add("require github.com/fxamacker/cbor/v2 v2.7.0\n")
   contents.add("\nreplace torpedolib => ../nimlib/" & buildDir & "/torpedolib_go\n")
   writeFile(modPath, contents)
-  if buildDir == "build_cbor":
+  if buildDir == "build":
     withDir "examples/torpedo/go_example":
       exec quoteArg(findGoExe()) & " mod tidy"
 
-task buildTorpedoExampleGo,
-  "Build the Torpedo Duel FFI library + generated Go wrapper module (native mode)":
-  buildTorpedoExampleLibrary(generateGo = true)
-
-task runTorpedoExampleGo,
-  "Build the Torpedo Duel FFI library + run the Go example (native mode)":
+task runTorpedoExampleGo, "Build the Torpedo Duel FFI library  + run the Go example":
   buildTorpedoExampleLibrary(generateGo = true)
   writeTorpedoGoModFor("build")
   withDir "examples/torpedo/go_example":
     exec quoteArg(findGoExe()) & " run ."
 
-task runTorpedoExampleCborGo,
-  "Build the Torpedo Duel FFI library (CBOR mode) + run the Go example":
-  buildTorpedoExampleCborLibrary(generateGo = true)
-  writeTorpedoGoModFor("build_cbor")
-  withDir "examples/torpedo/go_example":
-    exec quoteArg(findGoExe()) & " run ."
+# FFI build of the torpedo example. Same torpedolib.nim source +
+# same cpp_example/main.cpp, compiled against the FFI codegen output.
+task buildTorpedoExample, "Build the torpedo FFI example library (into nimlib/build)":
+  buildTorpedoExampleLibrary()
 
-task buildTorpedoExampleCpp, "Build the Torpedo Duel C++ application (via CMake)":
+task buildTorpedoExampleCpp,
+  "Build the Torpedo Duel C++ application against the library (via CMake)":
   buildTorpedoExampleLibrary()
   buildTorpedoCmakeTarget("torpedo_cpp")
 
-task runTorpedoExampleCpp, "Build and run the Torpedo Duel C++ text UI example":
+task runTorpedoExampleCpp,
+  "Build and run the Torpedo Duel C++ text UI example against the library":
   buildTorpedoExampleLibrary()
   buildTorpedoCmakeTarget("torpedo_cpp")
   exec quoteArg(torpedoExecutablePath())
 
-# CBOR-mode parity build of the torpedo example. Same torpedolib.nim source
-# + same cpp_example/main.cpp, compiled against the CBOR FFI codegen output.
-task buildTorpedoExampleCbor,
-  "Build the torpedo FFI example library (CBOR mode, into nimlib/build_cbor)":
-  buildTorpedoExampleCborLibrary()
-
-task buildTorpedoExampleCborCpp,
-  "Build the Torpedo Duel C++ application against the CBOR-mode library (via CMake)":
-  buildTorpedoExampleCborLibrary()
-  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
-
-task runTorpedoExampleCborCpp,
-  "Build and run the Torpedo Duel C++ text UI example against the CBOR-mode library":
-  buildTorpedoExampleCborLibrary()
-  buildTorpedoCmakeTarget("torpedo_cpp", useCbor = true)
-  exec quoteArg(torpedoExecutablePath())
-
-task runTorpedoExampleCborPy,
-  "Build the CBOR-mode torpedo library + Python wrapper and run the SAME python_example/main.py against it":
-  buildTorpedoExampleCborLibrary(true)
-  putEnv("TORPEDOLIB_BUILD_DIR", "build_cbor")
+task runTorpedoExamplePy,
+  "Build the torpedo library + Python wrapper and run the SAME python_example/main.py against it":
+  buildTorpedoExampleLibrary(true)
+  putEnv("TORPEDOLIB_BUILD_DIR", "build")
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
 
@@ -1141,23 +896,15 @@ task nphall, "Install nph if needed and format all Nim files in the project":
   runNph(allNimFiles(), "No .nim or .nimble files found to format")
 
 task alltests,
-  "Run every test suite: test, testApi, testFfiApi, testFfiApiCpp, runFfiExamplePy, runFfiExampleCpp, runFfiExampleC, runFfiExampleCborCpp, runFfiExampleCborPy, testApiCbor, runTypeMapTestLibCborCpp, runTypeMapTestLibCborPy":
+  "Run every test suite: test, testApi, runFfiExampleCpp, runFfiExamplePy, runTypeMapTestLibCpp, runTypeMapTestLibPy":
   exec "nimble test"
-  exec "nimble testApi"
-  exec "nimble testFfiApi"
-  exec "nimble testFfiApiCpp"
-  exec "nimble runFfiExamplePy"
   exec "nimble runFfiExampleCpp"
-  exec "nimble runFfiExampleC"
-  exec "nimble runFfiExampleCborCpp"
-  exec "nimble runFfiExampleCborPy"
-  exec "nimble testApiCbor"
-  exec "nimble runTypeMapTestLibCborCpp"
-  exec "nimble runTypeMapTestLibCborPy"
+  exec "nimble runFfiExamplePy"
+  exec "nimble testApi"
+  exec "nimble runTypeMapTestLibCpp"
+  exec "nimble runTypeMapTestLibPy"
 
 task allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
-  exec "nimble testFfiApiCppAsanOrc"
-  exec "nimble testFfiApiCppAsanRefc"
   exec "nimble testMtEventBrokerAsanOrc"
   exec "nimble testMtEventBrokerAsanRefc"
   exec "nimble testMtRequestBrokerAsanOrc"

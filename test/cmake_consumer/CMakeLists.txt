@@ -19,8 +19,14 @@ find_package(mylib 1.0 CONFIG REQUIRED)
 
 message(STATUS "Consumer found mylib ${mylib_VERSION} at ${mylib_LIBRARY}")
 
+# TODO(plan §10): the pure-C smoke test depends on the native FFI codegen
+# surface (typed mylib_* C functions), which was retired (see
+# doc/CBOR_Refactoring.md). Keep smoke.c in-tree but DO NOT compile it
+# until the deferred "CBOR-derived typed C functional interface" lands.
+if(FALSE)
 add_executable(smoke_c smoke.c)
 target_link_libraries(smoke_c PRIVATE mylib::mylib)
+endif() # if(FALSE) — pure-C smoke test disabled, see TODO above
 
 option(MYLIB_CPP_SMOKE "Also build the C++ smoke consumer" OFF)
 if(MYLIB_CPP_SMOKE)

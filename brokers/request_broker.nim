@@ -161,16 +161,16 @@ from std/sequtils import keepItIf
 import chronos
 import results
 import ./internal/helper/broker_utils, ./broker_context
+import ./internal/broker_debug
 
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_request_broker
   export mt_config, mt_request_broker
 
-when compileOption("threads") and
-    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
-  import ./internal/api_request_broker, ./internal/api_type
-  export api_request_broker, api_type
-
+when compileOption("threads") and defined(BrokerFfiApi):
+  # CBOR is the only FFI codegen strategy. The historical
+  # `-d:BrokerFfiApiNative` / `-d:BrokerFfiApiCBOR` flags were retired
+  # in favour of a single `-d:BrokerFfiApi`.
   import ./internal/api_request_broker_cbor
   export api_request_broker_cbor
 
@@ -838,7 +838,9 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)
+    when defined(brokerDebugStdout):
+      echo result.repr
 
   return result
 
@@ -891,11 +893,6 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
       let cfg = parseMtReqKwargs(split.kwargs)
       generateMtRequestBroker(body, cfg)
   of rbApi:
-    if split.kwargs.len > 0:
-      error(
-        "RequestBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
-        split.kwargs[0],
-      )
     when not compileOption("threads"):
       {.
         error:
@@ -903,14 +900,19 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
           "Compile with `--threads:on` to use API RequestBroker."
       .}
     else:
-      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or
-          defined(BrokerFfiApiNative):
-        when brokerFfiMode == mfCbor:
-          generateApiCborRequestBroker(body)
-        else:
-          generateApiRequestBroker(body)
+      when defined(BrokerFfiApi):
+        # Validate kwargs at the outer macro for clear error origin,
+        # then hand them to the deferred codegen which re-parses into
+        # MtReqCfg. RequestBroker(API) runs on the same MT lane
+        # underneath, so it accepts the same capacity knobs as
+        # RequestBroker(mt) (queueDepth / slabCapacity /
+        # maxPayloadBytes / responseSlots / maxResponseBytes /
+        # freeListShards / preset).
+        discard parseMtReqKwargs(split.kwargs)
+        generateApiCborRequestBroker(body, split.kwargs)
       else:
-        generateMtRequestBroker(body, defaultMtReqCfg())
+        let cfg = parseMtReqKwargs(split.kwargs)
+        generateMtRequestBroker(body, cfg)
   of rbAsync, rbSync:
     if split.kwargs.len > 0:
       error(

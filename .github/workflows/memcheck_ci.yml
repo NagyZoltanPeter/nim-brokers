@@ -32,8 +32,6 @@ on:
         default: all
         options:
           - all
-          - testFfiApiCppAsanOrc
-          - testFfiApiCppAsanRefc
           - testMtEventBrokerAsanOrc
           - testMtEventBrokerAsanRefc
           - testMtRequestBrokerAsanOrc
@@ -151,7 +149,7 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testFfiApiCppAsanOrc testFfiApiCppAsanRefc testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
+          ALL="testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -186,7 +184,6 @@ jobs:
         shell: pwsh
         run: |
           $all = @(
-            "testFfiApiCppAsanOrc", "testFfiApiCppAsanRefc",
             "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
             "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
             "testMtBrokerConfigsAsanOrc", "testMtBrokerConfigsAsanRefc",
@@ -204,12 +201,12 @@ jobs:
             nimble --verbose $task -y 2>&1 | Tee-Object -FilePath $log
             $rc = $LASTEXITCODE
             if ($rc -ne 0) {
-              Write-Host "::error::Task $task: nimble exited with code $rc"
+              Write-Host "::error::Task ${task}: nimble exited with code $rc"
               $rcOverall = 1
               continue
             }
             if (Select-String -Path $log -Pattern 'AddressSanitizer:|==\d+==ABORTING|Exception raised during nimble script execution' -Quiet) {
-              Write-Host "::error::Task $task: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
+              Write-Host "::error::Task ${task}: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
               $rcOverall = 1
               continue
             }

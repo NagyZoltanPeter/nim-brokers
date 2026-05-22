@@ -30,10 +30,8 @@ RequestBroker:
     note*: string
     count*: int
 
-  proc signatureNoInput*(): Future[Result[DualResponse, string]] {.async.}
-  proc signatureWithInput*(
-    suffix: string
-  ): Future[Result[DualResponse, string]] {.async.}
+  proc signature*(): Future[Result[DualResponse, string]] {.async.}
+  proc signature*(suffix: string): Future[Result[DualResponse, string]] {.async.}
 
 RequestBroker(async):
   type ImplicitResponse = ref object

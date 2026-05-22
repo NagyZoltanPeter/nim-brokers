@@ -31,7 +31,7 @@
 {.push raises: [].}
 
 import std/[macros, strutils, tables]
-import ./api_codegen_c, ./api_common, ./api_schema
+import ./api_common, ./api_schema
 
 # ---------------------------------------------------------------------------
 # Nim → Rust type mapping (registry-aware)

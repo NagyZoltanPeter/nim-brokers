@@ -35,20 +35,17 @@ The package is managed via `brokers.nimble`. Install dependencies and run all te
 nimble install -d
 nimble test
 nimble testApi
-nimble testFfiApi
-nimble testFfiApiCpp
 ```
 
 Current test task coverage:
 
 - `nimble test` — core broker tests (single-thread + multi-thread variants across ORC/refc and debug/release settings as defined in `brokers.nimble`)
-- `nimble testApi` — FFI API broker tests, including lifecycle/startup coverage for the generated shared-library runtime
-- `nimble testFfiApi` — tests for the FFI API generation components (type resolver, codegen modules, schema registry)
-- `nimble testFfiApiCpp` — C++ wrapper tests for the FFI API (builds and runs the C++ example consumer)
-- `nimble testFfiApiCmake` — Validates the generated `<lib>Config.cmake` package by configuring and building a downstream consumer in `test/cmake_consumer/` via `find_package(mylib CONFIG REQUIRED)` and linking smoke binaries against the IMPORTED targets `mylib::mylib` (C) and `mylib::mylib_cpp` (C++)
-- `nimble testApiCbor` — CBOR-mode FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the typemappingtestlib CBOR parity matrix (Nim side) across ORC/refc × debug/release
-- `nimble runTypeMapTestLibRust` / `runTypeMapTestLibCborRust` — Rust parity matrix for the typemappingtestlib (native and CBOR builds; requires stable Rust 1.75+ via rustup)
-- `nimble runTypeMapTestLibGo` / `runTypeMapTestLibCborGo` — Go parity matrix for the typemappingtestlib (native and CBOR builds; requires Go 1.21+ on PATH)
+- `nimble testApi` — FFI tests: codec round-trips, library lifecycle, event subscribe, discovery API, and the Nim-side typemappingtestlib parity matrix across ORC/refc × debug/release
+- `nimble runTypeMapTestLibRust` — Rust parity matrix for the typemappingtestlib, iterates `--mm:orc` and `--mm:refc` by default (requires stable Rust 1.75+ via rustup)
+- `nimble runTypeMapTestLibGo` — Go parity matrix for the typemappingtestlib, iterates `--mm:orc` and `--mm:refc` (requires Go 1.21+ on PATH)
+- `nimble runTypeMapTestLibCpp` / `runTypeMapTestLibPy` — C++ / Python parity, also iterate both memory managers
+- `nimble runFfiExample{Cpp,Py,Rust,Go}` — wrapper smoke-test examples, also iterate both memory managers
+- Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; the default iterates both. Windows + refc is CI-green; the historical `skipRefcOnWindows` carve-out is currently disabled (see `doc/LIMITATION.md` §2.2 for the platform-level caveat).
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
@@ -59,7 +56,7 @@ nim c -r --path:. --outdir:build test/test_request_broker.nim
 nim c -r --path:. --outdir:build test/test_multi_request_broker.nim
 nim c -r --path:. --outdir:build --threads:on test/test_multi_thread_event_broker.nim
 nim c -r --path:. --outdir:build --threads:on test/test_multi_thread_request_broker.nim
-nim c -r --path:. --outdir:build -d:BrokerFfiApiNative --threads:on --nimMainPrefix:apitestlib test/test_api_library_init.nim
+nim c -r --path:. --outdir:build -d:BrokerFfiApi --threads:on --nimMainPrefix:apitestlib test/test_api_library_init.nim
 ```
 
 The `build/` directory is in `.gitignore`. Never compile without `--outdir:build` as test binaries will otherwise land in `test/` and pollute git status.
@@ -72,52 +69,33 @@ Tests use `testutils/unittests` (not the stdlib `unittest`).
 
 ### FFI API example build and run tasks
 
-The FFI example library and runnable consumers are driven from Nimble tasks:
+The FFI example library and runnable consumers are driven from Nimble tasks. `-d:BrokerFfiApi` selects the (CBOR-based) FFI codegen; every library exposes a fixed 11-function ABI (`<lib>_version`, `_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
+
+`<lib>_version() -> const char*` returns the static semver string baked from the `version:` field of `registerBrokerLibrary` (default `0.1.0`). The pointer references library-owned static storage and must NOT be freed by the caller. Wrappers re-export it as a class member: `<Lib>::version() -> std::string_view` (C++ static method) and `<Lib>.version() -> str` (Python `@staticmethod`). Both can be called without an instance — no context, no library lifecycle required.
 
 ```
-nimble buildFfiExample      # build examples/ffiapi/nimlib/mylib.nim as shared library
-nimble buildFfiExamplePy    # same, plus generated Python wrapper
-nimble buildFfiExampleC     # build the pure C example via CMake
-nimble buildFfiExampleCpp   # build the C++ example via CMake
-nimble buildFfiExamples     # build both C and C++ examples via CMake
-nimble runFfiExampleC       # rebuild library + run C example
-nimble runFfiExampleCpp     # rebuild library + run C++ example
-nimble runFfiExamplePy      # rebuild library + generated wrapper + run Python example
-nimble runFfiExampleRust    # rebuild library + generated Rust crate + run native Rust example
-nimble runFfiExampleCborRust # CBOR-mode counterpart of runFfiExampleRust
-nimble runFfiExampleGo       # rebuild library + generated Go module + run native Go example
-nimble runFfiExampleCborGo   # CBOR-mode counterpart of runFfiExampleGo
-nimble runTorpedoExamplePy # build and run the more complex torpedo example over Python bindings, implements game ui and orchestrator in Python
-nimble runTorpedoExampleCpp # build and run the more complex torpedo example over C++ bindings, implements game ui and orchestrator in C++
-nimble runTorpedoExampleRust    # native Rust torpedo example
-nimble runTorpedoExampleCborRust # CBOR-mode Rust torpedo example
-nimble runTorpedoExampleGo       # native Go torpedo example
-nimble runTorpedoExampleCborGo   # CBOR-mode Go torpedo example
+nimble buildFfiExample        # mylib.nim with -d:BrokerFfiApi -> examples/ffiapi/nimlib/build/
+nimble buildFfiExampleCpp     # above + cmake build of cpp_example
+nimble runFfiExampleCpp       # above + run the C++ example
+nimble runFfiExamplePy        # rebuild library + Python wrapper + run python_example
+nimble runFfiExampleRust      # rebuild library + Rust crate + run rust_example
+nimble runFfiExampleGo        # rebuild library + Go module + run go_example
+nimble buildTorpedoExample    # same flow for the torpedo example
+nimble buildTorpedoExampleCpp
+nimble runTorpedoExampleCpp
+nimble runTorpedoExamplePy
+nimble runTorpedoExampleRust
+nimble runTorpedoExampleGo
+nimble buildTypeMapTestLib    # build the parity test library
+nimble runTypeMapTestLibCpp   # run the C++ parity matrix
+nimble runTypeMapTestLibPy    # run the Python parity matrix
+nimble runTypeMapTestLibRust  # run the Rust parity matrix
+nimble runTypeMapTestLibGo    # run the Go parity matrix
 ```
 
-The C and C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`. The Rust workflow generates a complete Cargo crate at `examples/ffiapi/nimlib/build/mylib_rs/` (or `build_cbor/mylib_rs/` for CBOR mode) when compiled with `-d:BrokerFfiApiGenRust`. Consumers include it via a `#[path]` module declaration so a single example crate can switch between modes via Cargo features.
+The C++ example binaries are built under `examples/ffiapi/cmake-build/`. The Python workflow generates `examples/ffiapi/nimlib/build/mylib.py` when compiled with `-d:BrokerFfiApiGenPy`. The Rust workflow generates a complete Cargo crate at `examples/ffiapi/nimlib/build/mylib_rs/` when compiled with `-d:BrokerFfiApiGenRust`. Consumers include it via a `#[path]` module declaration.
 
-#### CBOR-mode FFI tasks
-
-`-d:BrokerFfiApiCBOR` selects the CBOR strategy: every library exposes a fixed 11-function ABI (`<lib>_version`, `_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
-
-Both ABI modes (native and CBOR) additionally expose `<lib>_version() -> const char*` returning the static semver string baked from the `version:` field of `registerBrokerLibrary` (default `0.1.0`). The pointer references library-owned static storage and must NOT be freed by the caller. Wrappers re-export it as a class member: `<Lib>::version() -> std::string_view` (C++ static method) and `<Lib>.version() -> str` (Python `@staticmethod`). Both can be called without an instance — no context, no library lifecycle required.
-
-The CBOR-mode example builds reuse the SAME `examples/ffiapi/` and `examples/torpedo/` sources as the native builds — `mylib.nim` / `torpedolib.nim` are compiled with `-d:BrokerFfiApiCBOR` into `nimlib/build_cbor/`, and the existing `cpp_example/main.cpp` is linked against the CBOR-generated header (via `-DUSE_CBOR=ON` in the CMake project). This is the parity-validation harness: the same C++ client compiles cleanly against either build mode.
-
-```
-nimble buildFfiExampleCbor          # mylib.nim with -d:BrokerFfiApiCBOR -> examples/ffiapi/nimlib/build_cbor/
-nimble buildFfiExampleCborCpp       # above + cmake (USE_CBOR=ON) build of cpp_example
-nimble runFfiExampleCborCpp         # above + run the CBOR-built C++ example
-nimble buildTorpedoExampleCbor      # same for torpedo
-nimble buildTorpedoExampleCborCpp
-nimble runTorpedoExampleCborCpp
-nimble buildTypeMapTestLibCbor      # build the parity test library
-nimble runTypeMapTestLibCborPy      # run the Python parity matrix
-nimble runTypeMapTestLibCborCpp     # run the C++ parity matrix
-```
-
-External dependencies for CBOR-mode wrappers:
+External dependencies for the FFI wrappers:
 - C++: jsoncons (header-only) under `vendor/jsoncons/include`. Vendored as a
   git submodule pinned to a tagged release. After cloning the repo, run
   `nimble fetchVendor` (or `git submodule update --init --recursive`) to
@@ -143,40 +121,62 @@ C and C++ headers are always emitted; Python, Rust, and Go are opt-in.
 
 ##### Rust codegen scope
 
-Native- and CBOR-mode Rust have **full parity** for both requests and events across the type matrix the typemappingtestlib parity test exercises: primitive scalars (bool / intN / uintN / byte / floatN / string), enums (`#[repr(i32)]` Rust enums with `From<i32>`), distinct/alias (`pub type X = Y`), `seq[primitive]` (`Vec<T>`), `seq[string]` (`Vec<String>`), `seq[Object]` (`Vec<T>` with all-primitive/string fields), and `array[N, primitive]` (`Vec<T>`). The same client code drives either build mode unchanged.
+The Rust wrapper has **full parity** with the C++ and Python wrappers across the type matrix the typemappingtestlib parity test exercises: primitive scalars (bool / intN / uintN / byte / floatN / string), enums (`#[repr(i32)]` Rust enums with `From<i32>`), distinct/alias (`pub type X = Y`), `seq[primitive]` (`Vec<T>`), `seq[string]` (`Vec<String>`), `seq[Object]` and `seq[Object<seq>]` (`Vec<T>` with arbitrary nested fields), `array[N, T]` for primitive / string / Object element types, `Option[T]`, and inline-nested Objects.
 
-Per-mode shape:
-
-- **Native**: `extern "C"` blocks declare typed pointers (`*const T` for `seq[primitive]`, `*const *const c_char` for `seq[string]`, `*const TCItem` for `seq[Object]`). Request methods marshal Rust `Vec<T>` to/from C-side `(ptr, count)` pairs. Each event has a per-event extern `fn` typedef, a per-event dispatcher `static`, and a generated trampoline that converts FFI args to safe Rust values (Vec/String/enum/distinct) before fanning out to subscribed closures via `Arc<dyn Fn(...) + Send + Sync>` snapshot-and-clone.
-- **CBOR**: per-method response decode goes directly from CBOR bytes into the typed `#[derive(Deserialize)]` struct via a per-method `__Env<T>` envelope (no JSON intermediate, so `seq[byte]` and other byte-string fields preserve type fidelity). Events share one trampoline that demuxes by `(ctx, event_name)` and decodes the payload via `ciborium` into the typed event struct, then unpacks fields and fans out to the user closure with the **same** `Fn(field1, field2, ...)` signature the native build uses.
-
-Edge cases still left as `// TODO(rust-codegen)` stubs in native mode (CBOR handles them): `seq[Object]` where the object contains nested objects or composite fields (the codegen restricts `seq[T]` element objects to those with primitive/string fields only); `array[N, Object]`; `array[N, string]`. None of the example libraries hit these cases.
+Per-method response decode goes directly from CBOR bytes into the typed `#[derive(Deserialize)]` struct via a per-method `__Env<T>` envelope (no JSON intermediate, so `seq[byte]` and other byte-string fields preserve type fidelity). Events share one trampoline that demuxes by `(ctx, event_name)` and decodes the payload via `ciborium` into the typed event struct, then unpacks fields and fans out to the user closure with `Fn(field1, field2, ...)` signature.
 
 ##### Go codegen scope
 
-Native- and CBOR-mode Go have **full parity** with Rust on the type matrix the typemappingtestlib parity test exercises (41 native checks, 43 CBOR including `ObjParamRequest`). The public surface is idiomatic Go: `(T, error)` returns instead of `Result<T>`, `Close()` + `runtime.SetFinalizer` instead of `Drop`, and event handlers as plain Go func values stored in a `map[uint64]Handler` keyed by the registration handle.
+The Go wrapper has **full parity** with Rust on the same type matrix. The public surface is idiomatic Go: `(T, error)` returns instead of `Result<T>`, `Close()` + `runtime.SetFinalizer` instead of `Drop`, and event handlers as plain Go func values stored in a `map[uint64]Handler` keyed by the registration handle.
 
-Per-mode shape:
-
-- **Native**: cgo `extern "C"` declarations cast through the typed `<EventName>CCallback` function-pointer typedef. The `<lib>.go` cgo prelude declares register-helpers (`go_register_<Event>(ctx)`); their bodies live in a companion `<lib>_callbacks.c` that `#include`s `_cgo_export.h` so cgo's typed `GoUint32`/`GoInt64` extern declarations of the `//export`'d Go trampolines are visible to the cast (avoids the "conflicting types" error you hit declaring the trampoline yourself in the prelude). Each event has its own dispatcher map + trampoline; on call, the trampoline converts cgo C args to safe Go values, snapshots the map under `sync.Mutex`, then fans out.
-- **CBOR**: a single `//export goCborEventTrampoline` demuxes by `(ctx, eventName)` via a per-context handler registry and decodes the payload into the typed event struct via `github.com/fxamacker/cbor/v2`. Per-method `__Env`-style envelope (`struct{ Ok *T; Err *string }`) decodes the CBOR response directly into the typed struct — same fix the Rust CBOR codegen needed to make `seq[byte]` round-trip.
+A single `//export goCborEventTrampoline` demuxes by `(ctx, eventName)` via a per-context handler registry and decodes the payload into the typed event struct via `github.com/fxamacker/cbor/v2`. Per-method `__Env`-style envelope (`struct{ Ok *T; Err *string }`) decodes the CBOR response directly into the typed struct so `seq[byte]` and friends round-trip cleanly.
 
 Two intentional ergonomic divergences from the C++/Rust surface (forced by Go semantics):
 1. Event closures take unpacked fields (`func(p Priority, j int32, ts int64)`) but cannot capture `&self` because Go closures stored in a map need `Send + Sync + 'static`-equivalent shape; users that want lib state inside the handler close over it themselves.
 2. `Off<Event>(handle uint64)` requires an explicit handle (no default-zero "remove all") to keep the Go signature simple.
 
-Edge cases left as `// TODO(go-codegen)` stubs match the Rust set: `array[N, Object]`, `array[N, string]`, `seq[Object<seq>]` in native mode (CBOR handles them); object-as-request-param native (broker gated to `-d:BrokerFfiApiCBOR`).
-
 #### Examine generated nim code
 
-Sometimes it is useful to examine the Nim code generated by the macros. This can be done by compiling with the `-d:brokerDebug` flag, which will print the generated AST to the console. For example:
+Compile with `-d:brokerDebug` to dump every macro-generated AST,
+rendered back to Nim source, into per-broker files under
+`build/broker_debug/` (override with `-d:brokerDebugDir=<path>`):
 
 ```
-nim c -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:examples/ffiapi/nimlib/build -d:brokerDebug  --nimMainPrefix:mylib examples/ffiapi/nimlib/mylib.nim
+nim c -d:BrokerFfiApi -d:brokerDebug --threads:on --app:lib --path:. \
+  --outdir:examples/ffiapi/nimlib/build --nimMainPrefix:mylib \
+  examples/ffiapi/nimlib/mylib.nim
 ```
-or with such command template:
+
+The dump layout — one file per broker + one for the FFI library stub:
+
 ```
-nim c -d:BrokerFfiApiNative --threads:on --app:lib --path:. --outdir:build -d:brokerDebug --nimMainPrefix:<prefix> <file-to-compile>
+build/broker_debug/
+  ├── InitializeRequest__RequestBrokerApi.gen.nim
+  ├── ShutdownRequest__RequestBrokerApi.gen.nim
+  ├── ListDevices__RequestBrokerApi.gen.nim
+  ├── DeviceStatusChanged__EventBrokerApi.gen.nim
+  ├── ...
+  ├── <BrokerType>__RequestBrokerMt.gen.nim   ← underlying MT broker
+  ├── <BrokerType>__EventBrokerMt.gen.nim       (one per API broker;
+  │                                              the (API) layer wraps it)
+  └── mylib__BrokerLibrary.gen.nim   ← `registerBrokerLibrary` output —
+                                       the FFI C-ABI surface, lifecycle,
+                                       courier wiring, dispatch table
+```
+
+Each file starts with a 7-line header naming the role + type + notes.
+`cat build/broker_debug/*.gen.nim` gives the single-file view; `nph
+build/broker_debug/<X>.gen.nim` reformats one for readable browsing.
+
+Add `-d:brokerDebugStdout` if you also want the historical
+"echo result.repr" behaviour during the build log. Default is file-
+only, since the FFI lib stub alone is ~1000 lines and would drown the
+build output.
+
+Standalone template for any broker file:
+```
+nim c -d:BrokerFfiApi -d:brokerDebug --threads:on --app:lib --path:. \
+  --outdir:build --nimMainPrefix:<prefix> <file-to-compile>
 ```
 
 ### CI expectations
@@ -185,23 +185,14 @@ GitHub Actions CI currently runs:
 
 - `nimble test`
 - `nimble testApi`
-- `nimble testFfiApi`
-- `nimble testFfiApiCpp`
-- `nimble testApiCbor`
-- `nimble runFfiExampleC`
 - `nimble runFfiExampleCpp`
 - `nimble runFfiExamplePy`
-- `nimble runFfiExampleCborCpp`
-- `nimble runTypeMapTestLibCborPy`
-- `nimble runTypeMapTestLibCborCpp`
+- `nimble runTypeMapTestLibPy`
+- `nimble runTypeMapTestLibCpp`
 - `nimble runFfiExampleRust`
-- `nimble runFfiExampleCborRust`
 - `nimble runTypeMapTestLibRust`
-- `nimble runTypeMapTestLibCborRust`
 - `nimble runFfiExampleGo`
-- `nimble runFfiExampleCborGo`
 - `nimble runTypeMapTestLibGo`
-- `nimble runTypeMapTestLibCborGo`
 
 Any change that affects broker runtime behavior, FFI generation, or example integration should preserve all of the above.
 
@@ -274,6 +265,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 ### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)
 
 - `RequestBroker(API)` and `EventBroker(API)` generate C ABI entry points and wrapper metadata in addition to the normal broker interfaces.
+- `RequestBroker(API, ...)` / `EventBroker(API, ...)` accept the **same capacity / preset kwargs as their `(mt, ...)` counterparts** — the API broker rides the multi-thread lane internally, so `queueDepth`, `slabCapacity`, `maxPayloadBytes`, `responseSlots`, `maxResponseBytes`, `freeListShards`, and `preset = <name>` are all valid. Omitting kwargs yields `defaultMtEvtCfg()` / `defaultMtReqCfg()`.
 - `registerBrokerLibrary` ties API request/event brokers into a complete shared-library surface. It is a no-op when compiled without `-d:BrokerFfiApi`, so client code never needs a `when defined(BrokerFfiApi):` guard around it.
 - `api_library` is always imported as part of the `brokers` package; no conditional import is needed in client code.
 - External types used in broker signatures are auto-discovered and registered — plain Nim `object` types do not need any `ApiType` annotation. The deprecated `ApiType` macro still compiles with a warning.
@@ -282,10 +274,11 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   - `<lib>_createContext()` — per-context instance creation
   - `<lib>_shutdown(ctx)` — per-context shutdown
 - `InitializeRequest` is the post-create configuration broker; `ShutdownRequest` is the orderly teardown broker.
-- `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread installed event registration and the processing thread finished `setupProviders(ctx)`.
+- `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread has installed its event-courier poller and the processing thread has finished `setupProviders(ctx)` plus per-event listener installation.
 - The generated runtime uses two threads per created library context:
-  - **delivery thread** — owns foreign event registration and executes foreign callbacks
-  - **processing thread** — runs `setupProviders(ctx)` and executes request providers
+  - **delivery thread** — consumes the per-context event courier ring and invokes foreign callbacks. Spawned first so its broker dispatch signal is published before any emit can fire.
+  - **processing thread** — runs `setupProviders(ctx)`, installs per-event listeners (same-thread fast path for the FFI lane), executes request providers, and produces event-courier messages on emit.
+- FFI subscribe / unsubscribe (`<lib>_subscribe` / `<lib>_unsubscribe`) write the shared `SubsRegistry` directly from the foreign caller's thread and bump a per-event `Atomic[int]` counter; the emit-side reads the counter lock-free to short-circuit the courier path when no foreign subscriber is registered. See `doc/CBOR_Round2_PartD_EventCourier.md` for the three-lane dispatch design and `doc/bench_baseline.md` § "Event dispatch — Part D-6" for per-emit costs.
 - Generated C header: `<libName>.h` (pure C), C++ wrapper: `<libName>.hpp` (includes the `.h`).
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
 - Generated Rust wrapper support is optional and enabled with `-d:BrokerFfiApiGenRust`. It emits a complete Cargo crate `<libName>_rs/` (Cargo.toml + src/lib.rs) next to the `.so`. The crate declares the C ABI via hand-written `extern "C"` blocks (no bindgen / no clang dep) and exposes the same `Lib::new() / create_context() / <request>(args) -> Result<T, String> / on_<event> / off_<event> / shutdown / Drop` surface the C++ wrapper provides.
@@ -376,7 +369,7 @@ test/
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **nim-brokers** (1046 symbols, 1709 relationships, 10 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **nim-brokers** (5502 symbols, 9760 relationships, 228 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

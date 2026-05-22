@@ -1,10 +1,6 @@
 # Cargo manifest for the torpedo Rust FFI example.
 #
-# Drives the same `torpedolib` shared library that the C++ and Python
-# examples consume. Two build modes are supported via Cargo features:
-#
-#   cargo run                 # native FFI build  (uses nimlib/build/)
-#   cargo run --features cbor # CBOR FFI build    (uses nimlib/build_cbor/)
+#   cargo run   # builds against the FFI library in nimlib/build/
 
 [package]
 name = "torpedo_rust_example"
@@ -12,15 +8,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 
-[features]
-default = []
-cbor = ["dep:ciborium", "dep:serde", "dep:serde_json", "dep:serde_bytes"]
-
 [dependencies]
-ciborium = { version = "0.2", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-serde_bytes = { version = "0.11", optional = true }
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
 
 [[bin]]
 name = "torpedo_rust_example"

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Unified Python parity test for typemappingtestlib (native + CBOR).
+"""Python parity test for typemappingtestlib.
 
-Drives the same generated Python wrapper API on both the native FFI
-build and the CBOR FFI build. Selection is by environment:
+Drives the generated Python wrapper API of the FFI library. The
+`TYPEMAP_BUILD_DIR` env var selects the build subdirectory (defaults
+to `build`, matching `nimble runTypeMapTestLibPy`).
 
-    TYPEMAP_BUILD_DIR=build       # default — native FFI wrapper
-    TYPEMAP_BUILD_DIR=build_cbor  # CBOR-mode wrapper
-
-Both wrappers expose:
+The wrapper exposes:
     class Typemappingtestlib:
         def create_context() -> Result[None]
         def valid_context() -> bool
@@ -36,8 +34,10 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE / _BUILD_DIR_NAME))
 
 from typemappingtestlib import (  # noqa: E402
+    Inner,
     Priority,
     Result,
+    Slot,
     Tag,
     Typemappingtestlib,
 )
@@ -167,10 +167,9 @@ class TestRequests(unittest.TestCase):
 
 class TestPrimitiveBrokerTypes(unittest.TestCase):
     """IntResultRequest = int32 and SimpleIntEvent = int64 — broker types
-    that are bare primitives rather than objects. The native wrapper exposes
-    the result as a dataclass with a single `value` field and the event
-    callback as a bare scalar. CBOR-mode codegen for these patterns is not
-    yet implemented, so the wrapper omits the method/handler there."""
+    that are bare primitives rather than objects. The wrapper exposes
+    `IntResultRequest` as the underlying `int` alias and SimpleIntEvent
+    delivers the payload as a bare scalar to the callback."""
 
     def setUp(self):
         self.lib = _make_lib()
@@ -179,18 +178,14 @@ class TestPrimitiveBrokerTypes(unittest.TestCase):
         self.lib.shutdown()
 
     def test_int_result_request(self):
-        if not hasattr(self.lib, "int_result_request"):
-            self.skipTest("primitive request result not yet emitted in CBOR build")
         r = self.lib.int_result_request(21)
         self.assertTrue(r.is_ok(), r.error)
-        # Native mode: IntResultRequest is a dataclass with a `value` field.
-        # CBOR mode: IntResultRequest is the bare `int` alias.
-        actual = r.value.value if hasattr(r.value, "value") else r.value
-        self.assertEqual(actual, 42)  # provider returns value * 2
+        # `IntResultRequest` is a `distinct int32` alias, exposed by the
+        # Python wrapper as the bare `int` itself rather than a wrapper
+        # dataclass.
+        self.assertEqual(r.value, 42)  # provider returns value * 2
 
     def test_simple_int_event(self):
-        if not hasattr(self.lib, "on_simple_int_event"):
-            self.skipTest("primitive event payload not yet emitted in CBOR build")
         received = []
         ev = threading.Event()
 
@@ -478,12 +473,8 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.first, "alpha")
 
     def test_obj_as_param(self):
-        # Object-as-request-param probe. The broker is gated to CBOR mode
-        # in the Nim source — native C/C++/Python/Rust all fail for this
-        # pattern (see doc/TYPESUPPORT.md, Section 2). We only assert when
-        # running against the CBOR build.
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("obj_param_request only registered in CBOR build")
+        # Object-as-request-param — universally supported now that the
+        # native ABI was retired (see doc/TYPESUPPORT.md §2).
         r = self.lib.obj_param_request(Tag(key="k", value="v"))
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.summary, "k=v")
@@ -542,9 +533,7 @@ class TestSeqObject(unittest.TestCase):
     def test_bytes_echo_request_roundtrip(self):
         # Inbound `seq[byte]` byte-string probe — cbor2 encodes Python
         # `bytes` as CBOR byte string (major type 2), which the Nim
-        # provider expects. CBOR-only.
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("bytes_echo_request only registered in CBOR build")
+        # provider expects.
         r = self.lib.bytes_echo_request(bytes([10, 20, 30, 40, 50]))
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.length, 5)
@@ -552,8 +541,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.last, 50)
 
     def test_bytes_echo_request_empty(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("bytes_echo_request only registered in CBOR build")
         r = self.lib.bytes_echo_request(b"")
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.length, 0)
@@ -561,8 +548,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.last, -1)
 
     def test_scan_request_forward(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("scan_request only registered in CBOR build")
         from typemappingtestlib import KeyRange
         kr = KeyRange(startKey="lo", stopKey="hi")
         r = self.lib.scan_request("scan", kr, False)
@@ -573,8 +558,6 @@ class TestSeqObject(unittest.TestCase):
         self.assertEqual(r.value.rows[0].payload, "scan-row-0:hi")
 
     def test_scan_request_reverse(self):
-        if _BUILD_DIR_NAME != "build_cbor":
-            self.skipTest("scan_request only registered in CBOR build")
         from typemappingtestlib import KeyRange
         kr = KeyRange(startKey="lo", stopKey="hi")
         r = self.lib.scan_request("scan", kr, True)
@@ -899,6 +882,144 @@ class TestSeqObjectEventMemorySafety(unittest.TestCase):
             lib.off_tag_seq_event(h)
         finally:
             lib.shutdown()
+
+
+class TestPreviouslyRestrictedShapes(unittest.TestCase):
+    """Shapes that TYPESUPPORT.md historically marked ❌/❓ before the
+    native ABI was retired. The CBOR codec handles all of them
+    uniformly; these tests lock the behaviour in."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    # ----- seq[Object<seq>] -----
+
+    def test_list_inners_result_empty(self):
+        r = self.lib.list_inners_request(0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.items), [])
+
+    def test_list_inners_result_count_and_fields(self):
+        r = self.lib.list_inners_request(3)
+        self.assertTrue(r.is_ok())
+        items = list(r.value.items)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0].id, 0)
+        self.assertEqual(items[0].tag, "inner-0")
+        self.assertEqual(bytes(items[0].bytes), bytes([0]))
+        self.assertEqual(items[2].id, 2)
+        self.assertEqual(items[2].tag, "inner-2")
+        self.assertEqual(bytes(items[2].bytes), bytes([2, 3, 4]))
+
+    def test_bulk_inners_param_roundtrip(self):
+        gen = self.lib.list_inners_request(5)
+        self.assertTrue(gen.is_ok())
+        r = self.lib.bulk_inners_request(list(gen.value.items))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.idSum, 10)
+        self.assertEqual(r.value.byteCount, 15)
+
+    def test_inners_updated_event(self):
+        received: list[list[Inner]] = []
+        evt = threading.Event()
+
+        def cb(_lib, items):
+            received.append([
+                Inner(id=it.id, tag=it.tag, bytes=bytes(it.bytes)) for it in items
+            ])
+            evt.set()
+
+        h = self.lib.on_inners_updated_event(cb)
+        self.lib.trigger_inners_updated_request(4)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        snap = received[0]
+        self.assertEqual(len(snap), 4)
+        self.assertEqual(snap[0].id, 0)
+        self.assertEqual(snap[0].tag, "evt-0")
+        self.assertEqual(bytes(snap[0].bytes), bytes([0]))
+        self.assertEqual(snap[3].id, 3)
+        self.assertEqual(bytes(snap[3].bytes), bytes([3, 4, 5, 6]))
+        self.lib.off_inners_updated_event(h)
+
+    # ----- array[N, string] / array[N, primitive] -----
+
+    def test_fixed_str_array_result(self):
+        r = self.lib.fixed_str_array_request("tag")
+        self.assertTrue(r.is_ok())
+        self.assertEqual(list(r.value.tags), ["tag-0", "tag-1", "tag-2", "tag-3"])
+
+    def test_set_tags_array_param(self):
+        r = self.lib.set_tags_request(["alpha", "beta", "", "delta"])
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.joined, "alpha|beta||delta")
+
+    def test_sum_prim_array_param(self):
+        r = self.lib.sum_prim_array_request([10, 20, 30, 40])
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.total, 100)
+
+    # ----- array[N, Object] event -----
+
+    def test_fixed_obj_array_event(self):
+        received: list[list[Slot]] = []
+        evt = threading.Event()
+
+        def cb(_lib, slots):
+            received.append([Slot(idx=s.idx, name=s.name) for s in slots])
+            evt.set()
+
+        h = self.lib.on_fixed_obj_array_event(cb)
+        self.lib.trigger_fixed_obj_array_request(100)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        snap = received[0]
+        self.assertEqual(len(snap), 4)
+        self.assertEqual(snap[0].idx, 100)
+        self.assertEqual(snap[0].name, "alpha")
+        self.assertEqual(snap[2].name, "")
+        self.assertEqual(snap[3].idx, 103)
+        self.assertEqual(snap[3].name, "delta with spaces")
+        self.lib.off_fixed_obj_array_event(h)
+
+    # ----- Last-three-❓ probes -----
+
+    def test_nested_obj_inline_field(self):
+        r = self.lib.nested_obj_request("k", "v")
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.label, "k=v")
+        self.assertEqual(r.value.nested.key, "k")
+        self.assertEqual(r.value.nested.value, "v")
+
+    def test_set_slots_obj_array_param(self):
+        slots = [
+            Slot(idx=1, name="alpha"),
+            Slot(idx=2, name="beta"),
+            Slot(idx=3, name=""),
+            Slot(idx=4, name="delta"),
+        ]
+        r = self.lib.set_slots_request(slots)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.summary, "alpha|beta||delta")
+
+    def test_str_array_event(self):
+        received: list[list[str]] = []
+        evt = threading.Event()
+
+        def cb(_lib, words):
+            received.append([str(w) for w in words])
+            evt.set()
+
+        h = self.lib.on_str_array_event(cb)
+        self.lib.trigger_str_array_request("word")
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        snap = received[0]
+        self.assertEqual(snap, ["word-0", "word-1", "word-2", "word-3"])
+        self.lib.off_str_array_event(h)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ What is nim-brokers?
   - [Installation](#installation)
   - [Testing](#testing)
   - [Debug](#debug)
+      - [Compile-flag reference](#compile-flag-reference)
+      - [Examples](#examples)
   - [Types of Brokers](#types-of-brokers)
     - [EventBroker](#eventbroker)
     - [RequestBroker](#requestbroker)
@@ -40,11 +42,7 @@ What is nim-brokers?
   - [Broker FFI API](#broker-ffi-api)
     - [FFI\_API detailed documentation](#ffi_api-detailed-documentation)
     - [Type-support matrix](#type-support-matrix)
-    - [FFI API strategies: CBOR vs Native](#ffi-api-strategies-cbor-vs-native)
-    - [Native FFI strategy](#native-ffi-strategy)
-    - [CBOR FFI strategy](#cbor-ffi-strategy)
-    - [Comparison](#comparison)
-    - [Interface parity of strategies](#interface-parity-of-strategies)
+    - [FFI API strategy](#ffi-api-strategy)
       - [Torpedo Duel — a richer FFI API example](#torpedo-duel--a-richer-ffi-api-example)
   - [Some more details...](#some-more-details)
     - [Non-Object Types](#non-object-types)
@@ -53,7 +51,7 @@ What is nim-brokers?
     - [RequestBroker (single-thread, async)](#requestbroker-single-thread-async)
     - [EventBroker(mt) — example](#eventbrokermt--example)
     - [RequestBroker(mt) — example](#requestbrokermt--example)
-    - [Comparison](#comparison-1)
+    - [Comparison](#comparison)
   - [Platform \& Nim Version Support](#platform--nim-version-support)
     - [Windows toolchain requirements](#windows-toolchain-requirements)
   - [License](#license)
@@ -85,11 +83,70 @@ nimble alltests
 
 ## Debug
 
-As nim-brokers are macro heavy, in order to inspect generated AST during compilation:
+nim-brokers is macro-heavy - better say it generates all the boilerplate around your interfaces and dispatch machinery. 
+To inspect the Nim code that the broker macros (and `registerBrokerLibrary`) emit, compile any project that
+uses them with `-d:brokerDebug`:
 
 ```
 nim c -d:brokerDebug ...
 ```
+
+Every macro expansion is dumped to its own file under
+`build/broker_debug/`, rendered back to Nim source for offline
+examination. Layout for an FFI library example:
+
+```
+build/broker_debug/
+  ├── InitializeRequest__RequestBrokerApi.gen.nim
+  ├── ShutdownRequest__RequestBrokerApi.gen.nim
+  ├── ListDevices__RequestBrokerApi.gen.nim
+  ├── DeviceStatusChanged__EventBrokerApi.gen.nim
+  ├── ...
+  ├── <BrokerType>__RequestBrokerMt.gen.nim   ← underlying MT broker
+  ├── <BrokerType>__EventBrokerMt.gen.nim       (one per API broker —
+  │                                              the (API) layer wraps it)
+  └── <libName>__BrokerLibrary.gen.nim   ← `registerBrokerLibrary` output:
+                                           the FFI C-ABI surface,
+                                           lifecycle, courier wiring,
+                                           dispatch table (~1000 lines
+                                           for a non-trivial library)
+```
+
+Each file opens with a seven-line header naming the role, the broker
+type, and a context note (e.g. `apiName='initialize_request'`). The
+rest is pure ASCII Nim source — open in your editor, `diff` against
+a previous build, or pipe through `nph` for prettier formatting.
+
+#### Compile-flag reference
+
+| Flag | Effect |
+|---|---|
+| `-d:brokerDebug` | Enable the dump. |
+| `-d:brokerDebugDir=<path>` | Override the output directory (default `build/broker_debug`). |
+| `-d:brokerDebugStdout` | *Also* echo the generated AST to stdout — the historical "print to console" behaviour. Default is file-only because the FFI lib stub alone is ~1000 lines and would drown the build log. |
+
+#### Examples
+
+```sh
+# 1. Default — dump under build/broker_debug/
+nim c -d:BrokerFfiApi -d:brokerDebug --threads:on --app:lib --path:. \
+  --outdir:examples/ffiapi/nimlib/build --nimMainPrefix:mylib \
+  examples/ffiapi/nimlib/mylib.nim
+
+# 2. Custom dump location (and ALSO echo to console)
+nim c -d:brokerDebug -d:brokerDebugDir=/tmp/mylib_ast \
+  -d:brokerDebugStdout ...
+
+# 3. Single-file view on demand
+cat build/broker_debug/*.gen.nim > all.gen.nim
+
+# 4. Prettier formatting per broker
+nph build/broker_debug/<libName>__BrokerLibrary.gen.nim
+```
+
+Files are overwritten on rebuild; stale entries from earlier builds
+are NOT auto-cleaned. `rm -rf build/broker_debug` before compiling
+if you want a fresh snapshot.
 
 ## Types of Brokers
 
@@ -142,7 +199,7 @@ RequestBroker:
     text*: string
 
   proc signature*(): Future[Result[Greeting, string]] {.async.}
-  proc signature*(lang: string): Future[Result[Greeting, string]] {.async.}
+  proc signature*(to: string): Future[Result[Greeting, string]] {.async.}
 
 # Implementation is dynamically set:
 Greeting.setProvider(
@@ -150,9 +207,15 @@ Greeting.setProvider(
     ok(Greeting(text: "hello"))
 )
 
+Greeting.setProvider(
+  proc(to: string): Future[Result[Greeting, string]] {.async.} =
+    ok(Greeting(text: "hello " & to))
+)
+
 # use it from anywhere where the definition is visible:
 let res = await Greeting.request()
 assert res.isOk()
+echo res.get().text  # "hello"
 
 Greeting.clearProvider()
 ```
@@ -463,52 +526,29 @@ Architecture, threading behavior, lifecycle requirements, generated API surface,
 
 [Type-support matrix](doc/TYPESUPPORT.md) is available in a separate document.
 
-For the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go) × each FFI mode (native / CBOR), with footnoted defects, recommended idioms, and a worked example.
+For the authoritative reference on which Nim type patterns are supported in each wrapper (C / C++ / Python / Rust / Go), with footnoted defects, recommended idioms, and a worked example.
 
-### FFI API strategies: CBOR vs Native
+### FFI API strategy
 
-Currently developer can choose two major path, decision might be driven on API surface and usage needs.
+The FFI surface is **CBOR-only**. The historical "native" C-ABI codegen
+was retired (see `doc/CBOR_Refactoring.md`); the only build flag is now
+`-d:BrokerFfiApi`.
 
-### Native FFI strategy
+The CBOR strategy serializes all transmittable data into CBOR blobs at the
+ABI boundary and decodes / encodes on the wrapper side. Benefits over the
+old native path: reduced memory allocations, a single fixed ABI shape that
+ports cleanly across languages with CBOR support, and the ability to
+transmit complex structs / collections without a per-type C struct.
 
-This translates every Request/Event -Broker API interface into a plain export C ABI with typed structs and free helpers. The generated header is self-contained and does not require any external dependencies. Buffer ownership rules are per-helper and documented in the generated header. 
+Every library collapses to the same fixed 11-function C ABI plus a single
+event-callback typedef, with CBOR as the on-wire format. Wrappers carry
+the typed surface and decode / encode through language-specific CBOR
+libraries like `jsoncons` (C++), `cbor2` (Python), `ciborium` (Rust), or
+`github.com/fxamacker/cbor` (Go). Buffer ownership rule: every `void*`
+crossing the ABI is allocated by Nim and freed by Nim.
 
-While it is a good strategy where the API surface is reasonable small and transmits mainly primitive types and no complex structs or collections.
-
-Strategy flag: `-d:BrokerFfiApiNative`. This is an explicit opt-in; the default is CBOR.
-
-### CBOR FFI strategy
-
-The CBOR strategy is the **default** FFI surface.
-It is built on top of the idea of serializing all transmittable data into CBOR blobs at the ABI boundary, and decoding/encoding on the wrapper side.
-
-This has great advantages over `native` because of reduced memory allocations and unifies the interface can be easily ported to other languages with CBOR support. It also allows to transmit complex data structures and collections without the need of defining a C struct for each of them.
-
-It collapses every library to the same fixed 10-function C ABI plus a single
-event-callback typedef, with CBOR as the on-wire format. Wrappers
-carry the typed surface and decode/encode through language specific CBOR libraries like `jsoncons`
-(C++) or `cbor2` (Python). Buffer ownership rule: every `void*` crossing the ABI is allocated by Nim and freed by Nim.
-
-The major difference from the native strategy is that the generated header is C++ and is not self-contained and requires the wrapper's CBOR library as a dependency. 
-
-> :exclamation:The generated API surface is in parity with the native strategy above the C ABI layer. The same C++ / Python / Rust / Go wrapper interfaces are available regardless of the underlying ABI strategy.
-
-### Comparison
-| Aspect | Native strategy | CBOR strategy |
-|--------|-----------------|---------------|
-| C ABI surface | Per-request typed structs + free helpers | Fixed 10-function ABI + event callback typedef |
-| Wire format | Native C structs (per-language conversion) | CBOR everywhere (`jsoncons` / `cbor2`) |
-| Buffer ownership | Mixed (per-helper) | Uniform (Nim allocates, Nim frees) |
-| Discovery API | Static headers | Static `<lib>.cddl` + runtime `_listApis` / `_getSchema` |
-| Compile flag | `-d:BrokerFfiApiNative` | `-d:BrokerFfiApiCBOR` (default; also picked by bare `-d:BrokerFfiApi`) |
-
-### Interface parity of strategies
-
-The same Nim implementation can be built with either strategy without changes to the source. 
-- The generated C ABI are different. 
-- Wrapper API surface are semantically equivalent and in functional parity with each other. 
-  - C++ wrapper is always generated
-  - Python / Rust / Go wrapper can be generated for both strategies.
+C++ wrapper is always generated; Python / Rust / Go wrappers are opt-in
+via `-d:BrokerFfiApiGenPy` / `-d:BrokerFfiApiGenRust` / `-d:BrokerFfiApiGenGo`.
 
 > :exclamation: The same example source files can be compiled against either generated header with no changes!
 
@@ -546,16 +586,10 @@ This demonstrates several things that a trivial example cannot:
 Build and run from the repository root:
 
 ```sh
-# native strategy builds:
 nimble runTorpedoExampleCpp
 nimble runTorpedoExamplePy
 nimble runTorpedoExampleRust
 nimble runTorpedoExampleGo
-# CBOR strategy builds:
-nimble runTorpedoExampleCborCpp
-nimble runTorpedoExampleCborPy
-nimble runTorpedoExampleCborRust
-nimble runTorpedoExampleCborGo
 ```
 
 See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full
@@ -741,20 +775,23 @@ Per-request (cross-thread only, transient — no shared-heap alloc per call):
 
 ## Platform & Nim Version Support
 
-Single-thread brokers run on every supported platform under both `--mm:orc`
-and `--mm:refc`. Multi-thread (`(mt)`) brokers and the Broker FFI API have
-narrow, documented carve-outs — refc on Windows is unsupported, refc on
-macOS + Nim 2.2.4 + debug skips a defined set of stress tests, and Nim
-versions older than 2.2.0 are unsupported.
+Every supported platform × Nim version × memory manager combination
+is CI-green on every PR. The only build floor is **Nim ≥ 2.2.0**
+(2.0.x had upstream refc bugs we don't work around). One caveat
+applies on Windows + refc: don't call Nim allocators from your own
+`RegisterWaitForSingleObject` callbacks — see
+[LIMITATION.md](doc/LIMITATION.md) §2.2 for the hazard analysis.
 
-Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`**. ORC has no known
-limitations on any supported platform.
+Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`** for the
+smoothest experience; **Nim ≥ 2.2.4 + refc** also fully supported on
+every platform.
 
-See [LIMITATION.md](doc/LIMITATION.md) for the full support matrix, the
-per-platform issue analysis (Windows refc + chronos thread-pool callback,
-macOS + 2.2.4 stdlib `Channel[T].send` regression, devel allocator
-regression, etc.), and the compile-time test-exclusion mechanism used to
-keep CI green on the known-fragile combos.
+The companion [`doc/design/LESSONS_LEARNED.md`](doc/design/LESSONS_LEARNED.md)
+preserves the diagnostic history of the issues that closed during
+the Round-2 retirement: stdlib `Channel[T]` allocator races, chronos
+Future allocator pressure under high-frequency FFI RPC,
+provider-thread teardown ordering, and the Windows-refc-chronos
+hazard that turned out narrower than feared.
 
 ### Windows toolchain requirements
 
@@ -764,7 +801,7 @@ produces cross-heap crashes). When running the AddressSanitizer tasks,
 `clang_rt.asan_dynamic-x86_64.dll` from
 `C:\Program Files\LLVM\lib\clang\<ver>\lib\windows\` must also be on
 `PATH`; the `memcheck_ci.yml` workflow handles this for CI. See
-LIMITATION.md → §2.1 for the toolchain rationale.
+LIMITATION.md → §3 for the toolchain rationale.
 
 ## License
 

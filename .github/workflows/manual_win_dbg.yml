@@ -11,8 +11,7 @@ on:
         options:
           - test
           - testApi
-          - testFfiApi
-          - test testApi testFfiApi
+          - test testApi
 
 permissions:
   contents: read

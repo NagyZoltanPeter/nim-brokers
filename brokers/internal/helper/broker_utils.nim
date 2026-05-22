@@ -17,6 +17,19 @@ type ParsedBrokerType* = object
   fieldNames*: seq[NimNode]
   fieldTypes*: seq[NimNode]
 
+proc toSnakeCase*(name: string): string {.compileTime.} =
+  ## Converts PascalCase / camelCase to snake_case. Shared between the
+  ## CBOR codegen surface and any kept compile-time helper that needs to
+  ## derive a wire name from a Nim identifier.
+  result = ""
+  for i, ch in name:
+    if ch in {'A' .. 'Z'}:
+      if i > 0 and name[i - 1] notin {'A' .. 'Z', '_'}:
+        result.add('_')
+      result.add(chr(ord(ch) + 32))
+    else:
+      result.add(ch)
+
 proc sanitizeIdentName*(node: NimNode): string =
   var raw = $node
   var sanitizedName = newStringOfCap(raw.len)

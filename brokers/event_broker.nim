@@ -87,16 +87,14 @@
 import std/[macros, strutils, tables]
 import chronos, chronicles, results
 import ./internal/helper/broker_utils, ./broker_context
+import ./internal/broker_debug
 
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_event_broker
   export mt_config, mt_event_broker
 
-when compileOption("threads") and
-    (defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or defined(BrokerFfiApiNative)):
-  import ./internal/api_event_broker
-  export api_event_broker
-
+when compileOption("threads") and defined(BrokerFfiApi):
+  # Part A — native C-ABI codegen retired. See note in request_broker.nim.
   import ./internal/api_event_broker_cbor
   export api_event_broker_cbor
 
@@ -561,7 +559,9 @@ proc generateEventBroker(body: NimNode): NimNode =
     result.add(typedescEmitProcCtx)
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("EventBroker", sanitized, result)
+    when defined(brokerDebugStdout):
+      echo result.repr
 
 macro EventBroker*(args: varargs[untyped]): untyped =
   ## Single-thread default mode, or explicit mode selector with optional kwargs.
@@ -607,11 +607,6 @@ macro EventBroker*(args: varargs[untyped]): untyped =
       let cfg = parseMtEvtKwargs(split.kwargs)
       generateMtEventBroker(body, cfg)
   of ebApi:
-    if split.kwargs.len > 0:
-      error(
-        "EventBroker(API) does not accept kwargs (got: " & split.kwargs[0].repr & ")",
-        split.kwargs[0],
-      )
     when not compileOption("threads"):
       {.
         error:
@@ -619,14 +614,17 @@ macro EventBroker*(args: varargs[untyped]): untyped =
           "Compile with `--threads:on` to use API EventBroker."
       .}
     else:
-      when defined(BrokerFfiApi) or defined(BrokerFfiApiCBOR) or
-          defined(BrokerFfiApiNative):
-        when brokerFfiMode == mfCbor:
-          generateApiCborEventBroker(body)
-        else:
-          generateApiEventBroker(body)
+      when defined(BrokerFfiApi):
+        # Validate kwargs at the outer macro so errors point at the
+        # user's call site, then pass them through to the deferred
+        # codegen which re-parses them into an MtEvtCfg (the API
+        # broker rides the same MT lane internally, so the same
+        # capacity knobs apply).
+        discard parseMtEvtKwargs(split.kwargs)
+        generateApiCborEventBroker(body, split.kwargs)
       else:
-        generateMtEventBroker(body, defaultMtEvtCfg())
+        let cfg = parseMtEvtKwargs(split.kwargs)
+        generateMtEventBroker(body, cfg)
   of ebDefault:
     if split.kwargs.len > 0:
       error(

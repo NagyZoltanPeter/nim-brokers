@@ -1,21 +1,13 @@
-// Rust port of test_typemappingtestlib.cpp — exercises every Nim→C→Rust
+// Rust port of test_typemappingtestlib.cpp — exercises every Nim→Rust
 // type mapping through the generated Rust wrapper (typemappingtestlib_rs).
 // One Rust function per C++ test, preserved in the same order.
 //
-//     cargo run                 # native FFI build  (build/)
-//     cargo run --features cbor # CBOR FFI build    (build_cbor/)
+//     cargo run   # builds against the FFI library in build/
 
-#[cfg(not(feature = "cbor"))]
 #[path = "../../build/typemappingtestlib_rs/src/lib.rs"]
 mod lib;
 
-#[cfg(feature = "cbor")]
-#[path = "../../build_cbor/typemappingtestlib_rs/src/lib.rs"]
-mod lib;
-
-use lib::{Tag, Typemappingtestlib};
-#[cfg(feature = "cbor")]
-use lib::KeyRange;
+use lib::{Inner, KeyRange, Slot, Tag, Typemappingtestlib};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -304,10 +296,7 @@ fn test_primitive_int_result_request() {
     let r = lib.int_result_request(21);
     check!(r.is_ok());
     if let Some(v) = r.value() {
-        #[cfg(feature = "cbor")]
-        check_eq!(*v, 42); // CBOR: IntResultRequest is the bare i32 alias
-        #[cfg(not(feature = "cbor"))]
-        check_eq!(v.value, 42); // native: struct with a single `value` field
+        check_eq!(*v, 42); // IntResultRequest is the bare i32 alias
     }
     lib.shutdown();
 }
@@ -1433,7 +1422,6 @@ fn test_obj_seq_param_string_encoding() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_obj_as_param() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1545,7 +1533,6 @@ fn test_opt_seq_absent() {
 // Inbound `seq[byte]` probe — verifies the Rust args struct serialises
 // `Vec<u8>` as a CBOR byte string (via `#[serde(with = "serde_bytes")]`)
 // rather than a sequence-of-int that the Nim decoder rejects.
-#[cfg(feature = "cbor")]
 fn test_bytes_echo_request_roundtrip() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1559,7 +1546,6 @@ fn test_bytes_echo_request_roundtrip() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_bytes_echo_request_empty() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1573,7 +1559,6 @@ fn test_bytes_echo_request_empty() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_scan_request_forward() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -1589,7 +1574,6 @@ fn test_scan_request_forward() {
     lib.shutdown();
 }
 
-#[cfg(feature = "cbor")]
 fn test_scan_request_reverse() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -2637,6 +2621,198 @@ fn test_seq_object_event_concurrent_listeners_and_requesters() {
 }
 
 // ===========================================================================
+// TestPreviouslyRestrictedShapes — formerly ❌ in TYPESUPPORT.md.
+// ===========================================================================
+
+fn test_list_inners_result_empty() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.list_inners_request(0);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check!(v.items.is_empty());
+    }
+    lib.shutdown();
+}
+
+fn test_list_inners_result_count_and_fields() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.list_inners_request(3);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.items.len(), 3usize);
+        check_eq!(v.items[0].id, 0);
+        check_eq!(&v.items[0].tag, &"inner-0".to_string());
+        check_eq!(&v.items[0].bytes, &vec![0u8]);
+        check_eq!(v.items[2].id, 2);
+        check_eq!(&v.items[2].tag, &"inner-2".to_string());
+        check_eq!(&v.items[2].bytes, &vec![2u8, 3, 4]);
+    }
+    lib.shutdown();
+}
+
+fn test_bulk_inners_param_roundtrip() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let gen = lib.list_inners_request(5);
+    check!(gen.is_ok());
+    let items: Vec<Inner> = gen.value().map(|v| v.items.clone()).unwrap_or_default();
+    let r = lib.bulk_inners_request(items);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.idSum, 10i64);
+        check_eq!(v.byteCount, 15i64);
+    }
+    lib.shutdown();
+}
+
+fn test_inners_updated_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<Inner>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_inners_updated_event(move |items: Vec<Inner>| list_push(&cb, items));
+    let _ = lib.trigger_inners_updated_request(4);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let items = &snap[0];
+        check_eq!(items.len(), 4usize);
+        check_eq!(items[0].id, 0);
+        check_eq!(&items[0].tag, &"evt-0".to_string());
+        check_eq!(&items[0].bytes, &vec![0u8]);
+        check_eq!(items[3].id, 3);
+        check_eq!(&items[3].bytes, &vec![3u8, 4, 5, 6]);
+    }
+    lib.off_inners_updated_event(h);
+    lib.shutdown();
+}
+
+fn test_fixed_str_array_result() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.fixed_str_array_request("tag".to_string());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.tags.len(), 4usize);
+        check_eq!(&v.tags[0], &"tag-0".to_string());
+        check_eq!(&v.tags[1], &"tag-1".to_string());
+        check_eq!(&v.tags[2], &"tag-2".to_string());
+        check_eq!(&v.tags[3], &"tag-3".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_set_tags_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.set_tags_request(vec![
+        "alpha".to_string(),
+        "beta".to_string(),
+        "".to_string(),
+        "delta".to_string(),
+    ]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.joined, &"alpha|beta||delta".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_sum_prim_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.sum_prim_array_request(vec![10i32, 20, 30, 40]);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.total, 100i64);
+    }
+    lib.shutdown();
+}
+
+fn test_fixed_obj_array_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<Slot>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_fixed_obj_array_event(move |slots: Vec<Slot>| list_push(&cb, slots));
+    let _ = lib.trigger_fixed_obj_array_request(100);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let slots = &snap[0];
+        check_eq!(slots.len(), 4usize);
+        check_eq!(slots[0].idx, 100);
+        check_eq!(&slots[0].name, &"alpha".to_string());
+        check_eq!(&slots[2].name, &"".to_string());
+        check_eq!(slots[3].idx, 103);
+        check_eq!(&slots[3].name, &"delta with spaces".to_string());
+    }
+    lib.off_fixed_obj_array_event(h);
+    lib.shutdown();
+}
+
+// --- Last-three-❓ probes -------------------------------------------------
+
+fn test_nested_obj_inline_field() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.nested_obj_request("k".to_string(), "v".to_string());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.label, &"k=v".to_string());
+        check_eq!(&v.nested.key, &"k".to_string());
+        check_eq!(&v.nested.value, &"v".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_set_slots_obj_array_param() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let slots = vec![
+        Slot { idx: 1, name: "alpha".to_string() },
+        Slot { idx: 2, name: "beta".to_string() },
+        Slot { idx: 3, name: "".to_string() },
+        Slot { idx: 4, name: "delta".to_string() },
+    ];
+    let r = lib.set_slots_request(slots);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.summary, &"alpha|beta||delta".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_str_array_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<String>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_str_array_event(move |words: Vec<String>| list_push(&cb, words));
+    let _ = lib.trigger_str_array_request("word".to_string());
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        let words = &snap[0];
+        check_eq!(words.len(), 4usize);
+        check_eq!(&words[0], &"word-0".to_string());
+        check_eq!(&words[1], &"word-1".to_string());
+        check_eq!(&words[2], &"word-2".to_string());
+        check_eq!(&words[3], &"word-3".to_string());
+    }
+    lib.off_str_array_event(h);
+    lib.shutdown();
+}
+
+// ===========================================================================
 // main
 // ===========================================================================
 
@@ -2762,7 +2938,6 @@ fn main() {
     run_test("test_opt_seq_absent", test_opt_seq_absent);
     run_test("test_opt_obj_present", test_opt_obj_present);
     run_test("test_opt_obj_absent", test_opt_obj_absent);
-    #[cfg(feature = "cbor")]
     {
         run_test("test_obj_as_param", test_obj_as_param);
         run_test("test_bytes_echo_request_roundtrip", test_bytes_echo_request_roundtrip);
@@ -2796,6 +2971,19 @@ fn main() {
     run_test("test_seq_object_event_callback_data_correctness", test_seq_object_event_callback_data_correctness);
     run_test("test_seq_object_event_rapid_fire_no_leak", test_seq_object_event_rapid_fire_no_leak);
     run_test("test_seq_object_event_concurrent_listeners_and_requesters", test_seq_object_event_concurrent_listeners_and_requesters);
+
+    println!("\n--- TestPreviouslyRestrictedShapes ---");
+    run_test("test_list_inners_result_empty", test_list_inners_result_empty);
+    run_test("test_list_inners_result_count_and_fields", test_list_inners_result_count_and_fields);
+    run_test("test_bulk_inners_param_roundtrip", test_bulk_inners_param_roundtrip);
+    run_test("test_inners_updated_event", test_inners_updated_event);
+    run_test("test_fixed_str_array_result", test_fixed_str_array_result);
+    run_test("test_set_tags_array_param", test_set_tags_array_param);
+    run_test("test_sum_prim_array_param", test_sum_prim_array_param);
+    run_test("test_fixed_obj_array_event", test_fixed_obj_array_event);
+    run_test("test_nested_obj_inline_field", test_nested_obj_inline_field);
+    run_test("test_set_slots_obj_array_param", test_set_slots_obj_array_param);
+    run_test("test_str_array_event", test_str_array_event);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

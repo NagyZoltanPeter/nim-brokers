@@ -35,7 +35,8 @@ import
   ./mt_broker_common,
   ./mt_queue,
   ./mt_codec,
-  ./mt_config
+  ./mt_config,
+  ./broker_debug
 
 export results, chronos, broker_context, chronicles, mt_broker_common, mt_config
 
@@ -77,18 +78,26 @@ proc generateMtEventBroker*(
 
   # Apply type-driven default for maxPayloadBytes when neither a kwarg
   # nor a preset set it. Warn if the type is unclassifiable so the user
-  # knows to provide an explicit override.
+  # knows to provide an explicit override. Void / zero-field bodies
+  # collapse to the scalar bucket: a payload-less notification only
+  # ships the CBOR envelope (a handful of bytes), and the conservative
+  # 1 KB default would otherwise pin a full megabyte slab per event
+  # type for no reason.
   var cfg = cfgIn
-  if cfg.maxPayloadBytesOrigin == "default" and fieldTypes.len > 0:
-    let cls = classifyFieldsMax(fieldTypes)
-    cfg.maxPayloadBytes = cls.bytes
-    cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
-    if cls.reason.startsWith("unclassifiable"):
-      warning(
-        "[brokers] EventBroker(" & typeDisplayName & ") could not auto-size payload (" &
-          cls.reason & "); falling back to " & $cls.bytes &
-          " B. Override with `maxPayloadBytes = N`."
-      )
+  if cfg.maxPayloadBytesOrigin == "default":
+    if fieldTypes.len > 0:
+      let cls = classifyFieldsMax(fieldTypes)
+      cfg.maxPayloadBytes = cls.bytes
+      cfg.maxPayloadBytesOrigin = "auto:" & cls.reason
+      if cls.reason.startsWith("unclassifiable"):
+        warning(
+          "[brokers] EventBroker(" & typeDisplayName & ") could not auto-size payload (" &
+            cls.reason & "); falling back to " & $cls.bytes &
+            " B. Override with `maxPayloadBytes = N`."
+        )
+    else:
+      cfg.maxPayloadBytes = ScalarBytes
+      cfg.maxPayloadBytesOrigin = "auto:void"
 
   when not defined(brokerConfigSilent):
     hint(fmtEvtCfgSummary(typeDisplayName, cfg))
@@ -132,6 +141,17 @@ proc generateMtEventBroker*(
   let emitImplIdent = ident("emit" & typeDisplayName & "MtImpl")
   let dropListenerImplIdent = ident("drop" & typeDisplayName & "MtListenerImpl")
   let dropAllListenersImplIdent = ident("dropAll" & typeDisplayName & "MtListenersImpl")
+  # Part D-3: optional companion hook fired by `dropAllListenersImpl`
+  # after listener clearing completes. Used by the CBOR FFI library
+  # (`api_library.nim`) to clear the foreign-subscriber registry +
+  # reset the per-event atomic counter in lock-step with Nim-side
+  # listener drops. Single slot per type — the only intended user is
+  # the per-event installer registered at `_createContext` time.
+  let dropAllHookProcTypeIdent = ident(typeDisplayName & "MtDropAllHook")
+  let dropAllHookIdent = ident("g" & typeDisplayName & "MtDropAllHook")
+  let dropAllHookLockIdent = ident("g" & typeDisplayName & "MtDropAllHookLock")
+  let dropAllHookInitIdent = ident("g" & typeDisplayName & "MtDropAllHookInit")
+  let setDropAllHookIdent = ident("setDropAll" & typeDisplayName & "Hook")
   let shutdownProcessLoopsForCtxIdent =
     ident("shutdownProcessLoopsForCtx" & typeDisplayName)
 
@@ -153,6 +173,9 @@ proc generateMtEventBroker*(
 
         `exportedHandlerProcIdent` =
           proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
+
+        `dropAllHookProcTypeIdent` =
+          proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
 
         `bucketName` = object
           brokerCtx: BrokerContext
@@ -181,6 +204,11 @@ proc generateMtEventBroker*(
         ## losers spin until 2.
       var `globalSlabIdent`: PayloadSlab
       var `globalSlabInitIdent`: Atomic[int]
+      # Part D-3 dropAllListeners hook. Single slot per event type;
+      # `dropAllHookIdent` is `nil` when no hook is registered.
+      var `dropAllHookIdent`: `dropAllHookProcTypeIdent`
+      var `dropAllHookLockIdent`: Lock
+      var `dropAllHookInitIdent`: Atomic[int]
         ## same protocol as `globalInitIdent`, gating the global slab.
   )
 
@@ -217,6 +245,18 @@ proc generateMtEventBroker*(
             `bucketName`, `globalBucketCapIdent`
           ))
           `globalBucketCountIdent` = 0
+          # Part D-3 dropAllListeners hook storage init. Same one-shot
+          # CAS-init protocol as the main globals so concurrent callers
+          # see an initialised lock before any reader/writer touches it.
+          var hookExpected = 0
+          if `dropAllHookInitIdent`.compareExchange(
+            hookExpected, 1, moAcquire, moRelaxed
+          ):
+            initLock(`dropAllHookLockIdent`)
+            `dropAllHookInitIdent`.store(2, moRelease)
+          else:
+            while `dropAllHookInitIdent`.load(moAcquire) != 2:
+              discard
           `globalInitIdent`.store(2, moRelease)
         else:
           while `globalInitIdent`.load(moAcquire) != 2:
@@ -713,6 +753,21 @@ proc generateMtEventBroker*(
           discard ring.tryEnqueue(CtrlClearListeners)
           fireBrokerSignal(sig)
 
+        # Part D-3: invoke the companion cleanup hook (if any) AFTER
+        # listener clearing. The CBOR FFI library registers this hook
+        # in its per-event installer to clear the foreign-subscriber
+        # registry + reset the per-event atomic counter, keeping
+        # `SubsRegistry` in lock-step with the MT EventBroker listener
+        # table on dropAllListeners. The hook runs unlocked on the
+        # caller's thread; it's the hook's responsibility to acquire
+        # whatever locks its data structures need.
+        var hookSnap: `dropAllHookProcTypeIdent` = nil
+        {.cast(gcsafe).}:
+          withLock(`dropAllHookLockIdent`):
+            hookSnap = `dropAllHookIdent`
+        if not hookSnap.isNil:
+          hookSnap(brokerCtx)
+
   )
 
   # ── Public dropListener / dropAllListeners ────────────────────────────
@@ -733,6 +788,19 @@ proc generateMtEventBroker*(
 
       proc dropAllListeners*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext) =
         `dropAllListenersImplIdent`(brokerCtx)
+
+      proc `setDropAllHookIdent`*(
+          _: typedesc[`typeIdent`], hook: `dropAllHookProcTypeIdent`
+      ) =
+        ## Part D-3: register a companion cleanup hook fired by
+        ## `dropAllListeners` (any overload) AFTER listener clearing
+        ## completes. Passing `nil` clears the slot. Single slot per
+        ## event type — the intended sole caller is the CBOR FFI
+        ## library's per-event installer.
+        `initProcIdent`()
+        {.cast(gcsafe).}:
+          withLock(`dropAllHookLockIdent`):
+            `dropAllHookIdent` = hook
 
   )
 
@@ -832,4 +900,6 @@ proc generateMtEventBroker*(
   )
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("EventBrokerMt", typeDisplayName, result)
+    when defined(brokerDebugStdout):
+      echo result.repr

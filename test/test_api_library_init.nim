@@ -1,14 +1,34 @@
-import testutils/unittests
-import chronos
-import std/[algorithm, atomics, locks, os]
+## Integration tests for the CBOR FFI runtime emitted by
+## `registerBrokerLibrary` under `-d:BrokerFfiApi`.
+##
+## The test binary inlines the broker library (no .so loading) and drives
+## the generated C exports as ordinary Nim procs. This exercises:
+## - `<lib>_initialize` idempotency
+## - `<lib>_createContext` end-to-end (spawn processing thread, run
+##   setupProviders, return a usable ctx)
+## - `<lib>_allocBuffer` / `<lib>_freeBuffer` ownership conventions
+## - `<lib>_call` for zero-arg and arg-based requests, including round-
+##   tripping CBOR-encoded request payloads and decoded response envelopes
+## - `<lib>_call` framework-error path for unknown apiName
+## - `<lib>_shutdown` cleanup
 
-import brokers/[api_library, broker_context, event_broker, request_broker]
+import std/[options, strutils]
+import results
+import testutils/unittests
+import brokers/[event_broker, request_broker, broker_context, api_library]
+import brokers/internal/api_cbor_codec
+
+# ---------------------------------------------------------------------------
+# Inline mini-library
+# ---------------------------------------------------------------------------
 
 RequestBroker(API):
   type InitializeRequest = object
     initialized*: bool
 
-  proc signature*(): Future[Result[InitializeRequest, string]] {.async.}
+  proc signature*(
+    configPath: string
+  ): Future[Result[InitializeRequest, string]] {.async.}
 
 RequestBroker(API):
   type ShutdownRequest = object
@@ -16,113 +36,52 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
-RequestBroker(API):
-  type PingRequest = object
-    value*: int32
+# Regression coverage for the API broker kwargs surface — the
+# `(API, ...)` macro must accept the same capacity / preset knobs as
+# `(mt, ...)` because the MT lane is what carries the broker
+# internally. Two flavours below: a named built-in preset, and
+# individual kwargs overriding defaults.
+RequestBroker(API, preset = tinyFootprint):
+  type GetStatus = object
+    online*: bool
+    counter*: int32
 
-  proc signature*(): Future[Result[PingRequest, string]] {.async.}
+  proc signature*(): Future[Result[GetStatus, string]] {.async.}
 
-RequestBroker(API):
-  type DualNamingRequest = object
-    label*: string
-    code*: int32
+RequestBroker(API, queueDepth = 64, maxPayloadBytes = 256, maxResponseBytes = 512):
+  type AddNumbers = object
+    sum*: int64
 
-  proc signature*(): Future[Result[DualNamingRequest, string]] {.async.}
-  proc signatureWithInput*(
-    input: string
-  ): Future[Result[DualNamingRequest, string]] {.async.}
-
-EventBroker(API):
-  type ReadyEvent = object
-    value*: int32
-
-var gLibCtx {.threadvar.}: BrokerContext
-var gReadyCallbackCount: Atomic[int32]
-var gReadyCallbackValue: Atomic[int32]
-var gSetupProvidersCount: Atomic[int32]
-var gSetupPingBucketCount: Atomic[int32]
-var gSetupShutdownBucketCount: Atomic[int32]
-var gSetupInitializeBucketCount: Atomic[int32]
-var gSetupProvidersShouldFail: Atomic[int32]
-var gShutdownRequestCount: Atomic[int32]
-
-proc recordRequestBrokerBuckets() =
-  withLock(gInitializeRequestMtLock):
-    gSetupInitializeBucketCount.store(int32(gInitializeRequestMtBucketCount))
-  withLock(gShutdownRequestMtLock):
-    gSetupShutdownBucketCount.store(int32(gShutdownRequestMtBucketCount))
-  withLock(gPingRequestMtLock):
-    gSetupPingBucketCount.store(int32(gPingRequestMtBucketCount))
-
-proc resetSetupBucketState() =
-  gSetupPingBucketCount.store(-1)
-  gSetupShutdownBucketCount.store(-1)
-  gSetupInitializeBucketCount.store(-1)
+  proc signature*(a: int32, b: int32): Future[Result[AddNumbers, string]] {.async.}
 
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
-  gLibCtx = ctx
-  discard gSetupProvidersCount.fetchAdd(1)
+  proc initProv(
+      configPath: string
+  ): Future[Result[InitializeRequest, string]] {.async.} =
+    return Result[InitializeRequest, string].ok(InitializeRequest(initialized: true))
 
-  if gSetupProvidersShouldFail.load() == 1:
-    return err("simulated setupProviders failure")
+  ?InitializeRequest.setProvider(ctx, initProv)
 
-  let initializeProviderRes = InitializeRequest.setProvider(
-    ctx,
-    proc(): Future[Result[InitializeRequest, string]] {.closure, async.} =
-      await ReadyEvent.emit(gLibCtx, ReadyEvent(value: 7))
-      return ok(InitializeRequest(initialized: true)),
-  )
-  if initializeProviderRes.isErr():
-    return err(
-      "failed to register InitializeRequest provider: " & initializeProviderRes.error()
-    )
+  proc shutProv(): Future[Result[ShutdownRequest, string]] {.async.} =
+    return Result[ShutdownRequest, string].ok(ShutdownRequest(status: 0))
 
-  let shutdownProviderRes = ShutdownRequest.setProvider(
-    ctx,
-    proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
-      discard gShutdownRequestCount.fetchAdd(1)
-      return ok(ShutdownRequest(status: 0)),
-  )
-  if shutdownProviderRes.isErr():
-    return
-      err("failed to register ShutdownRequest provider: " & shutdownProviderRes.error())
+  ?ShutdownRequest.setProvider(ctx, shutProv)
 
-  let pingProviderRes = PingRequest.setProvider(
-    ctx,
-    proc(): Future[Result[PingRequest, string]] {.closure, async.} =
-      return ok(PingRequest(value: 99)),
-  )
-  if pingProviderRes.isErr():
-    return err("failed to register PingRequest provider: " & pingProviderRes.error())
+  proc statusProv(): Future[Result[GetStatus, string]] {.async.} =
+    return Result[GetStatus, string].ok(GetStatus(online: true, counter: 99))
 
-  let dualNamingProviderRes = DualNamingRequest.setProvider(
-    ctx,
-    proc(): Future[Result[DualNamingRequest, string]] {.closure, async.} =
-      return ok(DualNamingRequest(label: "default", code: 1)),
-  )
-  if dualNamingProviderRes.isErr():
-    return err(
-      "failed to register DualNamingRequest zero-arg provider: " &
-        dualNamingProviderRes.error()
-    )
+  ?GetStatus.setProvider(ctx, statusProv)
 
-  let dualNamingWithInputProviderRes = DualNamingRequest.setProvider(
-    ctx,
-    proc(input: string): Future[Result[DualNamingRequest, string]] {.closure, async.} =
-      return ok(DualNamingRequest(label: "input:" & input, code: int32(input.len))),
-  )
-  if dualNamingWithInputProviderRes.isErr():
-    return err(
-      "failed to register DualNamingRequest input provider: " &
-        dualNamingWithInputProviderRes.error()
-    )
+  proc addProv(a: int32, b: int32): Future[Result[AddNumbers, string]] {.async.} =
+    return Result[AddNumbers, string].ok(AddNumbers(sum: int64(a) + int64(b)))
 
-  recordRequestBrokerBuckets()
-  ok()
+  ?AddNumbers.setProvider(ctx, addProv)
+
+  return Result[void, string].ok()
 
 registerBrokerLibrary:
   name:
-    "apitestlib"
+    "cbtest"
   version:
     "0.1.0"
   initializeRequest:
@@ -130,252 +89,124 @@ registerBrokerLibrary:
   shutdownRequest:
     ShutdownRequest
 
-proc readyCallback(ctx: uint32, userData: pointer, value: int32) {.cdecl.} =
-  discard ctx
-  discard userData
-  gReadyCallbackValue.store(value)
-  discard gReadyCallbackCount.fetchAdd(1)
+# ---------------------------------------------------------------------------
+# Test helpers — wrap the generated C exports for ergonomic use.
+# ---------------------------------------------------------------------------
 
-proc clearError(msg: cstring) =
-  if not msg.isNil:
-    freeCString(msg)
+proc copyToCBuffer(bytes: openArray[byte]): pointer =
+  ## Allocates a `<lib>_allocBuffer`-equivalent buffer and copies bytes in.
+  ## We call the generated `cbtest_allocBuffer` directly so the buffer
+  ## ownership matches what `<lib>_call` expects (Nim-owned, freed inside
+  ## `<lib>_call`).
+  result = cbtest_allocBuffer(int32(bytes.len))
+  if bytes.len > 0:
+    copyMem(result, unsafeAddr bytes[0], bytes.len)
 
-proc pingBucketCtxs(): seq[uint32] =
-  withLock(gPingRequestMtLock):
-    for i in 0 ..< gPingRequestMtBucketCount:
-      result.add(uint32(gPingRequestMtBuckets[i].brokerCtx))
+proc takeRespBuffer(buf: pointer, len: int32): seq[byte] =
+  ## Copies the response buffer into a Nim seq and frees the C-side
+  ## allocation, matching the documented caller obligation.
+  if buf.isNil or len <= 0:
+    return @[]
+  result = newSeq[byte](len.int)
+  copyMem(addr result[0], buf, len.int)
+  cbtest_freeBuffer(buf)
 
-proc shutdownBucketCtxs(): seq[uint32] =
-  withLock(gShutdownRequestMtLock):
-    for i in 0 ..< gShutdownRequestMtBucketCount:
-      result.add(uint32(gShutdownRequestMtBuckets[i].brokerCtx))
+proc callApi(
+    ctx: uint32, apiName: string, reqPayload: openArray[byte] = []
+): tuple[status: int32, resp: seq[byte]] =
+  let inBuf =
+    if reqPayload.len > 0:
+      copyToCBuffer(reqPayload)
+    else:
+      nil
+  var respBuf: pointer = nil
+  var respLen: int32 = 0
+  let status = cbtest_call(
+    ctx, apiName.cstring, inBuf, int32(reqPayload.len), addr respBuf, addr respLen
+  )
+  let resp = takeRespBuffer(respBuf, respLen)
+  (status, resp)
 
-proc initializeBucketCtxs(): seq[uint32] =
-  withLock(gInitializeRequestMtLock):
-    for i in 0 ..< gInitializeRequestMtBucketCount:
-      result.add(uint32(gInitializeRequestMtBuckets[i].brokerCtx))
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
-proc freeCreateContextResult(r: var apitestlibCreateContextResult) =
-  free_apitestlib_create_context_result(addr r)
+suite "API library init (CBOR mode)":
+  test "createContext returns a usable ctx and shutdown cleans it up":
+    var err: cstring = nil
+    let ctx = cbtest_createContext(addr err)
+    check ctx != 0'u32
+    check err.isNil
+    check cbtest_shutdown(ctx) == 0'i32
 
-proc freeDualNamingResult(r: var DualNamingRequestCResult) =
-  apitestlib_free_dual_naming_result(addr r)
-
-proc createContext(): uint32 =
-  var createContextRes = apitestlib_createContext()
-  defer:
-    freeCreateContextResult(createContextRes)
-  check createContextRes.error_message.isNil()
-  clearError(createContextRes.error_message)
-  result = createContextRes.ctx
-
-proc assertSingleContextBuckets(ctx: uint32) =
-  check gSetupProvidersCount.load() >= 1
-  check gSetupPingBucketCount.load() == 1
-  check gSetupShutdownBucketCount.load() == 1
-  check gSetupInitializeBucketCount.load() == 1
-  check pingBucketCtxs() == @[ctx]
-  check shutdownBucketCtxs() == @[ctx]
-  check initializeBucketCtxs() == @[ctx]
-
-suite "API library init":
-  test "lib_createContext returns only after immediate requests and listener registration are ready":
-    gSetupProvidersShouldFail.store(0)
-    gShutdownRequestCount.store(0)
-    gReadyCallbackCount.store(0)
-    gReadyCallbackValue.store(-1)
-
-    let ctx = createContext()
+  test "zero-arg request round-trip (GetStatus)":
+    var err: cstring = nil
+    let ctx = cbtest_createContext(addr err)
     check ctx != 0'u32
 
-    let handle = apitestlib_onReadyEvent(ctx, readyCallback, nil)
-    check handle > 0'u64
+    let (status, resp) = callApi(ctx, "get_status", @[])
+    check status == 0'i32
+    check resp.len > 0
 
-    let pingRes = apitestlib_ping(ctx)
-    check pingRes.error_message.isNil()
-    check pingRes.value == 99
-    clearError(pingRes.error_message)
+    let dec = cborDecodeResultEnvelope(resp, GetStatus)
+    check dec.isOk()
+    check dec.value.online == true
+    check dec.value.counter == 99'i32
 
-    let initializeRes = apitestlib_initialize(ctx)
-    check initializeRes.error_message.isNil()
-    check initializeRes.initialized == true
-    clearError(initializeRes.error_message)
+    discard cbtest_shutdown(ctx)
 
-    var waitedMs = 0
-    while gReadyCallbackCount.load() == 0 and waitedMs < 1000:
-      sleep(10)
-      waitedMs += 10
-
-    check gReadyCallbackCount.load() >= 1
-    check gReadyCallbackValue.load() == 7
-
-    apitestlib_offReadyEvent(ctx, handle)
-
-    apitestlib_shutdown(ctx)
-    check gShutdownRequestCount.load() == 1
-
-    var activeCtxCount = -1
-    withLock(gapitestlibCtxsLock):
-      activeCtxCount = gapitestlibCtxs.len
-    check activeCtxCount == 0
-    check pingBucketCtxs().len == 0
-    check shutdownBucketCtxs().len == 0
-    check initializeBucketCtxs().len == 0
-
-  test "shutdown removes registry entry and repeated create/shutdown cycles work":
-    gSetupProvidersShouldFail.store(0)
-    gShutdownRequestCount.store(0)
-    for _ in 0 ..< 3:
-      resetSetupBucketState()
-      let ctx = createContext()
-      check ctx != 0'u32
-
-      var activeCtxCount = -1
-      withLock(gapitestlibCtxsLock):
-        activeCtxCount = gapitestlibCtxs.len
-      check activeCtxCount == 1
-      assertSingleContextBuckets(ctx)
-
-      let pingRes = apitestlib_ping(ctx)
-      if not pingRes.error_message.isNil:
-        echo "ping buckets: ", pingBucketCtxs()
-        echo "shutdown buckets: ", shutdownBucketCtxs()
-        echo "initialize buckets: ", initializeBucketCtxs()
-        echo "apitestlib_ping error: ", $pingRes.error_message
-      check pingRes.error_message.isNil()
-      check pingRes.value == 99
-      clearError(pingRes.error_message)
-
-      let shutdownCountBefore = gShutdownRequestCount.load()
-      apitestlib_shutdown(ctx)
-      check gShutdownRequestCount.load() == shutdownCountBefore + 1
-
-      withLock(gapitestlibCtxsLock):
-        activeCtxCount = gapitestlibCtxs.len
-      check activeCtxCount == 0
-
-  test "two library instances coexist and remain independently usable":
-    gSetupProvidersShouldFail.store(0)
-    gShutdownRequestCount.store(0)
-    let ctx1 = createContext()
-    let ctx2 = createContext()
-    check ctx1 != 0'u32
-    check ctx2 != 0'u32
-    check ctx1 != ctx2
-
-    var activeCtxCount = -1
-    withLock(gapitestlibCtxsLock):
-      activeCtxCount = gapitestlibCtxs.len
-    check activeCtxCount == 2
-    check pingBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
-    check shutdownBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
-    check initializeBucketCtxs().sorted() == @[ctx1, ctx2].sorted()
-
-    let pingRes1 = apitestlib_ping(ctx1)
-    check pingRes1.error_message.isNil()
-    check pingRes1.value == 99
-    clearError(pingRes1.error_message)
-
-    let pingRes2 = apitestlib_ping(ctx2)
-    check pingRes2.error_message.isNil()
-    check pingRes2.value == 99
-    clearError(pingRes2.error_message)
-
-    let initializeRes1 = apitestlib_initialize(ctx1)
-    check initializeRes1.error_message.isNil()
-    check initializeRes1.initialized == true
-    clearError(initializeRes1.error_message)
-
-    let initializeRes2 = apitestlib_initialize(ctx2)
-    check initializeRes2.error_message.isNil()
-    check initializeRes2.initialized == true
-    clearError(initializeRes2.error_message)
-
-    let shutdownCountBeforeCtx1 = gShutdownRequestCount.load()
-    apitestlib_shutdown(ctx1)
-    check gShutdownRequestCount.load() == shutdownCountBeforeCtx1 + 1
-
-    withLock(gapitestlibCtxsLock):
-      activeCtxCount = gapitestlibCtxs.len
-    check activeCtxCount == 1
-    check pingBucketCtxs() == @[ctx2]
-    check shutdownBucketCtxs() == @[ctx2]
-    check initializeBucketCtxs() == @[ctx2]
-
-    let shutdownCountBeforeCtx2 = gShutdownRequestCount.load()
-    apitestlib_shutdown(ctx2)
-    check gShutdownRequestCount.load() == shutdownCountBeforeCtx2 + 1
-
-    withLock(gapitestlibCtxsLock):
-      activeCtxCount = gapitestlibCtxs.len
-    check activeCtxCount == 0
-    check pingBucketCtxs().len == 0
-    check shutdownBucketCtxs().len == 0
-    check initializeBucketCtxs().len == 0
-
-  test "repeated createContext shutdown sequences remain usable":
-    gSetupProvidersShouldFail.store(0)
-    gShutdownRequestCount.store(0)
-    for _ in 0 ..< 2:
-      let ctx = createContext()
-      check ctx != 0'u32
-
-      let pingRes = apitestlib_ping(ctx)
-      check pingRes.error_message.isNil()
-      check pingRes.value == 99
-      clearError(pingRes.error_message)
-
-      let initializeRes = apitestlib_initialize(ctx)
-      check initializeRes.error_message.isNil()
-      check initializeRes.initialized == true
-      clearError(initializeRes.error_message)
-
-      let shutdownCountBefore = gShutdownRequestCount.load()
-      apitestlib_shutdown(ctx)
-      check gShutdownRequestCount.load() == shutdownCountBefore + 1
-
-      var activeCtxCount = -1
-      withLock(gapitestlibCtxsLock):
-        activeCtxCount = gapitestlibCtxs.len
-      check activeCtxCount == 0
-      check pingBucketCtxs().len == 0
-      check shutdownBucketCtxs().len == 0
-      check initializeBucketCtxs().len == 0
-
-  test "dual-signature request brokers expose distinct public C wrapper names":
-    gSetupProvidersShouldFail.store(0)
-    gShutdownRequestCount.store(0)
-
-    let ctx = createContext()
+  test "arg-based request round-trip (AddNumbers)":
+    var err: cstring = nil
+    let ctx = cbtest_createContext(addr err)
     check ctx != 0'u32
 
-    var zeroArgRes = apitestlib_dual_naming(ctx)
-    defer:
-      freeDualNamingResult(zeroArgRes)
-    check zeroArgRes.error_message.isNil()
-    check $zeroArgRes.label == "default"
-    check zeroArgRes.code == 1
+    # Encode the args object that mirrors the proc signature(a, b).
+    type AddNumbersCborArgs = object
+      a*: int32
+      b*: int32
 
-    var argRes = apitestlib_dual_naming_with_input(ctx, cstring("omega"))
-    defer:
-      freeDualNamingResult(argRes)
-    check argRes.error_message.isNil()
-    check $argRes.label == "input:omega"
-    check argRes.code == 5
+    let args = AddNumbersCborArgs(a: 41'i32, b: 1'i32)
+    let argBuf = cborEncode(args)
+    check argBuf.isOk()
 
-    let shutdownCountBefore = gShutdownRequestCount.load()
-    apitestlib_shutdown(ctx)
-    check gShutdownRequestCount.load() == shutdownCountBefore + 1
+    let (status, resp) = callApi(ctx, "add_numbers", argBuf.value)
+    check status == 0'i32
+    check resp.len > 0
 
-  test "createContext returns a generic startup error when setupProviders fails":
-    gSetupProvidersShouldFail.store(1)
+    let dec = cborDecodeResultEnvelope(resp, AddNumbers)
+    check dec.isOk()
+    check dec.value.sum == 42'i64
 
-    var createContextRes = apitestlib_createContext()
-    defer:
-      freeCreateContextResult(createContextRes)
-      gSetupProvidersShouldFail.store(0)
+    discard cbtest_shutdown(ctx)
 
-    check createContextRes.ctx == 0'u32
-    check not createContextRes.error_message.isNil()
-    check $createContextRes.error_message ==
-      "Library context creation failed during request processing startup"
+  test "unknown apiName returns framework error and a UTF-8 message":
+    var err: cstring = nil
+    let ctx = cbtest_createContext(addr err)
+    check ctx != 0'u32
+
+    let (status, resp) = callApi(ctx, "no_such_api", @[])
+    check status == -4'i32
+    let msg = cast[string](resp)
+    check msg.contains("no_such_api")
+
+    discard cbtest_shutdown(ctx)
+
+  test "two contexts coexist and stay independent":
+    var err1: cstring = nil
+    var err2: cstring = nil
+    let ctxA = cbtest_createContext(addr err1)
+    let ctxB = cbtest_createContext(addr err2)
+    check ctxA != 0'u32
+    check ctxB != 0'u32
+    check ctxA != ctxB
+
+    let (sA, rA) = callApi(ctxA, "get_status", @[])
+    check sA == 0'i32
+    check cborDecodeResultEnvelope(rA, GetStatus).isOk()
+
+    let (sB, rB) = callApi(ctxB, "get_status", @[])
+    check sB == 0'i32
+    check cborDecodeResultEnvelope(rB, GetStatus).isOk()
+
+    check cbtest_shutdown(ctxA) == 0'i32
+    check cbtest_shutdown(ctxB) == 0'i32

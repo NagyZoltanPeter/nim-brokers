@@ -22,7 +22,7 @@
 {.push raises: [].}
 
 import std/[macros, os, strutils]
-import ./api_codegen_c, ./api_common, ./api_schema
+import ./api_common, ./api_schema
 
 # ---------------------------------------------------------------------------
 # Nim → C++ type mapping
@@ -700,10 +700,14 @@ proc generateCborCppHeaderFile*(
   h.add("  std::string listApis();\n")
   h.add("  std::string getSchema();\n\n")
 
-  # Private section: dispatcher members + ctx + lastError scratch.
+  # Private section: dispatcher members + ctx.
+  # `lastError` is intentionally a per-call local in each generated method —
+  # NOT a shared instance member. Sharing it across calls was a data race
+  # (concurrent `addRequest`s on one `Lib` instance both write the same
+  # `std::string`, leading to a double-free on the SSO/heap buffer —
+  # caught by ASAN under stress_shutdown).
   h.add(" private:\n")
   h.add("  uint32_t ctx_ = 0;\n")
-  h.add("  std::string lastError_;\n")
   for ev in emittableEvents:
     let dispatcherType = ev.typeName & "Dispatcher"
     let dispatcherMember = ev.apiName & "Dispatcher_"
@@ -1215,17 +1219,19 @@ proc generateCborCppHeaderFile*(
           "::err(std::string(\"encode pass failed: \") + ex.what());\n"
       )
       h.add("  }\n")
+      h.add("  std::string lastError;\n")
       h.add(
-        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError_, \"" & e.apiName &
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & e.apiName &
           "\", inBuf, cborLen);\n"
       )
     else:
+      h.add("  std::string lastError;\n")
       h.add(
-        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError_, \"" & e.apiName &
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & e.apiName &
           "\", nullptr, 0);\n"
       )
     h.add("  if (status != 0)\n")
-    h.add("    return " & resTy & "::err(lastError_);\n")
+    h.add("    return " & resTy & "::err(lastError);\n")
     h.add("  if (resp.empty())\n")
     h.add("    return " & resTy & "::err(\"empty response\");\n")
     h.add("  " & envName & " env;\n")
@@ -1277,11 +1283,10 @@ proc generateCborCppHeaderFile*(
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "listApis(&buf, &len);\n")
   h.add("  detail::NimBuffer nb{buf, len};\n")
-  h.add("  if (status != 0) {\n")
-  h.add("    lastError_ = std::string(\"listApis framework error: \") +\n")
-  h.add("                  std::to_string(status);\n")
-  h.add("    return {};\n")
-  h.add("  }\n")
+  # listApis/getSchema have no error channel back to the caller beyond an
+  # empty return — the old `lastError_ = ...` writes were dead state on a
+  # member that has no public accessor. Dropped: returning {} is enough.
+  h.add("  if (status != 0) return {};\n")
   h.add("  if (nb.empty()) return {};\n")
   h.add("  auto v = nb.view();\n")
   h.add("  return std::string(reinterpret_cast<const char*>(v.data()), v.size());\n")
@@ -1291,11 +1296,7 @@ proc generateCborCppHeaderFile*(
   h.add("  int32_t len = 0;\n")
   h.add("  const int32_t status = " & p & "getSchema(&buf, &len);\n")
   h.add("  detail::NimBuffer nb{buf, len};\n")
-  h.add("  if (status != 0) {\n")
-  h.add("    lastError_ = std::string(\"getSchema framework error: \") +\n")
-  h.add("                  std::to_string(status);\n")
-  h.add("    return {};\n")
-  h.add("  }\n")
+  h.add("  if (status != 0) return {};\n")
   h.add("  if (nb.empty()) return {};\n")
   h.add("  auto v = nb.view();\n")
   h.add("  return std::string(reinterpret_cast<const char*>(v.data()), v.size());\n")

@@ -4,19 +4,12 @@ project(mylib_examples C CXX)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
-# MYLIB_DIR can be overridden at configure time. When USE_CBOR=ON it
-# defaults to nimlib/build_cbor (the -d:BrokerFfiApiCBOR build output)
-# and the C++ target additionally pulls in the jsoncons headers needed
-# by the CBOR-mode wrapper. With USE_CBOR=OFF it defaults to nimlib/build
-# (the -d:BrokerFfiApiNative build output).
-option(USE_CBOR "Link against the CBOR-mode Nim library (mylib.nim built with -d:BrokerFfiApiCBOR)" OFF)
-
+# CBOR is the only FFI mode (the native codegen was retired — see
+# doc/design/CBOR_Refactoring.md). MYLIB_DIR can be overridden at
+# configure time; by default it points at the standard
+# -d:BrokerFfiApi build output.
 if(NOT MYLIB_DIR)
-    if(USE_CBOR)
-        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
-    else()
-        set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
-    endif()
+    set(MYLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
 endif()
 
 # Subdir name used for embedded RPATH — keeps the example binary
@@ -55,6 +48,13 @@ endif()
 # ---------------------------------------------------------------------------
 # Pure C example
 # ---------------------------------------------------------------------------
+# TODO(plan §10): the native FFI codegen surface was retired (see
+# doc/CBOR_Refactoring.md). Pure-C consumers temporarily have only the raw
+# 11-function CBOR ABI — they would have to hand-encode CBOR against it.
+# The deferred "CBOR-derived typed C functional interface" will restore
+# this example. Until then, keep `example/main.c` in-tree but DO NOT compile
+# it so the build does not break in surprising ways.
+if(FALSE)
 add_executable(example_c example/main.c)
 set_target_properties(example_c PROPERTIES
     C_STANDARD 11
@@ -110,6 +110,7 @@ elseif(UNIX)
         INSTALL_RPATH "$ORIGIN/../../nimlib/${MYLIB_DIRNAME}"
     )
 endif()
+endif() # if(FALSE) — pure-C example disabled, see TODO above
 
 # ---------------------------------------------------------------------------
 # Modern C++ example
@@ -154,11 +155,9 @@ endif()
 
 target_link_libraries(example_cpp PRIVATE mylib)
 
-# CBOR variant: header-only jsoncons for cbor encode/decode in <mylib>.hpp
-if(USE_CBOR)
-    target_include_directories(example_cpp PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-endif()
+# Header-only jsoncons for CBOR encode/decode in <mylib>.hpp.
+target_include_directories(example_cpp PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
 
 if(APPLE)
     set_target_properties(example_cpp PROPERTIES
@@ -176,12 +175,8 @@ endif()
 # Windows: copy the DLL next to the executables so they can be run directly
 # ---------------------------------------------------------------------------
 if(WIN32)
-    add_custom_command(TARGET example_c POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${MYLIB_DIR}/mylib.dll"
-            "$<TARGET_FILE_DIR:example_c>/mylib.dll"
-        COMMENT "Copying mylib.dll next to C example"
-    )
+    # NB: pure-C example_c target is gated off (see TODO above); its DLL
+    # copy step lives with it once the typed C wrapper is restored.
     add_custom_command(TARGET example_cpp POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${MYLIB_DIR}/mylib.dll"

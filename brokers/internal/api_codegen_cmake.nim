@@ -22,7 +22,7 @@
 {.push raises: [].}
 
 import std/strutils
-import ./api_codegen_c
+import ./api_outdir
 
 {.pop.}
 

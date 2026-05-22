@@ -3,15 +3,9 @@
 // Functional parity with cpp_example/main.cpp: same inline event
 // printouts, same request flow, same listener-removal pattern.
 //
-//     cargo run                 # native FFI build  (nimlib/build/)
-//     cargo run --features cbor # CBOR FFI build    (nimlib/build_cbor/)
+//     cargo run   # builds against the FFI library in nimlib/build/
 
-#[cfg(not(feature = "cbor"))]
 #[path = "../../nimlib/build/mylib_rs/src/lib.rs"]
-mod mylib;
-
-#[cfg(feature = "cbor")]
-#[path = "../../nimlib/build_cbor/mylib_rs/src/lib.rs"]
 mod mylib;
 
 use mylib::{AddDeviceSpec, DeviceStatus, Mylib, SensorId, Timestamp};

@@ -6,18 +6,12 @@ option(ASAN "Enable AddressSanitizer (requires clang)" OFF)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated C++ header
 # ---------------------------------------------------------------------------
-# TYPEMAPTEST_DIR can be overridden at configure time. When USE_CBOR=ON it
-# defaults to build_cbor/ (the -d:BrokerFfiApiCBOR build output) and the
-# C++ test additionally pulls in the jsoncons headers used by the CBOR-mode
-# wrapper. With USE_CBOR=OFF it defaults to build/ (the native build).
-option(USE_CBOR "Link against the CBOR-mode build of typemappingtestlib (-d:BrokerFfiApiCBOR)" OFF)
-
+# CBOR is the only FFI mode (the native codegen was retired — see
+# doc/design/CBOR_Refactoring.md). TYPEMAPTEST_DIR can be overridden
+# at configure time; by default it points at the -d:BrokerFfiApi
+# build output and the C++ test pulls in jsoncons headers.
 if(NOT TYPEMAPTEST_DIR)
-    if(USE_CBOR)
-        set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_cbor")
-    else()
-        set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
-    endif()
+    set(TYPEMAPTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
 endif()
 
 get_filename_component(TYPEMAPTEST_DIR "${TYPEMAPTEST_DIR}" ABSOLUTE)
@@ -117,15 +111,9 @@ endif()
 
 target_link_libraries(test_typemappingtestlib PRIVATE typemappingtestlib)
 
-# CBOR-mode wrapper needs jsoncons headers (header-only).
-# Also exposes USE_CBOR=1 to the test source so it can gate probes that
-# only register in CBOR mode (e.g. obj_param_request — see
-# doc/TYPESUPPORT.md, Section 2).
-if(USE_CBOR)
-    target_include_directories(test_typemappingtestlib PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-    target_compile_definitions(test_typemappingtestlib PRIVATE USE_CBOR=1)
-endif()
+# jsoncons (header-only) used by the generated CBOR wrapper.
+target_include_directories(test_typemappingtestlib PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
 
 # Embed RPATH so the binary finds libtypemappingtestlib next to itself at runtime.
 if(APPLE)

@@ -11,7 +11,7 @@
 {.push raises: [].}
 
 import std/[macros, os, strutils]
-import ./api_codegen_c, ./api_common
+import ./api_common
 
 # ---------------------------------------------------------------------------
 # C header emission

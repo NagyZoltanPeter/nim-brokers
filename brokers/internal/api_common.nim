@@ -2,9 +2,10 @@
 ## ----------
 ## Shared utilities for FFI API broker code generation.
 ##
-## After the Phase 2 codegen surface separation, this module is a thin
-## coordination layer that:
-## - Re-exports all codegen modules (C, C++, Python, Nim) for backward compat
+## After the native FFI codegen surface was retired (see
+## `doc/CBOR_Refactoring.md`), this module is a thin coordination layer
+## that:
+## - Re-exports the type schema registry and FFI mode flag
 ## - Owns the legacy FFI struct registry bridge
 ## - Owns compile-time accumulators that are shared across broker macros
 ##   (event counters, handler entries, cleanup proc names)
@@ -16,28 +17,11 @@
 
 import std/macros
 
-# ---------------------------------------------------------------------------
-# Re-export all codegen modules — existing code that imports api_common
-# continues to see all type mapping procs, accumulators, and generation procs.
-# ---------------------------------------------------------------------------
-
-import ./api_codegen_c
-import ./api_codegen_cpp
-import ./api_codegen_python
-import ./api_codegen_rust
-import ./api_codegen_go
-import ./api_codegen_nim
 import ./api_schema
-import ./api_ffi_mode
+import ./api_outdir
 
-export api_codegen_c
-export api_codegen_cpp
-export api_codegen_python
-export api_codegen_rust
-export api_codegen_go
-export api_codegen_nim
 export api_schema
-export api_ffi_mode
+export api_outdir
 
 # ---------------------------------------------------------------------------
 # Library name accumulator
@@ -94,22 +78,21 @@ type CborRequestEntry* = object
     ## `<Type>CborArgs` object.
 
 var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
-  ## Accumulated by `RequestBroker(API)` expansions when `brokerFfiMode` is
-  ## `mfCbor`. `registerBrokerLibrary` drains this list to emit the
-  ## per-library `Table[string, CborApiAdapter]` and the `<lib>_call`
-  ## dispatch.
+  ## Accumulated by `RequestBroker(API)` expansions.
+  ## `registerBrokerLibrary` drains this list to emit the per-library
+  ## `Table[string, CborApiAdapter]` and the `<lib>_call` dispatch.
 
 type CborEventEntry* = object
   apiName*: string ## Wire eventName foreign callers pass to `<lib>_subscribe`.
   typeName*: string ## Nim type identifier for the event payload.
 
 var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
-  ## Accumulated by `EventBroker(API)` expansions when `brokerFfiMode` is
-  ## `mfCbor`. `registerBrokerLibrary` reads this list to generate
-  ## per-event listener installers and the `<lib>CborIsKnownEvent`
-  ## predicate. As with `gApiCborRequestEntries`, this list is read but
-  ## not reset — Nim's compile-time VM aliases `let` copies of seqs back
-  ## to the source.
+  ## Accumulated by `EventBroker(API)` expansions.
+  ## `registerBrokerLibrary` reads this list to generate per-event
+  ## listener installers and the `<lib>CborIsKnownEvent` predicate. As
+  ## with `gApiCborRequestEntries`, this list is read but not reset —
+  ## Nim's compile-time VM aliases `let` copies of seqs back to the
+  ## source.
 
 proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
   ## Register an event for the next library's CBOR-mode subscribe surface.

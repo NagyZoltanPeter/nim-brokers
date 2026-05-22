@@ -4,17 +4,13 @@ project(torpedo_examples CXX)
 # ---------------------------------------------------------------------------
 # Locate the Nim-built shared library and generated header
 # ---------------------------------------------------------------------------
-# TORPEDOLIB_DIR can be overridden at configure time. With USE_CBOR=ON it
-# defaults to nimlib/build_cbor (the -d:BrokerFfiApiCBOR build output) and
-# the C++ target additionally pulls in jsoncons headers.
-option(USE_CBOR "Link against the CBOR-mode Nim library (torpedolib.nim built with -d:BrokerFfiApiCBOR)" OFF)
-
+# CBOR is the only FFI mode (the native codegen was retired — see
+# doc/design/CBOR_Refactoring.md). TORPEDOLIB_DIR can be overridden at
+# configure time; by default it points at the standard
+# -d:BrokerFfiApi build output and the C++ target pulls in jsoncons
+# headers.
 if(NOT TORPEDOLIB_DIR)
-    if(USE_CBOR)
-        set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build_cbor")
-    else()
-        set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
-    endif()
+    set(TORPEDOLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nimlib/build")
 endif()
 
 get_filename_component(TORPEDOLIB_DIRNAME "${TORPEDOLIB_DIR}" NAME)
@@ -89,11 +85,9 @@ endif()
 
 target_link_libraries(torpedo_cpp PRIVATE torpedolib)
 
-# CBOR variant: header-only jsoncons for cbor encode/decode in <torpedolib>.hpp
-if(USE_CBOR)
-    target_include_directories(torpedo_cpp PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
-endif()
+# Header-only jsoncons for CBOR encode/decode in <torpedolib>.hpp.
+target_include_directories(torpedo_cpp PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../vendor/jsoncons/include")
 
 if(APPLE)
     set_target_properties(torpedo_cpp PROPERTIES

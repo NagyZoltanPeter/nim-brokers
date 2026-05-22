@@ -222,8 +222,8 @@ provider thread is gone, so nothing drains the ring — the ring + slab +
 response slot pool sit unreclaimed. This is a small bounded memory leak
 (per Invariant I0: the only safe deallocator is the bucket-owning
 thread; if that thread is gone, freeing from another thread would
-violate macOS+ORC's TLV-allocator hazard documented in `LIMITATION.md`
-§2.6's historical context). No OS resources held; no hang.
+violate macOS+ORC's TLV-allocator hazard documented in
+`design/LESSONS_LEARNED.md` §1.2. No OS resources held; no hang.
 
 ### 7. Cross-thread request timeout
 
@@ -609,10 +609,11 @@ pre-allocated at `setProvider` time. Senders only:
 - atomic enqueue into the ring (CAS on the slot's sequence atomic),
 - fire the per-thread shared signal.
 
-This is the §2.6/§2.2 fix in practice: under both `--mm:orc` and
-`--mm:refc`, the broker no longer touches the Nim allocator's per-thread
-arena on the cross-thread hot path, so sender-thread exit cannot strand
-any allocator state. See `doc/LIMITATION.md` for the historical context.
+This is the channel-dispatch refactor fix in practice: under both
+`--mm:orc` and `--mm:refc`, the broker no longer touches the Nim
+allocator's per-thread arena on the cross-thread hot path, so
+sender-thread exit cannot strand any allocator state. See
+`doc/design/LESSONS_LEARNED.md` §1 for the full historical analysis.
 
 ### Lock Contention
 
