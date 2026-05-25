@@ -105,7 +105,7 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
 
   # setupProviders — register a per-instance provider closure per request that
   # dispatches to the overriding method (capturing `self`).
-  var setupSrc = "proc " & $setupName & "(self: " & implStr & ") =\n"
+  var setupSrc = "proc " & $setupName & "(self: " & implStr & ") {.gcsafe.} =\n"
   if methods.len == 0:
     setupSrc.add("  discard\n")
   for (verb, brokerName, margs, payload, async) in methods:
@@ -154,13 +154,13 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   for s in pre:
     newBody.add(s)
   for s in initBody:
-    newBody.add(s)
+    newBody.add(copyNimTree(s))
   let post =
     quote do:
       `setupName`(`selfId`)
       `selfId`
   for s in post:
-    newBody.add(s)
+    newBody.add(copyNimTree(s))
   result.add(
     nnkProcDef.newTree(
       postfix(ident("new"), "*"),
@@ -170,6 +170,43 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       newEmptyNode(),
       newEmptyNode(),
       newBody,
+    )
+  )
+
+  # bindToContext() — construct an instance that ADOPTS an externally-supplied
+  # brokerCtx (the FFI library context allocated by `<lib>_createContext`)
+  # instead of allocating its own. Lets a BrokerInterface(API) impl serve as the
+  # provider set for registerBrokerLibrary's `setupProviders(ctx)` (runs on the
+  # processing thread → gcsafe). Wires providers keyed by `ctx`.
+  var bindFormal = nnkFormalParams.newTree(copyNimTree(implName))
+  bindFormal.add(
+    newIdentDefs(
+      ident("T"), nnkBracketExpr.newTree(ident("typedesc"), copyNimTree(implName))
+    )
+  )
+  bindFormal.add(newIdentDefs(ident("ctx"), ident("BrokerContext")))
+  for p in initParams:
+    bindFormal.add(copyNimTree(p))
+  var bindBody = newStmtList()
+  let bindPre =
+    quote do:
+      let `selfId` = `implName`()
+      `selfId`.brokerCtx = ctx
+  for s in bindPre:
+    bindBody.add(s)
+  for s in initBody:
+    bindBody.add(copyNimTree(s))
+  for s in post:
+    bindBody.add(copyNimTree(s))
+  result.add(
+    nnkProcDef.newTree(
+      postfix(ident("bindToContext"), "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      bindFormal,
+      nnkPragma.newTree(ident("gcsafe")),
+      newEmptyNode(),
+      bindBody,
     )
   )
 
