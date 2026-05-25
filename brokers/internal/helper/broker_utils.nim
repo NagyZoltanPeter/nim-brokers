@@ -282,6 +282,9 @@ type ParsedRequestSugar* = object
   zeroArgProc*: NimNode
   argProc*: NimNode
   argParams*: seq[NimNode]
+  parsed*: ParsedBrokerType
+    ## Full parse of the dispatch tag over the payload — drives the API/CBOR
+    ## schema registration identically to the legacy `type X = ...` path.
 
 proc extractResultOk*(returnType: NimNode, async: bool): NimNode =
   ## Ok payload type T from `Future[Result[T, string]]` (async) or
@@ -355,6 +358,7 @@ proc parseRequestSugar*(
     result.typeIdent = parsedT.typeIdent
     result.objectDef = parsedT.objectDef
     result.fieldTypes = parsedT.fieldTypes
+    result.parsed = parsedT
     if not result.typeIdent.eqIdent(brokerName):
       error(
         "Signature `" & verb & "` must pair with type `" & brokerName & "` (got `" &
@@ -403,5 +407,22 @@ proc parseRequestSugar*(
         result.argParams.add(copyNimTree(pd))
 
   if typeDecl == nil:
-    # POD: the broker name is a fresh distinct dispatch tag over the payload.
-    result.objectDef = ensureDistinctType(copyNimTree(result.payloadType))
+    # POD: synthesize `type <tag> = <payload>` and parse it through the normal
+    # path so the dispatch-tag classification (primitive / void / distinct) and
+    # the API/CBOR schema registration match the legacy `type X = ...` form.
+    let synth = newTree(
+      nnkStmtList,
+      newTree(
+        nnkTypeSection,
+        newTree(
+          nnkTypeDef,
+          copyNimTree(result.typeIdent),
+          newEmptyNode(),
+          copyNimTree(result.payloadType),
+        ),
+      ),
+    )
+    result.parsed = parseSingleTypeDef(
+      synth, macroName, allowRefToNonObject = true, collectFieldInfo = true
+    )
+    result.objectDef = result.parsed.objectDef
