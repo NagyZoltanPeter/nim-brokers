@@ -1,4 +1,4 @@
-import std/macros
+import std/[macros, strutils]
 
 type ParsedBrokerType* = object
   ## Result of parsing the single `type` definition inside a broker macro body.
@@ -257,3 +257,151 @@ proc parseSingleTypeDef*(
   if defs.len > 1:
     error("Only one type may be declared inside " & macroName, body)
   result = defs[0]
+
+# ---------------------------------------------------------------------------
+# RequestBroker proc-style sugar (option B — payload decoupled from the
+# dispatch tag). Shared by the single-thread, multi-thread, and API
+# RequestBroker generators so the surface stays identical across flavors.
+# ---------------------------------------------------------------------------
+
+type ParsedRequestSugar* = object
+  ## Result of parsing the new proc-style RequestBroker sugar.
+  ## - `typeIdent`  : the dispatch-tag type (broker name).
+  ## - `objectDef`  : RHS to declare for the tag (the object for the object
+  ##                  form, `distinct payload` for the POD form).
+  ## - `payloadType`: the value type returned by `request` (decoupled — raw
+  ##                  payload for POD, == typeIdent for the object form).
+  ## - `fieldTypes` : object field types (object form) for MT auto-config;
+  ##                  empty for POD.
+  ## - `zeroArgProc`/`argProc`: the parsed signature proc defs (nil if absent).
+  ## - `argParams`  : IdentDefs of the arg-based signature.
+  typeIdent*: NimNode
+  objectDef*: NimNode
+  payloadType*: NimNode
+  fieldTypes*: seq[NimNode]
+  zeroArgProc*: NimNode
+  argProc*: NimNode
+  argParams*: seq[NimNode]
+
+proc extractResultOk*(returnType: NimNode, async: bool): NimNode =
+  ## Ok payload type T from `Future[Result[T, string]]` (async) or
+  ## `Result[T, string]` (sync). Returns nil if the shape is invalid (error
+  ## type must be `string`). FFI/in-process errors are pinned to `string`.
+  if async:
+    if returnType.kind != nnkBracketExpr or returnType.len != 2:
+      return nil
+    if returnType[0].kind != nnkIdent or not returnType[0].eqIdent("Future"):
+      return nil
+    let inner = returnType[1]
+    if inner.kind != nnkBracketExpr or inner.len != 3:
+      return nil
+    if inner[0].kind != nnkIdent or not inner[0].eqIdent("Result"):
+      return nil
+    if not (inner[2].kind == nnkIdent and inner[2].eqIdent("string")):
+      return nil
+    return inner[1]
+  else:
+    if returnType.kind != nnkBracketExpr or returnType.len != 3:
+      return nil
+    if returnType[0].kind != nnkIdent or not returnType[0].eqIdent("Result"):
+      return nil
+    if not (returnType[2].kind == nnkIdent and returnType[2].eqIdent("string")):
+      return nil
+    return returnType[1]
+
+proc sugarVerbIdent(p: NimNode): NimNode =
+  let nm = p[0]
+  if nm.kind == nnkPostfix: nm[1] else: nm
+
+proc parseRequestSugar*(
+    body: NimNode, macroName: string, async: bool
+): ParsedRequestSugar =
+  ## Parse the proc-style sugar form of a RequestBroker body (one broker per
+  ## block, two signature slots, payload decoupled from the dispatch tag).
+  var typeDecl: NimNode = nil
+  var procs: seq[NimNode] = @[]
+  for stmt in body:
+    case stmt.kind
+    of nnkProcDef:
+      procs.add(stmt)
+    of nnkTypeSection:
+      for d in stmt:
+        if d.kind == nnkTypeDef:
+          if typeDecl != nil:
+            error(macroName & " sugar allows a single payload type", d)
+          typeDecl = d
+    of nnkEmpty:
+      discard
+    else:
+      error("Unsupported statement inside " & macroName & " definition", stmt)
+  if procs.len == 0:
+    error(macroName & " requires at least one signature proc", body)
+
+  var verb = ""
+  for p in procs:
+    if verb.len == 0:
+      verb = $sugarVerbIdent(p)
+    elif not sugarVerbIdent(p).eqIdent(verb):
+      error("All signatures in one " & macroName & " block must share the proc name", p)
+  let brokerName = capitalizeAscii(verb)
+
+  if typeDecl != nil:
+    let parsedT = parseSingleTypeDef(
+      newTree(nnkStmtList, newTree(nnkTypeSection, typeDecl)),
+      macroName,
+      allowRefToNonObject = true,
+      collectFieldInfo = true,
+    )
+    result.typeIdent = parsedT.typeIdent
+    result.objectDef = parsedT.objectDef
+    result.fieldTypes = parsedT.fieldTypes
+    if not result.typeIdent.eqIdent(brokerName):
+      error(
+        "Signature `" & verb & "` must pair with type `" & brokerName & "` (got `" &
+          $result.typeIdent & "`)",
+        typeDecl,
+      )
+    result.payloadType = copyNimTree(result.typeIdent)
+  else:
+    result.typeIdent = ident(brokerName)
+
+  for p in procs:
+    let params = p.params
+    if params.len == 0:
+      error("Signature must declare a return type", p)
+    let pl = extractResultOk(params[0], async)
+    if pl.isNil:
+      error(
+        "Signature must return " &
+          (if async: "Future[Result[T, string]]" else: "Result[T, string]"),
+        p,
+      )
+    if result.payloadType.isNil:
+      result.payloadType = copyNimTree(pl)
+    elif result.payloadType.repr != pl.repr:
+      error(
+        "All signatures of broker `" & brokerName &
+          "` must return the same payload type",
+        p,
+      )
+    let paramCount = params.len - 1
+    if paramCount == 0:
+      if not result.zeroArgProc.isNil:
+        error("Only one zero-argument signature is allowed", p)
+      result.zeroArgProc = p
+    else:
+      if not result.argProc.isNil:
+        error("Only one argument-based signature is allowed", p)
+      result.argProc = p
+      result.argParams = @[]
+      for idx in 1 ..< params.len:
+        let pd = params[idx]
+        if pd.kind != nnkIdentDefs:
+          error("Signature parameter must be a standard identifier declaration", pd)
+        if pd[pd.len - 2].kind == nnkEmpty:
+          error("Signature parameter must declare a type", pd)
+        result.argParams.add(copyNimTree(pd))
+
+  if typeDecl == nil:
+    # POD: the broker name is a fresh distinct dispatch tag over the payload.
+    result.objectDef = ensureDistinctType(copyNimTree(result.payloadType))

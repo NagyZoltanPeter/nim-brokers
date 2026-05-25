@@ -258,9 +258,113 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   when defined(brokerDebug):
     echo body.treeRepr
     echo "RequestBroker mode: ", $mode
-  let parsed = parseSingleTypeDef(body, "RequestBroker", allowRefToNonObject = true)
-  let typeIdent = parsed.typeIdent
-  let objectDef = parsed.objectDef
+  # Classify: legacy uses `proc signature*` procs (Ok type == broker type);
+  # the new proc-sugar uses lowercase verb procs paired to a Capitalized payload
+  # type by name, with the payload decoupled from the dispatch tag (option B).
+  # A body with no procs at all is legacy (zero-arg default).
+  var hasSignatureProc = false
+  var hasOtherProc = false
+  for stmt in body:
+    if stmt.kind == nnkProcDef:
+      let nm = stmt[0]
+      let nmId = (if nm.kind == nnkPostfix: nm[1] else: nm)
+      if ($nmId).startsWith("signature"):
+        hasSignatureProc = true
+      else:
+        hasOtherProc = true
+  let isSugar = hasOtherProc and not hasSignatureProc
+
+  var typeIdent: NimNode = nil
+  var objectDef: NimNode = nil
+  var payloadType: NimNode = nil
+  var zeroArgSig: NimNode = nil
+  var zeroArgProviderName: NimNode = nil
+  var argSig: NimNode = nil
+  var argParams: seq[NimNode] = @[]
+  var argProviderName: NimNode = nil
+
+  if not isSugar:
+    let parsed = parseSingleTypeDef(body, "RequestBroker", allowRefToNonObject = true)
+    typeIdent = parsed.typeIdent
+    objectDef = parsed.objectDef
+    payloadType = copyNimTree(typeIdent) # legacy: dispatch tag == payload
+
+    for stmt in body:
+      case stmt.kind
+      of nnkProcDef:
+        let procName = stmt[0]
+        let procNameIdent =
+          case procName.kind
+          of nnkIdent:
+            procName
+          of nnkPostfix:
+            procName[1]
+          else:
+            procName
+        let procNameStr = $procNameIdent
+        if not procNameStr.startsWith("signature"):
+          error("Signature proc names must start with `signature`", procName)
+        let params = stmt.params
+        if params.len == 0:
+          error("Signature must declare a return type", stmt)
+        let returnType = params[0]
+        if not isReturnTypeValid(returnType, typeIdent, mode):
+          case mode
+          of rbAsync, rbMultiThread, rbApi:
+            error(
+              "Signature must return Future[Result[`" & $typeIdent & "`, string]]", stmt
+            )
+          of rbSync:
+            error("Signature must return Result[`" & $typeIdent & "`, string]", stmt)
+        let paramCount = params.len - 1
+        if paramCount == 0:
+          if zeroArgSig != nil:
+            error("Only one zero-argument signature is allowed", stmt)
+          zeroArgSig = stmt
+          zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+        elif paramCount >= 1:
+          if argSig != nil:
+            error("Only one argument-based signature is allowed", stmt)
+          argSig = stmt
+          argParams = @[]
+          for idx in 1 ..< params.len:
+            let paramDef = params[idx]
+            if paramDef.kind != nnkIdentDefs:
+              error(
+                "Signature parameter must be a standard identifier declaration", paramDef
+              )
+            let paramTypeNode = paramDef[paramDef.len - 2]
+            if paramTypeNode.kind == nnkEmpty:
+              error("Signature parameter must declare a type", paramDef)
+            var hasName = false
+            for i in 0 ..< paramDef.len - 2:
+              if paramDef[i].kind != nnkEmpty:
+                hasName = true
+            if not hasName:
+              error("Signature parameter must declare a name", paramDef)
+            argParams.add(copyNimTree(paramDef))
+          argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
+      of nnkTypeSection, nnkEmpty:
+        discard
+      else:
+        error("Unsupported statement inside RequestBroker definition", stmt)
+
+    if zeroArgSig.isNil() and argSig.isNil():
+      zeroArgSig = newEmptyNode()
+      zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+  else:
+    # ---- New proc-sugar form (option B / decoupled payload) ----
+    let sg = parseRequestSugar(body, "RequestBroker", async = (mode != rbSync))
+    typeIdent = sg.typeIdent
+    objectDef = sg.objectDef
+    payloadType = sg.payloadType
+    if not sg.zeroArgProc.isNil:
+      zeroArgSig = sg.zeroArgProc
+      zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+    if not sg.argProc.isNil:
+      argSig = sg.argProc
+      argParams = sg.argParams
+      argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
 
   when defined(brokerDebug):
     echo "RequestBroker generating type: ", $typeIdent
@@ -268,75 +372,6 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
-  var zeroArgSig: NimNode = nil
-  var zeroArgProviderName: NimNode = nil
-  var argSig: NimNode = nil
-  var argParams: seq[NimNode] = @[]
-  var argProviderName: NimNode = nil
-
-  for stmt in body:
-    case stmt.kind
-    of nnkProcDef:
-      let procName = stmt[0]
-      let procNameIdent =
-        case procName.kind
-        of nnkIdent:
-          procName
-        of nnkPostfix:
-          procName[1]
-        else:
-          procName
-      let procNameStr = $procNameIdent
-      if not procNameStr.startsWith("signature"):
-        error("Signature proc names must start with `signature`", procName)
-      let params = stmt.params
-      if params.len == 0:
-        error("Signature must declare a return type", stmt)
-      let returnType = params[0]
-      if not isReturnTypeValid(returnType, typeIdent, mode):
-        case mode
-        of rbAsync, rbMultiThread, rbApi:
-          error(
-            "Signature must return Future[Result[`" & $typeIdent & "`, string]]", stmt
-          )
-        of rbSync:
-          error("Signature must return Result[`" & $typeIdent & "`, string]", stmt)
-      let paramCount = params.len - 1
-      if paramCount == 0:
-        if zeroArgSig != nil:
-          error("Only one zero-argument signature is allowed", stmt)
-        zeroArgSig = stmt
-        zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
-      elif paramCount >= 1:
-        if argSig != nil:
-          error("Only one argument-based signature is allowed", stmt)
-        argSig = stmt
-        argParams = @[]
-        for idx in 1 ..< params.len:
-          let paramDef = params[idx]
-          if paramDef.kind != nnkIdentDefs:
-            error(
-              "Signature parameter must be a standard identifier declaration", paramDef
-            )
-          let paramTypeNode = paramDef[paramDef.len - 2]
-          if paramTypeNode.kind == nnkEmpty:
-            error("Signature parameter must declare a type", paramDef)
-          var hasName = false
-          for i in 0 ..< paramDef.len - 2:
-            if paramDef[i].kind != nnkEmpty:
-              hasName = true
-          if not hasName:
-            error("Signature parameter must declare a name", paramDef)
-          argParams.add(copyNimTree(paramDef))
-        argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
-    of nnkTypeSection, nnkEmpty:
-      discard
-    else:
-      error("Unsupported statement inside RequestBroker definition", stmt)
-
-  if zeroArgSig.isNil() and argSig.isNil():
-    zeroArgSig = newEmptyNode()
-    zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
 
   var typeSection = newTree(nnkTypeSection)
   typeSection.add(newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef))
@@ -345,10 +380,10 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     case mode
     of rbAsync, rbMultiThread, rbApi:
       quote:
-        Future[Result[`typeIdent`, string]]
+        Future[Result[`payloadType`, string]]
     of rbSync:
       quote:
-        Result[`typeIdent`, string]
+        Result[`payloadType`, string]
 
   if not zeroArgSig.isNil():
     let procType = makeProcType(returnType, @[], mode)
@@ -494,7 +529,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         quote do:
           proc request*(
               _: typedesc[`typeIdent`]
-          ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+          ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
             return await request(`typeIdent`, DefaultBrokerContext)
 
       )
@@ -503,7 +538,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         quote do:
           proc request*(
               _: typedesc[`typeIdent`], brokerCtx: BrokerContext
-          ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+          ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
             var provider: `zeroArgProviderName`
             if brokerCtx == DefaultBrokerContext:
               provider = `accessProcIdent`().`zeroArgProvidersFieldName`[0].handler
@@ -534,7 +569,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
             let providerRes = catchedRes.get()
             if providerRes.isOk():
-              when compiles(providerRes.get().isNil()):
+              when compiles(providerRes.get().isNil()) and
+                not (typeof(providerRes.get()) is string):
                 if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
@@ -547,7 +583,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         quote do:
           proc request*(
               _: typedesc[`typeIdent`]
-          ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+          ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
             return request(`typeIdent`, DefaultBrokerContext)
 
       )
@@ -556,7 +592,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         quote do:
           proc request*(
               _: typedesc[`typeIdent`], brokerCtx: BrokerContext
-          ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+          ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
             var provider: `zeroArgProviderName`
             if brokerCtx == DefaultBrokerContext:
               provider = `accessProcIdent`().`zeroArgProvidersFieldName`[0].handler
@@ -576,7 +612,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
                   "): no provider registered for broker context " & $brokerCtx
               )
 
-            var providerRes: Result[`typeIdent`, string]
+            var providerRes: Result[`payloadType`, string]
             try:
               providerRes = provider()
             except CatchableError as e:
@@ -586,7 +622,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
               )
 
             if providerRes.isOk():
-              when compiles(providerRes.get().isNil()):
+              when compiles(providerRes.get().isNil()) and
+                not (typeof(providerRes.get()) is string):
                 if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
@@ -762,7 +799,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
           let providerRes = catchedRes.get()
           if providerRes.isOk():
-            when compiles(providerRes.get().isNil()):
+            when compiles(providerRes.get().isNil()) and
+                not (typeof(providerRes.get()) is string):
               if providerRes.get().isNil():
                 return err(
                   "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
@@ -772,7 +810,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     of rbSync:
       requestBodyKeyed.add(
         quote do:
-          var providerRes: Result[`typeIdent`, string]
+          var providerRes: Result[`payloadType`, string]
           try:
             providerRes = `providerCallKeyed`
           except CatchableError as e:
@@ -781,7 +819,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
             )
 
           if providerRes.isOk():
-            when compiles(providerRes.get().isNil()):
+            when compiles(providerRes.get().isNil()) and
+                not (typeof(providerRes.get()) is string):
               if providerRes.get().isNil():
                 return err(
                   "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
