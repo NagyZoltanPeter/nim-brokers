@@ -367,6 +367,19 @@ proc parseRequestSugar*(
       )
     result.payloadType = copyNimTree(result.typeIdent)
   else:
+    # POD form: the broker name is derived solely from the proc verb and is
+    # always Capitalized (it is a Nim type / dispatch tag). Warn when we had to
+    # capitalize a lowercase verb so the `Broker.request(...)` handle name is
+    # not a surprise; writing the proc Capitalized (`proc GetConfig(...)`) is
+    # accepted and silences this.
+    if verb.len > 0 and verb[0] in {'a' .. 'z'}:
+      warning(
+        "RequestBroker: broker name is `" & brokerName & "` (capitalized from proc `" &
+          verb & "`); call it as `" & brokerName &
+          ".request(...)`. Write `proc " & brokerName &
+          "(...)` to name it explicitly and silence this warning.",
+        procs[0],
+      )
     result.typeIdent = ident(brokerName)
 
   for p in procs:
