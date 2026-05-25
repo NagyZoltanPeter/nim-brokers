@@ -1,0 +1,151 @@
+## BrokerInterface — an abstract, OOP-style facade over a group of Event /
+## Request brokers (see doc/HIERARCHICAL_BROKERS_PLAN.md, phase P3).
+##
+## A `BrokerInterface` block declares the *contract*: the events it can emit
+## and the requests it answers. It generates:
+##   * a `ref object of RootObj` interface type carrying a hidden `brokerCtx`;
+##   * the underlying Event/Request brokers (re-emitted verbatim, or lowered to
+##     their `(API)` variants when the interface is declared `(API)`);
+##   * one abstract `{.base.}` `method` per request (pure-virtual — raises
+##     until a `BrokerImplement` derived type overrides it);
+##   * a generic instance-scoped event facade (`self.emit` / `self.listen` /
+##     `self.dropListener`) that injects `self.brokerCtx`.
+##
+## Invocation forms (note: `BrokerInterface(API) IFace:` does NOT parse in Nim —
+## the `(API)` binds as a call; use the comma form instead):
+##   BrokerInterface IFace:            ## or BrokerInterface(IFace):
+##     EventBroker: ...
+##     RequestBroker: ...
+##   BrokerInterface(API, IFace):      ## (API) propagates to every sub-broker
+##     EventBroker: ...
+##     RequestBroker: ...
+##
+## Requests inside an interface use the proc-sugar form (a lowercase verb proc);
+## the verb becomes the abstract method name a `BrokerImplement` overrides.
+
+import std/[macros, strutils]
+import chronos, results
+import ./broker_context
+import ./request_broker, ./event_broker
+import ./internal/helper/broker_utils
+
+export chronos, results, broker_context, request_broker, event_broker
+
+proc isApiArg(n: NimNode): bool =
+  n.kind == nnkIdent and n.eqIdent("API")
+
+proc brokerHeadName(stmt: NimNode): string =
+  ## The macro name a sub-block invokes (EventBroker / RequestBroker), or "".
+  if stmt.kind notin {nnkCall, nnkCommand}:
+    return ""
+  let head = stmt[0]
+  if head.kind == nnkIdent:
+    return $head
+  ""
+
+proc renderAbstractMethod(
+    ifaceName, verb, payloadRepr: string, argParams: seq[NimNode], async: bool
+): string =
+  ## Render an abstract base method as Nim source (parsed back via parseStmt —
+  ## sidesteps fiddly pragma-AST construction for `async: (raises: [])`).
+  var params = "self: " & ifaceName
+  for p in argParams:
+    params.add(", " & p.repr.strip())
+  let ret =
+    if async: "Future[Result[" & payloadRepr & ", string]]"
+    else: "Result[" & payloadRepr & ", string]"
+  let pragma =
+    if async: "{.base, async: (raises: []), gcsafe.}"
+    else: "{.base, gcsafe, raises: [].}"
+  result =
+    "method " & verb & "*(" & params & "): " & ret & " " & pragma & " =\n" &
+    "  raiseAssert(\"" & ifaceName & "." & verb & " has no implementation\")\n"
+
+macro BrokerInterface*(args: varargs[untyped]): untyped =
+  ## See module docs. `args` is `[<API>?, <IFaceName>, <body>]` in any order for
+  ## the leading idents, with the `:` block as the final argument.
+  if args.len < 2:
+    macros.error("BrokerInterface requires an interface name and a `:` body block")
+  let body = args[^1]
+  if body.kind != nnkStmtList:
+    macros.error("BrokerInterface body must be a `:` block")
+
+  var ifaceName: NimNode = nil
+  var isApi = false
+  for i in 0 ..< args.len - 1:
+    if isApiArg(args[i]):
+      isApi = true
+    elif args[i].kind == nnkIdent:
+      if ifaceName != nil:
+        macros.error("BrokerInterface: unexpected extra name `" & $args[i] & "`", args[i])
+      ifaceName = args[i]
+    else:
+      macros.error("BrokerInterface: unexpected argument", args[i])
+  if ifaceName.isNil:
+    macros.error("BrokerInterface requires an interface name", body)
+
+  let ifaceNameStr = $ifaceName
+  result = newStmtList()
+
+  # 1. Interface ref type with the hidden context.
+  result.add(
+    quote do:
+      type `ifaceName`* = ref object of RootObj
+        brokerCtx*: BrokerContext
+  )
+
+  # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
+  #    interface is `(API)`), and generate abstract methods for requests.
+  for stmt in body:
+    let headName = brokerHeadName(stmt)
+    if headName notin ["EventBroker", "RequestBroker"]:
+      macros.error(
+        "BrokerInterface body may only contain `EventBroker:` / `RequestBroker:` blocks",
+        stmt,
+      )
+    let innerBody = stmt[^1]
+    if innerBody.kind != nnkStmtList:
+      macros.error(headName & " inside BrokerInterface must have a `:` body block", stmt)
+    let hasMode = stmt.len == 3 # nnkCall(Head, mode, body)
+
+    # Re-emit the underlying broker.
+    if isApi:
+      if hasMode:
+        macros.error(
+          "BrokerInterface(API): sub-brokers must be plain `" & headName &
+            ":` (the API mode is applied automatically)",
+          stmt,
+        )
+      result.add(newCall(ident(headName), ident("API"), copyNimTree(innerBody)))
+    else:
+      result.add(copyNimTree(stmt))
+
+    # Requests → abstract methods.
+    if headName == "RequestBroker":
+      let async = isApi or not (hasMode and stmt[1].eqIdent("sync"))
+      let sg = parseRequestSugar(innerBody, "BrokerInterface RequestBroker", async)
+      let payloadRepr = sg.payloadType.repr.strip()
+      if not sg.zeroArgProc.isNil:
+        result.add(parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)))
+      if not sg.argProc.isNil:
+        result.add(
+          parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async))
+        )
+
+  # 3. Generic instance-scoped event facade — forwards any event typedesc to
+  #    the underlying ctx-based broker API using `self.brokerCtx`.
+  result.add(
+    quote do:
+      template emit*(self: `ifaceName`, t: typedesc, args: varargs[untyped]): untyped =
+        t.emit(self.brokerCtx, args)
+
+      template listen*(
+          self: `ifaceName`, t: typedesc, handler: untyped
+      ): untyped =
+        t.listen(self.brokerCtx, handler)
+
+      template dropListener*(
+          self: `ifaceName`, t: typedesc, handle: untyped
+      ): untyped =
+        t.dropListener(self.brokerCtx, handle)
+  )

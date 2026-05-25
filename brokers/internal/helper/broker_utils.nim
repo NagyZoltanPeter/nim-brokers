@@ -282,6 +282,9 @@ type ParsedRequestSugar* = object
   zeroArgProc*: NimNode
   argProc*: NimNode
   argParams*: seq[NimNode]
+  verb*: string
+    ## The (lowercase) signature verb — the BrokerInterface method name that
+    ## `BrokerImplement` overrides (e.g. `getHealth`).
   parsed*: ParsedBrokerType
     ## Full parse of the dispatch tag over the payload — drives the API/CBOR
     ## schema registration identically to the legacy `type X = ...` path.
@@ -347,6 +350,7 @@ proc parseRequestSugar*(
     elif not sugarVerbIdent(p).eqIdent(verb):
       error("All signatures in one " & macroName & " block must share the proc name", p)
   let brokerName = capitalizeAscii(verb)
+  result.verb = verb
 
   if typeDecl != nil:
     let parsedT = parseSingleTypeDef(
