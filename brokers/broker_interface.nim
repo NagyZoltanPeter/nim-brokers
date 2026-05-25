@@ -149,3 +149,57 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       ): untyped =
         t.dropListener(self.brokerCtx, handle)
   )
+
+  # 4. Factory / dependency-injection. A consumer depends only on the interface
+  #    module; an implementer installs a constructor via `provideFactory`
+  #    (last wins) and the consumer obtains an instance via `create`. The
+  #    factory may close over outer config, or take a typed config at call
+  #    time. In-process the factory returns the real impl (direct virtual
+  #    dispatch); the cross-runtime proxy variant is wired in P6.
+  #    NOTE (P6): factory storage is a process-global here; cross-thread FFI use
+  #    will harden it (lock + shared) when registerBrokerLibrary lands.
+  let ifaceNameLit = newLit(ifaceNameStr)
+  let facVar = ident(ifaceNameStr & "BrokerFactory")
+  let facCfgVar = ident(ifaceNameStr & "BrokerFactoryCfg")
+  result.add(
+    quote do:
+      var `facVar` {.global.}:
+        proc(cfg: pointer): Result[`ifaceName`, string] {.raises: [].}
+      var `facCfgVar` {.global.}: string
+
+      proc provideFactory*(
+          _: typedesc[`ifaceName`], f: proc(): Result[`ifaceName`, string]
+      ) =
+        `facCfgVar` = ""
+        `facVar` = proc(cfg: pointer): Result[`ifaceName`, string] {.raises: [].} =
+          try:
+            f()
+          except Exception as e:
+            err(`ifaceNameLit` & " factory raised: " & e.msg)
+
+      proc provideFactory*[A](
+          _: typedesc[`ifaceName`], f: proc(cfg: A): Result[`ifaceName`, string]
+      ) =
+        `facCfgVar` = $A
+        `facVar` = proc(cfg: pointer): Result[`ifaceName`, string] {.raises: [].} =
+          try:
+            f(cast[ptr A](cfg)[])
+          except Exception as e:
+            err(`ifaceNameLit` & " factory raised: " & e.msg)
+
+      proc create*(_: typedesc[`ifaceName`]): Result[`ifaceName`, string] =
+        if `facVar`.isNil:
+          return err("no factory provided for " & `ifaceNameLit`)
+        `facVar`(nil)
+
+      proc create*[A](_: typedesc[`ifaceName`], cfg: A): Result[`ifaceName`, string] =
+        if `facVar`.isNil:
+          return err("no factory provided for " & `ifaceNameLit`)
+        if `facCfgVar` != $A:
+          return err(
+            `ifaceNameLit` & " factory config type mismatch (got " & $A & ", expected " &
+              `facCfgVar` & ")"
+          )
+        var c = cfg
+        `facVar`(addr c)
+  )
