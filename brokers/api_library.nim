@@ -1557,7 +1557,7 @@ proc registerBrokerLibraryCborImpl(
   when defined(BrokerFfiApiGenRust):
     generateCborRustFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenGo):
-    generateCborGoFile(outDir, libName, entries, eventEntries)
+    generateCborGoFile(outDir, libName, entries, eventEntries, config.mainClass)
 
   generateCMakePackageFiles(
     outDir, libName, config.version, cborMode = true, hasCpp = true

@@ -47,5 +47,41 @@ func main() {
 	}
 
 	lib.OffTick(h)
+
+	// reduced-A: create a sub-interface instance, drive its own methods (routed
+	// to the same processing thread via shared classCtx), then release it.
+	widget, err := lib.MakeWidget(5)
+	if err != nil {
+		panic(fmt.Sprint("make_widget: ", err))
+	}
+	if widget.Ctx() == 0 {
+		panic("widget ctx")
+	}
+	if a, err := widget.Area(); err != nil || int32(a) != 25 {
+		panic(fmt.Sprint("widget.Area: ", a, " ", err))
+	}
+	if s, err := widget.Scale(3); err != nil || int32(s) != 15 {
+		panic(fmt.Sprint("widget.Scale: ", s, " ", err))
+	}
+	if a, err := widget.Area(); err != nil || int32(a) != 225 {
+		panic(fmt.Sprint("widget.Area after scale: ", a, " ", err))
+	}
+
+	// A second, independent widget (own instanceCtx, same library).
+	w2, err := lib.MakeWidget(2)
+	if err != nil {
+		panic(fmt.Sprint("make_widget 2: ", err))
+	}
+	if a, err := w2.Area(); err != nil || int32(a) != 4 {
+		panic(fmt.Sprint("w2.Area: ", a, " ", err))
+	}
+	w2.Close()
+
+	widget.Close() // explicit release
+	widget.Close() // idempotent
+	if _, err := widget.Area(); err == nil {
+		panic("post-release call must error")
+	}
+
 	fmt.Println("hierlib go example: OK")
 }
