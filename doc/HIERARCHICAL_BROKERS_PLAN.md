@@ -2,6 +2,74 @@
 
 Branch: `hierarchical_brokers` (from `master` @ 74799f7).
 
+---
+
+## ⮕ REVISED ROADMAP (post-P7, supersedes the original P5/P6 FFI sections below)
+
+P1–P4 + P5(in-proc factory) + P6-core(bindToContext) + P7(unit tests) are
+**done & committed**. The FFI multi-interface design was re-scoped with the
+user. Remaining work, in execution order: **D → B → reduced-A**.
+
+### Decisions (this revision)
+- **No** hierarchical *Nim ownership*, **no** cascade in Nim, **no** cross-`.so`
+  (interface in one lib + impl in another). Dropped.
+- **Multi-interface within ONE library**: one **main** `BrokerInterface(API)` =
+  the library (its `createContext`/`shutdown` embed into the main wrapper class,
+  exactly as today). Every **other** `BrokerInterface(API)` → its **own wrapper
+  class in its own header**.
+- **Library-global brokers live INSIDE the main interface** (they're tied to the
+  library context / thread / resource lifecycle). No top-level flat API brokers.
+  **Broker-name / apiName collisions across the whole library = HARD compile
+  errors.**
+- **Create-instance request**: any API request (main or sub) may return a
+  **sub-interface instance** — typed as the sub-interface ref (`IWidget`) in Nim;
+  serialized as the instance `BrokerContext` (the `instanceCtx` half) over FFI.
+- **Ownership is in the WRAPPER (RAII), not Nim**: the foreign wrapper object
+  returned for a created sub-instance **owns** it and drives teardown
+  (C++ `unique_ptr<T>` / dtor; Rust `Drop`; Go `runtime.SetFinalizer`+`Close`;
+  Python `__del__`/`close`/context-mgr; C explicit free fn). Per-language
+  ownership must be examined.
+- **Library shutdown sweeps** any still-live sub-instances (safety net): a
+  per-context registry of live sub-instances; main `shutdown` closes the
+  remainder. So teardown is guaranteed even if a wrapper leaks.
+- C (custom error `E`, MultiRequestBroker sugar) — **not needed now**.
+
+### Phase D — formal testing of the CURRENT (single main interface) capability
+- **D1** `examples/ffiapi/hierlib`: one main `BrokerInterface(API)` +
+  `BrokerImplement` + `bindToContext` + `registerBrokerLibrary`, with C/C++/
+  Rust/Go/Py wrappers + nimble tasks + CI list (mirrors `examples/ffiapi`).
+  Turns the proven core into a reviewable, CI-guarded artifact. (Single
+  interface; reduced-A extends it to multi-interface.)
+- **D2** refc: instance is GC-freed after `close()` (not just providers cleared).
+- **D3** multi-thread interface dispatch test (cross-thread, real MT lane).
+- **D4** compile-fail/negative tests: apiName collision, cross-interface broker
+  name collision, object-payload/name mismatch, mixed-case sigs in one block.
+
+### Phase B — lifecycle / memory robustness (all 🔴 important)
+- **B1** `=destroy` on the impl → `close()` when `brokerCtx != Default`; tested
+  on refc + orc.
+- **B2** event-listener cleanup in `close()`: the interface registers a teardown
+  hook enumerating its event types so `close()` drops listeners too.
+- **B3** gcsafe `new()`/`create()`: atomic `classCtx` allocator + once-init so
+  `create()` is callable on the FFI processing thread (re-add gcsafe to the
+  factory path).
+- **B4** factory storage cross-thread (lock / shared cell, not a bare global).
+- **B5** `classCtx` lazy-init race fix (atomic) — folds into B3.
+
+### Phase reduced-A — multi-interface FFI library
+- **A1** main interface = library lifecycle in the main wrapper class; global
+  brokers fold into the main interface; cross-library collision check (hard err).
+- **A2** compile-time interface registry; emit one wrapper class + header per
+  `BrokerInterface(API)`; only the main gets `createContext`/`shutdown`.
+- **A3** create-instance request → returns `IWidget`; provider constructs the
+  instance under the lib's ctx scheme; FFI returns the `instanceCtx` handle.
+- **A4** wrapper RAII ownership + teardown per language (C++/Rust/Go/Py/C).
+- **A5** per-context live-sub-instance registry + library-shutdown sweep.
+- Extend `hierlib` to multi-interface; verify across all wrappers.
+
+---
+
+
 ## Goal
 
 Add an interface/implementation (pure-virtual-like) layer over the existing
