@@ -361,6 +361,19 @@ task test, "Run all single and multi-threaded broker tests":
         continue
       test opt, f
 
+task testSugarRejects,
+  "Compile-fail tests: each test/reject/*.nim must NOT compile":
+  let rejects =
+    ["reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret"]
+  for f in rejects:
+    let (outp, code) =
+      gorgeEx("nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim")
+    if code == 0:
+      echo outp
+      quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
+    echo "  reject OK (correctly rejected): " & f
+  echo "all sugar-reject tests passed"
+
 task runFfiBenchEventStress,
   "Build benchlib  + the Part D-4/D-5 event dispatch stress drivers and run them":
   # Build the benchlib shared library into test/ffibench/build/.
