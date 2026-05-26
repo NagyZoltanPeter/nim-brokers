@@ -641,6 +641,15 @@ task runHierExampleCpp,
     buildHierCmakeTarget("hier_cpp")
     exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/hierlib/cpp_example"))
 
+task runHierExampleRust,
+  "Build hierlib + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/ffiapi/hierlib/rust_example/Cargo.toml"
+
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
   for mm in memoryManagerMatrix():
