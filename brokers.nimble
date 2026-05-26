@@ -650,6 +650,16 @@ task runHierExampleRust,
     exec quoteArg(findCargoExe()) &
       " run --manifest-path examples/ffiapi/hierlib/rust_example/Cargo.toml"
 
+task runHierExampleGo,
+  "Build hierlib + Go module and run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(generateGo = true)
+    withDir "examples/ffiapi/hierlib/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+      exec quoteArg(findGoExe()) & " run ."
+
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
   for mm in memoryManagerMatrix():
