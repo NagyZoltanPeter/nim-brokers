@@ -492,6 +492,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_api_library_init", "apitest"),
     ("test_api_discovery", "apidisc"),
     ("test_broker_interface_api", "brokerifaceapi"),
+    ("test_broker_interface_mt", "brokerifacemt"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
   ]
   for (f, prefix) in apiTests:
