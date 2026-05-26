@@ -1551,7 +1551,7 @@ proc registerBrokerLibraryCborImpl(
   for e in eventEntries:
     eventNames.add(e.apiName)
   generateCborCHeaderFile(outDir, libName, config.version, requestNames, eventNames)
-  generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
+  generateCborCppHeaderFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenRust):

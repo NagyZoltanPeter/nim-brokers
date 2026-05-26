@@ -32,6 +32,29 @@ int main() {
   assert(received.load() == 99);
 
   lib.offTick(handle);
+
+  // reduced-A: create a sub-interface instance, drive its own methods (routed
+  // to the same processing thread via shared classCtx), then release it.
+  {
+    auto wr = lib.makeWidget(5);
+    assert(wr.isOk());
+    Widget widget = std::move(wr.take());
+    assert(widget.ctx() != 0);
+    assert(widget.area().value() == 25);
+    assert(widget.scale(3).value() == 15);
+    assert(widget.area().value() == 225);
+
+    // A second, independent widget (own instanceCtx, same library).
+    auto w2 = lib.makeWidget(2);
+    assert(w2.isOk());
+    assert(w2.value().area().value() == 4);
+
+    widget.close();      // explicit release
+    widget.close();      // idempotent
+    assert(widget.area().isErr()); // post-release routes but has no provider
+    // w2 released by its destructor at scope exit.
+  }
+
   lib.shutdown();
   std::cout << "hierlib cpp example: OK\n";
   return 0;
