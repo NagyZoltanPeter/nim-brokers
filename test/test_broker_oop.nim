@@ -81,6 +81,21 @@ suite "BrokerInterface: event facade":
     g.emit(Greeted, Greeted(who: "bob"))
     check (waitFor fut) == "bob"
 
+  test "close() drops the instance's event listeners (B2)":
+    let g = GreeterImpl.new(prefix = "x")
+    let ctx = g.brokerCtx
+    var fired = 0
+    discard g.listen(
+      Greeted,
+      proc(ev: Greeted): Future[void] {.async: (raises: []), gcsafe.} =
+        inc(fired),
+    )
+    g.close()
+    # Emit on the (now-cleared) context directly; the listener was dropped.
+    Greeted.emit(ctx, Greeted(who: "z"))
+    waitFor sleepAsync(20.milliseconds)
+    check fired == 0
+
 suite "BrokerInterface: factory / dependency-injection":
   test "create() errors with no factory":
     check IGreeter.create().isErr()

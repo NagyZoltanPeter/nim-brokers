@@ -96,6 +96,7 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
 
   # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
   #    interface is `(API)`), and generate abstract methods for requests.
+  var eventNames: seq[string] = @[]
   for stmt in body:
     let headName = brokerHeadName(stmt)
     if headName notin ["EventBroker", "RequestBroker"]:
@@ -131,6 +132,13 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
         result.add(
           parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async))
         )
+    elif headName == "EventBroker":
+      # Record the event type so BrokerImplement.close() can drop listeners.
+      let evParsed = parseSingleTypeDef(innerBody, "BrokerInterface EventBroker")
+      eventNames.add($evParsed.typeIdent)
+
+  # Publish this interface's event types for BrokerImplement teardown (B2).
+  registerInterfaceEvents(ifaceNameStr, eventNames)
 
   # 3. Generic instance-scoped event facade — forwards any event typedesc to
   #    the underlying ctx-based broker API using `self.brokerCtx`.

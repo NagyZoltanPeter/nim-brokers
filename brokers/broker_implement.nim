@@ -51,6 +51,7 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     macros.error("BrokerImplement must be written `BrokerImplement Impl of IFace:`", infix)
   let implName = infix[1]
   let implStr = $implName
+  let ifaceStr = $infix[2]
 
   result = newStmtList()
 
@@ -99,7 +100,9 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   let setupName = ident(implStr & "SetupProviders")
   result.add(
     quote do:
-      var `classCtxVar` {.global.}: uint16 = 0'u16
+      # classCtx allocated once at module init (immutable -> race-free and
+      # gcsafe to read); per-instance instanceCtx from an atomic counter.
+      let `classCtxVar` = newClassCtx()
       var `instCounter` {.global.}: Atomic[uint16]
   )
 
@@ -147,8 +150,6 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   let pre =
     quote do:
       let `selfId` = `implName`()
-      if `classCtxVar` == 0'u16:
-        `classCtxVar` = newClassCtx()
       `selfId`.brokerCtx =
         makeBrokerContext(`classCtxVar`, `instCounter`.fetchAdd(1'u16, moRelaxed) + 1'u16)
   for s in pre:
@@ -216,6 +217,20 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   closeSrc.add("  if self.brokerCtx == DefaultBrokerContext: return\n")
   for (verb, brokerName, margs, payload, async) in methods:
     closeSrc.add("  " & brokerName & ".clearProvider(self.brokerCtx)\n")
+  # B2: also drop this instance's event listeners. The interface published its
+  # event types via the compile-time registry; guard with `when compiles` so it
+  # works whether the event broker is single-thread / mt / API.
+  for ev in interfaceEvents(ifaceStr):
+    # dropAllListeners clears the listener table synchronously (before its first
+    # await), so discarding the Future from sync close() still removes listeners;
+    # only the in-flight-cancel await is abandoned (matches teardown semantics).
+    closeSrc.add("  when compiles(" & ev & ".dropAllListeners(self.brokerCtx)):\n")
+    closeSrc.add(
+      "    when typeof(" & ev & ".dropAllListeners(self.brokerCtx)) is void:\n"
+    )
+    closeSrc.add("      " & ev & ".dropAllListeners(self.brokerCtx)\n")
+    closeSrc.add("    else:\n")
+    closeSrc.add("      discard " & ev & ".dropAllListeners(self.brokerCtx)\n")
   closeSrc.add("  self.brokerCtx = DefaultBrokerContext\n")
   result.add(parseStmt(closeSrc))
 

@@ -443,3 +443,25 @@ proc parseRequestSugar*(
       synth, macroName, allowRefToNonObject = true, collectFieldInfo = true
     )
     result.objectDef = result.parsed.objectDef
+
+# ---------------------------------------------------------------------------
+# Compile-time interface -> event-type registry. BrokerInterface records the
+# event types it declares; BrokerImplement reads them so the generated
+# `close()` can drop the instance's event listeners (the impl macro otherwise
+# doesn't know the interface's events).
+# ---------------------------------------------------------------------------
+
+var gInterfaceEvents {.compileTime.}: seq[(string, seq[string])] = @[]
+
+proc registerInterfaceEvents*(iface: string, events: seq[string]) {.compileTime.} =
+  for i in 0 ..< gInterfaceEvents.len:
+    if gInterfaceEvents[i][0] == iface:
+      gInterfaceEvents[i][1] = events
+      return
+  gInterfaceEvents.add((iface, events))
+
+proc interfaceEvents*(iface: string): seq[string] {.compileTime.} =
+  for it in gInterfaceEvents:
+    if it[0] == iface:
+      return it[1]
+  @[]
