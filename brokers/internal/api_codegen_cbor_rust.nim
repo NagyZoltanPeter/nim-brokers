@@ -32,6 +32,7 @@
 
 import std/[macros, strutils, tables]
 import ./api_common, ./api_schema
+import ./helper/broker_utils # reduced-A: per-interface partitioning
 
 # ---------------------------------------------------------------------------
 # Nim → Rust type mapping (registry-aware)
@@ -168,15 +169,44 @@ proc cborRustClassName(libName: string): string {.compileTime.} =
     else:
       result.add(ch)
 
+proc rustSubStructName(iface: string): string {.compileTime.} =
+  ## Wrapper struct name for a sub-interface: strip a leading `I` before an
+  ## uppercase letter (IWidget -> Widget), else use the name as-is.
+  if iface.len > 1 and iface[0] == 'I' and iface[1] in {'A' .. 'Z'}:
+    iface[1 ..^ 1]
+  else:
+    iface
+
 proc generateCborRustFile*(
     outDir: string,
     libName: string,
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
+    mainClass: string = "",
 ) {.compileTime, raises: [].} =
   ## Writes the Rust wrapper crate (Cargo.toml + src/lib.rs) for a
   ## CBOR-mode library under `<outDir>/<libName>_rs/`.
   ensureGeneratedOutputDir(outDir)
+
+  # reduced-A: per-interface partition. Sub-interface names are derived from the
+  # entries via interfaceOwningRequestType (NOT apiInterfaces() — the VM aliases
+  # a by-value seq return to an empty copy).
+  proc ownsReqMain(e: CborRequestEntry): bool {.compileTime.} =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningRequestType(e.responseTypeName)
+    o.len == 0 or o == mainClass
+  proc ownsEvtMain(ev: CborEventEntry): bool {.compileTime.} =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningEventType(ev.typeName)
+    o.len == 0 or o == mainClass
+  var subInterfaceNames: seq[string] = @[]
+  if mainClass.len > 0:
+    for e in requestEntries:
+      let o = interfaceOwningRequestType(e.responseTypeName)
+      if o.len > 0 and o != mainClass and o notin subInterfaceNames:
+        subInterfaceNames.add(o)
   let crateDir =
     if outDir.len > 0:
       outDir & "/" & libName & "_rs"
@@ -263,6 +293,7 @@ proc generateCborRustFile*(
   rs.add("    fn " & p & "initialize();\n")
   rs.add("    fn " & p & "createContext(err: *mut *const c_char) -> u32;\n")
   rs.add("    fn " & p & "shutdown(ctx: u32) -> i32;\n")
+  rs.add("    fn " & p & "releaseInstance(ctx: u32) -> i32;\n")
   rs.add("    fn " & p & "allocBuffer(size: i32) -> *mut c_void;\n")
   rs.add("    fn " & p & "freeBuffer(p: *mut c_void);\n")
   rs.add("    fn " & p & "call(\n")
@@ -576,29 +607,20 @@ proc generateCborRustFile*(
   rs.add("        }\n")
   rs.add("    }\n\n")
 
-  # Per-request methods.
-  rs.add("    // ---- Request methods ----\n\n")
-  for e in requestEntries:
+  # Per-request methods. Factored into a reusable emitter so the main Lib impl
+  # and each sub-interface impl share identical bodies (reduced-A).
+  proc emitRustReqMethod(e: CborRequestEntry): string {.compileTime.} =
     if e.responseTypeName.len == 0:
-      continue
+      return ""
     if not isEmittablePayload(e.responseTypeName):
-      rs.add(
+      return
         "    // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
-          "' is not a registered object type.\n\n"
-      )
-      continue
-    var argsMappable = true
+        "' is not a registered object type.\n\n"
     for (n, t) in e.argFields:
       if not isRustMappable(t):
-        argsMappable = false
-        break
-    if not argsMappable:
-      rs.add(
-        "    // TODO: '" & e.apiName &
+        return
+          "    // TODO: '" & e.apiName &
           "' has parameters whose Nim types aren't yet mappable to Rust.\n\n"
-      )
-      continue
-
     let methodName = e.apiName
     var sigParams = "&self"
     var argsStructDecl = ""
@@ -608,11 +630,6 @@ proc generateCborRustFile*(
       argsStructDecl.add("        struct __Args {\n")
       for (n, t) in e.argFields:
         sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
-        # `seq[byte]` and `Option[seq[byte]]` need `#[serde(with =
-        # "serde_bytes")]` so ciborium encodes them as CBOR byte strings
-        # (major type 2). The Nim cbor_serialization decoder rejects the
-        # default array-of-int form with "Expected: byte string but
-        # found: array".
         let lowered = t.toLowerAscii().strip()
         if lowered == "seq[byte]":
           argsStructDecl.add("            #[serde(with = \"serde_bytes\")]\n")
@@ -623,53 +640,124 @@ proc generateCborRustFile*(
         argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
         argsStructInit.add("            " & n & ",\n")
       argsStructDecl.add("        }\n")
-
-    rs.add(
+    result.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
         "> {\n"
     )
     if e.argFields.len > 0:
-      # Build a typed args struct (so `#[serde(with = "serde_bytes")]`
-      # annotations on `Vec<u8>` fields take effect during ciborium
-      # encoding) instead of going through `serde_json::Value`.
-      rs.add(argsStructDecl)
-      rs.add("        let args = __Args {\n")
-      rs.add(argsStructInit)
-      rs.add("        };\n")
-      rs.add("        let mut buf: Vec<u8> = Vec::new();\n")
-      rs.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
-      rs.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
-      rs.add("        }\n")
+      result.add(argsStructDecl)
+      result.add("        let args = __Args {\n")
+      result.add(argsStructInit)
+      result.add("        };\n")
+      result.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      result.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
+      result.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
+      result.add("        }\n")
     else:
-      rs.add("        let buf: Vec<u8> = Vec::new();\n")
-    rs.add("        let raw = match self.do_call(\"" & e.apiName & "\", &buf) {\n")
-    rs.add("            Ok(v) => v,\n")
-    rs.add("            Err(e) => return Result::err(e),\n")
-    rs.add("        };\n")
-    rs.add("        if raw.is_empty() {\n")
-    rs.add("            return Result::err(\"empty response envelope\");\n")
-    rs.add("        }\n")
-    rs.add("        #[derive(Deserialize)]\n")
-    rs.add(
+      result.add("        let buf: Vec<u8> = Vec::new();\n")
+    result.add("        let raw = match self.do_call(\"" & e.apiName & "\", &buf) {\n")
+    result.add("            Ok(v) => v,\n")
+    result.add("            Err(e) => return Result::err(e),\n")
+    result.add("        };\n")
+    result.add("        if raw.is_empty() {\n")
+    result.add("            return Result::err(\"empty response envelope\");\n")
+    result.add("        }\n")
+    result.add("        #[derive(Deserialize)]\n")
+    result.add(
       "        struct __Env { #[serde(default)] ok: Option<" & e.responseTypeName &
         ">, #[serde(default)] err: Option<String> }\n"
     )
-    rs.add("        let env: __Env = match ciborium::from_reader(raw.as_slice()) {\n")
-    rs.add("            Ok(v) => v,\n")
-    rs.add(
+    result.add(
+      "        let env: __Env = match ciborium::from_reader(raw.as_slice()) {\n"
+    )
+    result.add("            Ok(v) => v,\n")
+    result.add(
       "            Err(e) => return Result::err(format!(\"cbor decode: {}\", e)),\n"
     )
-    rs.add("        };\n")
-    rs.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
-    rs.add("        match env.ok {\n")
-    rs.add("            Some(v) => Result::ok(v),\n")
-    rs.add("            None => Result::err(\"missing ok in envelope\"),\n")
-    rs.add("        }\n")
-    rs.add("    }\n\n")
+    result.add("        };\n")
+    result.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
+    result.add("        match env.ok {\n")
+    result.add("            Some(v) => Result::ok(v),\n")
+    result.add("            None => Result::err(\"missing ok in envelope\"),\n")
+    result.add("        }\n")
+    result.add("    }\n\n")
+
+  # reduced-A: a create-instance method returns the typed sub-wrapper. The wire
+  # ok value is a bare u32 ctx; we construct `Sub { ctx }` from it (same module,
+  # so the private field is accessible).
+  proc emitRustInstanceMethod(e: CborRequestEntry): string {.compileTime.} =
+    for (n, t) in e.argFields:
+      if not isRustMappable(t):
+        return
+          "    // TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+    let sub = rustSubStructName(e.returnsInterface)
+    var sigParams = "&self"
+    var argsStructInit = ""
+    var argsStructDecl = ""
+    if e.argFields.len > 0:
+      argsStructDecl.add("        #[derive(Serialize)]\n")
+      argsStructDecl.add("        struct __Args {\n")
+      for (n, t) in e.argFields:
+        sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
+        argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
+        argsStructInit.add("            " & n & ",\n")
+      argsStructDecl.add("        }\n")
+    result.add(
+      "    pub fn " & e.apiName & "(" & sigParams & ") -> Result<" & sub & "> {\n"
+    )
+    if e.argFields.len > 0:
+      result.add(argsStructDecl)
+      result.add("        let args = __Args {\n")
+      result.add(argsStructInit)
+      result.add("        };\n")
+      result.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      result.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
+      result.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
+      result.add("        }\n")
+    else:
+      result.add("        let buf: Vec<u8> = Vec::new();\n")
+    result.add("        let raw = match self.do_call(\"" & e.apiName & "\", &buf) {\n")
+    result.add("            Ok(v) => v,\n")
+    result.add("            Err(e) => return Result::err(e),\n")
+    result.add("        };\n")
+    result.add("        if raw.is_empty() {\n")
+    result.add("            return Result::err(\"empty response envelope\");\n")
+    result.add("        }\n")
+    result.add("        #[derive(Deserialize)]\n")
+    result.add(
+      "        struct __Env { #[serde(default)] ok: Option<u32>, #[serde(default)] err: Option<String> }\n"
+    )
+    result.add(
+      "        let env: __Env = match ciborium::from_reader(raw.as_slice()) {\n"
+    )
+    result.add("            Ok(v) => v,\n")
+    result.add(
+      "            Err(e) => return Result::err(format!(\"cbor decode: {}\", e)),\n"
+    )
+    result.add("        };\n")
+    result.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
+    result.add("        match env.ok {\n")
+    result.add("            Some(v) => Result::ok(" & sub & " { ctx: v }),\n")
+    result.add("            None => Result::err(\"missing ok in envelope\"),\n")
+    result.add("        }\n")
+    result.add("    }\n\n")
+
+  rs.add("    // ---- Request methods ----\n\n")
+  for e in requestEntries:
+    if e.responseTypeName.len == 0:
+      continue
+    if not ownsReqMain(e):
+      continue
+    if e.returnsInterface.len > 0:
+      rs.add(emitRustInstanceMethod(e))
+    else:
+      rs.add(emitRustReqMethod(e))
 
   # Per-event subscribe / unsubscribe.
   rs.add("    // ---- Event registration ----\n\n")
   for ev in eventEntries:
+    if not ownsEvtMain(ev):
+      continue # sub-interface events are not in scope for this slice
     if not isEmittablePayload(ev.typeName):
       rs.add(
         "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
@@ -749,6 +837,81 @@ proc generateCborRustFile*(
   rs.add("impl Drop for " & className & " {\n")
   rs.add("    fn drop(&mut self) { self.shutdown(); }\n")
   rs.add("}\n\n")
+
+  # reduced-A: sub-interface wrapper structs. Each shares the single C ABI: its
+  # methods call <lib>_call(ctx, ...) which the library routes by classCtx to
+  # the same processing thread. Drop / close() calls <lib>_releaseInstance, after
+  # which the Nim instance is reclaimed by the GC (no FFI-side ownership).
+  for ifaceName in subInterfaceNames:
+    let sub = rustSubStructName(ifaceName)
+    rs.add("// -------- " & sub & " — sub-instance wrapper of " & ifaceName & " --------\n")
+    rs.add("pub struct " & sub & " {\n")
+    rs.add("    ctx: u32,\n")
+    rs.add("}\n\n")
+    rs.add("impl " & sub & " {\n")
+    rs.add("    pub fn ctx(&self) -> u32 { self.ctx }\n")
+    rs.add("    pub fn valid(&self) -> bool { self.ctx != 0 }\n\n")
+    rs.add("    pub fn close(&mut self) {\n")
+    rs.add("        if self.ctx != 0 {\n")
+    rs.add("            unsafe { " & p & "releaseInstance(self.ctx); }\n")
+    rs.add("            self.ctx = 0;\n")
+    rs.add("        }\n")
+    rs.add("    }\n\n")
+    # Internal call helper (same shape as Lib::do_call, keyed by self.ctx).
+    rs.add(
+      "    fn do_call(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, String> {\n"
+    )
+    rs.add(
+      "        if self.ctx == 0 { return Err(\"sub-instance is released\".into()); }\n"
+    )
+    rs.add("        unsafe {\n")
+    rs.add(
+      "            let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+    )
+    rs.add("            let in_buf: *const c_void = if req_payload.is_empty() {\n")
+    rs.add("                std::ptr::null()\n")
+    rs.add("            } else {\n")
+    rs.add("                let p = " & p & "allocBuffer(req_payload.len() as i32);\n")
+    rs.add(
+      "                if p.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+    )
+    rs.add(
+      "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), p as *mut u8, req_payload.len());\n"
+    )
+    rs.add("                p as *const c_void\n")
+    rs.add("            };\n")
+    rs.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
+    rs.add("            let mut out_len: i32 = 0;\n")
+    rs.add("            let status = " & p & "call(\n")
+    rs.add("                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n")
+    rs.add("                &mut out_buf as *mut _, &mut out_len as *mut _,\n")
+    rs.add("            );\n")
+    rs.add("            let mut out: Vec<u8> = Vec::new();\n")
+    rs.add("            if !out_buf.is_null() && out_len > 0 {\n")
+    rs.add(
+      "                let slice = std::slice::from_raw_parts(out_buf as *const u8, out_len as usize);\n"
+    )
+    rs.add("                out = slice.to_vec();\n")
+    rs.add("                " & p & "freeBuffer(out_buf);\n")
+    rs.add("            }\n")
+    rs.add("            if status != 0 {\n")
+    rs.add("                if status == -4 && !out.is_empty() {\n")
+    rs.add(
+      "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
+    )
+    rs.add("                }\n")
+    rs.add("                return Err(format!(\"framework error: {}\", status));\n")
+    rs.add("            }\n")
+    rs.add("            Ok(out)\n")
+    rs.add("        }\n")
+    rs.add("    }\n\n")
+    for e in requestEntries:
+      if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
+        rs.add(emitRustReqMethod(e))
+    rs.add("}\n\n")
+    rs.add("impl Drop for " & sub & " {\n")
+    rs.add("    fn drop(&mut self) { self.close(); }\n")
+    rs.add("}\n\n")
 
   # Trampoline: each subscription's user_data points at a leaked
   # Box<Arc<closure>>. Clone the Arc cheaply (atomic refcount) so

@@ -35,6 +35,26 @@ fn main() {
     assert_eq!(received.load(Ordering::SeqCst), 99);
 
     lib.off_tick(handle);
+
+    // reduced-A: create a sub-interface instance, drive its own methods (routed
+    // to the same processing thread via shared classCtx), then release it.
+    {
+        let mut widget = lib.make_widget(5).into_result().expect("make_widget");
+        assert_ne!(widget.ctx(), 0);
+        assert_eq!(*widget.area().value().unwrap(), 25);
+        assert_eq!(*widget.scale(3).value().unwrap(), 15);
+        assert_eq!(*widget.area().value().unwrap(), 225);
+
+        // A second, independent widget (own instanceCtx, same library).
+        let w2 = lib.make_widget(2).into_result().expect("make_widget 2");
+        assert_eq!(*w2.area().value().unwrap(), 4);
+        // w2 released by its Drop at scope exit.
+
+        widget.close(); // explicit release
+        widget.close(); // idempotent
+        assert!(widget.area().is_err(), "post-release call must error");
+    }
+
     lib.shutdown();
     println!("hierlib rust example: OK");
 }

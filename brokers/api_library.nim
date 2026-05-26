@@ -1555,7 +1555,7 @@ proc registerBrokerLibraryCborImpl(
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenRust):
-    generateCborRustFile(outDir, libName, entries, eventEntries)
+    generateCborRustFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenGo):
     generateCborGoFile(outDir, libName, entries, eventEntries)
 
