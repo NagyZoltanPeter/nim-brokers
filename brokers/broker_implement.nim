@@ -162,13 +162,19 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       `selfId`
   for s in post:
     newBody.add(copyNimTree(s))
+  # A0: new() is gcsafe — the create-instance FFI path constructs sub-instances
+  # in a gcsafe request method body (classCtx is an immutable `let`, instanceCtx
+  # an atomic, setupProviders is gcsafe). Requires the impl's `init` body to be
+  # gcsafe (trivial field writes always are). If a real in-process user needs a
+  # non-gcsafe init, add a separate non-gcsafe constructor rather than relaxing
+  # this.
   result.add(
     nnkProcDef.newTree(
       postfix(ident("new"), "*"),
       newEmptyNode(),
       newEmptyNode(),
       newFormal,
-      newEmptyNode(),
+      nnkPragma.newTree(ident("gcsafe")),
       newEmptyNode(),
       newBody,
     )
