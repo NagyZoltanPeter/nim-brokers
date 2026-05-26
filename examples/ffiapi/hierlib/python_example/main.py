@@ -62,6 +62,14 @@ def main() -> None:
     widget.close()
     assert widget.area().is_err(), "area after release must error"
 
+    # A5: a sub-instance the foreign side FORGETS to release. shutdown() must
+    # tear the library context down cleanly anyway — the Nim instance lives on
+    # the processing thread's heap and is reclaimed when that thread is joined
+    # (no FFI-side ownership; GC owns instances). No crash/hang under refc/orc.
+    leaked = lib.make_widget(9)
+    assert leaked.is_ok() and leaked.value.area().value == 81, "leaked widget"
+    # intentionally NOT closed.
+
     lib.shutdown()
     print("hierlib python example: OK")
 
