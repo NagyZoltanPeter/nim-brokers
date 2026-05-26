@@ -593,6 +593,44 @@ task runFfiExamplePy,
     exec quoteArg(findPythonExe()) & " " &
       quoteArg("examples/ffiapi/python_example/main.py")
 
+# ---------------------------------------------------------------------------
+# hierlib — the OOP interface-model FFI example (BrokerInterface(API) +
+# BrokerImplement + bindToContext). Same C ABI as the flat mylib example.
+# ---------------------------------------------------------------------------
+
+proc buildHierExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/ffiapi/hierlib/nimlib/build"
+  flags.add(nimMainPrefixFlag("hierlib"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("examples/ffiapi/hierlib/nimlib/build", "hierlib"))
+  if existsEnv("MM"):
+    flags.add(" --mm:" & getEnv("MM"))
+  else:
+    flags.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    flags.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
+  exec "nim c " & flags & " examples/ffiapi/hierlib/nimlib/hierlib.nim"
+
+task buildHierExample, "Build the hierlib interface-model FFI example library":
+  buildHierExampleLibrary()
+
+task runHierExamplePy,
+  "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(true)
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/ffiapi/hierlib/python_example/main.py")
+
 # FFI build of the typemapping test library: compiles
 # test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApi
 # into build/ and drives test_typemappingtestlib.{cpp,py} against
