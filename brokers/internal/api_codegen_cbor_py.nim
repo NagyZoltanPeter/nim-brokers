@@ -34,6 +34,7 @@
 
 import std/[macros, strutils, tables]
 import ./api_common, ./api_schema
+import ./helper/broker_utils # reduced-A: per-interface partitioning
 
 # ---------------------------------------------------------------------------
 # Nim → Python type mapping (registry-aware)
@@ -275,11 +276,20 @@ proc snakeToUpperCamel(s: string): string {.compileTime.} =
 
 {.pop.}
 
+proc subClassName(iface: string): string {.compileTime.} =
+  ## Wrapper class name for a sub-interface: strip a leading `I` before an
+  ## uppercase letter (IWidget -> Widget), else use the name as-is.
+  if iface.len > 1 and iface[0] == 'I' and iface[1] in {'A' .. 'Z'}:
+    iface[1 ..^ 1]
+  else:
+    iface
+
 proc generateCborPyFile*(
     outDir: string,
     libName: string,
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
+    mainClass: string = "",
 ) {.compileTime, raises: [].} =
   ## Writes the Python wrapper module (.py) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
@@ -398,6 +408,9 @@ proc generateCborPyFile*(
   py.add("_LIB." & p & "createContext.restype = ctypes.c_uint32\n\n")
   py.add("_LIB." & p & "shutdown.argtypes = [ctypes.c_uint32]\n")
   py.add("_LIB." & p & "shutdown.restype = ctypes.c_int32\n\n")
+  # reduced-A: per-instance teardown (used by sub-wrapper close()).
+  py.add("_LIB." & p & "releaseInstance.argtypes = [ctypes.c_uint32]\n")
+  py.add("_LIB." & p & "releaseInstance.restype = ctypes.c_int32\n\n")
   py.add("_LIB." & p & "allocBuffer.argtypes = [ctypes.c_int32]\n")
   py.add("_LIB." & p & "allocBuffer.restype = ctypes.c_void_p\n\n")
   py.add("_LIB." & p & "freeBuffer.argtypes = [ctypes.c_void_p]\n")
@@ -751,28 +764,63 @@ proc generateCborPyFile*(
   py.add("            raise RuntimeError(f\"framework error: {status}\")\n")
   py.add("        return cbor2.loads(out) if out else None\n\n")
 
-  # Per-request typed methods.
-  for e in requestEntries:
+  # reduced-A: a request method's body, indented for a wrapper class. Handles
+  # both normal requests (decode the typed payload) and instance-returning
+  # requests (Ok value is a uint32 ctx → construct the typed sub-wrapper).
+  # Reused by the main class and each sub-interface class.
+  proc emitReqMethod(e: CborRequestEntry): string =
     if e.responseTypeName.len == 0:
-      continue
-    if not isEmittablePayload(e.responseTypeName):
-      py.add(
-        "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
-          "' is not a registered object type.\n\n"
-      )
-      continue
+      return ""
     var argsMappable = true
     for (n, t) in e.argFields:
       if not isPyMappable(t):
         argsMappable = false
         break
-    if not argsMappable:
-      py.add(
-        "    # TODO: '" & e.apiName &
-          "' has parameters whose Nim types aren't yet mappable to Python.\n\n"
+    if e.returnsInterface.len > 0:
+      if not argsMappable:
+        return
+          "    # TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+      let sub = subClassName(e.returnsInterface)
+      var sigParams = "self"
+      var argsDictBuilder = "{}"
+      if e.argFields.len > 0:
+        var dictParts = ""
+        for i, (n, t) in e.argFields.pairs:
+          sigParams.add(", " & n & ": " & nimTypeToPyHint(t))
+          if i > 0:
+            dictParts.add(", ")
+          dictParts.add("\"" & n & "\": " & pyEncodeExpr(t, n))
+        argsDictBuilder = "{" & dictParts & "}"
+      result.add(
+        "    def " & e.apiName & "(" & sigParams & ") -> Result[\"" & sub & "\"]:\n"
       )
-      continue
-
+      result.add("        if self._ctx == 0:\n")
+      result.add("            return Result.err(\"Library context is not created\")\n")
+      if e.argFields.len > 0:
+        result.add("        req_payload = cbor2.dumps(" & argsDictBuilder & ")\n")
+      else:
+        result.add("        req_payload = b\"\"\n")
+      result.add(
+        "        try:\n" & "            envelope = self._do_call(\"" & e.apiName &
+          "\", req_payload)\n" & "        except RuntimeError as exc:\n" &
+          "            return Result.err(str(exc))\n"
+      )
+      result.add(
+        "        if envelope is None or not isinstance(envelope, dict):\n" &
+          "            return Result.err(\"empty or malformed response envelope\")\n" &
+          "        if envelope.get(\"err\") is not None:\n" &
+          "            return Result.err(str(envelope[\"err\"]))\n" &
+          "        return Result.ok(" & sub & "(int(envelope.get(\"ok\"))))\n\n"
+      )
+      return result
+    if not isEmittablePayload(e.responseTypeName):
+      return
+        "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
+        "' is not a registered object type.\n\n"
+    if not argsMappable:
+      return
+        "    # TODO: '" & e.apiName &
+        "' has parameters whose Nim types aren't yet mappable to Python.\n\n"
     let methodName = e.apiName
     var sigParams = "self"
     var argsDictBuilder = "{}"
@@ -784,23 +832,22 @@ proc generateCborPyFile*(
           dictParts.add(", ")
         dictParts.add("\"" & n & "\": " & pyEncodeExpr(t, n))
       argsDictBuilder = "{" & dictParts & "}"
-
-    py.add(
+    result.add(
       "    def " & methodName & "(" & sigParams & ") -> Result[" & e.responseTypeName &
         "]:\n"
     )
-    py.add("        if self._ctx == 0:\n")
-    py.add("            return Result.err(\"Library context is not created\")\n")
+    result.add("        if self._ctx == 0:\n")
+    result.add("            return Result.err(\"Library context is not created\")\n")
     if e.argFields.len > 0:
-      py.add("        req_payload = cbor2.dumps(" & argsDictBuilder & ")\n")
+      result.add("        req_payload = cbor2.dumps(" & argsDictBuilder & ")\n")
     else:
-      py.add("        req_payload = b\"\"\n")
-    py.add(
+      result.add("        req_payload = b\"\"\n")
+    result.add(
       "        try:\n" & "            envelope = self._do_call(\"" & e.apiName &
         "\", req_payload)\n" & "        except RuntimeError as exc:\n" &
         "            return Result.err(str(exc))\n"
     )
-    py.add(
+    result.add(
       "        if envelope is None or not isinstance(envelope, dict):\n" &
         "            return Result.err(\"empty or malformed response envelope\")\n" &
         "        if envelope.get(\"err\") is not None:\n" &
@@ -808,6 +855,21 @@ proc generateCborPyFile*(
         "        return Result.ok(_decode_" & e.responseTypeName &
         "(envelope.get(\"ok\")))\n\n"
     )
+
+  # reduced-A: ownership predicate — an entry belongs to the main class when no
+  # mainClass is designated (legacy single-class), or it is flat (no owning
+  # interface), or its owning interface IS the main class.
+  proc ownsReqMain(e: CborRequestEntry): bool =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningRequestType(e.responseTypeName)
+    o.len == 0 or o == mainClass
+
+  # Per-request typed methods (main class).
+  for e in requestEntries:
+    if not ownsReqMain(e):
+      continue
+    py.add(emitReqMethod(e))
 
   # Per-event subscribe / unsubscribe.
   for ev in eventEntries:
@@ -887,6 +949,96 @@ proc generateCborPyFile*(
     py.add("            self." & mapName & ".clear()\n")
     py.add("        else:\n")
     py.add("            self." & mapName & ".pop(handle, None)\n\n")
+
+  # reduced-A: per-sub-interface wrapper classes. Each non-main
+  # BrokerInterface(API) with at least one request entry gets its own class. A
+  # sub-instance is created by a main create-instance method (returns Result of
+  # the sub class), bound to its routing ctx. The sub class shares the single C
+  # ABI: its _do_call uses self._ctx, which the library routes by classCtx to
+  # the same processing thread. close() calls <lib>_releaseInstance(ctx).
+  if mainClass.len > 0:
+    # Collect distinct non-main owning interfaces directly from the entries.
+    # (Deriving from interfaceOwningRequestType avoids returning the compile-
+    # time registry seq by value, which the Nim VM aliases to an empty copy.)
+    var subNames: seq[string] = @[]
+    for e in requestEntries:
+      let o = interfaceOwningRequestType(e.responseTypeName)
+      if o.len > 0 and o != mainClass and o notin subNames:
+        subNames.add(o)
+    for ifaceName in subNames:
+      var ifaceReqs: seq[CborRequestEntry] = @[]
+      for e in requestEntries:
+        if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
+          ifaceReqs.add(e)
+      if ifaceReqs.len == 0:
+        continue
+      let sub = subClassName(ifaceName)
+      py.add(
+        "# ---------------------------------------------------------------------------\n"
+      )
+      py.add("# " & sub & " — sub-instance wrapper (created via a " & mainClass & " request)\n")
+      py.add(
+        "# ---------------------------------------------------------------------------\n\n"
+      )
+      py.add("class " & sub & ":\n")
+      py.add("    \"\"\"Sub-interface instance of " & ifaceName & ".\n\n")
+      py.add("    Lives on the library's processing thread; obtained from a main\n")
+      py.add("    create-instance method. Call close() (or use as a context\n")
+      py.add("    manager) to release it — drops its providers/listeners.\"\"\"\n\n")
+      py.add("    def __init__(self, ctx: int) -> None:\n")
+      py.add("        self._ctx: int = ctx\n\n")
+      py.add("    @property\n")
+      py.add("    def ctx(self) -> int:\n")
+      py.add("        return self._ctx\n\n")
+      py.add("    def valid(self) -> bool:\n")
+      py.add("        return self._ctx != 0\n\n")
+      py.add("    def __bool__(self) -> bool:\n")
+      py.add("        return self._ctx != 0\n\n")
+      # _do_call (same body as the main class; routes by self._ctx).
+      py.add(
+        "    def _do_call(self, api_name: str, req_payload: bytes) -> Optional[Dict[str, Any]]:\n"
+      )
+      py.add("        in_buf = None\n")
+      py.add("        if req_payload:\n")
+      py.add("            in_buf = _LIB." & p & "allocBuffer(len(req_payload))\n")
+      py.add("            if not in_buf:\n")
+      py.add("                raise RuntimeError(\"allocBuffer failed\")\n")
+      py.add("            ctypes.memmove(in_buf, req_payload, len(req_payload))\n")
+      py.add("        resp_buf = ctypes.c_void_p()\n")
+      py.add("        resp_len = ctypes.c_int32()\n")
+      py.add("        status = _LIB." & p & "call(\n")
+      py.add("            self._ctx,\n")
+      py.add("            api_name.encode(\"utf-8\"),\n")
+      py.add("            in_buf,\n")
+      py.add("            len(req_payload),\n")
+      py.add("            ctypes.byref(resp_buf),\n")
+      py.add("            ctypes.byref(resp_len),\n")
+      py.add("        )\n")
+      py.add("        out: bytes = b\"\"\n")
+      py.add("        if resp_buf and resp_len.value > 0:\n")
+      py.add("            out = ctypes.string_at(resp_buf, resp_len.value)\n")
+      py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
+      py.add("        if status != 0:\n")
+      py.add("            if status == -4 and out:\n")
+      py.add("                raise RuntimeError(out.decode(\"utf-8\", errors=\"replace\"))\n")
+      py.add("            raise RuntimeError(f\"framework error: {status}\")\n")
+      py.add("        return cbor2.loads(out) if out else None\n\n")
+      for e in ifaceReqs:
+        py.add(emitReqMethod(e))
+      py.add("    def close(self) -> None:\n")
+      py.add("        \"\"\"Release this sub-instance (idempotent).\"\"\"\n")
+      py.add("        if self._ctx:\n")
+      py.add("            _LIB." & p & "releaseInstance(self._ctx)\n")
+      py.add("            self._ctx = 0\n\n")
+      py.add("    def __enter__(self) -> \"" & sub & "\":\n")
+      py.add("        return self\n\n")
+      py.add("    def __exit__(self, exc_type, exc, tb) -> None:\n")
+      py.add("        self.close()\n\n")
+      py.add("    def __del__(self) -> None:\n")
+      py.add("        try:\n")
+      py.add("            self.close()\n")
+      py.add("        except Exception:\n")
+      py.add("            pass\n\n")
 
   try:
     writeFile(pyPath, py)

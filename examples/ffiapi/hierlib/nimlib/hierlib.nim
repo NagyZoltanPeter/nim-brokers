@@ -15,6 +15,16 @@ import brokers/broker_interface
 import brokers/broker_implement
 import brokers/api_library
 
+# --- Sub-interface (reduced-A): created at runtime by the main interface via a
+# create-instance request. It has its own typed wrapper class; calls route to
+# the same library processing thread (shared classCtx, distinct instanceCtx).
+BrokerInterface(API, IWidget):
+  RequestBroker:
+    proc area(): Future[Result[int32, string]] {.async.}
+
+  RequestBroker:
+    proc scale(factor: int32): Future[Result[int32, string]] {.async.}
+
 BrokerInterface(API, IHier):
   EventBroker:
     type Tick = object
@@ -22,6 +32,12 @@ BrokerInterface(API, IHier):
 
   RequestBroker:
     proc getValue(): Future[Result[int32, string]] {.async.}
+
+  # Create-instance request: returns a sub-interface ref. Over FFI the wire
+  # carries the sub-instance's BrokerContext (uint32); the wrapper turns it into
+  # a typed Widget object.
+  RequestBroker:
+    proc makeWidget(size: int32): Future[Result[IWidget, string]] {.async.}
 
   RequestBroker:
     proc echoLen(s: string): Future[Result[int32, string]] {.async.}
@@ -43,6 +59,22 @@ BrokerInterface(API, IHier):
 
     proc shutdownRequest(): Future[Result[ShutdownRequest, string]] {.async.}
 
+type WidgetImpl = ref object of IWidget
+  size: int32
+
+BrokerImplement WidgetImpl of IWidget:
+  proc init(size: int32) =
+    self.size = size
+
+  method area(self: WidgetImpl): Future[Result[int32, string]] {.async.} =
+    ok(self.size * self.size)
+
+  method scale(
+      self: WidgetImpl, factor: int32
+  ): Future[Result[int32, string]] {.async.} =
+    self.size = self.size * factor
+    ok(self.size)
+
 type HierImpl = ref object of IHier
   value: int32
 
@@ -52,6 +84,16 @@ BrokerImplement HierImpl of IHier:
 
   method getValue(self: HierImpl): Future[Result[int32, string]] {.async.} =
     ok(self.value)
+
+  method makeWidget(
+      self: HierImpl, size: int32
+  ): Future[Result[IWidget, string]] {.async.} =
+    # Build a sub-instance that SHARES this library's classCtx (so its calls
+    # route to the same processing thread) but gets a fresh instanceCtx. Use
+    # bindToContext, NOT new() (new() would allocate its own classCtx and break
+    # the classCtx-mask routing). gcsafe: new()/bindToContext are gcsafe (A0).
+    let w = WidgetImpl.bindToContext(newInstanceCtx(self.brokerCtx), size)
+    ok(IWidget(w))
 
   method echoLen(self: HierImpl, s: string): Future[Result[int32, string]] {.async.} =
     ok(int32(s.len))
@@ -82,6 +124,8 @@ registerBrokerLibrary:
     "hierlib"
   version:
     "0.1.0"
+  mainClass:
+    IHier
   initializeRequest:
     InitializeRequest
   shutdownRequest:

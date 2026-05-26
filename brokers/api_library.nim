@@ -264,6 +264,13 @@ proc registerBrokerLibraryCborImpl(
   let unsubscribeFuncName = libName & "_unsubscribe"
   let unsubscribeFuncNameLit = newLit(unsubscribeFuncName)
   let unsubscribeFuncIdent = ident(unsubscribeFuncName)
+  # reduced-A (A4): per-instance teardown export + processing-thread worker.
+  let releaseInstanceFuncName = libName & "_releaseInstance"
+  let releaseInstanceFuncNameLit = newLit(releaseInstanceFuncName)
+  let releaseInstanceFuncIdent = ident(releaseInstanceFuncName)
+  let releaseCtxProcName = libName & "CborReleaseCtx"
+  let releaseCtxProcIdent = ident(releaseCtxProcName)
+  let releaseApiNameLit = newLit("__release_instance")
   let knownEventPredIdent = ident(libName & "CborIsKnownEvent")
   let installAllListenersIdent = ident(libName & "CborInstallAllListeners")
   # Part D-3: per-event helper that maps an event name to its global
@@ -388,6 +395,44 @@ proc registerBrokerLibraryCborImpl(
     newStmtList(caseStmt),
   )
   result.add(dispatchProc)
+
+  # ------------------------------------------------------------------
+  # reduced-A (A4): per-context teardown. `<lib>_releaseInstance(ctx)` and
+  # `<lib>_shutdown` route a reserved-apiName message to the processing thread
+  # which runs this proc: it clears the request providers and drops the event
+  # listeners keyed by `ctx`. Running here (the processing thread) is required
+  # because the MT broker buckets are keyed by the processing thread's id —
+  # clearing from a foreign thread would touch the wrong bucket. After this the
+  # Nim sub-instance is no longer pinned by its provider closures and the GC
+  # reclaims it (no FFI-side ownership). Idempotent: clearing an absent ctx is a
+  # no-op. `when compiles` guards keep it valid whether a broker is request/
+  # event / single-thread / mt / API.
+  block:
+    var seenReq: seq[string] = @[]
+    var src = "proc " & releaseCtxProcName & "(ctx: BrokerContext) {.gcsafe.} =\n"
+    var body = ""
+    for entry in entries:
+      if entry.responseTypeName.len == 0 or entry.responseTypeName in seenReq:
+        continue
+      seenReq.add(entry.responseTypeName)
+      body.add(
+        "  when compiles(" & entry.responseTypeName & ".clearProvider(ctx)):\n" &
+          "    " & entry.responseTypeName & ".clearProvider(ctx)\n"
+      )
+    for e in eventEntries:
+      body.add(
+        "  when compiles(" & e.typeName & ".dropAllListeners(ctx)):\n" &
+          "    when typeof(" & e.typeName & ".dropAllListeners(ctx)) is void:\n" &
+          "      " & e.typeName & ".dropAllListeners(ctx)\n" & "    else:\n" &
+          "      discard " & e.typeName & ".dropAllListeners(ctx)\n"
+      )
+    if body.len == 0:
+      body = "  discard ctx\n"
+    src.add(body)
+    try:
+      result.add(parseStmt(src))
+    except ValueError as exc:
+      error("reduced-A release-teardown codegen failed: " & exc.msg)
 
   # Companion predicate: foreign caller dispatch needs to distinguish
   # "unknown name" from "known name with empty response". Predicate is a
@@ -1077,6 +1122,13 @@ proc registerBrokerLibraryCborImpl(
           var respBuf: pointer = nil
           var respLen: int32 = 0
           var status: int32 = 0
+          if apiName == `releaseApiNameLit`:
+            # reduced-A: per-context teardown control op (from
+            # `<lib>_releaseInstance`). Clears providers + listeners for the
+            # addressed ctx on this (processing) thread, then completes the slot.
+            `releaseCtxProcIdent`(BrokerContext(m.targetCtx))
+            completeSlot(arg.courier, m.slotIdx.int, nil, 0'i32, 0'i32)
+            return
           if not `knownNamePredIdent`(apiName):
             let em = "unknown apiName: " & apiName
             let b = allocShared0(em.len)
@@ -1086,8 +1138,14 @@ proc registerBrokerLibraryCborImpl(
             respLen = int32(em.len)
             status = -4'i32
           else:
+            # reduced-A: dispatch against the FULL ctx the caller addressed
+            # (sub-instance ctx for create-instance subs; == arg.ctx otherwise),
+            # so the broker provider keyed by the sub ctx is reached. Falls back
+            # to arg.ctx for legacy messages where targetCtx was never set (0).
+            let dispCtx =
+              if m.targetCtx != 0'u32: BrokerContext(m.targetCtx) else: arg.ctx
             let dispRes = catch:
-              await `dispatchProcIdent`(apiName, arg.ctx, nimReq)
+              await `dispatchProcIdent`(apiName, dispCtx, nimReq)
             if dispRes.isErr():
               status = -10'i32
             else:
@@ -1369,12 +1427,18 @@ proc registerBrokerLibraryCborImpl(
         # Resolve ctx -> courier. `inFlight` is bumped under the SAME lock
         # `_shutdown` uses to flip `active`, so once shutdown has run no
         # new call can enter; `_shutdown` then waits for inFlight -> 0.
+        # reduced-A: route by classCtx (low16). A library context is registered
+        # with instanceCtx 0; a sub-instance ctx shares the same classCtx but
+        # carries a distinct instanceCtx, so masking it off recovers the owning
+        # library context's courier. The full `ctx` is carried in the message
+        # (targetCtx) so the processing thread dispatches against the sub ctx.
+        let libCtxKey = ctx and 0x0000FFFF'u32
         var courier: ptr CborCourier = nil
         var courierSig: ThreadSignalPtr = nil
         withLock `ctxsLockIdent`:
           for i in 0 ..< `ctxsIdent`.len:
             let e = `ctxsIdent`[i]
-            if uint32(e.ctx) == ctx and e.active:
+            if uint32(e.ctx) == libCtxKey and e.active:
               courier = e.arg.courier
               courierSig = e.arg.courierSignal
               discard courier.inFlight.fetchAdd(1, moAcquireRelease)
@@ -1398,6 +1462,7 @@ proc registerBrokerLibraryCborImpl(
         msg.reqBuf = reqBuf
         msg.reqLen = reqLen
         msg.slotIdx = int32(slotIdx)
+        msg.targetCtx = ctx # full ctx (sub-instance routing, reduced-A)
         # Ownership of reqBuf transfers into the ring here. Enqueue is
         # backstopped by the slot claim above (ring.cap == slotCount), so
         # a false return is a programming error rather than backpressure;
@@ -1422,6 +1487,58 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # ------------------------------------------------------------------
+  # reduced-A (A4): `<lib>_releaseInstance(ctx)` — drop a sub-instance's
+  # providers + listeners. Routes a reserved-apiName control message through
+  # the same courier (by classCtx mask) so the teardown runs on the processing
+  # thread, then returns. The foreign sub-wrapper calls this from its RAII path
+  # (C++ dtor / Rust Drop / Go Close / Python close). Idempotent + safe on an
+  # already-released or unknown ctx (returns 0). The Nim sub-instance is freed
+  # by the GC once its providers are cleared — no FFI-side ownership.
+  # ------------------------------------------------------------------
+  result.add(
+    quote do:
+      proc `releaseInstanceFuncIdent`*(
+          ctx: uint32
+      ): int32 {.exportc: `releaseInstanceFuncNameLit`, cdecl, dynlib.} =
+        ensureForeignThreadGc()
+        let libCtxKey = ctx and 0x0000FFFF'u32
+        var courier: ptr CborCourier = nil
+        var courierSig: ThreadSignalPtr = nil
+        withLock `ctxsLockIdent`:
+          for i in 0 ..< `ctxsIdent`.len:
+            let e = `ctxsIdent`[i]
+            if uint32(e.ctx) == libCtxKey and e.active:
+              courier = e.arg.courier
+              courierSig = e.arg.courierSignal
+              discard courier.inFlight.fetchAdd(1, moAcquireRelease)
+              break
+        if courier.isNil:
+          return 0'i32 # unknown/closed ctx: nothing to release.
+        let slotIdx = claimSlot(courier)
+        if slotIdx < 0:
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          return -6'i32
+        var msg: CborCallMsg
+        const relName = `releaseApiNameLit`
+        copyMem(addr msg.apiName[0], cstring(relName), relName.len)
+        msg.reqBuf = nil
+        msg.reqLen = 0
+        msg.slotIdx = int32(slotIdx)
+        msg.targetCtx = ctx
+        if not tryEnqueue(addr courier.ring, msg):
+          releaseSlot(courier, slotIdx)
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          return -6'i32
+        if not courierSig.isNil:
+          discard courierSig.fireSync()
+        let res = waitSlot(courier, slotIdx)
+        releaseSlot(courier, slotIdx)
+        discard courier.inFlight.fetchSub(1, moAcquireRelease)
+        return res.status
+
+  )
+
+  # ------------------------------------------------------------------
   # Generated artifacts: write the C header + CDDL schema next to the
   # build output so foreign-language wrappers can pick them up via `-I`.
   # ------------------------------------------------------------------
@@ -1436,7 +1553,7 @@ proc registerBrokerLibraryCborImpl(
   generateCborCHeaderFile(outDir, libName, config.version, requestNames, eventNames)
   generateCborCppHeaderFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenPy):
-    generateCborPyFile(outDir, libName, entries, eventEntries)
+    generateCborPyFile(outDir, libName, entries, eventEntries, config.mainClass)
   when defined(BrokerFfiApiGenRust):
     generateCborRustFile(outDir, libName, entries, eventEntries)
   when defined(BrokerFfiApiGenGo):

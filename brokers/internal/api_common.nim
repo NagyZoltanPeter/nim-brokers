@@ -77,6 +77,12 @@ type CborRequestEntry* = object
     ## requests. Wrapper codegen turns this into the typed method
     ## signature and the args struct mirroring the synthetic Nim
     ## `<Type>CborArgs` object.
+  returnsInterface*: string
+    ## reduced-A: name of the BrokerInterface(API) this request *creates and
+    ## returns an instance of* (e.g. "IWidget"), or "" for a normal request.
+    ## When set, the wire `ok` value is a bare uint32 (the sub-instance's
+    ## BrokerContext); wrapper codegen emits a method returning the typed
+    ## sub-wrapper class built from that ctx instead of a decoded payload.
 
 var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
   ## Accumulated by `RequestBroker(API)` expansions.
@@ -120,6 +126,7 @@ proc registerCborRequestEntry*(
     apiName, adapterProc: string,
     responseTypeName: string = "",
     argFields: seq[(string, string)] = @[],
+    returnsInterface: string = "",
 ) {.compileTime.} =
   ## Register a CBOR request adapter for the next library that calls
   ## `registerBrokerLibrary`. Detects duplicate apiNames at compile time
@@ -150,6 +157,7 @@ proc registerCborRequestEntry*(
       adapterProc: adapterProc,
       responseTypeName: responseTypeName,
       argFields: argFields,
+      returnsInterface: returnsInterface,
     )
   )
 

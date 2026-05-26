@@ -288,6 +288,64 @@ proc emitArgAdapter(
   parseStmt(src)
 
 # ---------------------------------------------------------------------------
+# reduced-A: create-instance adapters. When a request's Ok payload type is a
+# registered BrokerInterface(API), the provider builds and returns a sub-
+# interface ref. We do NOT CBOR-encode the ref; instead the adapter extracts
+# the sub-instance's BrokerContext and encodes it as a bare `uint32` (the
+# routing handle). The foreign wrapper decodes that ctx and constructs the
+# typed sub-wrapper class. Adapter + provider both run on the processing
+# thread (same-thread direct dispatch), so the ref never crosses a channel —
+# safe under both --mm:refc and --mm:orc.
+# ---------------------------------------------------------------------------
+
+proc emitZeroArgInstanceAdapter(
+    typeIdent, adapterIdent: NimNode
+): NimNode {.compileTime, raises: [ValueError].} =
+  let src =
+    "proc " & $adapterIdent & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
+    "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" & "  discard reqBuf\n" &
+    "  let r = await " & $typeIdent & ".request(ctx)\n" &
+    "  let mapped =\n" &
+    "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
+    "    else: Result[uint32, string].err(r.error)\n" &
+    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" &
+    "  if envBytes.isOk:\n" & "    return envBytes.value\n" & "  return @[]\n"
+  parseStmt(src)
+
+proc emitArgInstanceAdapter(
+    typeIdent, adapterIdent, argsTypeIdent: NimNode, argParams: seq[NimNode]
+): NimNode {.compileTime, raises: [ValueError].} =
+  var fieldNames: seq[string] = @[]
+  for paramDefs in argParams:
+    let lastIdx = paramDefs.len - 1
+    for nameIdx in 0 ..< lastIdx - 1:
+      let nameNode = paramDefs[nameIdx]
+      let nameStr =
+        case nameNode.kind
+        of nnkIdent, nnkSym: $nameNode
+        of nnkPostfix: $nameNode[1]
+        of nnkPragmaExpr: $nameNode[0]
+        else: $nameNode
+      fieldNames.add(nameStr)
+  var argList = ""
+  for f in fieldNames:
+    argList.add(", decoded." & f)
+  let src =
+    "proc " & $adapterIdent & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
+    "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" &
+    "  let decRes = cborDecode(reqBuf, " & $argsTypeIdent & ")\n" & "  if decRes.isErr:\n" &
+    "    let errEnv = cborEncodeResultEnvelope(\n" &
+    "      Result[uint32, string].err(\"request decode failed: \" & decRes.error))\n" &
+    "    if errEnv.isOk:\n" & "      return errEnv.value\n" & "    return @[]\n" &
+    "  let decoded = decRes.value\n" & "  let r = await " & $typeIdent &
+    ".request(ctx" & argList & ")\n" & "  let mapped =\n" &
+    "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
+    "    else: Result[uint32, string].err(r.error)\n" &
+    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" &
+    "  if envBytes.isOk:\n" & "    return envBytes.value\n" & "  return @[]\n"
+  parseStmt(src)
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -368,10 +426,19 @@ proc generateApiCborRequestBrokerImpl(
   let typeName = sanitizeIdentName(typeIdent)
   let apiName = snakeApiName(typeIdent)
 
+  # reduced-A: does this request CREATE AND RETURN a sub-interface instance?
+  # (Its Ok payload type is a registered BrokerInterface(API).) If so the wire
+  # carries the sub-instance's ctx as a bare uint32 — we skip type registration
+  # (the interface ref is never CBOR-encoded) and emit instance adapters below.
+  let payloadName = payloadType.repr.strip()
+  let returnsIface = (if isApiInterface(payloadName): payloadName else: "")
+
   # Register the payload type in the schema so wrapper codegen can emit
   # typed structs / aliases. For the proc-sugar POD form this mirrors the
   # legacy `type X = <prim>` registration exactly (wire-identical).
-  if parsed.hasInlineFields:
+  if returnsIface.len > 0:
+    discard # instance-returning request: no payload type to register.
+  elif parsed.hasInlineFields:
     registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
   elif parsed.isVoid:
     # `void` → a zero-field object: payload-less request, the response
@@ -408,26 +475,44 @@ proc generateApiCborRequestBrokerImpl(
   if not zeroArgPresent and not argPresent:
     # No explicit signature — treat as zero-arg, matching the native default.
     let adapterIdent = ident(typeName & "CborAdapter")
-    result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
-    registerCborRequestEntry(apiName, $adapterIdent, typeName, @[])
+    if returnsIface.len > 0:
+      result.add(emitZeroArgInstanceAdapter(typeIdent, adapterIdent))
+    else:
+      result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
+    registerCborRequestEntry(
+      apiName, $adapterIdent, typeName, @[], returnsInterface = returnsIface
+    )
     return
 
   if zeroArgPresent:
     let zeroAdapterTag = if argPresent: "Zero" else: ""
     let adapterIdent = ident(typeName & "CborAdapter" & zeroAdapterTag)
-    result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
-    registerCborRequestEntry(apiName & zeroApiSuffix, $adapterIdent, typeName, @[])
+    if returnsIface.len > 0:
+      result.add(emitZeroArgInstanceAdapter(typeIdent, adapterIdent))
+    else:
+      result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
+    registerCborRequestEntry(
+      apiName & zeroApiSuffix, $adapterIdent, typeName, @[], returnsInterface = returnsIface
+    )
 
   if argPresent:
     let argAdapterTag = if zeroArgPresent: "Args" else: ""
     let adapterIdent = ident(typeName & "CborAdapter" & argAdapterTag)
     let argsTypeIdent = ident(typeName & "CborArgs" & argAdapterTag)
     result.add(emitArgsType(argsTypeIdent, argParams))
-    result.add(
-      emitArgAdapter(typeIdent, payloadType, adapterIdent, argsTypeIdent, argParams)
-    )
+    if returnsIface.len > 0:
+      result.add(
+        emitArgInstanceAdapter(typeIdent, adapterIdent, argsTypeIdent, argParams)
+      )
+    else:
+      result.add(
+        emitArgAdapter(typeIdent, payloadType, adapterIdent, argsTypeIdent, argParams)
+      )
     let fields = paramFields(argParams)
-    registerCborRequestEntry(apiName & argApiSuffix, $adapterIdent, typeName, fields)
+    registerCborRequestEntry(
+      apiName & argApiSuffix, $adapterIdent, typeName, fields,
+      returnsInterface = returnsIface,
+    )
 
   when defined(brokerDebug):
     writeBrokerDebug(

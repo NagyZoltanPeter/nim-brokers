@@ -453,6 +453,15 @@ proc generateCborGoFile*(
 
   # ---- Per-request methods ------------------------------------------------
   for e in requestEntries:
+    if e.returnsInterface.len > 0:
+      # reduced-A: instance-returning request — the response is a sub-interface
+      # ctx, not a serializable struct. Go sub-wrapper codegen is a later slice;
+      # skip so the unregistered response type isn't referenced.
+      g.add(
+        "// TODO: '" & e.apiName & "' returns a sub-interface instance (" &
+          e.returnsInterface & "); Go sub-wrapper codegen pending.\n\n"
+      )
+      continue
     let methodName = snakeToPascal(e.apiName)
     let respType = e.responseTypeName
     var argsStructFields = ""

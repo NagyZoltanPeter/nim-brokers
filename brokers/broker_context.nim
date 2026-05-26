@@ -86,6 +86,23 @@ proc NewBrokerContext*(): BrokerContext =
   ## A flat "global" context: a fresh classCtx with instanceCtx 0.
   makeBrokerContext(newClassCtx(), 0'u16)
 
+var gInstanceCtxCounter: Atomic[uint32]
+
+proc newInstanceCtx*(parentCtx: BrokerContext): BrokerContext =
+  ## Allocate a sub-instance context that SHARES `parentCtx`'s classCtx (so it
+  ## routes to the same library context — same processing/delivery thread and
+  ## courier) but carries a fresh, process-unique instanceCtx (high16).
+  ##
+  ## Used by create-instance FFI requests (reduced-A): a sub-interface instance
+  ## lives on the main library's processing thread, so it must share the library
+  ## classCtx. `<lib>_call` masks the instanceCtx off to find the courier, then
+  ## dispatches against the full sub ctx so the provider keyed by it is hit.
+  ## The counter is process-monotonic, so two sub-instances under the same
+  ## library never collide on instanceCtx.
+  let id = gInstanceCtxCounter.fetchAdd(1, moRelaxed) + 1'u32
+  doAssert id < 0x1_0000'u32, "BrokerContext instanceCtx space exhausted (max 65535)"
+  makeBrokerContext(classCtx(parentCtx), uint16(id))
+
 # ---------------------------------------------------------------------------
 # Sync thread-context binding (usable from {.thread.} init, before event loop)
 # ---------------------------------------------------------------------------
