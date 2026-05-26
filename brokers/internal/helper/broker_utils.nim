@@ -465,3 +465,59 @@ proc interfaceEvents*(iface: string): seq[string] {.compileTime.} =
     if it[0] == iface:
       return it[1]
   @[]
+
+# ---------------------------------------------------------------------------
+# Compile-time registry of `BrokerInterface(API)` interfaces (reduced-A, A1).
+# Records, per interface, the sanitized request *type* names and event *type*
+# names it owns. The flat CBOR request/event entry registries store these same
+# type names (CborRequestEntry.responseTypeName / CborEventEntry.typeName), so
+# wrapper codegen can partition the flat entry lists per interface by matching
+# on type name — no need to replicate the snake/suffix apiName derivation here.
+# ---------------------------------------------------------------------------
+
+type ApiInterfaceEntry* = object
+  name*: string
+  requestTypes*: seq[string] ## sanitized request broker type names
+  eventTypes*: seq[string] ## event payload type names
+
+var gApiInterfaces {.compileTime.}: seq[ApiInterfaceEntry] = @[]
+
+proc registerApiInterface*(
+    name: string, requestTypes, eventTypes: seq[string]
+) {.compileTime.} =
+  for i in 0 ..< gApiInterfaces.len:
+    if gApiInterfaces[i].name == name:
+      gApiInterfaces[i].requestTypes = requestTypes
+      gApiInterfaces[i].eventTypes = eventTypes
+      return
+  gApiInterfaces.add(
+    ApiInterfaceEntry(name: name, requestTypes: requestTypes, eventTypes: eventTypes)
+  )
+
+proc apiInterfaces*(): seq[ApiInterfaceEntry] {.compileTime.} =
+  gApiInterfaces
+
+proc isApiInterface*(name: string): bool {.compileTime.} =
+  for it in gApiInterfaces:
+    if it.name == name:
+      return true
+  false
+
+proc interfaceOwningRequestType*(typeName: string): string {.compileTime.} =
+  ## Comma-joined names of every interface that declared the request broker
+  ## `typeName` (more than one when two interfaces reuse the same type name —
+  ## itself the most common apiName collision), or "" if none.
+  var owners: seq[string] = @[]
+  for it in gApiInterfaces:
+    for rt in it.requestTypes:
+      if rt == typeName:
+        owners.add(it.name)
+  owners.join(", ")
+
+proc interfaceOwningEventType*(typeName: string): string {.compileTime.} =
+  var owners: seq[string] = @[]
+  for it in gApiInterfaces:
+    for et in it.eventTypes:
+      if et == typeName:
+        owners.add(it.name)
+  owners.join(", ")

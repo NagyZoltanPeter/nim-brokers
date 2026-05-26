@@ -97,6 +97,7 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
   #    interface is `(API)`), and generate abstract methods for requests.
   var eventNames: seq[string] = @[]
+  var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
   for stmt in body:
     let headName = brokerHeadName(stmt)
     if headName notin ["EventBroker", "RequestBroker"]:
@@ -126,6 +127,9 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       let async = isApi or not (hasMode and stmt[1].eqIdent("sync"))
       let sg = parseRequestSugar(innerBody, "BrokerInterface RequestBroker", async)
       let payloadRepr = sg.payloadType.repr.strip()
+      # Record the request broker type name (matches CborRequestEntry.
+      # responseTypeName) so codegen can attribute the flat entry to this iface.
+      requestTypes.add(sanitizeIdentName(sg.typeIdent))
       if not sg.zeroArgProc.isNil:
         result.add(parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)))
       if not sg.argProc.isNil:
@@ -139,6 +143,12 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
 
   # Publish this interface's event types for BrokerImplement teardown (B2).
   registerInterfaceEvents(ifaceNameStr, eventNames)
+
+  # A1: publish (API) interfaces to the compile-time registry so
+  # registerBrokerLibrary can designate a main class and partition the per-
+  # interface wrapper surface. Plain (non-API) interfaces are not FFI-exposed.
+  if isApi:
+    registerApiInterface(ifaceNameStr, requestTypes, eventNames)
 
   # 3. Generic instance-scoped event facade — forwards any event typedesc to
   #    the underlying ctx-based broker API using `self.brokerCtx`.

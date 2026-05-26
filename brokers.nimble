@@ -372,6 +372,18 @@ task testSugarRejects,
       echo outp
       quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
     echo "  reject OK (correctly rejected): " & f
+  # API-mode rejects (reduced-A): cross-interface apiName collisions only
+  # manifest under -d:BrokerFfiApi --threads:on.
+  let apiRejects = ["reject_iface_apicollision"]
+  for f in apiRejects:
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off -d:BrokerFfiApi --threads:on --path:. --outdir:build/reject test/reject/" &
+        f & ".nim"
+    )
+    if code == 0:
+      echo outp
+      quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
+    echo "  reject OK (correctly rejected): " & f
   echo "all sugar-reject tests passed"
 
 task runFfiBenchEventStress,

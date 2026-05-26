@@ -27,6 +27,7 @@ import std/[atomics, locks, macros, os, strutils, tables]
 import chronos, chronicles
 import results
 import ./broker_context, ./internal/api_common
+import ./internal/helper/broker_utils
 import ./internal/api_codegen_cbor_h
 import ./internal/api_codegen_cbor_hpp
 import ./internal/api_codegen_cbor_py
@@ -60,12 +61,14 @@ proc parseLibraryConfig(
   initializeRequest: NimNode,
   shutdownRequest: NimNode,
   refType: NimNode,
+  mainClass: string,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
+  var mainClass = ""
 
   for stmt in body:
     if stmt.kind == nnkCall and stmt.len == 2:
@@ -102,6 +105,20 @@ proc parseLibraryConfig(
           refTy = value[0]
         else:
           refTy = value
+      of "mainclass":
+        # reduced-A (A1): designates the main `BrokerInterface(API)` facade for
+        # a multi-interface library. Other (API) interfaces are auto-discovered
+        # from the compile-time registry and emitted as their own sub-wrappers.
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        case v.kind
+        of nnkIdent, nnkSym:
+          mainClass = $v
+        of nnkStrLit:
+          mainClass = v.strVal
+        else:
+          error("mainClass must be an interface type name", v)
       else:
         error("Unknown registerBrokerLibrary key: " & key, stmt)
     else:
@@ -116,6 +133,13 @@ proc parseLibraryConfig(
       "registerBrokerLibrary requires a 'shutdownRequest' field (the legacy 'destroyRequest' alias is still accepted)",
       body,
     )
+  if mainClass.len > 0 and not isApiInterface(mainClass):
+    error(
+      "registerBrokerLibrary: mainClass '" & mainClass &
+        "' is not a registered BrokerInterface(API). Declare it with " &
+        "`BrokerInterface(API, " & mainClass & "): ...` before registerBrokerLibrary.",
+      body,
+    )
 
   (
     name: name,
@@ -123,6 +147,7 @@ proc parseLibraryConfig(
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
+    mainClass: mainClass,
   )
 
 proc parseTypeExpr(
@@ -149,6 +174,7 @@ proc registerBrokerLibraryCborImpl(
       initializeRequest: NimNode,
       shutdownRequest: NimNode,
       refType: NimNode,
+      mainClass: string,
     ],
 ): NimNode
 
@@ -180,6 +206,7 @@ proc registerBrokerLibraryCborImpl(
         initializeRequest: NimNode,
         shutdownRequest: NimNode,
         refType: NimNode,
+        mainClass: string,
       ],
 ): NimNode =
   let libName = config.name

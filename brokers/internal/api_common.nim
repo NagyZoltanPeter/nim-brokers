@@ -19,6 +19,7 @@ import std/macros
 
 import ./api_schema
 import ./api_outdir
+import ./helper/broker_utils
 
 export api_schema
 export api_outdir
@@ -98,9 +99,19 @@ proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
   ## Register an event for the next library's CBOR-mode subscribe surface.
   for entry in gApiCborEventEntries:
     if entry.apiName == apiName:
+      let ownerNew = interfaceOwningEventType(typeName)
+      let ownerOld = interfaceOwningEventType(entry.typeName)
+      let ifaceHint =
+        if ownerNew.len > 0 or ownerOld.len > 0:
+          " ('" & typeName & "' in interface " &
+            (if ownerNew.len > 0: ownerNew else: "<library>") & " vs '" &
+            entry.typeName & "' in interface " &
+            (if ownerOld.len > 0: ownerOld else: "<library>") & ")"
+        else:
+          ""
       error(
         "CBOR FFI: duplicate event apiName '" & apiName & "' (already registered by '" &
-          entry.typeName & "'). " &
+          entry.typeName & "')" & ifaceHint & ". " &
           "Each EventBroker(API) must have a unique event type name."
       )
   gApiCborEventEntries.add(CborEventEntry(apiName: apiName, typeName: typeName))
@@ -115,9 +126,22 @@ proc registerCborRequestEntry*(
   ## so two requests can't shadow each other on the wire.
   for entry in gApiCborRequestEntries:
     if entry.apiName == apiName:
+      # reduced-A: name the owning interfaces when the collision spans two
+      # BrokerInterface(API) declarations (apiNames are globally unique across
+      # the whole library, not per interface).
+      let ownerNew = interfaceOwningRequestType(responseTypeName)
+      let ownerOld = interfaceOwningRequestType(entry.responseTypeName)
+      let ifaceHint =
+        if ownerNew.len > 0 or ownerOld.len > 0:
+          " ('" & responseTypeName & "' in interface " &
+            (if ownerNew.len > 0: ownerNew else: "<library>") & " vs '" &
+            entry.responseTypeName & "' in interface " &
+            (if ownerOld.len > 0: ownerOld else: "<library>") & ")"
+        else:
+          ""
       error(
         "CBOR FFI: duplicate request apiName '" & apiName & "' (already registered by '" &
-          entry.adapterProc & "'). " &
+          entry.adapterProc & "')" & ifaceHint & ". " &
           "Each RequestBroker(API) must have a unique response type name."
       )
   gApiCborRequestEntries.add(
