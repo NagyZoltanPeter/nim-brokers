@@ -645,12 +645,23 @@ proc generateCborCppHeaderFile*(
       emittableEvents.add(ev)
 
   # reduced-A: events owned by the main interface (the only ones the main Lib
-  # class carries dispatchers/methods for). Sub-interface events are not in
-  # scope for this slice. Traits/forward-decls below stay on the full set.
+  # class carries dispatchers/methods for). Traits/forward-decls stay full set.
   var mainEvents: seq[CborEventEntry] = @[]
   for ev in emittableEvents:
     if ownsEvtMain(ev):
       mainEvents.add(ev)
+
+  # Emittable events owned by a given sub-interface, and whether it has any.
+  # An event-bearing sub-wrapper carries EventDispatchers (which hold
+  # `owner_ = this`), so it must be NON-MOVABLE and is therefore created on the
+  # heap and returned as `Result<std::unique_ptr<Sub>>`. An event-free sub
+  # (e.g. a request-only IWidget) stays movable and is returned by value.
+  proc subEventsOf(ifaceName: string): seq[CborEventEntry] {.compileTime.} =
+    for ev in emittableEvents:
+      if interfaceOwningEventType(ev.typeName) == ifaceName:
+        result.add(ev)
+  proc subHasEvents(ifaceName: string): bool {.compileTime.} =
+    subEventsOf(ifaceName).len > 0
 
   # reduced-A: forward-declare each sub-interface wrapper class so the main
   # class can name `Result<Sub>` as a create-instance method return type (a
@@ -711,11 +722,14 @@ proc generateCborCppHeaderFile*(
         sigParams.add(nimTypeToCppType(t) & " " & n)
         first = false
     if e.returnsInterface.len > 0:
-      # reduced-A: create-instance method returns the typed sub-wrapper.
-      h.add(
-        "  Result<" & cppSubClassName(e.returnsInterface) & "> " & methodName & "(" &
-          sigParams & ");\n"
-      )
+      # reduced-A: create-instance method returns the typed sub-wrapper —
+      # by-value if event-free, or unique_ptr<Sub> if the sub carries events
+      # (non-movable, heap-stable for its EventDispatchers).
+      let subN = cppSubClassName(e.returnsInterface)
+      let retT =
+        if subHasEvents(e.returnsInterface): "Result<std::unique_ptr<" & subN & ">>"
+        else: "Result<" & subN & ">"
+      h.add("  " & retT & " " & methodName & "(" & sigParams & ");\n")
       continue
     if not isEmittablePayload(e.responseTypeName):
       h.add(
@@ -1268,30 +1282,82 @@ proc generateCborCppHeaderFile*(
 
   for ifaceName in subInterfaceNames:
     let sub = cppSubClassName(ifaceName)
+    let subEvts = subEventsOf(ifaceName)
+    let hasEvts = subEvts.len > 0
     h.add("// ---- " & sub & " — sub-instance wrapper of " & ifaceName & " ----\n")
     h.add("class " & sub & " {\n")
-    h.add(" public:\n")
-    h.add("  explicit " & sub & "(uint32_t ctx) noexcept : ctx_(ctx) {}\n")
-    h.add("  ~" & sub & "() { close(); }\n")
-    h.add("  " & sub & "(const " & sub & "&) = delete;\n")
-    h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
-    h.add("  " & sub & "(" & sub & "&& o) noexcept : ctx_(o.ctx_) { o.ctx_ = 0; }\n")
-    h.add(
-      "  " & sub & "& operator=(" & sub &
-        "&& o) noexcept { if (this != &o) { close(); ctx_ = o.ctx_; o.ctx_ = 0; } return *this; }\n"
-    )
+    # Members first (a ctor mem-init-list references the dispatcher members /
+    # aliases, which must be declared before the ctor for name lookup).
+    h.add(" private:\n")
+    h.add("  uint32_t ctx_ = 0;\n")
+    for ev in subEvts:
+      let dispType = ev.typeName & "Dispatcher"
+      let dispMember = ev.apiName & "Dispatcher_"
+      h.add(
+        "  using " & dispType & " = detail::EventDispatcher<" & sub & ", detail::" &
+          ev.typeName & "EventTraits>;\n"
+      )
+      h.add("  std::unique_ptr<" & dispType & "> " & dispMember & ";\n")
+    h.add("\n public:\n")
+    if hasEvts:
+      # Event-bearing sub: non-movable (its EventDispatchers hold `owner_ =
+      # this`), heap-created via the main create-instance method. The ctor
+      # constructs one dispatcher per owned event (mirrors the main Lib ctor).
+      h.add("  explicit " & sub & "(uint32_t ctx)\n")
+      h.add("      : ctx_(ctx)\n")
+      for ev in subEvts:
+        let dispType = ev.typeName & "Dispatcher"
+        let dispMember = ev.apiName & "Dispatcher_"
+        h.add("      , " & dispMember & "(std::make_unique<" & dispType & ">(*this))\n")
+      h.add("  {}\n")
+      h.add("  ~" & sub & "() { close(); }\n")
+      h.add("  " & sub & "(const " & sub & "&) = delete;\n")
+      h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
+      h.add("  " & sub & "(" & sub & "&&) = delete;\n")
+      h.add("  " & sub & "& operator=(" & sub & "&&) = delete;\n")
+    else:
+      h.add("  explicit " & sub & "(uint32_t ctx) noexcept : ctx_(ctx) {}\n")
+      h.add("  ~" & sub & "() { close(); }\n")
+      h.add("  " & sub & "(const " & sub & "&) = delete;\n")
+      h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
+      h.add("  " & sub & "(" & sub & "&& o) noexcept : ctx_(o.ctx_) { o.ctx_ = 0; }\n")
+      h.add(
+        "  " & sub & "& operator=(" & sub &
+          "&& o) noexcept { if (this != &o) { close(); ctx_ = o.ctx_; o.ctx_ = 0; } return *this; }\n"
+      )
     h.add("  uint32_t ctx() const noexcept { return ctx_; }\n")
     h.add("  bool valid() const noexcept { return ctx_ != 0; }\n")
     h.add("  explicit operator bool() const noexcept { return ctx_ != 0; }\n")
-    h.add(
-      "  void close() noexcept { if (ctx_) { " & p &
-        "releaseInstance(ctx_); ctx_ = 0; } }\n"
-    )
+    # close(): clear event dispatchers (so no late callback fires) then release.
+    h.add("  void close() noexcept {\n")
+    for ev in subEvts:
+      let dispMember = ev.apiName & "Dispatcher_"
+      h.add("    if (" & dispMember & ") " & dispMember & "->clear();\n")
+    h.add("    if (ctx_) { " & p & "releaseInstance(ctx_); ctx_ = 0; }\n")
+    h.add("  }\n")
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         h.add(emitSubReqMethod(e))
-    h.add(" private:\n")
-    h.add("  uint32_t ctx_ = 0;\n")
+    # Per-event callback alias + on/off (reuses the generic detail::EventDispatcher).
+    for ev in subEvts:
+      let camelBase = snakeToLowerCamel(ev.apiName)
+      var pascal = camelBase
+      if pascal.len > 0:
+        pascal[0] = toUpperAscii(pascal[0])
+      let cbAlias = ev.typeName & "Callback"
+      h.add("  using " & cbAlias & " = std::function<void(" & sub & "&")
+      for f in effectiveFields(ev.typeName):
+        h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
+      h.add(")>;\n")
+      h.add(
+        "  uint64_t on" & pascal & "(" & cbAlias &
+          " fn) noexcept { return " & ev.apiName & "Dispatcher_->add(std::move(fn)); }\n"
+      )
+      h.add(
+        "  void off" & pascal & "(uint64_t handle = 0) noexcept { if (handle == 0) " &
+          ev.apiName & "Dispatcher_->clear(); else " & ev.apiName &
+          "Dispatcher_->remove(handle); }\n"
+      )
     h.add("};\n\n")
 
   # ==================================================================
@@ -1369,11 +1435,19 @@ proc generateCborCppHeaderFile*(
     let envName =
       if isInstance: "__InstanceCtxEnvelope" else: e.responseTypeName & "Envelope"
     let voidResp = (not isInstance) and isVoidPayload(e.responseTypeName)
+    let subEv = isInstance and subHasEvents(e.returnsInterface)
     let resTy =
-      if isInstance: "Result<" & cppSubClassName(e.returnsInterface) & ">"
-      else: "Result<" & payloadCppType(e.responseTypeName) & ">"
+      if isInstance and subEv:
+        "Result<std::unique_ptr<" & cppSubClassName(e.returnsInterface) & ">>"
+      elif isInstance:
+        "Result<" & cppSubClassName(e.returnsInterface) & ">"
+      else:
+        "Result<" & payloadCppType(e.responseTypeName) & ">"
     let okExpr =
-      if isInstance:
+      if isInstance and subEv:
+        resTy & "::ok(std::make_unique<" & cppSubClassName(e.returnsInterface) &
+          ">(static_cast<uint32_t>(*env.ok)))"
+      elif isInstance:
         resTy & "::ok(" & cppSubClassName(e.returnsInterface) &
           "(static_cast<uint32_t>(*env.ok)))"
       elif voidResp:

@@ -305,6 +305,8 @@ proc emitZeroArgInstanceAdapter(
     "proc " & $adapterIdent & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
     "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" & "  discard reqBuf\n" &
     "  let r = await " & $typeIdent & ".request(ctx)\n" &
+    "  if r.isOk:\n" &
+    "    installApiListenersForCtx(r.value.brokerCtx)\n" &
     "  let mapped =\n" &
     "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
     "    else: Result[uint32, string].err(r.error)\n" &
@@ -338,7 +340,10 @@ proc emitArgInstanceAdapter(
     "      Result[uint32, string].err(\"request decode failed: \" & decRes.error))\n" &
     "    if errEnv.isOk:\n" & "      return errEnv.value\n" & "    return @[]\n" &
     "  let decoded = decRes.value\n" & "  let r = await " & $typeIdent &
-    ".request(ctx" & argList & ")\n" & "  let mapped =\n" &
+    ".request(ctx" & argList & ")\n" &
+    "  if r.isOk:\n" &
+    "    installApiListenersForCtx(r.value.brokerCtx)\n" &
+    "  let mapped =\n" &
     "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
     "    else: Result[uint32, string].err(r.error)\n" &
     "  let envBytes = cborEncodeResultEnvelope(mapped)\n" &

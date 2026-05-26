@@ -812,13 +812,19 @@ proc registerBrokerLibraryCborImpl(
             # read pointer fields out of it under the lock — the
             # cast(gcsafe) annotation is required because the
             # generated async handler is gcsafe by signature.
+            # reduced-A: route by classCtx (low16) so a SUB-INSTANCE emit
+            # (sub ctx shares the library classCtx, distinct instanceCtx) finds
+            # the owning library's event courier. `msg.ctx` carries the FULL
+            # ctx, so the delivery thread still snapshots subscribers by the
+            # exact emitting ctx — per-instance event routing stays exact.
+            let libCtxKey = uint32(ctx) and 0x0000FFFF'u32
             var courier: ptr CborEventCourier = nil
             var sig: ThreadSignalPtr = nil
             {.cast(gcsafe).}:
               withLock `ctxsLockIdent`:
                 for i in 0 ..< `ctxsIdent`.len:
                   let e = `ctxsIdent`[i]
-                  if uint32(e.ctx) == uint32(ctx) and e.active:
+                  if (uint32(e.ctx) and 0x0000FFFF'u32) == libCtxKey and e.active:
                     courier = e.arg.eventCourier
                     sig = e.arg.deliverySignal
                     break
@@ -1213,6 +1219,10 @@ proc registerBrokerLibraryCborImpl(
         var bctx = NewBrokerContext()
         while uint32(bctx) == 0'u32:
           bctx = NewBrokerContext()
+        # reduced-A: record this library's event-listener installer keyed by its
+        # classCtx so create-instance requests can install courier listeners for
+        # sub-instance ctxs (which share this classCtx).
+        registerApiCtxListenerInstaller(classCtx(bctx), `installAllListenersIdent`)
         let arg =
           cast[ptr `procThreadArgIdent`](allocShared0(sizeof(`procThreadArgIdent`)))
         arg.ctx = bctx

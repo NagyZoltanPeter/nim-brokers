@@ -686,6 +686,56 @@ task runHierExampleGo,
       exec quoteArg(findGoExe()) & " mod tidy"
       exec quoteArg(findGoExe()) & " run ."
 
+# Persistence example: two-layer interfaces (IPersistence -> IBackend) with a
+# factory selecting File/Memory backends, requests + events at both levels, and
+# per-instance routing. The entry module is IPersistenceLib.nim but the
+# registered library name (and generated header/dylib) is "persistence", so the
+# dylib output name is forced to lib<persistence> here.
+proc persistenceLibOutFlag(): string =
+  let dir = "examples/persistence/nimlib/build"
+  when defined(windows):
+    " --out:" & (dir / "persistence.dll")
+  elif defined(macosx):
+    " --out:" & (dir / "libpersistence.dylib")
+  else:
+    " --out:" & (dir / "libpersistence.so")
+
+proc buildPersistenceExampleLibrary() =
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/persistence/nimlib/build"
+  flags.add(nimMainPrefixFlag("persistence"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("examples/persistence/nimlib/build", "persistence"))
+  if existsEnv("MM"):
+    flags.add(" --mm:" & getEnv("MM"))
+  else:
+    flags.add(" --mm:orc")
+  flags.add(persistenceLibOutFlag())
+  exec "nim c " & flags & " examples/persistence/nimlib/IPersistenceLib.nim"
+
+proc buildPersistenceCmakeTarget(target = "") =
+  let cmakeDir = "examples/persistence"
+  let buildDir = cmakeDir & "/cmake-build"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+task buildPersistenceExample, "Build the persistence interface-model FFI example library":
+  buildPersistenceExampleLibrary()
+
+task runPersistenceExampleCpp,
+  "Build persistence + the C++ example and run it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary()
+    buildPersistenceCmakeTarget("persistence_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/persistence/cpp_example"))
+
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
   for mm in memoryManagerMatrix():
