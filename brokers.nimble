@@ -333,7 +333,10 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
   exec "git submodule update --init --recursive vendor"
 
 task test, "Run all single and multi-threaded broker tests":
-  let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
+  let tests = [
+    "test_event_broker", "test_request_broker", "test_request_broker_sugar",
+    "test_multi_request_broker", "test_broker_oop",
+  ]
   for f in tests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -488,6 +491,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   let apiTests = [
     ("test_api_library_init", "apitest"),
     ("test_api_discovery", "apidisc"),
+    ("test_broker_interface_api", "brokerifaceapi"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
   ]
   for (f, prefix) in apiTests:
