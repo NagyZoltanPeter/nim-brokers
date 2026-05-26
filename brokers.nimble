@@ -335,7 +335,7 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
 task test, "Run all single and multi-threaded broker tests":
   let tests = [
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
-    "test_multi_request_broker", "test_broker_oop",
+    "test_multi_request_broker", "test_broker_oop", "test_broker_lifecycle",
   ]
   for f in tests:
     for opt in [
