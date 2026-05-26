@@ -10,6 +10,24 @@ decide what to pull in next.
 Legend — **Priority**: 🔴 needed for a complete feature · 🟡 important hardening ·
 🟢 nice-to-have / ergonomics.
 
+## ✅ Resolution status (updated post-D, post-B)
+
+Per the re-scope, work proceeded **D → B → reduced-A**.
+
+- **Phase D — DONE.** D1 formal `examples/ffiapi/hierlib` with **C++/Python/Rust/Go**
+  consumers + nimble tasks (pure-C stays disabled project-wide). D2 instance-freed-
+  after-close test. D3 cross-thread dispatch test (API/MT lane). D4 file-based
+  compile-fail tests + `nimble testSugarRejects`.
+- **Phase B — DONE.** B5 race-free classCtx (immutable `let`). B2 event-listener
+  cleanup in `close()`. B3 gcsafe construction — satisfied by B5 + the already-gcsafe
+  `bindToContext`. B4 factory cross-thread storage — folded into reduced-A (in-process
+  factory is sync-root-only). **B1 (`=destroy`) — RESOLVED as won't-implement:**
+  explicit `close()` is the documented contract (provider closures pin the instance
+  until close, and GC-finalizer-context teardown is unsafe).
+- **NEXT: reduced-A** (multi-interface FFI) — see the revised roadmap in
+  `HIERARCHICAL_BROKERS_PLAN.md`. Section A below predates the re-scope (no Nim
+  ownership hierarchy / no cross-`.so`); read it together with the plan's revised A.
+
 ---
 
 ## A. FFI hierarchy & proxy (the rest of P6)
