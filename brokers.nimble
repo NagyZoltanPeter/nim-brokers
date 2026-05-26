@@ -619,8 +619,27 @@ proc buildHierExampleLibrary(
     flags.add(" -d:BrokerFfiApiGenGo")
   exec "nim c " & flags & " examples/ffiapi/hierlib/nimlib/hierlib.nim"
 
+proc buildHierCmakeTarget(target = "") =
+  let cmakeDir = "examples/ffiapi/hierlib"
+  let buildDir = cmakeDir & "/cmake-build"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
 task buildHierExample, "Build the hierlib interface-model FFI example library":
   buildHierExampleLibrary()
+
+task runHierExampleCpp,
+  "Build hierlib + the C++ example and run it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary()
+    buildHierCmakeTarget("hier_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/hierlib/cpp_example"))
 
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
