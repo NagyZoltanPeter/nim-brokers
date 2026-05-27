@@ -906,7 +906,8 @@ proc sanitizerCompileFlags(mode: string): string =
   of "tsan":
     result = "-fsanitize=thread -fno-omit-frame-pointer -g"
   else: # asan / asanleak
-    result = "-fsanitize=address -fsanitize=undefined " &
+    result =
+      "-fsanitize=address -fsanitize=undefined " &
       "-fno-sanitize=function,vptr -fno-omit-frame-pointer -g"
     when defined(windows):
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
@@ -940,7 +941,13 @@ proc linuxSharedRuntimeOnPath(printName: string) =
     if rc == 0 and trimmed.len > 0 and trimmed != printName:
       let dir = parentDir(trimmed)
       let cur = getEnv("LD_LIBRARY_PATH")
-      putEnv("LD_LIBRARY_PATH", if cur.len == 0: dir else: dir & ":" & cur)
+      putEnv(
+        "LD_LIBRARY_PATH",
+        if cur.len == 0:
+          dir
+        else:
+          dir & ":" & cur,
+      )
 
 proc setSanitizerEnv(mode: string) =
   putEnv("MallocNanoZone", "0")
@@ -1299,7 +1306,8 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testApiTeardownAsanOrc"
   exec "nimble testApiTeardownAsanRefc"
 
-task allTsan, "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
+task allTsan,
+  "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
   exec "nimble testMtEventBrokerTsanOrc"
   exec "nimble testMtEventBrokerTsanRefc"
   exec "nimble testMtRequestBrokerTsanOrc"
@@ -1309,8 +1317,7 @@ task allTsan, "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (
   exec "nimble testApiTeardownTsanOrc"
   exec "nimble testApiTeardownTsanRefc"
 
-task allAsanLeak,
-  "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
+task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
   # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
   testSan("asanleak", "orc", "test_multi_thread_event_broker")
   testSan("asanleak", "refc", "test_multi_thread_event_broker")
