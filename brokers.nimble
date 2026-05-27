@@ -361,13 +361,13 @@ task test, "Run all single and multi-threaded broker tests":
         continue
       test opt, f
 
-task testSugarRejects,
-  "Compile-fail tests: each test/reject/*.nim must NOT compile":
+task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
   let rejects =
     ["reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret"]
   for f in rejects:
-    let (outp, code) =
-      gorgeEx("nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim")
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim"
+    )
     if code == 0:
       echo outp
       quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
@@ -659,8 +659,7 @@ proc buildHierCmakeTarget(target = "") =
 task buildHierExample, "Build the hierlib interface-model FFI example library":
   buildHierExampleLibrary()
 
-task runHierExampleCpp,
-  "Build hierlib + the C++ example and run it (orc + refc)":
+task runHierExampleCpp, "Build hierlib + the C++ example and run it (orc + refc)":
   for mm in memoryManagerMatrix():
     echo "\n=== runHierExampleCpp: --mm:" & mm & " ==="
     setMM(mm)
@@ -677,8 +676,7 @@ task runHierExampleRust,
     exec quoteArg(findCargoExe()) &
       " run --manifest-path examples/ffiapi/hierlib/rust_example/Cargo.toml"
 
-task runHierExampleGo,
-  "Build hierlib + Go module and run the Go example (orc + refc)":
+task runHierExampleGo, "Build hierlib + Go module and run the Go example (orc + refc)":
   for mm in memoryManagerMatrix():
     echo "\n=== runHierExampleGo: --mm:" & mm & " ==="
     setMM(mm)
@@ -701,7 +699,9 @@ proc persistenceLibOutFlag(): string =
   else:
     " --out:" & (dir / "libpersistence.so")
 
-proc buildPersistenceExampleLibrary() =
+proc buildPersistenceExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
   var flags =
     "-d:BrokerFfiApi --threads:on --app:lib --path:. " &
     "--outdir:examples/persistence/nimlib/build"
@@ -712,6 +712,12 @@ proc buildPersistenceExampleLibrary() =
     flags.add(" --mm:" & getEnv("MM"))
   else:
     flags.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    flags.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
   flags.add(persistenceLibOutFlag())
   exec "nim c " & flags & " examples/persistence/nimlib/IPersistenceLib.nim"
 
@@ -725,7 +731,8 @@ proc buildPersistenceCmakeTarget(target = "") =
   else:
     exec "cmake --build " & buildDir & " --target " & target
 
-task buildPersistenceExample, "Build the persistence interface-model FFI example library":
+task buildPersistenceExample,
+  "Build the persistence interface-model FFI example library":
   buildPersistenceExampleLibrary()
 
 task runPersistenceExampleCpp,
@@ -736,6 +743,34 @@ task runPersistenceExampleCpp,
     buildPersistenceExampleLibrary()
     buildPersistenceCmakeTarget("persistence_cpp")
     exec quoteArg(ffiExampleExecutablePath("examples/persistence/cpp_example"))
+
+task runPersistenceExamplePy,
+  "Build persistence + Python wrapper and run persistence/python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generatePy = true)
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/persistence/python_example/main.py")
+
+task runPersistenceExampleRust,
+  "Build persistence + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/persistence/rust_example/Cargo.toml"
+
+task runPersistenceExampleGo,
+  "Build persistence + Go wrapper and run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generateGo = true)
+    withDir "examples/persistence/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+      exec quoteArg(findGoExe()) & " run ."
 
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
