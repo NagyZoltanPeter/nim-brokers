@@ -1,4 +1,4 @@
-name: Memcheck CI
+name: Sanitizer CI
 
 on:
   workflow_dispatch:
@@ -26,18 +26,20 @@ on:
           - "2.2.4"
           - "devel"
       tasks:
-        description: "ASAN task(s) to run"
+        description: "Sanitizer task(s) to run ('all' = ASan+UBSan, TSan, +LSan on Linux)"
         required: true
         type: choice
         default: all
         options:
           - all
-          - testMtEventBrokerAsanOrc
-          - testMtEventBrokerAsanRefc
-          - testMtRequestBrokerAsanOrc
-          - testMtRequestBrokerAsanRefc
-          - testMtBrokerConfigsAsanOrc
-          - testMtBrokerConfigsAsanRefc
+          - allAsan
+          - allTsan
+          - allAsanLeak
+          - allSan
+          - testApiTeardownAsanOrc
+          - testApiTeardownTsanOrc
+          - testMtEventBrokerTsanOrc
+          - testMtRequestBrokerTsanOrc
           - probeWinTlsUninitOrc
           - probeWinTlsUninitRefc
 
@@ -149,7 +151,10 @@ jobs:
         env:
           TASKS: ${{ inputs.tasks }}
         run: |
-          ALL="testMtEventBrokerAsanOrc testMtEventBrokerAsanRefc testMtRequestBrokerAsanOrc testMtRequestBrokerAsanRefc testMtBrokerConfigsAsanOrc testMtBrokerConfigsAsanRefc probeWinTlsUninitOrc probeWinTlsUninitRefc"
+          # ASan+UBSan and TSan everywhere; LSan (asanleak) only on Linux,
+          # where LeakSanitizer is supported (it is a no-op on macOS).
+          ALL="allAsan allTsan"
+          if [ "$(uname)" = "Linux" ]; then ALL="$ALL allAsanLeak"; fi
           [ "$TASKS" = "all" ] && TASKS="$ALL"
           mkdir -p build
           # nimble >= 0.22 swallows exit codes from `exec` failures inside
@@ -169,8 +174,8 @@ jobs:
               rc_overall=1
               continue
             fi
-            if grep -qE 'AddressSanitizer:|==[0-9]+==ABORTING|Exception raised during nimble script execution' "$log"; then
-              echo "::error::Task $task: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
+            if grep -qE 'AddressSanitizer:|ThreadSanitizer:|LeakSanitizer:|runtime error:|detected memory leaks|==[0-9]+==ABORTING|Exception raised during nimble script execution' "$log"; then
+              echo "::error::Task $task: sanitizer/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
               rc_overall=1
               continue
             fi
@@ -183,12 +188,10 @@ jobs:
           TASKS: ${{ inputs.tasks }}
         shell: pwsh
         run: |
-          $all = @(
-            "testMtEventBrokerAsanOrc", "testMtEventBrokerAsanRefc",
-            "testMtRequestBrokerAsanOrc", "testMtRequestBrokerAsanRefc",
-            "testMtBrokerConfigsAsanOrc", "testMtBrokerConfigsAsanRefc",
-            "probeWinTlsUninitOrc", "probeWinTlsUninitRefc"
-          )
+          # TSan and LSan are unsupported on Windows clang, so 'all' on Windows
+          # is ASan+UBSan only (allAsan). Pick allTsan/allAsanLeak explicitly
+          # only on a Linux/macOS runner.
+          $all = @("allAsan")
           $taskList = if ($env:TASKS -eq "all") { $all } else { @($env:TASKS) }
           New-Item -ItemType Directory -Force -Path build | Out-Null
           # nimble >= 0.22 may swallow exit codes from `exec` failures inside
@@ -205,8 +208,8 @@ jobs:
               $rcOverall = 1
               continue
             }
-            if (Select-String -Path $log -Pattern 'AddressSanitizer:|==\d+==ABORTING|Exception raised during nimble script execution' -Quiet) {
-              Write-Host "::error::Task ${task}: ASAN/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
+            if (Select-String -Path $log -Pattern 'AddressSanitizer:|ThreadSanitizer:|LeakSanitizer:|runtime error:|detected memory leaks|==\d+==ABORTING|Exception raised during nimble script execution' -Quiet) {
+              Write-Host "::error::Task ${task}: sanitizer/abort diagnostic detected in log despite nimble exiting 0 (nimble >= 0.22 bug)"
               $rcOverall = 1
               continue
             }

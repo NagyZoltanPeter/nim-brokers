@@ -1,0 +1,18 @@
+# ThreadSanitizer suppressions for nim-brokers.
+#
+# Format (one rule per line):
+#   race:<substring of function/symbol>
+#   deadlock:<substring>
+#   called_from_lib:<shared-lib name>
+#   thread:<substring>
+#
+# Wired in by setSanitizerEnv("tsan") via TSAN_OPTIONS=suppressions=.
+# Keep this list MINIMAL — only add an entry once you have confirmed the
+# reported race is benign (e.g. a known-safe pattern in the Nim runtime or
+# chronos internals), never to silence a real race in broker code.
+#
+# Nim refc/orc collector bookkeeping and chronos event-loop internals can
+# produce benign reports under partial instrumentation. Add specific frames
+# here as they are triaged. Example (commented out until confirmed):
+# race:nimGCvisit
+# race:chronos
