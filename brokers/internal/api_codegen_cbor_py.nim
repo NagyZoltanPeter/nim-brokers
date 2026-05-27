@@ -638,14 +638,31 @@ proc generateCborPyFile*(
   py.add("        raw = _LIB." & p & "version()\n")
   py.add("        return raw.decode(\"utf-8\") if raw else \"\"\n\n")
 
+  # reduced-A: ownership predicates — an entry belongs to the main class when no
+  # mainClass is designated (legacy single-class), or it is flat (no owning
+  # interface), or its owning interface IS the main class.
+  proc ownsReqMain(e: CborRequestEntry): bool =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningRequestType(e.responseTypeName)
+    o.len == 0 or o == mainClass
+
+  proc ownsEvtMain(ev: CborEventEntry): bool =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningEventType(ev.typeName)
+    o.len == 0 or o == mainClass
+
   py.add("    def __init__(self) -> None:\n")
   py.add("        _LIB." & p & "initialize()\n")
   py.add("        self._ctx: int = 0\n")
   py.add("        # Per-event handler maps + GC-anchor for trampolines.\n")
 
-  # Per-event handler maps, initialised in __init__.
+  # Per-event handler maps, initialised in __init__ (main-class events only).
   for ev in eventEntries:
     if not isEmittablePayload(ev.typeName):
+      continue
+    if mainClass.len > 0 and not ownsEvtMain(ev):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
@@ -684,6 +701,8 @@ proc generateCborPyFile*(
   py.add("            self._ctx = 0\n")
   for ev in eventEntries:
     if not isEmittablePayload(ev.typeName):
+      continue
+    if mainClass.len > 0 and not ownsEvtMain(ev):
       continue
     let mapName = "_" & ev.apiName & "_handlers"
     py.add("        self." & mapName & ".clear()\n")
@@ -778,8 +797,7 @@ proc generateCborPyFile*(
         break
     if e.returnsInterface.len > 0:
       if not argsMappable:
-        return
-          "    # TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+        return "    # TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
       let sub = subClassName(e.returnsInterface)
       var sigParams = "self"
       var argsDictBuilder = "{}"
@@ -856,23 +874,16 @@ proc generateCborPyFile*(
         "(envelope.get(\"ok\")))\n\n"
     )
 
-  # reduced-A: ownership predicate — an entry belongs to the main class when no
-  # mainClass is designated (legacy single-class), or it is flat (no owning
-  # interface), or its owning interface IS the main class.
-  proc ownsReqMain(e: CborRequestEntry): bool =
-    if mainClass.len == 0:
-      return true
-    let o = interfaceOwningRequestType(e.responseTypeName)
-    o.len == 0 or o == mainClass
-
   # Per-request typed methods (main class).
   for e in requestEntries:
     if not ownsReqMain(e):
       continue
     py.add(emitReqMethod(e))
 
-  # Per-event subscribe / unsubscribe.
+  # Per-event subscribe / unsubscribe (main-class events only).
   for ev in eventEntries:
+    if not ownsEvtMain(ev):
+      continue
     if not isEmittablePayload(ev.typeName):
       py.add(
         "    # TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
@@ -976,7 +987,10 @@ proc generateCborPyFile*(
       py.add(
         "# ---------------------------------------------------------------------------\n"
       )
-      py.add("# " & sub & " — sub-instance wrapper (created via a " & mainClass & " request)\n")
+      py.add(
+        "# " & sub & " — sub-instance wrapper (created via a " & mainClass &
+          " request)\n"
+      )
       py.add(
         "# ---------------------------------------------------------------------------\n\n"
       )
@@ -986,7 +1000,16 @@ proc generateCborPyFile*(
       py.add("    create-instance method. Call close() (or use as a context\n")
       py.add("    manager) to release it — drops its providers/listeners.\"\"\"\n\n")
       py.add("    def __init__(self, ctx: int) -> None:\n")
-      py.add("        self._ctx: int = ctx\n\n")
+      py.add("        self._ctx: int = ctx\n")
+      # Initialize per-event handler maps for sub-interface events.
+      for ev in eventEntries:
+        if interfaceOwningEventType(ev.typeName) != ifaceName:
+          continue
+        if not isEmittablePayload(ev.typeName):
+          continue
+        let mapName = "_" & ev.apiName & "_handlers"
+        py.add("        self." & mapName & ": Dict[int, Any] = {}\n")
+      py.add("\n")
       py.add("    @property\n")
       py.add("    def ctx(self) -> int:\n")
       py.add("        return self._ctx\n\n")
@@ -1020,16 +1043,94 @@ proc generateCborPyFile*(
       py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
       py.add("        if status != 0:\n")
       py.add("            if status == -4 and out:\n")
-      py.add("                raise RuntimeError(out.decode(\"utf-8\", errors=\"replace\"))\n")
+      py.add(
+        "                raise RuntimeError(out.decode(\"utf-8\", errors=\"replace\"))\n"
+      )
       py.add("            raise RuntimeError(f\"framework error: {status}\")\n")
       py.add("        return cbor2.loads(out) if out else None\n\n")
       for e in ifaceReqs:
         py.add(emitReqMethod(e))
+      # Sub-interface event methods (subscribe/unsubscribe keyed by self._ctx).
+      for ev in eventEntries:
+        if interfaceOwningEventType(ev.typeName) != ifaceName:
+          continue
+        if not isEmittablePayload(ev.typeName):
+          py.add(
+            "    # TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
+              "' is not a registered object type.\n\n"
+          )
+          continue
+        let mapName = "_" & ev.apiName & "_handlers"
+        let onName = "on_" & ev.apiName
+        let offName = "off_" & ev.apiName
+        var hintParts: seq[string] = @[sub]
+        var destructureArgs: seq[string] = @["self"]
+        if isScalarPayload(ev.typeName):
+          hintParts.add(primPyHint(resolveUnderlyingType(ev.typeName)))
+          destructureArgs.add("evt")
+        else:
+          for f in lookupTypeEntry(ev.typeName).fields:
+            hintParts.add(nimTypeToPyHint(f.nimType))
+            destructureArgs.add("evt." & f.name)
+        let pyCallableHint = "Callable[[" & hintParts.join(", ") & "], None]"
+        py.add(
+          "    def " & onName & "(self, callback: " & pyCallableHint & ") -> int:\n"
+        )
+        py.add(
+          "        \"\"\"Subscribe to '" & ev.apiName &
+            "' events. Returns a handle (>=2) on success, 0 on failure.\"\"\"\n"
+        )
+        py.add("        if self._ctx == 0:\n")
+        py.add("            return 0\n")
+        py.add("        def trampoline(\n")
+        py.add("            ctx: int, name: bytes, buf: int, buf_len: int, _ud: int\n")
+        py.add("        ) -> None:\n")
+        py.add("            if not buf or buf_len <= 0:\n")
+        py.add("                return\n")
+        py.add("            try:\n")
+        py.add("                payload = ctypes.string_at(buf, buf_len)\n")
+        py.add("                data = cbor2.loads(payload)\n")
+        py.add("                evt = _decode_" & ev.typeName & "(data)\n")
+        py.add("                callback(" & destructureArgs.join(", ") & ")\n")
+        py.add("            except Exception:\n")
+        py.add("                pass\n")
+        py.add("        cb = EVENT_CB_T(trampoline)\n")
+        py.add(
+          "        h = _LIB." & p & "subscribe(self._ctx, b\"" & ev.apiName &
+            "\", cb, None)\n"
+        )
+        py.add("        if h == 0 or h == 1:\n")
+        py.add("            return h\n")
+        py.add("        self." & mapName & "[h] = (cb, callback)\n")
+        py.add("        return h\n\n")
+        py.add("    def " & offName & "(self, handle: int = 0) -> None:\n")
+        py.add(
+          "        \"\"\"Unsubscribe from '" & ev.apiName &
+            "' events. handle=0 removes all.\"\"\"\n"
+        )
+        py.add("        if self._ctx == 0:\n")
+        py.add("            return\n")
+        py.add(
+          "        _LIB." & p & "unsubscribe(self._ctx, b\"" & ev.apiName &
+            "\", handle)\n"
+        )
+        py.add("        if handle == 0:\n")
+        py.add("            self." & mapName & ".clear()\n")
+        py.add("        else:\n")
+        py.add("            self." & mapName & ".pop(handle, None)\n\n")
       py.add("    def close(self) -> None:\n")
       py.add("        \"\"\"Release this sub-instance (idempotent).\"\"\"\n")
       py.add("        if self._ctx:\n")
       py.add("            _LIB." & p & "releaseInstance(self._ctx)\n")
-      py.add("            self._ctx = 0\n\n")
+      py.add("            self._ctx = 0\n")
+      for ev in eventEntries:
+        if interfaceOwningEventType(ev.typeName) != ifaceName:
+          continue
+        if not isEmittablePayload(ev.typeName):
+          continue
+        let mapName = "_" & ev.apiName & "_handlers"
+        py.add("        self." & mapName & ".clear()\n")
+      py.add("\n")
       py.add("    def __enter__(self) -> \"" & sub & "\":\n")
       py.add("        return self\n\n")
       py.add("    def __exit__(self, exc_type, exc, tb) -> None:\n")

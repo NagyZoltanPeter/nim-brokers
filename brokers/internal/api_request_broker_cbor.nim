@@ -304,14 +304,12 @@ proc emitZeroArgInstanceAdapter(
   let src =
     "proc " & $adapterIdent & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
     "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" & "  discard reqBuf\n" &
-    "  let r = await " & $typeIdent & ".request(ctx)\n" &
-    "  if r.isOk:\n" &
-    "    installApiListenersForCtx(r.value.brokerCtx)\n" &
-    "  let mapped =\n" &
+    "  let r = await " & $typeIdent & ".request(ctx)\n" & "  if r.isOk:\n" &
+    "    installApiListenersForCtx(r.value.brokerCtx)\n" & "  let mapped =\n" &
     "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
     "    else: Result[uint32, string].err(r.error)\n" &
-    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" &
-    "  if envBytes.isOk:\n" & "    return envBytes.value\n" & "  return @[]\n"
+    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" & "  if envBytes.isOk:\n" &
+    "    return envBytes.value\n" & "  return @[]\n"
   parseStmt(src)
 
 proc emitArgInstanceAdapter(
@@ -324,10 +322,14 @@ proc emitArgInstanceAdapter(
       let nameNode = paramDefs[nameIdx]
       let nameStr =
         case nameNode.kind
-        of nnkIdent, nnkSym: $nameNode
-        of nnkPostfix: $nameNode[1]
-        of nnkPragmaExpr: $nameNode[0]
-        else: $nameNode
+        of nnkIdent, nnkSym:
+          $nameNode
+        of nnkPostfix:
+          $nameNode[1]
+        of nnkPragmaExpr:
+          $nameNode[0]
+        else:
+          $nameNode
       fieldNames.add(nameStr)
   var argList = ""
   for f in fieldNames:
@@ -335,19 +337,17 @@ proc emitArgInstanceAdapter(
   let src =
     "proc " & $adapterIdent & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
     "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" &
-    "  let decRes = cborDecode(reqBuf, " & $argsTypeIdent & ")\n" & "  if decRes.isErr:\n" &
-    "    let errEnv = cborEncodeResultEnvelope(\n" &
+    "  let decRes = cborDecode(reqBuf, " & $argsTypeIdent & ")\n" &
+    "  if decRes.isErr:\n" & "    let errEnv = cborEncodeResultEnvelope(\n" &
     "      Result[uint32, string].err(\"request decode failed: \" & decRes.error))\n" &
     "    if errEnv.isOk:\n" & "      return errEnv.value\n" & "    return @[]\n" &
-    "  let decoded = decRes.value\n" & "  let r = await " & $typeIdent &
-    ".request(ctx" & argList & ")\n" &
-    "  if r.isOk:\n" &
-    "    installApiListenersForCtx(r.value.brokerCtx)\n" &
-    "  let mapped =\n" &
+    "  let decoded = decRes.value\n" & "  let r = await " & $typeIdent & ".request(ctx" &
+    argList & ")\n" & "  if r.isOk:\n" &
+    "    installApiListenersForCtx(r.value.brokerCtx)\n" & "  let mapped =\n" &
     "    if r.isOk: Result[uint32, string].ok(uint32(r.value.brokerCtx))\n" &
     "    else: Result[uint32, string].err(r.error)\n" &
-    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" &
-    "  if envBytes.isOk:\n" & "    return envBytes.value\n" & "  return @[]\n"
+    "  let envBytes = cborEncodeResultEnvelope(mapped)\n" & "  if envBytes.isOk:\n" &
+    "    return envBytes.value\n" & "  return @[]\n"
   parseStmt(src)
 
 # ---------------------------------------------------------------------------
@@ -497,7 +497,11 @@ proc generateApiCborRequestBrokerImpl(
     else:
       result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
     registerCborRequestEntry(
-      apiName & zeroApiSuffix, $adapterIdent, typeName, @[], returnsInterface = returnsIface
+      apiName & zeroApiSuffix,
+      $adapterIdent,
+      typeName,
+      @[],
+      returnsInterface = returnsIface,
     )
 
   if argPresent:
@@ -515,7 +519,10 @@ proc generateApiCborRequestBrokerImpl(
       )
     let fields = paramFields(argParams)
     registerCborRequestEntry(
-      apiName & argApiSuffix, $adapterIdent, typeName, fields,
+      apiName & argApiSuffix,
+      $adapterIdent,
+      typeName,
+      fields,
       returnsInterface = returnsIface,
     )
 

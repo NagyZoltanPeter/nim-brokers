@@ -34,7 +34,8 @@ func instanceCtx*(bc: BrokerContext): uint16 =
 func makeBrokerContext*(classCtx, instanceCtx: uint16): BrokerContext =
   BrokerContext((uint32(instanceCtx) shl 16) or uint32(classCtx))
 
-const DefaultBrokerContext* = makeBrokerContext(1'u16, 0'u16) ## 0x0000_0001 —
+const DefaultBrokerContext* = makeBrokerContext(1'u16, 0'u16)
+  ## 0x0000_0001 —
   ## the base "global" flat scope (classCtx 1, instance 0). Deliberately not
   ## 0x0 so an unset/nil context is distinguishable from the default.
 

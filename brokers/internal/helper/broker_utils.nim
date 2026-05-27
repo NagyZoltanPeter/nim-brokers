@@ -317,7 +317,10 @@ proc extractResultOk*(returnType: NimNode, async: bool): NimNode =
 
 proc sugarVerbIdent(p: NimNode): NimNode =
   let nm = p[0]
-  if nm.kind == nnkPostfix: nm[1] else: nm
+  if nm.kind == nnkPostfix:
+    nm[1]
+  else:
+    nm
 
 proc parseRequestSugar*(
     body: NimNode, macroName: string, async: bool
@@ -379,9 +382,8 @@ proc parseRequestSugar*(
     if verb.len > 0 and verb[0] in {'a' .. 'z'}:
       warning(
         "RequestBroker: broker name is `" & brokerName & "` (capitalized from proc `" &
-          verb & "`); call it as `" & brokerName &
-          ".request(...)`. Write `proc " & brokerName &
-          "(...)` to name it explicitly and silence this warning.",
+          verb & "`); call it as `" & brokerName & ".request(...)`. Write `proc " &
+          brokerName & "(...)` to name it explicitly and silence this warning.",
         procs[0],
       )
     result.typeIdent = ident(brokerName)
@@ -401,8 +403,7 @@ proc parseRequestSugar*(
       result.payloadType = copyNimTree(pl)
     elif result.payloadType.repr != pl.repr:
       error(
-        "All signatures of broker `" & brokerName &
-          "` must return the same payload type",
+        "All signatures of broker `" & brokerName & "` must return the same payload type",
         p,
       )
     let paramCount = params.len - 1
@@ -462,6 +463,29 @@ proc registerInterfaceEvents*(iface: string, events: seq[string]) {.compileTime.
 
 proc interfaceEvents*(iface: string): seq[string] {.compileTime.} =
   for it in gInterfaceEvents:
+    if it[0] == iface:
+      return it[1]
+  @[]
+
+# ---------------------------------------------------------------------------
+# Compile-time registry of interface request verbs.
+# Records, per interface, the verb name and the associated request type name.
+# Used by BrokerImplement to validate that all declared requests are overridden.
+# ---------------------------------------------------------------------------
+
+var gInterfaceVerbs {.compileTime.}: seq[(string, seq[(string, string)])] = @[]
+
+proc registerInterfaceVerbs*(
+    iface: string, verbs: seq[(string, string)]
+) {.compileTime.} =
+  for i in 0 ..< gInterfaceVerbs.len:
+    if gInterfaceVerbs[i][0] == iface:
+      gInterfaceVerbs[i] = (iface, verbs)
+      return
+  gInterfaceVerbs.add((iface, verbs))
+
+proc interfaceRequestVerbs*(iface: string): seq[(string, string)] {.compileTime.} =
+  for it in gInterfaceVerbs:
     if it[0] == iface:
       return it[1]
   @[]

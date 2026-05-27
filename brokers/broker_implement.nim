@@ -28,8 +28,10 @@ proc canonPragma(async: bool): NimNode {.compileTime.} =
   ## Canonical override pragma matching the BrokerInterface abstract base
   ## (byte-identical async/raises/gcsafe is required for method dispatch).
   let src =
-    if async: "proc d() {.async: (raises: []), gcsafe.} = discard"
-    else: "proc d() {.gcsafe, raises: [].} = discard"
+    if async:
+      "proc d() {.async: (raises: []), gcsafe.} = discard"
+    else:
+      "proc d() {.gcsafe, raises: [].} = discard"
   parseStmt(src)[0][4]
 
 proc isAsyncRet(ret: NimNode): bool {.compileTime.} =
@@ -37,7 +39,10 @@ proc isAsyncRet(ret: NimNode): bool {.compileTime.} =
     ret[0].eqIdent("Future")
 
 proc baseName(n: NimNode): NimNode {.compileTime.} =
-  if n.kind == nnkPostfix: n[1] else: n
+  if n.kind == nnkPostfix:
+    n[1]
+  else:
+    n
 
 macro BrokerImplement*(args: varargs[untyped]): untyped =
   ## See module docs. Invoked as `BrokerImplement Impl of IFace: <body>`.
@@ -48,7 +53,9 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     macros.error("BrokerImplement body must be a `:` block")
   let infix = args[0]
   if infix.kind != nnkInfix or not infix[0].eqIdent("of"):
-    macros.error("BrokerImplement must be written `BrokerImplement Impl of IFace:`", infix)
+    macros.error(
+      "BrokerImplement must be written `BrokerImplement Impl of IFace:`", infix
+    )
   let implName = infix[1]
   let implStr = $implName
   let ifaceStr = $infix[2]
@@ -64,7 +71,9 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     case stmt.kind
     of nnkProcDef:
       if not baseName(stmt[0]).eqIdent("init"):
-        macros.error("BrokerImplement only allows an `init` proc and `method` overrides", stmt)
+        macros.error(
+          "BrokerImplement only allows an `init` proc and `method` overrides", stmt
+        )
       let p = stmt.params
       for i in 1 ..< p.len: # skip return type
         initParams.add(copyNimTree(p[i]))
@@ -92,7 +101,24 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     of nnkEmpty, nnkCommentStmt:
       discard
     else:
-      macros.error("BrokerImplement only allows an `init` proc and `method` overrides", stmt)
+      macros.error(
+        "BrokerImplement only allows an `init` proc and `method` overrides", stmt
+      )
+
+  # Compile-time fulfillment check: every request verb declared in the
+  # interface must have a corresponding method override in the implementation.
+  let ifaceVerbs = interfaceRequestVerbs(ifaceStr)
+  for (verb, typeName) in ifaceVerbs:
+    var found = false
+    for m in methods:
+      if m[0] == verb:
+        found = true
+        break
+    if not found:
+      macros.error(
+        "BrokerImplement " & implStr & ": missing method override for '" & verb &
+          "' (request type " & typeName & ") declared in " & ifaceStr
+      )
 
   # Per-class context allocation state.
   let classCtxVar = ident(implStr & "BrokerClassCtx")
@@ -119,14 +145,15 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       for j in 0 ..< a.len - 2:
         argNames.add((if argNames.len > 0: ", " else: "") & $baseName(a[j]))
     let ret =
-      if async: "Future[Result[" & payload & ", string]]"
-      else: "Result[" & payload & ", string]"
+      if async:
+        "Future[Result[" & payload & ", string]]"
+      else:
+        "Result[" & payload & ", string]"
     # Pragma must match the broker's generated provider proc type
     # (request_broker `makeProcType`): plain `{.async.}` for async,
     # `{.gcsafe, raises: [CatchableError].}` for sync.
     let prag = if async: "{.async.}" else: "{.gcsafe, raises: [CatchableError].}"
-    let call =
-      (if async: "await " else: "") & "self." & verb & "(" & argNames & ")"
+    let call = (if async: "await " else: "") & "self." & verb & "(" & argNames & ")"
     setupSrc.add(
       "  discard " & brokerName & ".setProvider(self.brokerCtx, proc(" & paramDecls &
         "): " & ret & " " & prag & " =\n    " & call & ")\n"
@@ -147,19 +174,17 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   # a literal `let self`, breaking the user's `self.field` references).
   let selfId = ident("self")
   var newBody = newStmtList()
-  let pre =
-    quote do:
-      let `selfId` = `implName`()
-      `selfId`.brokerCtx =
-        makeBrokerContext(`classCtxVar`, `instCounter`.fetchAdd(1'u16, moRelaxed) + 1'u16)
+  let pre = quote:
+    let `selfId` = `implName`()
+    `selfId`.brokerCtx =
+      makeBrokerContext(`classCtxVar`, `instCounter`.fetchAdd(1'u16, moRelaxed) + 1'u16)
   for s in pre:
     newBody.add(s)
   for s in initBody:
     newBody.add(copyNimTree(s))
-  let post =
-    quote do:
-      `setupName`(`selfId`)
-      `selfId`
+  let post = quote:
+    `setupName`(`selfId`)
+    `selfId`
   for s in post:
     newBody.add(copyNimTree(s))
   # A0: new() is gcsafe — the create-instance FFI path constructs sub-instances
@@ -195,10 +220,9 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   for p in initParams:
     bindFormal.add(copyNimTree(p))
   var bindBody = newStmtList()
-  let bindPre =
-    quote do:
-      let `selfId` = `implName`()
-      `selfId`.brokerCtx = ctx
+  let bindPre = quote:
+    let `selfId` = `implName`()
+    `selfId`.brokerCtx = ctx
   for s in bindPre:
     bindBody.add(s)
   for s in initBody:

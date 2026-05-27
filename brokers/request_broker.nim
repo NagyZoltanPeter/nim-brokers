@@ -331,7 +331,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
             let paramDef = params[idx]
             if paramDef.kind != nnkIdentDefs:
               error(
-                "Signature parameter must be a standard identifier declaration", paramDef
+                "Signature parameter must be a standard identifier declaration",
+                paramDef,
               )
             let paramTypeNode = paramDef[paramDef.len - 2]
             if paramTypeNode.kind == nnkEmpty:
@@ -570,7 +571,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
             let providerRes = catchedRes.get()
             if providerRes.isOk():
               when compiles(providerRes.get().isNil()) and
-                not (typeof(providerRes.get()) is string):
+                  not (typeof(providerRes.get()) is string):
                 if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
@@ -623,7 +624,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
             if providerRes.isOk():
               when compiles(providerRes.get().isNil()) and
-                not (typeof(providerRes.get()) is string):
+                  not (typeof(providerRes.get()) is string):
                 if providerRes.get().isNil():
                   return err(
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
@@ -873,6 +874,74 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
+  )
+
+  # ── isProvided ─────────────────────────────────────────────────────
+  # Returns true when at least one provider slot (zero-arg or with-arg)
+  # is filled for the given broker context.
+  block:
+    var isProvidedBody = newStmtList()
+    if not zeroArgSig.isNil():
+      let zeroArgProvidersFieldName = ident("providersNoArgs")
+      isProvidedBody.add(
+        quote do:
+          if `brokerCtxParamIdent` == DefaultBrokerContext:
+            if not `accessProcIdent`().`zeroArgProvidersFieldName`[0].handler.isNil():
+              return true
+          else:
+            for entry in `accessProcIdent`().`zeroArgProvidersFieldName`:
+              if entry.brokerCtx == `brokerCtxParamIdent` and not entry.handler.isNil():
+                return true
+      )
+    if not argSig.isNil():
+      let argProvidersFieldName = ident("providersWithArgs")
+      isProvidedBody.add(
+        quote do:
+          if `brokerCtxParamIdent` == DefaultBrokerContext:
+            if not `accessProcIdent`().`argProvidersFieldName`[0].handler.isNil():
+              return true
+          else:
+            for entry in `accessProcIdent`().`argProvidersFieldName`:
+              if entry.brokerCtx == `brokerCtxParamIdent` and not entry.handler.isNil():
+                return true
+      )
+    isProvidedBody.add(
+      quote do:
+        return false
+    )
+
+    var formalParamsIsProvided = newTree(nnkFormalParams)
+    formalParamsIsProvided.add(ident("bool"))
+    formalParamsIsProvided.add(
+      newTree(
+        nnkIdentDefs,
+        ident("_"),
+        newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+        newEmptyNode(),
+      )
+    )
+    formalParamsIsProvided.add(
+      newTree(nnkIdentDefs, brokerCtxParamIdent, ident("BrokerContext"), newEmptyNode())
+    )
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("isProvided"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        formalParamsIsProvided,
+        newEmptyNode(),
+        newEmptyNode(),
+        isProvidedBody,
+      )
+    )
+
+  result.add(
+    quote do:
+      proc isProvided*(_: typedesc[`typeIdent`]): bool =
+        isProvided(`typeIdent`, DefaultBrokerContext)
 
   )
 

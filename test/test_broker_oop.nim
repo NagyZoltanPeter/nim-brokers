@@ -76,7 +76,8 @@ suite "BrokerInterface: event facade":
       Greeted,
       proc(ev: Greeted): Future[void] {.async: (raises: []), gcsafe.} =
         if not fut.finished:
-          fut.complete(ev.who),
+          fut.complete(ev.who)
+      ,
     )
     g.emit(Greeted, Greeted(who: "bob"))
     check (waitFor fut) == "bob"

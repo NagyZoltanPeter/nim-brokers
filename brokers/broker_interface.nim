@@ -52,11 +52,15 @@ proc renderAbstractMethod(
   for p in argParams:
     params.add(", " & p.repr.strip())
   let ret =
-    if async: "Future[Result[" & payloadRepr & ", string]]"
-    else: "Result[" & payloadRepr & ", string]"
+    if async:
+      "Future[Result[" & payloadRepr & ", string]]"
+    else:
+      "Result[" & payloadRepr & ", string]"
   let pragma =
-    if async: "{.base, async: (raises: []), gcsafe.}"
-    else: "{.base, gcsafe, raises: [].}"
+    if async:
+      "{.base, async: (raises: []), gcsafe.}"
+    else:
+      "{.base, gcsafe, raises: [].}"
   result =
     "method " & verb & "*(" & params & "): " & ret & " " & pragma & " =\n" &
     "  raiseAssert(\"" & ifaceName & "." & verb & " has no implementation\")\n"
@@ -77,7 +81,9 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       isApi = true
     elif args[i].kind == nnkIdent:
       if ifaceName != nil:
-        macros.error("BrokerInterface: unexpected extra name `" & $args[i] & "`", args[i])
+        macros.error(
+          "BrokerInterface: unexpected extra name `" & $args[i] & "`", args[i]
+        )
       ifaceName = args[i]
     else:
       macros.error("BrokerInterface: unexpected argument", args[i])
@@ -92,12 +98,14 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
     quote do:
       type `ifaceName`* = ref object of RootObj
         brokerCtx*: BrokerContext
+
   )
 
   # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
   #    interface is `(API)`), and generate abstract methods for requests.
   var eventNames: seq[string] = @[]
   var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
+  var requestVerbs: seq[(string, string)] = @[] # (verb, sanitized type name)
   for stmt in body:
     let headName = brokerHeadName(stmt)
     if headName notin ["EventBroker", "RequestBroker"]:
@@ -107,7 +115,9 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       )
     let innerBody = stmt[^1]
     if innerBody.kind != nnkStmtList:
-      macros.error(headName & " inside BrokerInterface must have a `:` body block", stmt)
+      macros.error(
+        headName & " inside BrokerInterface must have a `:` body block", stmt
+      )
     let hasMode = stmt.len == 3 # nnkCall(Head, mode, body)
 
     # Re-emit the underlying broker.
@@ -130,11 +140,20 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       # Record the request broker type name (matches CborRequestEntry.
       # responseTypeName) so codegen can attribute the flat entry to this iface.
       requestTypes.add(sanitizeIdentName(sg.typeIdent))
+      requestVerbs.add((sg.verb, sanitizeIdentName(sg.typeIdent)))
       if not sg.zeroArgProc.isNil:
-        result.add(parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)))
+        result.add(
+          parseStmt(
+            renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)
+          )
+        )
       if not sg.argProc.isNil:
         result.add(
-          parseStmt(renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async))
+          parseStmt(
+            renderAbstractMethod(
+              ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async
+            )
+          )
         )
     elif headName == "EventBroker":
       # Record the event type so BrokerImplement.close() can drop listeners.
@@ -143,6 +162,9 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
 
   # Publish this interface's event types for BrokerImplement teardown (B2).
   registerInterfaceEvents(ifaceNameStr, eventNames)
+
+  # Publish this interface's request verbs for BrokerImplement fulfillment check.
+  registerInterfaceVerbs(ifaceNameStr, requestVerbs)
 
   # A1: publish (API) interfaces to the compile-time registry so
   # registerBrokerLibrary can designate a main class and partition the per-
@@ -157,15 +179,12 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       template emit*(self: `ifaceName`, t: typedesc, args: varargs[untyped]): untyped =
         t.emit(self.brokerCtx, args)
 
-      template listen*(
-          self: `ifaceName`, t: typedesc, handler: untyped
-      ): untyped =
+      template listen*(self: `ifaceName`, t: typedesc, handler: untyped): untyped =
         t.listen(self.brokerCtx, handler)
 
-      template dropListener*(
-          self: `ifaceName`, t: typedesc, handle: untyped
-      ): untyped =
+      template dropListener*(self: `ifaceName`, t: typedesc, handle: untyped): untyped =
         t.dropListener(self.brokerCtx, handle)
+
   )
 
   # 4. Factory / dependency-injection. A consumer depends only on the interface
@@ -220,4 +239,5 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
           )
         var c = cfg
         `facVar`(addr c)
+
   )

@@ -31,9 +31,11 @@ export chronos, threadsync, atomics
 
 const maxApiCtxInstallers* = 64
 
-type ApiCtxListenerInstaller* = proc(ctx: BrokerContext): Result[void, string] {.nimcall.}
+type ApiCtxListenerInstaller* =
+  proc(ctx: BrokerContext): Result[void, string] {.nimcall.}
 
-var gApiCtxInstallers: array[maxApiCtxInstallers, tuple[classCtx: uint16, fn: ApiCtxListenerInstaller]]
+var gApiCtxInstallers:
+  array[maxApiCtxInstallers, tuple[classCtx: uint16, fn: ApiCtxListenerInstaller]]
 var gApiCtxInstallerCount: int
 var gApiCtxInstallerLock: Lock
 var gApiCtxInstallerLockInit: Atomic[int]

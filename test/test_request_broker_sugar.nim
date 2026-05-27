@@ -44,54 +44,68 @@ RequestBroker:
 
 suite "RequestBroker proc-sugar (option B)":
   test "POD zero-arg returns the raw payload":
-    GetVersion.setProvider(
-      proc(): Future[Result[string, string]] {.async.} =
-        ok("1.2.3")
-    ).get()
+    GetVersion
+      .setProvider(
+        proc(): Future[Result[string, string]] {.async.} =
+          ok("1.2.3")
+      )
+      .get()
     let r = waitFor GetVersion.request()
     check r.isOk()
     check r.value == "1.2.3" # raw string, no .distinctBase needed
 
   test "capital-initial proc name names the broker directly":
-    GetName.setProvider(
-      proc(): Future[Result[string, string]] {.async.} =
-        ok("zoli")
-    ).get()
+    GetName
+      .setProvider(
+        proc(): Future[Result[string, string]] {.async.} =
+          ok("zoli")
+      )
+      .get()
     check (waitFor GetName.request()).value == "zoli"
 
   test "arg-based POD":
-    Greet.setProvider(
-      proc(name: string): Future[Result[string, string]] {.async.} =
-        ok("hi " & name)
-    ).get()
+    Greet
+      .setProvider(
+        proc(name: string): Future[Result[string, string]] {.async.} =
+          ok("hi " & name)
+      )
+      .get()
     check (waitFor Greet.request("bob")).value == "hi bob"
 
   test "sync POD":
-    GetId.setProvider(
-      proc(): Result[int, string] =
-        ok(42)
-    ).get()
+    GetId
+      .setProvider(
+        proc(): Result[int, string] =
+          ok(42)
+      )
+      .get()
     check GetId.request().value == 42
 
   test "object payload":
-    GetHealth.setProvider(
-      proc(): Future[Result[GetHealth, string]] {.async.} =
-        ok(GetHealth(alive: true, code: 7))
-    ).get()
+    GetHealth
+      .setProvider(
+        proc(): Future[Result[GetHealth, string]] {.async.} =
+          ok(GetHealth(alive: true, code: 7))
+      )
+      .get()
     let r = waitFor GetHealth.request()
     check r.isOk()
     check r.value.alive
     check r.value.code == 7
 
   test "two slots: zero-arg + arg-based on one broker":
-    Lookup.setProvider(
-      proc(): Future[Result[string, string]] {.async.} =
-        ok("zero")
-    ).get()
-    Lookup.setProvider(
-      proc(key: int): Future[Result[string, string]] {.async.} =
-        ok("k" & $key)
-    ).get()
+    Lookup
+      .setProvider(
+        proc(): Future[Result[string, string]] {.async.} =
+          ok("zero")
+      )
+      .get()
+    Lookup
+      .setProvider(
+        proc(key: int): Future[Result[string, string]] {.async.} =
+          ok("k" & $key)
+      )
+      .get()
     check (waitFor Lookup.request()).value == "zero"
     check (waitFor Lookup.request(7)).value == "k7"
 

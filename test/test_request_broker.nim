@@ -139,6 +139,32 @@ suite "RequestBroker macro (async mode)":
     let res = waitFor DualResponse.request()
     check res.isErr()
 
+  test "isProvided reflects provider lifecycle":
+    check not SimpleResponse.isProvided()
+    check SimpleResponse
+      .setProvider(
+        proc(): Future[Result[SimpleResponse, string]] {.async.} =
+          ok(SimpleResponse(value: "hi"))
+      )
+      .isOk()
+    check SimpleResponse.isProvided()
+    SimpleResponse.clearProvider()
+    check not SimpleResponse.isProvided()
+
+  test "isProvided with BrokerContext":
+    let ctx = NewBrokerContext()
+    check not DualResponse.isProvided(ctx)
+    check DualResponse
+      .setProvider(
+        ctx,
+        proc(): Future[Result[DualResponse, string]] {.async.} =
+          ok(DualResponse(note: "ctx", count: 1)),
+      )
+      .isOk()
+    check DualResponse.isProvided(ctx)
+    check not DualResponse.isProvided() # default ctx still empty
+    DualResponse.clearProvider(ctx)
+
   test "implicit zero-argument provider works by default":
     check ImplicitResponse
       .setProvider(

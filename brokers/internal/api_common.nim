@@ -110,9 +110,8 @@ proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
       let ifaceHint =
         if ownerNew.len > 0 or ownerOld.len > 0:
           " ('" & typeName & "' in interface " &
-            (if ownerNew.len > 0: ownerNew else: "<library>") & " vs '" &
-            entry.typeName & "' in interface " &
-            (if ownerOld.len > 0: ownerOld else: "<library>") & ")"
+            (if ownerNew.len > 0: ownerNew else: "<library>") & " vs '" & entry.typeName &
+            "' in interface " & (if ownerOld.len > 0: ownerOld else: "<library>") & ")"
         else:
           ""
       error(

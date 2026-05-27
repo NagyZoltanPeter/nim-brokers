@@ -201,11 +201,13 @@ proc generateCborGoFile*(
       return true
     let o = interfaceOwningRequestType(e.responseTypeName)
     o.len == 0 or o == mainClass
+
   proc ownsEvtMain(ev: CborEventEntry): bool {.compileTime.} =
     if mainClass.len == 0:
       return true
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   if mainClass.len > 0:
     for e in requestEntries:
@@ -572,11 +574,11 @@ proc generateCborGoFile*(
       "\tif derr := cbor.Unmarshal(out, &env); derr != nil { return nil, derr }\n"
     )
     result.add("\tif env.Err != nil { return nil, errors.New(*env.Err) }\n")
-    result.add("\tif env.Ok == nil { return nil, errors.New(\"empty response envelope\") }\n")
-    result.add("\tw := &" & sub & "{ctx: C.uint32_t(*env.Ok)}\n")
     result.add(
-      "\truntime.SetFinalizer(w, func(x *" & sub & ") { x.Close() })\n"
+      "\tif env.Ok == nil { return nil, errors.New(\"empty response envelope\") }\n"
     )
+    result.add("\tw := &" & sub & "{ctx: C.uint32_t(*env.Ok)}\n")
+    result.add("\truntime.SetFinalizer(w, func(x *" & sub & ") { x.Close() })\n")
     result.add("\treturn w, nil\n")
     result.add("}\n\n")
 
@@ -610,7 +612,7 @@ proc generateCborGoFile*(
 
   for ev in eventEntries:
     if not ownsEvtMain(ev):
-      continue # sub-interface events are not in scope for this slice
+      continue
     let exName = snakeToPascal(ev.apiName)
     let payloadType = ev.typeName
     # Walk the payload struct fields to build an unpacked-field handler
@@ -700,7 +702,10 @@ proc generateCborGoFile*(
   # C.<lib>_releaseInstance, after which the Nim instance is GC-reclaimed.
   for ifaceName in subInterfaceNames:
     let sub = goSubStructName(ifaceName)
-    g.add("// -------- " & sub & " — sub-instance wrapper of " & ifaceName & " --------\n\n")
+    g.add(
+      "// -------- " & sub & " — sub-instance wrapper of " & ifaceName &
+        " --------\n\n"
+    )
     g.add("type " & sub & " struct {\n")
     g.add("\tctx C.uint32_t\n")
     g.add("\tmu  sync.Mutex\n")
@@ -721,9 +726,7 @@ proc generateCborGoFile*(
       "func (l *" & sub &
         ") internalCborCall(apiName string, args interface{}) ([]byte, error) {\n"
     )
-    g.add(
-      "\tif l.ctx == 0 { return nil, errors.New(\"sub-instance is released\") }\n"
-    )
+    g.add("\tif l.ctx == 0 { return nil, errors.New(\"sub-instance is released\") }\n")
     g.add("\tvar inBytes []byte\n")
     g.add("\tif args != nil {\n")
     g.add("\t\tvar err error\n")
@@ -756,6 +759,82 @@ proc generateCborGoFile*(
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         g.add(emitGoReqMethod(e, sub))
+    # Sub-interface event methods (subscribe/unsubscribe keyed by l.ctx).
+    for ev in eventEntries:
+      if interfaceOwningEventType(ev.typeName) != ifaceName:
+        continue
+      let exName = snakeToPascal(ev.apiName)
+      let payloadType = ev.typeName
+      var fieldNames: seq[string] = @[]
+      var fieldGoTypes: seq[string] = @[]
+      var fieldExNames: seq[string] = @[]
+      var fieldsOk = true
+      let scalarEvt = isScalarPayload(payloadType)
+      if scalarEvt:
+        fieldNames.add("value")
+        fieldGoTypes.add(primGoHint(resolveUnderlyingType(payloadType)))
+        fieldExNames.add("value")
+      elif isTypeRegistered(payloadType):
+        let entry = lookupTypeEntry(payloadType)
+        for f in entry.fields:
+          let h = nimTypeToGoCborHint(f.nimType)
+          if h.len == 0:
+            fieldsOk = false
+            break
+          fieldNames.add(f.name)
+          fieldGoTypes.add(h)
+          fieldExNames.add(goExportedField(f.name))
+      else:
+        fieldsOk = false
+      if not fieldsOk:
+        g.add(
+          "// TODO(go-codegen-cbor): event '" & payloadType &
+            "' has fields not yet mappable\n"
+        )
+        g.add(
+          "func (l *" & sub & ") On" & exName & "(cb func(" & payloadType &
+            ")) uint64 { _ = cb; return 0 }\n\n"
+        )
+      else:
+        var sig = ""
+        for i in 0 ..< fieldNames.len:
+          if i > 0:
+            sig.add(", ")
+          sig.add(fieldNames[i] & " " & fieldGoTypes[i])
+        g.add("func (l *" & sub & ") On" & exName & "(cb func(" & sig & ")) uint64 {\n")
+        g.add("\tif l.ctx == 0 { return 0 }\n")
+        g.add("\twrap := cborEventHandler(func(payload []byte) {\n")
+        g.add("\t\tvar p " & payloadType & "\n")
+        g.add("\t\tif derr := cbor.Unmarshal(payload, &p); derr != nil { return }\n")
+        g.add("\t\tcb(")
+        if scalarEvt:
+          g.add("p")
+        else:
+          for i in 0 ..< fieldNames.len:
+            if i > 0:
+              g.add(", ")
+            g.add("p." & fieldExNames[i])
+        g.add(")\n")
+        g.add("\t})\n")
+        g.add("\th := cgo.NewHandle(wrap)\n")
+        g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
+        g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+        g.add(
+          "\thandle := uint64(C.go_cbor_subscribe(l.ctx, cName, unsafe.Pointer(h)))\n"
+        )
+        g.add("\tif handle == 0 {\n")
+        g.add("\t\th.Delete()\n")
+        g.add("\t\treturn 0\n")
+        g.add("\t}\n")
+        g.add("\tregisterCborHandle(l.ctx, h)\n")
+        g.add("\treturn handle\n")
+        g.add("}\n\n")
+      g.add("func (l *" & sub & ") Off" & exName & "(handle uint64) {\n")
+      g.add("\tif l.ctx == 0 { return }\n")
+      g.add("\tcName := C.CString(\"" & ev.apiName & "\")\n")
+      g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+      g.add("\tC." & p & "unsubscribe(l.ctx, cName, C.uint64_t(handle))\n")
+      g.add("}\n\n")
 
   try:
     writeFile(modDir & "/" & libName & ".go", g)

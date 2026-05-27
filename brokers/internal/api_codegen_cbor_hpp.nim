@@ -356,11 +356,13 @@ proc generateCborCppHeaderFile*(
       return true
     let o = interfaceOwningRequestType(e.responseTypeName)
     o.len == 0 or o == mainClass
+
   proc ownsEvtMain(ev: CborEventEntry): bool {.compileTime.} =
     if mainClass.len == 0:
       return true
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   var anyInstanceReturn = false
   if mainClass.len > 0:
@@ -660,6 +662,7 @@ proc generateCborCppHeaderFile*(
     for ev in emittableEvents:
       if interfaceOwningEventType(ev.typeName) == ifaceName:
         result.add(ev)
+
   proc subHasEvents(ifaceName: string): bool {.compileTime.} =
     subEventsOf(ifaceName).len > 0
 
@@ -727,8 +730,10 @@ proc generateCborCppHeaderFile*(
       # (non-movable, heap-stable for its EventDispatchers).
       let subN = cppSubClassName(e.returnsInterface)
       let retT =
-        if subHasEvents(e.returnsInterface): "Result<std::unique_ptr<" & subN & ">>"
-        else: "Result<" & subN & ">"
+        if subHasEvents(e.returnsInterface):
+          "Result<std::unique_ptr<" & subN & ">>"
+        else:
+          "Result<" & subN & ">"
       h.add("  " & retT & " " & methodName & "(" & sigParams & ");\n")
       continue
     if not isEmittablePayload(e.responseTypeName):
@@ -800,6 +805,178 @@ proc generateCborCppHeaderFile*(
     )
     h.add("  std::unique_ptr<" & dispatcherType & "> " & dispatcherMember & ";\n")
   h.add("};\n\n")
+
+  # ==================================================================
+  # Sub-interface request method helpers (compile-time procs).
+  # emitSubReqDecl  → in-class signature (declaration only)
+  # emitSubReqImpl  → out-of-class inline definition (for detail:: namespace)
+  # ==================================================================
+  proc subReqSigParams(e: CborRequestEntry): string {.compileTime.} =
+    if e.argFields.len > 0:
+      var first = true
+      for (n, t) in e.argFields:
+        if not first:
+          result.add(", ")
+        result.add(nimTypeToCppType(t) & " " & n)
+        first = false
+
+  proc subReqRetType(e: CborRequestEntry): string {.compileTime.} =
+    "Result<" & payloadCppType(e.responseTypeName) & ">"
+
+  proc emitSubReqDecl(e: CborRequestEntry): string {.compileTime.} =
+    if e.responseTypeName.len == 0:
+      return ""
+    if e.returnsInterface.len > 0:
+      return "  // TODO: nested create-instance from a sub-interface unsupported.\n"
+    if not isEmittablePayload(e.responseTypeName):
+      return
+        "  // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
+        "' not emittable.\n"
+    if not isMethodSupported(e.apiName):
+      return "  // TODO: '" & e.apiName & "' has unmappable parameter types.\n"
+    let methodName = snakeToLowerCamel(e.apiName)
+    result.add(
+      "  " & subReqRetType(e) & " " & methodName & "(" & subReqSigParams(e) & ");\n"
+    )
+
+  proc emitSubReqImpl(e: CborRequestEntry, sub: string): string {.compileTime.} =
+    if e.responseTypeName.len == 0:
+      return ""
+    if e.returnsInterface.len > 0 or not isEmittablePayload(e.responseTypeName) or
+        not isMethodSupported(e.apiName):
+      return ""
+    let methodName = snakeToLowerCamel(e.apiName)
+    let envName = e.responseTypeName & "Envelope"
+    let voidResp = isVoidPayload(e.responseTypeName)
+    let resTy = subReqRetType(e)
+    let okExpr =
+      if voidResp:
+        resTy & "::ok()"
+      else:
+        resTy & "::ok(std::move(*env.ok))"
+    let argsName = argsStructName(e.apiName)
+    result.add(
+      "inline " & resTy & " " & sub & "::" & methodName & "(" & subReqSigParams(e) &
+        ") {\n"
+    )
+    if e.argFields.len > 0:
+      var argsAssign = ""
+      for (n, t) in e.argFields:
+        argsAssign.add("  args." & n & " = " & n & ";\n")
+      result.add("  " & argsName & " args;\n")
+      result.add(argsAssign)
+      result.add("  std::size_t cborLen = 0;\n")
+      result.add("  try { cborLen = detail::cborEncodedSize(args); }\n")
+      result.add("  catch (const std::exception& ex) {\n")
+      result.add(
+        "    return " & resTy &
+          "::err(std::string(\"size pass failed: \") + ex.what());\n"
+      )
+      result.add("  }\n")
+      result.add(
+        "  void* inBuf = (cborLen > 0) ? " & p &
+          "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
+      )
+      result.add(
+        "  if (cborLen > 0 && !inBuf) return " & resTy &
+          "::err(\"allocBuffer failed\");\n"
+      )
+      result.add("  try {\n")
+      result.add(
+        "    if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
+      )
+      result.add("  } catch (const std::exception& ex) {\n")
+      result.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
+      result.add(
+        "    return " & resTy &
+          "::err(std::string(\"encode pass failed: \") + ex.what());\n"
+      )
+      result.add("  }\n")
+      result.add("  std::string lastError;\n")
+      result.add(
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & e.apiName &
+          "\", inBuf, cborLen);\n"
+      )
+    else:
+      result.add("  std::string lastError;\n")
+      result.add(
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & e.apiName &
+          "\", nullptr, 0);\n"
+      )
+    result.add("  if (status != 0) return " & resTy & "::err(lastError);\n")
+    result.add("  if (resp.empty()) return " & resTy & "::err(\"empty response\");\n")
+    result.add("  " & envName & " env;\n")
+    result.add("  try {\n")
+    result.add("    auto v = resp.view();\n")
+    result.add(
+      "    env = jsoncons::cbor::decode_cbor<" & envName & ">(v.begin(), v.end());\n"
+    )
+    result.add("  } catch (const std::exception& ex) {\n")
+    result.add(
+      "    return " & resTy & "::err(std::string(\"decode failed: \") + ex.what());\n"
+    )
+    result.add("  }\n")
+    result.add("  if (env.err.has_value()) return " & resTy & "::err(*env.err);\n")
+    result.add("  if (env.ok.has_value()) return " & okExpr & ";\n")
+    result.add("  return " & resTy & "::err(\"malformed response envelope\");\n")
+    result.add("}\n\n")
+
+  # ==================================================================
+  # Section 2: Sub-interface class declarations (signatures only).
+  # Emitted in the library namespace right after the main Lib class so
+  # they live under <library-name>, ahead of namespace detail.
+  # Method implementations are emitted later inside namespace detail.
+  # ==================================================================
+  for ifaceName in subInterfaceNames:
+    let sub = cppSubClassName(ifaceName)
+    let subEvts = subEventsOf(ifaceName)
+    let hasEvts = subEvts.len > 0
+    h.add("// ---- " & sub & " — sub-instance wrapper of " & ifaceName & " ----\n")
+    h.add("class " & sub & " {\n")
+    h.add(" private:\n")
+    h.add("  uint32_t ctx_ = 0;\n")
+    for ev in subEvts:
+      let dispType = ev.typeName & "Dispatcher"
+      let dispMember = ev.apiName & "Dispatcher_"
+      h.add(
+        "  using " & dispType & " = detail::EventDispatcher<" & sub & ", detail::" &
+          ev.typeName & "EventTraits>;\n"
+      )
+      h.add("  std::unique_ptr<" & dispType & "> " & dispMember & ";\n")
+    h.add("\n public:\n")
+    # Ctor/dtor/copy/move — declared here, defined out-of-class in detail::.
+    h.add("  explicit " & sub & "(uint32_t ctx);\n")
+    h.add("  ~" & sub & "();\n")
+    h.add("  " & sub & "(const " & sub & "&) = delete;\n")
+    h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
+    if hasEvts:
+      h.add("  " & sub & "(" & sub & "&&) = delete;\n")
+      h.add("  " & sub & "& operator=(" & sub & "&&) = delete;\n")
+    else:
+      h.add("  " & sub & "(" & sub & "&& o) noexcept;\n")
+      h.add("  " & sub & "& operator=(" & sub & "&& o) noexcept;\n")
+    h.add("  uint32_t ctx() const noexcept { return ctx_; }\n")
+    h.add("  bool valid() const noexcept { return ctx_ != 0; }\n")
+    h.add("  explicit operator bool() const noexcept { return ctx_ != 0; }\n")
+    h.add("  void close() noexcept;\n")
+    # Request method declarations.
+    for e in requestEntries:
+      if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
+        h.add(emitSubReqDecl(e))
+    # Event callback aliases + on/off declarations.
+    for ev in subEvts:
+      let camelBase = snakeToLowerCamel(ev.apiName)
+      var pascal = camelBase
+      if pascal.len > 0:
+        pascal[0] = toUpperAscii(pascal[0])
+      let cbAlias = ev.typeName & "Callback"
+      h.add("  using " & cbAlias & " = std::function<void(" & sub & "&")
+      for f in effectiveFields(ev.typeName):
+        h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
+      h.add(")>;\n")
+      h.add("  uint64_t on" & pascal & "(" & cbAlias & " fn) noexcept;\n")
+      h.add("  void off" & pascal & "(uint64_t handle = 0) noexcept;\n")
+    h.add("};\n\n")
 
   # ==================================================================
   # Section 3: Envelope + args structs (internal plumbing, after class)
@@ -1186,179 +1363,67 @@ proc generateCborCppHeaderFile*(
   h.add("} // namespace detail\n\n")
 
   # ==================================================================
-  # reduced-A: sub-interface wrapper classes. Emitted AFTER detail:: (so they
-  # can use detail::rawCallOwned + the envelope/args structs) and BEFORE the
-  # main Lib method definitions (so a create-instance method returning
-  # Result<Sub> sees a complete Sub). Each shares the single C ABI: its methods
-  # call <lib>_call(ctx_, ...) — the library routes by classCtx to the same
-  # processing thread. The destructor / close() calls <lib>_releaseInstance.
+  # Sub-interface out-of-class inline method implementations.
+  # Emitted in the library namespace (same as the class declaration)
+  # after detail:: is fully defined so EventDispatcher is complete.
   # ==================================================================
-  proc emitSubReqMethod(e: CborRequestEntry): string {.compileTime.} =
-    if e.responseTypeName.len == 0:
-      return ""
-    if e.returnsInterface.len > 0:
-      return "  // TODO: nested create-instance from a sub-interface unsupported.\n"
-    if not isEmittablePayload(e.responseTypeName):
-      return
-        "  // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
-        "' not emittable.\n"
-    if not isMethodSupported(e.apiName):
-      return "  // TODO: '" & e.apiName & "' has unmappable parameter types.\n"
-    let methodName = snakeToLowerCamel(e.apiName)
-    let envName = e.responseTypeName & "Envelope"
-    let voidResp = isVoidPayload(e.responseTypeName)
-    let resTy = "Result<" & payloadCppType(e.responseTypeName) & ">"
-    let okExpr =
-      if voidResp: resTy & "::ok()" else: resTy & "::ok(std::move(*env.ok))"
-    var sigParams = ""
-    var argsAssign = ""
-    let argsName = argsStructName(e.apiName)
-    if e.argFields.len > 0:
-      var first = true
-      for (n, t) in e.argFields:
-        if not first:
-          sigParams.add(", ")
-        sigParams.add(nimTypeToCppType(t) & " " & n)
-        argsAssign.add("    args." & n & " = " & n & ";\n")
-        first = false
-    result.add("  " & resTy & " " & methodName & "(" & sigParams & ") {\n")
-    if e.argFields.len > 0:
-      result.add("    " & argsName & " args;\n")
-      result.add(argsAssign)
-      result.add("    std::size_t cborLen = 0;\n")
-      result.add("    try { cborLen = detail::cborEncodedSize(args); }\n")
-      result.add("    catch (const std::exception& ex) {\n")
-      result.add(
-        "      return " & resTy &
-          "::err(std::string(\"size pass failed: \") + ex.what());\n"
-      )
-      result.add("    }\n")
-      result.add(
-        "    void* inBuf = (cborLen > 0) ? " & p &
-          "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
-      )
-      result.add(
-        "    if (cborLen > 0 && !inBuf) return " & resTy & "::err(\"allocBuffer failed\");\n"
-      )
-      result.add("    try {\n")
-      result.add(
-        "      if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
-      )
-      result.add("    } catch (const std::exception& ex) {\n")
-      result.add("      if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
-      result.add(
-        "      return " & resTy &
-          "::err(std::string(\"encode pass failed: \") + ex.what());\n"
-      )
-      result.add("    }\n")
-      result.add("    std::string lastError;\n")
-      result.add(
-        "    auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" &
-          e.apiName & "\", inBuf, cborLen);\n"
-      )
-    else:
-      result.add("    std::string lastError;\n")
-      result.add(
-        "    auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" &
-          e.apiName & "\", nullptr, 0);\n"
-      )
-    result.add("    if (status != 0) return " & resTy & "::err(lastError);\n")
-    result.add("    if (resp.empty()) return " & resTy & "::err(\"empty response\");\n")
-    result.add("    " & envName & " env;\n")
-    result.add("    try {\n")
-    result.add("      auto v = resp.view();\n")
-    result.add(
-      "      env = jsoncons::cbor::decode_cbor<" & envName & ">(v.begin(), v.end());\n"
-    )
-    result.add("    } catch (const std::exception& ex) {\n")
-    result.add(
-      "      return " & resTy & "::err(std::string(\"decode failed: \") + ex.what());\n"
-    )
-    result.add("    }\n")
-    result.add("    if (env.err.has_value()) return " & resTy & "::err(*env.err);\n")
-    result.add("    if (env.ok.has_value()) return " & okExpr & ";\n")
-    result.add("    return " & resTy & "::err(\"malformed response envelope\");\n")
-    result.add("  }\n")
-
   for ifaceName in subInterfaceNames:
     let sub = cppSubClassName(ifaceName)
     let subEvts = subEventsOf(ifaceName)
     let hasEvts = subEvts.len > 0
-    h.add("// ---- " & sub & " — sub-instance wrapper of " & ifaceName & " ----\n")
-    h.add("class " & sub & " {\n")
-    # Members first (a ctor mem-init-list references the dispatcher members /
-    # aliases, which must be declared before the ctor for name lookup).
-    h.add(" private:\n")
-    h.add("  uint32_t ctx_ = 0;\n")
-    for ev in subEvts:
-      let dispType = ev.typeName & "Dispatcher"
-      let dispMember = ev.apiName & "Dispatcher_"
-      h.add(
-        "  using " & dispType & " = detail::EventDispatcher<" & sub & ", detail::" &
-          ev.typeName & "EventTraits>;\n"
-      )
-      h.add("  std::unique_ptr<" & dispType & "> " & dispMember & ";\n")
-    h.add("\n public:\n")
+    h.add("// ---- " & sub & " implementations ----\n")
+    # Ctor
     if hasEvts:
-      # Event-bearing sub: non-movable (its EventDispatchers hold `owner_ =
-      # this`), heap-created via the main create-instance method. The ctor
-      # constructs one dispatcher per owned event (mirrors the main Lib ctor).
-      h.add("  explicit " & sub & "(uint32_t ctx)\n")
-      h.add("      : ctx_(ctx)\n")
+      h.add("inline " & sub & "::" & sub & "(uint32_t ctx)\n")
+      h.add("    : ctx_(ctx)\n")
       for ev in subEvts:
         let dispType = ev.typeName & "Dispatcher"
         let dispMember = ev.apiName & "Dispatcher_"
-        h.add("      , " & dispMember & "(std::make_unique<" & dispType & ">(*this))\n")
-      h.add("  {}\n")
-      h.add("  ~" & sub & "() { close(); }\n")
-      h.add("  " & sub & "(const " & sub & "&) = delete;\n")
-      h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
-      h.add("  " & sub & "(" & sub & "&&) = delete;\n")
-      h.add("  " & sub & "& operator=(" & sub & "&&) = delete;\n")
+        h.add("    , " & dispMember & "(std::make_unique<" & dispType & ">(*this))\n")
+      h.add("{}\n")
     else:
-      h.add("  explicit " & sub & "(uint32_t ctx) noexcept : ctx_(ctx) {}\n")
-      h.add("  ~" & sub & "() { close(); }\n")
-      h.add("  " & sub & "(const " & sub & "&) = delete;\n")
-      h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
-      h.add("  " & sub & "(" & sub & "&& o) noexcept : ctx_(o.ctx_) { o.ctx_ = 0; }\n")
+      h.add("inline " & sub & "::" & sub & "(uint32_t ctx) noexcept : ctx_(ctx) {}\n")
+    # Dtor
+    h.add("inline " & sub & "::~" & sub & "() { close(); }\n")
+    # Move ctor/assign (event-free only)
+    if not hasEvts:
       h.add(
-        "  " & sub & "& operator=(" & sub &
+        "inline " & sub & "::" & sub & "(" & sub &
+          "&& o) noexcept : ctx_(o.ctx_) { o.ctx_ = 0; }\n"
+      )
+      h.add(
+        "inline " & sub & "& " & sub & "::operator=(" & sub &
           "&& o) noexcept { if (this != &o) { close(); ctx_ = o.ctx_; o.ctx_ = 0; } return *this; }\n"
       )
-    h.add("  uint32_t ctx() const noexcept { return ctx_; }\n")
-    h.add("  bool valid() const noexcept { return ctx_ != 0; }\n")
-    h.add("  explicit operator bool() const noexcept { return ctx_ != 0; }\n")
-    # close(): clear event dispatchers (so no late callback fires) then release.
-    h.add("  void close() noexcept {\n")
+    # close()
+    h.add("inline void " & sub & "::close() noexcept {\n")
     for ev in subEvts:
       let dispMember = ev.apiName & "Dispatcher_"
-      h.add("    if (" & dispMember & ") " & dispMember & "->clear();\n")
-    h.add("    if (ctx_) { " & p & "releaseInstance(ctx_); ctx_ = 0; }\n")
-    h.add("  }\n")
+      h.add("  if (" & dispMember & ") " & dispMember & "->clear();\n")
+    h.add("  if (ctx_) { " & p & "releaseInstance(ctx_); ctx_ = 0; }\n")
+    h.add("}\n")
+    # Request method implementations.
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
-        h.add(emitSubReqMethod(e))
-    # Per-event callback alias + on/off (reuses the generic detail::EventDispatcher).
+        h.add(emitSubReqImpl(e, sub))
+    # Event on/off implementations.
     for ev in subEvts:
       let camelBase = snakeToLowerCamel(ev.apiName)
       var pascal = camelBase
       if pascal.len > 0:
         pascal[0] = toUpperAscii(pascal[0])
       let cbAlias = ev.typeName & "Callback"
-      h.add("  using " & cbAlias & " = std::function<void(" & sub & "&")
-      for f in effectiveFields(ev.typeName):
-        h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
-      h.add(")>;\n")
+      let dispMember = ev.apiName & "Dispatcher_"
       h.add(
-        "  uint64_t on" & pascal & "(" & cbAlias &
-          " fn) noexcept { return " & ev.apiName & "Dispatcher_->add(std::move(fn)); }\n"
+        "inline uint64_t " & sub & "::on" & pascal & "(" & cbAlias &
+          " fn) noexcept { return " & dispMember & "->add(std::move(fn)); }\n"
       )
       h.add(
-        "  void off" & pascal & "(uint64_t handle = 0) noexcept { if (handle == 0) " &
-          ev.apiName & "Dispatcher_->clear(); else " & ev.apiName &
-          "Dispatcher_->remove(handle); }\n"
+        "inline void " & sub & "::off" & pascal &
+          "(uint64_t handle) noexcept { if (handle == 0) " & dispMember &
+          "->clear(); else " & dispMember & "->remove(handle); }\n"
       )
-    h.add("};\n\n")
+    h.add("\n")
 
   # ==================================================================
   # Section 6: Out-of-class inline Lib method definitions
@@ -1433,7 +1498,10 @@ proc generateCborCppHeaderFile*(
     # reduced-A: a create-instance method decodes the shared uint-ctx envelope
     # and constructs the typed sub-wrapper from the returned ctx.
     let envName =
-      if isInstance: "__InstanceCtxEnvelope" else: e.responseTypeName & "Envelope"
+      if isInstance:
+        "__InstanceCtxEnvelope"
+      else:
+        e.responseTypeName & "Envelope"
     let voidResp = (not isInstance) and isVoidPayload(e.responseTypeName)
     let subEv = isInstance and subHasEvents(e.returnsInterface)
     let resTy =

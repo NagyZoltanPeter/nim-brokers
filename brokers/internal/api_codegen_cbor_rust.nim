@@ -196,11 +196,13 @@ proc generateCborRustFile*(
       return true
     let o = interfaceOwningRequestType(e.responseTypeName)
     o.len == 0 or o == mainClass
+
   proc ownsEvtMain(ev: CborEventEntry): bool {.compileTime.} =
     if mainClass.len == 0:
       return true
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   if mainClass.len > 0:
     for e in requestEntries:
@@ -688,8 +690,7 @@ proc generateCborRustFile*(
   proc emitRustInstanceMethod(e: CborRequestEntry): string {.compileTime.} =
     for (n, t) in e.argFields:
       if not isRustMappable(t):
-        return
-          "    // TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+        return "    // TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
     let sub = rustSubStructName(e.returnsInterface)
     var sigParams = "&self"
     var argsStructInit = ""
@@ -757,7 +758,7 @@ proc generateCborRustFile*(
   rs.add("    // ---- Event registration ----\n\n")
   for ev in eventEntries:
     if not ownsEvtMain(ev):
-      continue # sub-interface events are not in scope for this slice
+      continue
     if not isEmittablePayload(ev.typeName):
       rs.add(
         "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
@@ -844,7 +845,9 @@ proc generateCborRustFile*(
   # which the Nim instance is reclaimed by the GC (no FFI-side ownership).
   for ifaceName in subInterfaceNames:
     let sub = rustSubStructName(ifaceName)
-    rs.add("// -------- " & sub & " — sub-instance wrapper of " & ifaceName & " --------\n")
+    rs.add(
+      "// -------- " & sub & " — sub-instance wrapper of " & ifaceName & " --------\n"
+    )
     rs.add("pub struct " & sub & " {\n")
     rs.add("    ctx: u32,\n")
     rs.add("}\n\n")
@@ -883,7 +886,9 @@ proc generateCborRustFile*(
     rs.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
     rs.add("            let mut out_len: i32 = 0;\n")
     rs.add("            let status = " & p & "call(\n")
-    rs.add("                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n")
+    rs.add(
+      "                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n"
+    )
     rs.add("                &mut out_buf as *mut _, &mut out_len as *mut _,\n")
     rs.add("            );\n")
     rs.add("            let mut out: Vec<u8> = Vec::new();\n")
@@ -908,6 +913,74 @@ proc generateCborRustFile*(
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         rs.add(emitRustReqMethod(e))
+    # Sub-interface event methods (subscribe/unsubscribe keyed by self.ctx).
+    for ev in eventEntries:
+      if interfaceOwningEventType(ev.typeName) != ifaceName:
+        continue
+      if not isEmittablePayload(ev.typeName):
+        rs.add(
+          "    // TODO: event '" & ev.apiName & "' payload type '" & ev.typeName &
+            "' is not a registered object type.\n\n"
+        )
+        continue
+      let onName = "on_" & ev.apiName
+      let offName = "off_" & ev.apiName
+      var hintParts: seq[string] = @[]
+      var destructureArgs: seq[string] = @[]
+      if isScalarPayload(ev.typeName):
+        hintParts.add(primRustHint(resolveUnderlyingType(ev.typeName)))
+        destructureArgs.add("v")
+      else:
+        for f in lookupTypeEntry(ev.typeName).fields:
+          let hint = nimTypeToRustHint(f.nimType)
+          hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
+          destructureArgs.add("v." & f.name)
+      let fnBound = hintParts.join(", ")
+      rs.add(
+        "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
+          ") + Send + Sync + 'static {\n"
+      )
+      rs.add("        if self.ctx == 0 { return 0; }\n")
+      rs.add("        let wrapper: CborEventHandler = Arc::new(move |raw: &[u8]| {\n")
+      rs.add(
+        "            if let Ok(v) = ciborium::from_reader::<" & ev.typeName &
+          ", _>(raw) {\n"
+      )
+      rs.add("                callback(" & destructureArgs.join(", ") & ");\n")
+      rs.add("            }\n")
+      rs.add("        });\n")
+      rs.add(
+        "        let raw: *mut c_void = Box::into_raw(Box::new(wrapper)) as *mut c_void;\n"
+      )
+      rs.add(
+        "        let cname = match CString::new(\"" & ev.apiName &
+          "\") { Ok(s) => s, Err(_) => { unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); } return 0 } };\n"
+      )
+      rs.add(
+        "        let h = unsafe { " & p &
+          "subscribe(self.ctx, cname.as_ptr(), cbor_trampoline, raw) };\n"
+      )
+      rs.add("        if h == 0 {\n")
+      rs.add(
+        "            unsafe { drop(Box::from_raw(raw as *mut CborEventHandler)); }\n"
+      )
+      rs.add("            return 0;\n")
+      rs.add("        }\n")
+      rs.add(
+        "        cbor_event_holders().lock().unwrap().push(CborHolderEntry { ctx: self.ctx, ptr: raw });\n"
+      )
+      rs.add("        h\n")
+      rs.add("    }\n\n")
+      rs.add("    pub fn " & offName & "(&self, handle: u64) {\n")
+      rs.add("        if self.ctx == 0 { return; }\n")
+      rs.add(
+        "        let cname = match CString::new(\"" & ev.apiName &
+          "\") { Ok(s) => s, Err(_) => return };\n"
+      )
+      rs.add(
+        "        unsafe { " & p & "unsubscribe(self.ctx, cname.as_ptr(), handle); }\n"
+      )
+      rs.add("    }\n\n")
     rs.add("}\n\n")
     rs.add("impl Drop for " & sub & " {\n")
     rs.add("    fn drop(&mut self) { self.close(); }\n")

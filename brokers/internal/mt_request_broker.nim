@@ -132,7 +132,8 @@ proc generateMtRequestBroker*(
             let paramDef = params[idx]
             if paramDef.kind != nnkIdentDefs:
               error(
-                "Signature parameter must be a standard identifier declaration", paramDef
+                "Signature parameter must be a standard identifier declaration",
+                paramDef,
               )
             let paramTypeNode = paramDef[paramDef.len - 2]
             if paramTypeNode.kind == nnkEmpty:
@@ -374,7 +375,9 @@ proc generateMtRequestBroker*(
         return pos
 
       proc `unmarshalRespIdent`(
-          buf: ptr UncheckedArray[byte], len: int, dst: var Result[`payloadType`, string]
+          buf: ptr UncheckedArray[byte],
+          len: int,
+          dst: var Result[`payloadType`, string],
       ): bool {.gcsafe, raises: [].} =
         var pos = 0
         if pos + 1 > len:
@@ -1499,6 +1502,50 @@ proc generateMtRequestBroker*(
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
+  )
+
+  # ── isProvided ─────────────────────────────────────────────────────
+  let isProvidedCtxParam = ident("brokerCtx")
+  let isProvidedBody = quote:
+    `initProcIdent`()
+    withLock(`globalLockIdent`):
+      for i in 0 ..< `globalBucketCountIdent`:
+        if `globalBucketsIdent`[i].brokerCtx == `isProvidedCtxParam`:
+          return true
+    return false
+
+  var formalParamsIsProvided = newTree(nnkFormalParams)
+  formalParamsIsProvided.add(ident("bool"))
+  formalParamsIsProvided.add(
+    newTree(
+      nnkIdentDefs,
+      ident("_"),
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+      newEmptyNode(),
+    )
+  )
+  formalParamsIsProvided.add(
+    newTree(nnkIdentDefs, isProvidedCtxParam, ident("BrokerContext"), newEmptyNode())
+  )
+
+  result.add(
+    newTree(
+      nnkProcDef,
+      postfix(ident("isProvided"), "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      formalParamsIsProvided,
+      newEmptyNode(),
+      newEmptyNode(),
+      isProvidedBody,
+    )
+  )
+
+  result.add(
+    quote do:
+      proc isProvided*(_: typedesc[`typeIdent`]): bool =
+        isProvided(`typeIdent`, DefaultBrokerContext)
 
   )
 
