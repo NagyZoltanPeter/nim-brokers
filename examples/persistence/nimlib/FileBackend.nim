@@ -11,6 +11,14 @@ type FileBackendImpl* = ref object of IBackend
   dir: string
   rng: Rand ## per-instance RNG (no global state → gcsafe; runs single-threaded)
 
+proc emitReadResult(
+    self: FileBackendImpl, key, value: string, found: bool
+) {.async: (raises: []), gcsafe.} =
+  ## Out-of-band read result (see MemoryBackend): fires after a variable I/O
+  ## latency, on the processing thread.
+  await noCancel(sleepAsync(self.rng.rand(8 .. 50).milliseconds))
+  await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
+
 BrokerImplement FileBackendImpl of IBackend:
   proc init() =
     # `brokerCtx` is already assigned by the time the init body runs, so it
@@ -38,6 +46,8 @@ BrokerImplement FileBackendImpl of IBackend:
   method read(
       self: FileBackendImpl, key: string
   ): Future[Result[bool, string]] {.async.} =
+    # Read the file now (snapshot), then ACK IMMEDIATELY; the result is
+    # delivered out-of-band by a spawned task after a variable I/O latency.
     var found = false
     var value = ""
     try:
@@ -48,7 +58,5 @@ BrokerImplement FileBackendImpl of IBackend:
           value = readFile(path)
     except CatchableError as e:
       return err("file read failed: " & e.msg)
-    # Variable I/O latency before the async result is delivered.
-    await noCancel(sleepAsync(self.rng.rand(8 .. 50).milliseconds))
-    await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
+    asyncSpawn self.emitReadResult(key, value, found)
     ok(true)

@@ -10,6 +10,14 @@ type MemoryBackendImpl* = ref object of IBackend
   data: Table[string, string]
   rng: Rand ## per-instance RNG (no global state → gcsafe; runs single-threaded)
 
+proc emitReadResult(
+    self: MemoryBackendImpl, key, value: string, found: bool
+) {.async: (raises: []), gcsafe.} =
+  ## Out-of-band read result: `read` acks immediately; this fires later, after a
+  ## variable delay, on the processing thread (where it was spawned).
+  await noCancel(sleepAsync(self.rng.rand(5 .. 40).milliseconds))
+  await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
+
 BrokerImplement MemoryBackendImpl of IBackend:
   proc init() =
     self.data = initTable[string, string]()
@@ -28,11 +36,10 @@ BrokerImplement MemoryBackendImpl of IBackend:
   method read(
       self: MemoryBackendImpl, key: string
   ): Future[Result[bool, string]] {.async.} =
+    # Snapshot the value now, then ACK IMMEDIATELY. The result is delivered
+    # purely out-of-band: a spawned task waits a variable delay and emits
+    # ReadCompleted on this backend's own ctx (→ routes to this backend's subs).
     let found = self.data.hasKey(key)
     let value = self.data.getOrDefault(key, "")
-    # Realistic jitter: the value is produced after a variable delay, then
-    # delivered asynchronously through the instance-scoped event facade
-    # (injects this backend's own ctx → routes to this backend's subs).
-    await noCancel(sleepAsync(self.rng.rand(5 .. 40).milliseconds))
-    await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
+    asyncSpawn self.emitReadResult(key, value, found)
     ok(true)
