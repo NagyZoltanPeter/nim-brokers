@@ -10,7 +10,9 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -154,10 +156,76 @@ static void scenarioMixedOneContext() {
   p.shutdown();
 }
 
+// Scenario C: TWO IPersistence library contexts live and run AT THE SAME TIME,
+// each on its own thread, each driving its own backend under a load of many
+// store/read operations whose results arrive via random-delayed async events.
+// Verifies that concurrent contexts + variable impl timing never cross results.
+static void scenarioConcurrentLoad() {
+  constexpr int N = 30;
+  std::cout << "  [C] two IPersistence contexts running concurrently, " << N
+            << " roundtrips each under load\n";
+
+  // Drives one library context end-to-end on its own thread. `okCount` receives
+  // the number of correctly round-tripped (store -> read -> async event) ops.
+  auto runLib = [](int32_t kind, std::string tag, std::atomic<int>& okCount) {
+    Persistence p;
+    if (!p.createContext().isOk())
+      return;
+    p.initializeRequest("cfg");
+    auto be = std::move(p.makeBackend(kind).take());
+    if (!be)
+      return;
+
+    std::mutex m;
+    std::map<std::string, std::string> results; // key -> value, from events
+    auto h = be->onReadCompleted(
+        [&](Backend&, std::string_view k, std::string_view v, bool) {
+          std::lock_guard<std::mutex> lk(m);
+          results[std::string(k)] = std::string(v);
+        });
+
+    int local = 0;
+    for (int i = 0; i < N; ++i) {
+      const std::string key = tag + "_" + std::to_string(i);
+      const std::string val = tag + "_val_" + std::to_string(i);
+      if (!be->store(key, val).isOk())
+        continue;
+      if (!be->read(key).isOk())
+        continue;
+      const bool got = waitFor(
+          [&] {
+            std::lock_guard<std::mutex> lk(m);
+            return results.count(key) > 0;
+          },
+          std::chrono::milliseconds(3000));
+      if (got) {
+        std::lock_guard<std::mutex> lk(m);
+        if (results[key] == val)
+          ++local;
+      }
+    }
+    be->offReadCompleted(h);
+    okCount.fetch_add(local);
+    p.shutdown();
+  };
+
+  std::atomic<int> okFile{0}, okMem{0};
+  std::thread tFile(runLib, KIND_FILE, std::string("fileLib"), std::ref(okFile));
+  std::thread tMem(runLib, KIND_MEMORY, std::string("memLib"), std::ref(okMem));
+  tFile.join();
+  tMem.join();
+
+  std::cout << "      File lib: " << okFile.load() << "/" << N
+            << "  Memory lib: " << okMem.load() << "/" << N << " roundtrips OK\n";
+  assert(okFile.load() == N && "all File-lib roundtrips correct under concurrent load");
+  assert(okMem.load() == N && "all Memory-lib roundtrips correct under concurrent load");
+}
+
 int main() {
   std::cout << "persistence version: " << Persistence::version() << "\n";
   scenarioTwoContexts();
   scenarioMixedOneContext();
+  scenarioConcurrentLoad();
   std::cout << "persistence cpp example: OK\n";
   return 0;
 }
