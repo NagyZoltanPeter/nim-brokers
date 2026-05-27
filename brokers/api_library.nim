@@ -416,8 +416,8 @@ proc registerBrokerLibraryCborImpl(
         continue
       seenReq.add(entry.responseTypeName)
       body.add(
-        "  when compiles(" & entry.responseTypeName & ".clearProvider(ctx)):\n" &
-          "    " & entry.responseTypeName & ".clearProvider(ctx)\n"
+        "  when compiles(" & entry.responseTypeName & ".clearProvider(ctx)):\n" & "    " &
+          entry.responseTypeName & ".clearProvider(ctx)\n"
       )
     for e in eventEntries:
       body.add(
@@ -855,10 +855,14 @@ proc registerBrokerLibraryCborImpl(
           # → wasted encodes; the SubNodes would only release at
           # `_shutdown`'s `subsRegistryFreeForCtx`).
           proc dropAllHook(brokerCtx: BrokerContext) {.gcsafe, raises: [].} =
-            discard subsRegistryRemoveAllForKey(
+            # Decrement the shared per-event subs-count by the exact number of
+            # subs removed for THIS ctx — never reset to 0, which would silence
+            # sibling contexts/instances sharing the event name.
+            let removed = subsRegistryRemoveAllForKeyN(
               `subsRegIdent`, uint32(brokerCtx), `eventNameLit`.cstring
             )
-            `subsCountIdent`.store(0, moRelease)
+            if removed > 0:
+              discard `subsCountIdent`.fetchSub(removed, moRelease)
 
           `eventTypeIdent`.`setDropAllHookIdent`(dropAllHook)
           return Result[void, string].ok()
@@ -953,17 +957,18 @@ proc registerBrokerLibraryCborImpl(
           return -1'i32
         let name = $eventNameC
         if handle == 0'u64:
-          # Drop every subscription for this (ctx, name). Reset the
-          # atomic counter to 0 (it might be > 0 from other ctxs sharing
-          # the event name, but per-ctx isolation is currently not
-          # tracked by the counter — see plan §3 open question on
-          # per-event vs per-(ctx, event) granularity).
-          let res = subsRegistryRemoveAllForKey(`subsRegIdent`, ctx, eventNameC)
-          if res == 0:
-            let counter = `getEventSubsCountIdent`(name)
-            if not counter.isNil:
-              counter[].store(0, moRelease)
-          return res
+          # Drop every subscription for this (ctx, name). Decrement the
+          # shared per-event counter by the exact number removed — never
+          # reset to 0, which would silence other ctxs/instances sharing
+          # the event name (the counter is a process-global aggregate gate).
+          let removed = subsRegistryRemoveAllForKeyN(`subsRegIdent`, ctx, eventNameC)
+          if removed >= 0:
+            if removed > 0:
+              let counter = `getEventSubsCountIdent`(name)
+              if not counter.isNil:
+                discard counter[].fetchSub(removed, moRelease)
+            return 0'i32
+          return removed
         let res = subsRegistryRemoveOne(`subsRegIdent`, ctx, eventNameC, handle)
         if res == 0:
           # Part D-3: decrement after a successful removal.
@@ -1149,7 +1154,10 @@ proc registerBrokerLibraryCborImpl(
             # so the broker provider keyed by the sub ctx is reached. Falls back
             # to arg.ctx for legacy messages where targetCtx was never set (0).
             let dispCtx =
-              if m.targetCtx != 0'u32: BrokerContext(m.targetCtx) else: arg.ctx
+              if m.targetCtx != 0'u32:
+                BrokerContext(m.targetCtx)
+              else:
+                arg.ctx
             let dispRes = catch:
               await `dispatchProcIdent`(apiName, dispCtx, nimReq)
             if dispRes.isErr():
@@ -1371,9 +1379,18 @@ proc registerBrokerLibraryCborImpl(
         # thread (which owns the providers that emitted those events).
         joinThread(entryToShutdown.delivThread)
         joinThread(entryToShutdown.procThread)
-        # Free this ctx's subscription state after both threads are
-        # joined — no concurrent listener can be mid-snapshot.
-        subsRegistryFreeForCtx(`subsRegIdent`, ctx)
+        # Free this lib's subscription state for the whole class after both
+        # threads are joined — no concurrent listener can be mid-snapshot.
+        # The sweep drains the lib ctx (instanceCtx 0) AND every still-alive
+        # sub-instance sharing its classCtx, decrementing each per-event
+        # global subs-count by the exact number removed so the shared gate
+        # stays a correct running sum for sibling lib contexts.
+        proc onFreed(name: cstring, count: int32) {.gcsafe, raises: [].} =
+          let counter = `getEventSubsCountIdent`($name)
+          if not counter.isNil and count > 0:
+            discard counter[].fetchSub(count, moRelease)
+
+        subsRegistryFreeForClass(`subsRegIdent`, classCtx(BrokerContext(ctx)), onFreed)
         if not entryToShutdown.arg.processingErrorMessage.isNil:
           freeCString(entryToShutdown.arg.processingErrorMessage)
         if not entryToShutdown.arg.deliveryErrorMessage.isNil:
