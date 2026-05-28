@@ -9,7 +9,7 @@
 import results, chronos
 import brokers/broker_interface, brokers/broker_implement
 import ../nimlib/PersistenceAPI
-import ../nimlib/PersistenceFacade # side-effect: registers IPersistence factory
+import ../nimlib/PersistenceFactory
 
 const
   KindMemory = int32(bkMemory)
