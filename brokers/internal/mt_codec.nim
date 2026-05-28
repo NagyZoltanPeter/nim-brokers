@@ -93,7 +93,20 @@ proc mtMarshalValue*[T](
 ): bool {.gcsafe.} =
   mixin mtMarshalValue # allow user overloads for field types
   when T is ref:
-    {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
+    when compiles(value.brokerCtx):
+      # reduced-A: a BrokerInterface ref is a same-thread routing handle (it
+      # carries a `brokerCtx`). Create-instance dispatch is same-thread (adapter
+      # + provider both on the processing thread), so the ref never actually
+      # travels between threads — we marshal its pointer bytewise purely to
+      # satisfy the response codec's instantiation. This is NOT general
+      # cross-thread ref support; arbitrary refs still hard-error below.
+      if pos + sizeof(pointer) > cap:
+        return false
+      copyMem(addr buf[pos], unsafeAddr value, sizeof(pointer))
+      pos += sizeof(pointer)
+      return true
+    else:
+      {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
   # below and are marshaled bytewise. Caller is responsible for the
   # lifetime of what they point to — typically used for shared structures
@@ -142,7 +155,18 @@ proc mtUnmarshalValue*[T](
 ): bool {.gcsafe.} =
   mixin mtUnmarshalValue # allow user overloads for field types
   when T is ref:
-    {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
+    when compiles(value.brokerCtx):
+      # reduced-A: BrokerInterface ref — same-thread routing handle, see the
+      # marshal counterpart. Reads the pointer bytes back. Bypasses GC refcount
+      # (the instance stays pinned by its provider closures), valid only because
+      # the create-instance path is same-thread and transient.
+      if pos + sizeof(pointer) > len:
+        return false
+      copyMem(unsafeAddr value, addr buf[pos], sizeof(pointer))
+      pos += sizeof(pointer)
+      return true
+    else:
+      {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
   # ptr / pointer / cstring fall through to the `supportsCopyMem` branch
   # below and are marshaled bytewise. Caller is responsible for the
   # lifetime of what they point to — typically used for shared structures

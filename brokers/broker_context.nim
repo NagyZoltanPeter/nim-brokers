@@ -13,7 +13,31 @@ func `!=`*(a, b: BrokerContext): bool =
 func `$`*(bc: BrokerContext): string =
   toHex(uint32(bc), 8)
 
-const DefaultBrokerContext* = BrokerContext(0xCAFFE14E'u32)
+# ---------------------------------------------------------------------------
+# Context split — a BrokerContext packs two uint16 halves:
+#   bits [15:0]  classCtx     — which broker-object/interface scope ("global"
+#                               context). 0 = reserved (nil/invalid), 1 = the
+#                               default base scope, 2..0xFFFE = allocated,
+#                               0xFFFF = reserved guard.
+#   bits [31:16] instanceCtx  — which instance of that scope. 0 = flat /
+#                               class-level (no specific instance), 1..0xFFFF =
+#                               OOP-owned instances.
+# Bucket lookup remains keyed by the full uint32; the split is semantic.
+# ---------------------------------------------------------------------------
+
+func classCtx*(bc: BrokerContext): uint16 =
+  uint16(uint32(bc) and 0xFFFF'u32)
+
+func instanceCtx*(bc: BrokerContext): uint16 =
+  uint16((uint32(bc) shr 16) and 0xFFFF'u32)
+
+func makeBrokerContext*(classCtx, instanceCtx: uint16): BrokerContext =
+  BrokerContext((uint32(instanceCtx) shl 16) or uint32(classCtx))
+
+const DefaultBrokerContext* = makeBrokerContext(1'u16, 0'u16)
+  ## 0x0000_0001 —
+  ## the base "global" flat scope (classCtx 1, instance 0). Deliberately not
+  ## 0x0 so an unset/nil context is distinguishable from the default.
 
 # ---------------------------------------------------------------------------
 # Thread-global broker context
@@ -49,13 +73,36 @@ proc threadGlobalBrokerContext*(): BrokerContext =
 template globalBrokerContext*(): BrokerContext =
   threadGlobalBrokerContext()
 
-var gContextCounter: Atomic[uint32]
+var gClassCtxCounter: Atomic[uint32]
+
+proc newClassCtx*(): uint16 =
+  ## Allocate a fresh, process-unique classCtx (the low-16 "global" scope id).
+  ## Shared by flat `NewBrokerContext` and the OOP interface-class registration
+  ## so every classCtx is unique. Starts at 2 (0 = nil, 1 = default scope).
+  let id = gClassCtxCounter.fetchAdd(1, moRelaxed) + 2'u32
+  doAssert id < 0xFFFF'u32, "BrokerContext classCtx space exhausted (max 65534)"
+  uint16(id)
 
 proc NewBrokerContext*(): BrokerContext =
-  var nextId = gContextCounter.fetchAdd(1, moRelaxed)
-  if nextId == uint32(DefaultBrokerContext):
-    nextId = gContextCounter.fetchAdd(1, moRelaxed)
-  return BrokerContext(nextId)
+  ## A flat "global" context: a fresh classCtx with instanceCtx 0.
+  makeBrokerContext(newClassCtx(), 0'u16)
+
+var gInstanceCtxCounter: Atomic[uint32]
+
+proc newInstanceCtx*(parentCtx: BrokerContext): BrokerContext =
+  ## Allocate a sub-instance context that SHARES `parentCtx`'s classCtx (so it
+  ## routes to the same library context — same processing/delivery thread and
+  ## courier) but carries a fresh, process-unique instanceCtx (high16).
+  ##
+  ## Used by create-instance FFI requests (reduced-A): a sub-interface instance
+  ## lives on the main library's processing thread, so it must share the library
+  ## classCtx. `<lib>_call` masks the instanceCtx off to find the courier, then
+  ## dispatches against the full sub ctx so the provider keyed by it is hit.
+  ## The counter is process-monotonic, so two sub-instances under the same
+  ## library never collide on instanceCtx.
+  let id = gInstanceCtxCounter.fetchAdd(1, moRelaxed) + 1'u32
+  doAssert id < 0x1_0000'u32, "BrokerContext instanceCtx space exhausted (max 65535)"
+  makeBrokerContext(classCtx(parentCtx), uint16(id))
 
 # ---------------------------------------------------------------------------
 # Sync thread-context binding (usable from {.thread.} init, before event loop)

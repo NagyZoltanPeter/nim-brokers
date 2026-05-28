@@ -60,84 +60,115 @@ proc generateMtRequestBroker*(
     echo body.treeRepr
     echo "RequestBroker mode: mt"
 
-  let parsed = parseSingleTypeDef(
-    body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
-  )
-  let typeIdent = parsed.typeIdent
-  let objectDef = parsed.objectDef
-  let responseFieldTypes = parsed.fieldTypes
+  # Classify legacy (`proc signature*`) vs proc-sugar (lowercase verb procs).
+  # Mirrors request_broker.nim; MT is always async.
+  var hasSignatureProc = false
+  var hasOtherProc = false
+  for stmt in body:
+    if stmt.kind == nnkProcDef:
+      let nm = stmt[0]
+      let nmId = (if nm.kind == nnkPostfix: nm[1] else: nm)
+      if ($nmId).startsWith("signature"):
+        hasSignatureProc = true
+      else:
+        hasOtherProc = true
+  let isSugar = hasOtherProc and not hasSignatureProc
 
-  let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
-  let typeDisplayName = sanitizeIdentName(typeIdent)
-  let typeNameLit = newLit(typeDisplayName)
-
-  # The hint() / auto-classification happens AFTER signature parsing so
-  # that the cfg the user sees reflects type-driven defaults.
-
-  # ── Parse signatures ────────────────────────────────────────────────
+  var typeIdent: NimNode = nil
+  var objectDef: NimNode = nil
+  var payloadType: NimNode = nil
+  var responseFieldTypes: seq[NimNode] = @[]
   var zeroArgSig: NimNode = nil
   var zeroArgProviderName: NimNode = nil
   var argSig: NimNode = nil
   var argParams: seq[NimNode] = @[]
   var argProviderName: NimNode = nil
 
-  for stmt in body:
-    case stmt.kind
-    of nnkProcDef:
-      let procName = stmt[0]
-      let procNameIdent =
-        case procName.kind
-        of nnkIdent:
-          procName
-        of nnkPostfix:
-          procName[1]
-        else:
-          procName
-      if not ($procNameIdent).startsWith("signature"):
-        error("Signature proc names must start with `signature`", procName)
-      let params = stmt.params
-      if params.len == 0:
-        error("Signature must declare a return type", stmt)
-      let returnType = params[0]
-      if not isAsyncReturnTypeValid(returnType, typeIdent):
-        error(
-          "MT RequestBroker signature must return Future[Result[`" & $typeIdent &
-            "`, string]]",
-          stmt,
-        )
-      let paramCount = params.len - 1
-      if paramCount == 0:
-        if zeroArgSig != nil:
-          error("Only one zero-argument signature is allowed", stmt)
-        zeroArgSig = stmt
-        zeroArgProviderName = ident(typeDisplayName & "ProviderNoArgs")
-      elif paramCount >= 1:
-        if argSig != nil:
-          error("Only one argument-based signature is allowed", stmt)
-        argSig = stmt
-        argParams = @[]
-        for idx in 1 ..< params.len:
-          let paramDef = params[idx]
-          if paramDef.kind != nnkIdentDefs:
-            error(
-              "Signature parameter must be a standard identifier declaration", paramDef
-            )
-          let paramTypeNode = paramDef[paramDef.len - 2]
-          if paramTypeNode.kind == nnkEmpty:
-            error("Signature parameter must declare a type", paramDef)
-          argParams.add(copyNimTree(paramDef))
-        argProviderName = ident(typeDisplayName & "ProviderWithArgs")
-    of nnkTypeSection, nnkEmpty:
-      discard
-    else:
-      error("Unsupported statement inside RequestBroker definition", stmt)
+  if not isSugar:
+    let parsed = parseSingleTypeDef(
+      body, "RequestBroker", allowRefToNonObject = true, collectFieldInfo = true
+    )
+    typeIdent = parsed.typeIdent
+    objectDef = parsed.objectDef
+    responseFieldTypes = parsed.fieldTypes
+    payloadType = copyNimTree(typeIdent) # legacy: dispatch tag == payload
 
-  if zeroArgSig.isNil() and argSig.isNil():
-    zeroArgSig = newEmptyNode()
-    zeroArgProviderName = ident(typeDisplayName & "ProviderNoArgs")
+    for stmt in body:
+      case stmt.kind
+      of nnkProcDef:
+        let procName = stmt[0]
+        let procNameIdent =
+          case procName.kind
+          of nnkIdent:
+            procName
+          of nnkPostfix:
+            procName[1]
+          else:
+            procName
+        if not ($procNameIdent).startsWith("signature"):
+          error("Signature proc names must start with `signature`", procName)
+        let params = stmt.params
+        if params.len == 0:
+          error("Signature must declare a return type", stmt)
+        let returnType = params[0]
+        if not isAsyncReturnTypeValid(returnType, typeIdent):
+          error(
+            "MT RequestBroker signature must return Future[Result[`" & $typeIdent &
+              "`, string]]",
+            stmt,
+          )
+        let paramCount = params.len - 1
+        if paramCount == 0:
+          if zeroArgSig != nil:
+            error("Only one zero-argument signature is allowed", stmt)
+          zeroArgSig = stmt
+          zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+        elif paramCount >= 1:
+          if argSig != nil:
+            error("Only one argument-based signature is allowed", stmt)
+          argSig = stmt
+          argParams = @[]
+          for idx in 1 ..< params.len:
+            let paramDef = params[idx]
+            if paramDef.kind != nnkIdentDefs:
+              error(
+                "Signature parameter must be a standard identifier declaration",
+                paramDef,
+              )
+            let paramTypeNode = paramDef[paramDef.len - 2]
+            if paramTypeNode.kind == nnkEmpty:
+              error("Signature parameter must declare a type", paramDef)
+            argParams.add(copyNimTree(paramDef))
+          argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
+      of nnkTypeSection, nnkEmpty:
+        discard
+      else:
+        error("Unsupported statement inside RequestBroker definition", stmt)
+
+    if zeroArgSig.isNil() and argSig.isNil():
+      zeroArgSig = newEmptyNode()
+      zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+  else:
+    # ---- New proc-sugar form (option B / decoupled payload) ----
+    let sg = parseRequestSugar(body, "RequestBroker", async = true)
+    typeIdent = sg.typeIdent
+    objectDef = sg.objectDef
+    payloadType = sg.payloadType
+    responseFieldTypes = sg.fieldTypes
+    if not sg.zeroArgProc.isNil:
+      zeroArgSig = sg.zeroArgProc
+      zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
+    if not sg.argProc.isNil:
+      argSig = sg.argProc
+      argParams = sg.argParams
+      argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
+
+  let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
+  let typeDisplayName = sanitizeIdentName(typeIdent)
+  let typeNameLit = newLit(typeDisplayName)
 
   let returnType = quote:
-    Future[Result[`typeIdent`, string]]
+    Future[Result[`payloadType`, string]]
 
   # ── Type-driven auto-defaults ───────────────────────────────────────
   # Void / zero-field response and zero-arg signatures collapse to the
@@ -325,7 +356,7 @@ proc generateMtRequestBroker*(
   result.add(
     quote do:
       proc `marshalRespIdent`(
-          buf: ptr UncheckedArray[byte], cap: int, res: Result[`typeIdent`, string]
+          buf: ptr UncheckedArray[byte], cap: int, res: Result[`payloadType`, string]
       ): int {.gcsafe, raises: [].} =
         var pos = 0
         if pos + 1 > cap:
@@ -344,7 +375,9 @@ proc generateMtRequestBroker*(
         return pos
 
       proc `unmarshalRespIdent`(
-          buf: ptr UncheckedArray[byte], len: int, dst: var Result[`typeIdent`, string]
+          buf: ptr UncheckedArray[byte],
+          len: int,
+          dst: var Result[`payloadType`, string],
       ): bool {.gcsafe, raises: [].} =
         var pos = 0
         if pos + 1 > len:
@@ -352,15 +385,15 @@ proc generateMtRequestBroker*(
         let isOk = buf[pos]
         pos += 1
         if isOk == 1'u8:
-          var val: `typeIdent`
+          var val: `payloadType`
           if not mtUnmarshalValue(buf, len, val, pos):
             return false
-          dst = ok(Result[`typeIdent`, string], val)
+          dst = ok(Result[`payloadType`, string], val)
         else:
           var errMsg: string
           if not mtUnmarshalValue(buf, len, errMsg, pos):
             return false
-          dst = err(Result[`typeIdent`, string], errMsg)
+          dst = err(Result[`payloadType`, string], errMsg)
         return true
 
   )
@@ -456,7 +489,7 @@ proc generateMtRequestBroker*(
           pool: ptr ResponseSlotPool,
           slotIdx: uint32,
           requesterSignal: ThreadSignalPtr,
-          resp: Result[`typeIdent`, string],
+          resp: Result[`payloadType`, string],
       ) {.gcsafe, raises: [].} =
         if pool.isNil or slotIdx == EmptyIdx:
           return
@@ -476,7 +509,7 @@ proc generateMtRequestBroker*(
           # path is rare: the response would only overflow if the broker
           # type and error message are both unusually large.
           let fallback =
-            err(Result[`typeIdent`, string], "response too large to marshal")
+            err(Result[`payloadType`, string], "response too large to marshal")
           let writtenFb =
             try:
               `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), fallback)
@@ -518,7 +551,7 @@ proc generateMtRequestBroker*(
               `msgIdent`.responseSlotIdx,
               `msgIdent`.requesterSignal,
               err(
-                Result[`typeIdent`, string],
+                Result[`payloadType`, string],
                 "RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered",
               ),
             )
@@ -531,7 +564,7 @@ proc generateMtRequestBroker*(
                 `msgIdent`.responseSlotIdx,
                 `msgIdent`.requesterSignal,
                 err(
-                  Result[`typeIdent`, string],
+                  Result[`payloadType`, string],
                   "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
                     catchedRes.error.msg,
                 ),
@@ -540,14 +573,15 @@ proc generateMtRequestBroker*(
               let providerRes = catchedRes.get()
               if providerRes.isOk():
                 let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()):
+                when compiles(resultValue.isNil()) and
+                    not (typeof(resultValue) is string):
                   if resultValue.isNil():
                     `sendReplyIdent`(
                       `poolIdent`,
                       `msgIdent`.responseSlotIdx,
                       `msgIdent`.requesterSignal,
                       err(
-                        Result[`typeIdent`, string],
+                        Result[`payloadType`, string],
                         "RequestBroker(" & `typeNameLit` &
                           "): provider returned nil result",
                       ),
@@ -580,7 +614,7 @@ proc generateMtRequestBroker*(
               `msgIdent`.responseSlotIdx,
               `msgIdent`.requesterSignal,
               err(
-                Result[`typeIdent`, string],
+                Result[`payloadType`, string],
                 "RequestBroker(" & `typeNameLit` &
                   "): no provider registered for input signature",
               ),
@@ -594,7 +628,7 @@ proc generateMtRequestBroker*(
                 `msgIdent`.responseSlotIdx,
                 `msgIdent`.requesterSignal,
                 err(
-                  Result[`typeIdent`, string],
+                  Result[`payloadType`, string],
                   "RequestBroker(" & `typeNameLit` & "): provider threw exception: " &
                     catchedRes.error.msg,
                 ),
@@ -603,14 +637,15 @@ proc generateMtRequestBroker*(
               let providerRes = catchedRes.get()
               if providerRes.isOk():
                 let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()):
+                when compiles(resultValue.isNil()) and
+                    not (typeof(resultValue) is string):
                   if resultValue.isNil():
                     `sendReplyIdent`(
                       `poolIdent`,
                       `msgIdent`.responseSlotIdx,
                       `msgIdent`.requesterSignal,
                       err(
-                        Result[`typeIdent`, string],
+                        Result[`payloadType`, string],
                         "RequestBroker(" & `typeNameLit` &
                           "): provider returned nil result",
                       ),
@@ -842,7 +877,7 @@ proc generateMtRequestBroker*(
           pool: ptr ResponseSlotPool,
           providerSignal: ThreadSignalPtr,
           msg: sink `requestMsgName`,
-      ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+      ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
         ensureBrokerDispatchStarted()
         let mySignal = getOrInitBrokerSignal()
         # Reserve the response slot.
@@ -878,7 +913,7 @@ proc generateMtRequestBroker*(
         fireBrokerSignal(providerSignal)
         # Register a one-shot response poller for this slot.
         let responseFut =
-          newFuture[Result[`typeIdent`, string]]("request." & `typeNameLit`)
+          newFuture[Result[`payloadType`, string]]("request." & `typeNameLit`)
         let capturedPool = pool
         let capturedSlotIdx = slotIdx
         let capturedResponseFut = responseFut
@@ -891,7 +926,7 @@ proc generateMtRequestBroker*(
               # so any string/seq inside lives on this thread's GC heap.
               # This is the §2.2 fix: no cross-thread `=copy` of the typed
               # Result value.
-              var decoded: Result[`typeIdent`, string]
+              var decoded: Result[`payloadType`, string]
               let payloadPtr = capturedPool[].slotPayloadPtr(capturedSlotIdx)
               let payloadSize = capturedPool[].payloadSize(capturedSlotIdx)
               let ok =
@@ -901,7 +936,7 @@ proc generateMtRequestBroker*(
                   false
               if not ok:
                 decoded = err(
-                  Result[`typeIdent`, string],
+                  Result[`payloadType`, string],
                   "RequestBroker(" & `typeNameLit` & "): response unmarshal failed",
                 )
               if not capturedResponseFut.finished:
@@ -945,7 +980,7 @@ proc generateMtRequestBroker*(
           pool: ptr ResponseSlotPool,
           providerSignal: ThreadSignalPtr,
           msg: sink `requestMsgName`,
-      ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+      ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         let slotIdx = pool[].claim(`shardHintIdent`())
         if slotIdx == EmptyIdx:
           return
@@ -979,7 +1014,7 @@ proc generateMtRequestBroker*(
         let deadline = Moment.now() + `timeoutVarIdent`
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx):
-            var decoded: Result[`typeIdent`, string]
+            var decoded: Result[`payloadType`, string]
             let payloadPtr = pool[].slotPayloadPtr(slotIdx)
             let payloadSize = pool[].payloadSize(slotIdx)
             let ok =
@@ -1009,7 +1044,7 @@ proc generateMtRequestBroker*(
       quote do:
         proc request*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
-        ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+        ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
           `initProcIdent`()
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
@@ -1057,7 +1092,7 @@ proc generateMtRequestBroker*(
 
         proc request*(
             _: typedesc[`typeIdent`]
-        ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+        ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
           return await request(`typeIdent`, DefaultBrokerContext)
 
     )
@@ -1066,7 +1101,7 @@ proc generateMtRequestBroker*(
       quote do:
         proc request*(
             _: typedesc[`typeIdent`]
-        ): Future[Result[`typeIdent`, string]] {.async: (raises: []).} =
+        ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
 
@@ -1078,7 +1113,7 @@ proc generateMtRequestBroker*(
       quote do:
         proc blockingRequest*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
-        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+        ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
           `initProcIdent`()
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
@@ -1126,7 +1161,7 @@ proc generateMtRequestBroker*(
 
         proc blockingRequest*(
             _: typedesc[`typeIdent`]
-        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+        ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
           blockingRequest(`typeIdent`, DefaultBrokerContext)
 
     )
@@ -1135,7 +1170,7 @@ proc generateMtRequestBroker*(
       quote do:
         proc blockingRequest*(
             _: typedesc[`typeIdent`]
-        ): Result[`typeIdent`, string] {.gcsafe, raises: [].} =
+        ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
           return
             err("RequestBroker(" & `typeNameLit` & "): no zero-arg provider registered")
 
@@ -1467,6 +1502,50 @@ proc generateMtRequestBroker*(
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
+  )
+
+  # ── isProvided ─────────────────────────────────────────────────────
+  let isProvidedCtxParam = ident("brokerCtx")
+  let isProvidedBody = quote:
+    `initProcIdent`()
+    withLock(`globalLockIdent`):
+      for i in 0 ..< `globalBucketCountIdent`:
+        if `globalBucketsIdent`[i].brokerCtx == `isProvidedCtxParam`:
+          return true
+    return false
+
+  var formalParamsIsProvided = newTree(nnkFormalParams)
+  formalParamsIsProvided.add(ident("bool"))
+  formalParamsIsProvided.add(
+    newTree(
+      nnkIdentDefs,
+      ident("_"),
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+      newEmptyNode(),
+    )
+  )
+  formalParamsIsProvided.add(
+    newTree(nnkIdentDefs, isProvidedCtxParam, ident("BrokerContext"), newEmptyNode())
+  )
+
+  result.add(
+    newTree(
+      nnkProcDef,
+      postfix(ident("isProvided"), "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      formalParamsIsProvided,
+      newEmptyNode(),
+      newEmptyNode(),
+      isProvidedBody,
+    )
+  )
+
+  result.add(
+    quote do:
+      proc isProvided*(_: typedesc[`typeIdent`]): bool =
+        isProvided(`typeIdent`, DefaultBrokerContext)
 
   )
 

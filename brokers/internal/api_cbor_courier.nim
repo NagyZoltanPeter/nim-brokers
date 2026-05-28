@@ -48,6 +48,12 @@ type
     reqBuf*: pointer ## allocShared0; ownership transfers to the processing thread
     reqLen*: int32
     slotIdx*: int32 ## index of the response slot to complete
+    targetCtx*: uint32
+      ## reduced-A: the FULL BrokerContext the foreign caller addressed. For a
+      ## main-context call this equals the library ctx; for a sub-instance call
+      ## it carries the sub ctx (same classCtx as the library, distinct
+      ## instanceCtx). The processing thread dispatches the adapter against this
+      ## so the provider keyed by the sub ctx is reached.
 
   CborRespSlot = object
     lock: Lock

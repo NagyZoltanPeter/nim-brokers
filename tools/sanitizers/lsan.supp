@@ -1,0 +1,20 @@
+# LeakSanitizer suppressions for nim-brokers (Linux-only; mode "asanleak").
+#
+# Format: leak:<substring of function/symbol/source>
+#
+# Wired in by setSanitizerEnv("asanleak") via LSAN_OPTIONS=suppressions=.
+# Suppress ONLY by-design, process-lifetime allocations that are intentionally
+# never freed (so a real per-context/per-instance leak — exactly what the
+# Gap 2 fix addresses — still surfaces).
+#
+# By-design process-global singletons in the MT broker runtime:
+#   * the Lock-protected global bucket registry (createShared, lives for the
+#     process — see mt_broker_common / mt_event_broker / mt_request_broker)
+#   * the per-thread shared ThreadSignalPtr published for cross-thread dispatch
+# These are allocated once and reclaimed by the OS at process exit by design.
+leak:getOrInitBrokerSignal
+leak:registerBrokerPoller
+# Nim runtime one-time globals (thread-local registries, GC metadata) allocated
+# at startup and intentionally not freed at exit.
+leak:nimRegisterThreadLocalMarkers
+leak:initThreadVarsEmulation

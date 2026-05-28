@@ -1,0 +1,13 @@
+# UndefinedBehaviorSanitizer suppressions for nim-brokers.
+#
+# Format: <check>:<substring of symbol or source file>
+#   e.g.  alignment:somefunc
+#         shift:some/file.nim.c
+#
+# Wired in by setSanitizerEnv (asan/asanleak modes) via
+# UBSAN_OPTIONS=suppressions=. Note `function` and `vptr` checks are already
+# disabled at compile time (-fno-sanitize=function,vptr) because the FFI C ABI
+# casts cdecl callback pointers and carries no C++ RTTI.
+#
+# Keep MINIMAL — prefer fixing real UB over suppressing it. Add entries only
+# for confirmed-benign reports in generated C or third-party code.

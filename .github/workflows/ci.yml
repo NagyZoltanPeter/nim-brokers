@@ -166,6 +166,31 @@ jobs:
       - name: Run Go parity matrix
         run: nimble runTypeMapTestLibGo -y --verbose
 
+      # OOP interface-model examples (hierlib + persistence)
+      - name: Run hierlib C++ example
+        run: nimble runHierExampleCpp -y --verbose
+
+      - name: Run hierlib Python example
+        run: nimble runHierExamplePy -y --verbose
+
+      - name: Run hierlib Rust example
+        run: nimble runHierExampleRust -y --verbose
+
+      - name: Run hierlib Go example
+        run: nimble runHierExampleGo -y --verbose
+
+      - name: Run persistence C++ example
+        run: nimble runPersistenceExampleCpp -y --verbose
+
+      - name: Run persistence Python example
+        run: nimble runPersistenceExamplePy -y --verbose
+
+      - name: Run persistence Rust example
+        run: nimble runPersistenceExampleRust -y --verbose
+
+      - name: Run persistence Go example
+        run: nimble runPersistenceExampleGo -y --verbose
+
   nph:
     runs-on: ubuntu-latest
     steps:

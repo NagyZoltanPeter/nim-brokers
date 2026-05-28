@@ -350,6 +350,18 @@ suite "RequestBroker macro (multi-thread mode)":
 
     MTReq.clearProvider()
 
+  asyncTest "isProvided reflects provider lifecycle":
+    check not MTReq.isProvided()
+    check MTReq
+      .setProvider(
+        proc(input: string): Future[Result[MTReq, string]] {.async.} =
+          ok(MTReq(textValue: input, numValue: 0, boolValue: true))
+      )
+      .isOk()
+    check MTReq.isProvided()
+    MTReq.clearProvider()
+    check not MTReq.isProvided()
+
   # ── Concurrency ──
 
   asyncTest "concurrent requests from multiple threads":

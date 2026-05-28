@@ -236,6 +236,13 @@ Config.setProvider(
 let res = Config.request()  # no await needed
 Config.clearProvider()
 ```
+As an alternative simpler syntax when the return value is single data type you can describe RequestBroker as
+```nim
+RequestBroker(sync):
+  proc PlusOp*(a: int, b: int): Result[int, string]
+```
+Macro will extend the generated `PlusOp` RequestBroker - name is derived from the proc name.
+
  RequestBroker support two differnet call signatures in the same broker definition. The signature procs can be overloaded by arity and parameter types, and the generated `request()` proc will dispatch to the correct provider based on the call-site arguments.
 > If no `signature` proc is declared, a zero-argument form is generated automatically.
 
@@ -307,6 +314,63 @@ MyEvent.dropAllListeners(ctxB)
 When no `BrokerContext` argument is passed, the `DefaultBrokerContext` is used.
 
 A global context lock is available via `lockGlobalBrokerContext` for serialized cross-module coordination within `chronos` async procs.
+
+s
+`BrokerInterface` and `BrokerImplement` are **syntactic sugar over the same `EventBroker` and `RequestBroker` macros** documented above. Inner broker blocks are re-emitted verbatim — you can use any broker variant (`EventBroker`, `RequestBroker(sync)`, `RequestBroker(mt)`, etc.) inside an interface body. The one exception is `BrokerInterface(API, IFace):`, which auto-propagates `(API)` to every inner broker. The OOP layer adds interface/implementation separation, per-instance state, virtual dispatch, deterministic lifecycle, and dependency injection without changing the underlying broker machinery.
+
+The key idea: **define your communication contract once as an interface, implement it separately, swap implementations at runtime.** The macros generate all the boilerplate — broker definitions, abstract methods, provider wiring, instance isolation, and cleanup.
+
+**`BrokerInterface`** declares the *contract*: a `ref object` base type grouping related events and requests. It generates one abstract method per request (pure-virtual until overridden), an instance-scoped event facade (`self.emit` / `self.listen`), and a built-in factory broker for DI (`provideFactory` / `create`).
+
+**`BrokerImplement`** provides the *fulfillment*: it wires a concrete `ref object of IFace` to the interface. It generates `Impl.new(args...)` (allocates an instance with its own `BrokerContext`, runs an optional `init` block, auto-registers per-instance providers), and `close()` (deterministic cleanup of providers + listeners — mandatory under `--mm:refc` to break the closure cycle, recommended under `--mm:orc`).
+
+```nim
+import brokers/broker_interface
+import brokers/broker_implement
+
+# --- Interface (the contract) ---
+BrokerInterface(IGreeter):
+  EventBroker:
+    type Greeted = object
+      who: string
+
+  RequestBroker:
+    proc greet(name: string): Future[Result[string, string]] {.async.}
+
+# --- Implementation (the fulfillment) ---
+type GreeterImpl = ref object of IGreeter
+  prefix: string
+
+BrokerImplement GreeterImpl of IGreeter:
+  proc init(prefix: string) =
+    self.prefix = prefix
+
+  method greet(
+      self: GreeterImpl, name: string
+  ): Future[Result[string, string]] {.async.} =
+    ok(self.prefix & name)
+
+# --- Usage ---
+let a = GreeterImpl.new(prefix = "hello ")
+let b = GreeterImpl.new(prefix = "hi ")
+
+# Each instance has its own BrokerContext — fully isolated
+assert (waitFor a.greet("alice")).value == "hello alice"
+assert (waitFor b.greet("alice")).value == "hi alice"
+
+# DI: consumer depends only on the interface
+IGreeter.provideFactory(proc(): Result[IGreeter, string] =
+  ok(GreeterImpl.new(prefix = "default:")))
+let svc = IGreeter.create().value
+assert (waitFor svc.greet("x")).value == "default:x"
+
+a.close()  # deterministic cleanup; b unaffected
+b.close()
+```
+
+For FFI libraries, `BrokerInterface(API, IFace):` propagates the `(API)` marker to all inner brokers automatically. The generated wrapper classes follow the same pattern across all languages — the main interface becomes the library class (`Hierlib` in C++ / Python / Rust / Go), and sub-interfaces become independent typed wrapper classes (`Widget`) with their own methods and RAII-style lifetime management. The OOP structure is an *authoring* concern — foreign consumers see the same typed API surface regardless of whether the Nim side uses flat or OOP brokers.
+
+Full documentation — use cases, DI patterns, hierarchical sub-instances, FFI wrapper class layout, memory model notes, and comparison with flat brokers — is in **[doc/OOP_Brokers.md](doc/OOP_Brokers.md)**.
 
 ## Multi-thread support
 

@@ -333,7 +333,10 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
   exec "git submodule update --init --recursive vendor"
 
 task test, "Run all single and multi-threaded broker tests":
-  let tests = ["test_event_broker", "test_request_broker", "test_multi_request_broker"]
+  let tests = [
+    "test_event_broker", "test_request_broker", "test_request_broker_sugar",
+    "test_multi_request_broker", "test_broker_oop", "test_broker_lifecycle",
+  ]
   for f in tests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -357,6 +360,31 @@ task test, "Run all single and multi-threaded broker tests":
       if skipRefcOnWindows(opt, f):
         continue
       test opt, f
+
+task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
+  let rejects =
+    ["reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret"]
+  for f in rejects:
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim"
+    )
+    if code == 0:
+      echo outp
+      quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
+    echo "  reject OK (correctly rejected): " & f
+  # API-mode rejects (reduced-A): cross-interface apiName collisions only
+  # manifest under -d:BrokerFfiApi --threads:on.
+  let apiRejects = ["reject_iface_apicollision"]
+  for f in apiRejects:
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off -d:BrokerFfiApi --threads:on --path:. --outdir:build/reject test/reject/" &
+        f & ".nim"
+    )
+    if code == 0:
+      echo outp
+      quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
+    echo "  reject OK (correctly rejected): " & f
+  echo "all sugar-reject tests passed"
 
 task runFfiBenchEventStress,
   "Build benchlib  + the Part D-4/D-5 event dispatch stress drivers and run them":
@@ -487,7 +515,10 @@ task testApi, "Run codec unit tests + library init integration tests":
   # NimMain symbols distinct.
   let apiTests = [
     ("test_api_library_init", "apitest"),
+    ("test_api_event_teardown_isolation", "cbevt"),
     ("test_api_discovery", "apidisc"),
+    ("test_broker_interface_api", "brokerifaceapi"),
+    ("test_broker_interface_mt", "brokerifacemt"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
   ]
   for (f, prefix) in apiTests:
@@ -589,6 +620,167 @@ task runFfiExamplePy,
     exec quoteArg(findPythonExe()) & " " &
       quoteArg("examples/ffiapi/python_example/main.py")
 
+# ---------------------------------------------------------------------------
+# hierlib — the OOP interface-model FFI example (BrokerInterface(API) +
+# BrokerImplement + bindToContext). Same C ABI as the flat mylib example.
+# ---------------------------------------------------------------------------
+
+proc buildHierExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/ffiapi/hierlib/nimlib/build"
+  flags.add(nimMainPrefixFlag("hierlib"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("examples/ffiapi/hierlib/nimlib/build", "hierlib"))
+  if existsEnv("MM"):
+    flags.add(" --mm:" & getEnv("MM"))
+  else:
+    flags.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    flags.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
+  exec "nim c " & flags & " examples/ffiapi/hierlib/nimlib/hierlib.nim"
+
+proc buildHierCmakeTarget(target = "") =
+  let cmakeDir = "examples/ffiapi/hierlib"
+  let buildDir = cmakeDir & "/cmake-build"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+task buildHierExample, "Build the hierlib interface-model FFI example library":
+  buildHierExampleLibrary()
+
+task runHierExampleCpp, "Build hierlib + the C++ example and run it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary()
+    buildHierCmakeTarget("hier_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/hierlib/cpp_example"))
+
+task runHierExampleRust,
+  "Build hierlib + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/ffiapi/hierlib/rust_example/Cargo.toml"
+
+task runHierExampleGo, "Build hierlib + Go module and run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(generateGo = true)
+    withDir "examples/ffiapi/hierlib/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+      exec quoteArg(findGoExe()) & " run ."
+
+# Persistence example: two-layer interfaces (IPersistence -> IBackend) with a
+# factory selecting File/Memory backends, requests + events at both levels, and
+# per-instance routing. The entry module is IPersistenceLib.nim but the
+# registered library name (and generated header/dylib) is "persistence", so the
+# dylib output name is forced to lib<persistence> here.
+proc persistenceLibOutFlag(): string =
+  let dir = "examples/persistence/nimlib/build"
+  when defined(windows):
+    " --out:" & (dir / "persistence.dll")
+  elif defined(macosx):
+    " --out:" & (dir / "libpersistence.dylib")
+  else:
+    " --out:" & (dir / "libpersistence.so")
+
+proc buildPersistenceExampleLibrary(
+    generatePy = false, generateRust = false, generateGo = false
+) =
+  var flags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/persistence/nimlib/build"
+  flags.add(nimMainPrefixFlag("persistence"))
+  flags.add(nimWindowsCcFlag())
+  flags.add(nimWindowsImplibFlag("examples/persistence/nimlib/build", "persistence"))
+  if existsEnv("MM"):
+    flags.add(" --mm:" & getEnv("MM"))
+  else:
+    flags.add(" --mm:orc")
+  if generatePy or existsEnv("GEN_PY"):
+    flags.add(" -d:BrokerFfiApiGenPy")
+  if generateRust or existsEnv("GEN_RUST"):
+    flags.add(" -d:BrokerFfiApiGenRust")
+  if generateGo or existsEnv("GEN_GO"):
+    flags.add(" -d:BrokerFfiApiGenGo")
+  flags.add(persistenceLibOutFlag())
+  exec "nim c " & flags & " examples/persistence/nimlib/IPersistenceLib.nim"
+
+proc buildPersistenceCmakeTarget(target = "") =
+  let cmakeDir = "examples/persistence"
+  let buildDir = cmakeDir & "/cmake-build"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir & cmakeWindowsConfigureExtras()
+  if target.len == 0:
+    exec "cmake --build " & buildDir
+  else:
+    exec "cmake --build " & buildDir & " --target " & target
+
+task buildPersistenceExample,
+  "Build the persistence interface-model FFI example library":
+  buildPersistenceExampleLibrary()
+
+task runPersistenceExampleCpp,
+  "Build persistence + the C++ example and run it (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary()
+    buildPersistenceCmakeTarget("persistence_cpp")
+    exec quoteArg(ffiExampleExecutablePath("examples/persistence/cpp_example"))
+
+task runPersistenceExamplePy,
+  "Build persistence + Python wrapper and run persistence/python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generatePy = true)
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/persistence/python_example/main.py")
+
+task runPersistenceExampleRust,
+  "Build persistence + Rust crate and run the Rust example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generateRust = true)
+    exec quoteArg(findCargoExe()) &
+      " run --manifest-path examples/persistence/rust_example/Cargo.toml"
+
+task runPersistenceExampleGo,
+  "Build persistence + Go wrapper and run the Go example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildPersistenceExampleLibrary(generateGo = true)
+    withDir "examples/persistence/go_example":
+      exec quoteArg(findGoExe()) & " mod tidy"
+      exec quoteArg(findGoExe()) & " run ."
+
+task runHierExamplePy,
+  "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runHierExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildHierExampleLibrary(true)
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/ffiapi/hierlib/python_example/main.py")
+
 # FFI build of the typemapping test library: compiles
 # test/typemappingtestlib/typemappingtestlib.nim with -d:BrokerFfiApi
 # into build/ and drives test_typemappingtestlib.{cpp,py} against
@@ -687,23 +879,66 @@ task runTypeMapTestLibPy,
     exec quoteArg(findPythonExe()) & " " &
       quoteArg("test/typemappingtestlib/test_typemappingtestlib.py")
 
-proc setAsanEnv() =
-  putEnv("MallocNanoZone", "0")
-  putEnv(
-    "ASAN_OPTIONS",
-    "detect_leaks=0:symbolize=1:print_stacktrace=1:halt_on_error=1:abort_on_error=0:strict_string_checks=1",
-  )
-  if not existsEnv("ASAN_SYMBOLIZER_PATH"):
-    let llvmSym = findExe("llvm-symbolizer")
-    if llvmSym.len > 0:
-      putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
+# ---------------------------------------------------------------------------
+# Sanitizer support — ASan(+UBSan), ASan+LSan(+UBSan) on Linux, and TSan.
+# ---------------------------------------------------------------------------
+# Modes (the `mode` string threaded through the helpers below):
+#   "asan"     — AddressSanitizer + UndefinedBehaviorSanitizer. detect_leaks=0.
+#                Cross-platform (macOS/Linux/Windows).
+#   "asanleak" — asan + LeakSanitizer (detect_leaks=1). LSan is Linux-only; on
+#                macOS/Windows this degrades to plain ASan+UBSan (with a notice),
+#                since LSan is unsupported there.
+#   "tsan"     — ThreadSanitizer. Mutually exclusive with ASan, so it is always a
+#                SEPARATE build. Built with `--tlsEmulation:off` so TSan observes
+#                real TLS accesses (the MT brokers lean heavily on threadvars:
+#                gBrokerThreadSignal, mtThreadIdMarker, the per-thread pollers).
+#
+# UBSan is folded into the asan modes (same build, near-zero cost). `function`
+# and `vptr` checks are disabled: the FFI C ABI casts cdecl callback pointers
+# (trips -fsanitize=function) and carries no C++ RTTI (vptr). Everything else —
+# alignment, signed-overflow, null deref, bad enum/bool, shift UB — stays on.
+
+proc sanitizerSuppPath(name: string): string =
+  thisDir() / "tools" / "sanitizers" / name
+
+proc sanitizerCompileFlags(mode: string): string =
+  case mode
+  of "tsan":
+    result = "-fsanitize=thread -fno-omit-frame-pointer -g"
+  else: # asan / asanleak
+    result =
+      "-fsanitize=address -fsanitize=undefined " &
+      "-fno-sanitize=function,vptr -fno-omit-frame-pointer -g"
+    when defined(windows):
+      # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
+      result.add(" -gcodeview")
+
+proc sanitizerLinkFlags(mode: string, sharedLib: bool = false): string =
+  case mode
+  of "tsan":
+    result = "-fsanitize=thread -g"
+    when defined(linux):
+      if sharedLib:
+        result.add(" -shared-libtsan")
+  else: # asan / asanleak
+    result = "-fsanitize=address -fsanitize=undefined -g"
+    when defined(linux):
+      # The Nim .so links the shared sanitizer runtime; a foreign exe linked
+      # with the static runtime otherwise can't satisfy the .so's dep.
+      if sharedLib:
+        result.add(" -shared-libasan")
+    when defined(windows):
+      # Tell lld to emit a PDB so ASAN frames carry function/line info.
+      result.add(" -Wl,/debug")
+
+proc linuxSharedRuntimeOnPath(printName: string) =
+  ## Put the directory holding the named clang_rt shared runtime on
+  ## LD_LIBRARY_PATH so a Nim .so linked with the *shared* sanitizer runtime
+  ## loads cleanly. No-op if clang can't resolve it (static-runtime build).
   when defined(linux):
-    # The Nim .so links -shared-libasan, so the loader needs libclang_rt.asan-*.so
-    # on LD_LIBRARY_PATH. The C++ test exe is linked with plain -fsanitize=address
-    # (static asan on Linux) and otherwise can't satisfy the .so's runtime dep.
-    let (so, rc) = gorgeEx("clang -print-file-name=libclang_rt.asan-x86_64.so")
+    let (so, rc) = gorgeEx("clang -print-file-name=" & printName)
     let trimmed = so.strip()
-    if rc == 0 and trimmed.len > 0 and trimmed != "libclang_rt.asan-x86_64.so":
+    if rc == 0 and trimmed.len > 0 and trimmed != printName:
       let dir = parentDir(trimmed)
       let cur = getEnv("LD_LIBRARY_PATH")
       putEnv(
@@ -714,36 +949,87 @@ proc setAsanEnv() =
           dir & ":" & cur,
       )
 
+proc setSanitizerEnv(mode: string) =
+  putEnv("MallocNanoZone", "0")
+  if not existsEnv("ASAN_SYMBOLIZER_PATH"):
+    let llvmSym = findExe("llvm-symbolizer")
+    if llvmSym.len > 0:
+      putEnv("ASAN_SYMBOLIZER_PATH", llvmSym)
+  case mode
+  of "tsan":
+    var opts =
+      "symbolize=1:halt_on_error=1:second_deadlock_stack=1:history_size=4:exitcode=66"
+    let supp = sanitizerSuppPath("tsan.supp")
+    if fileExists(supp):
+      opts.add(":suppressions=" & supp)
+    putEnv("TSAN_OPTIONS", opts)
+    linuxSharedRuntimeOnPath("libclang_rt.tsan-x86_64.so")
+  else: # asan / asanleak
+    var leaks = mode == "asanleak"
+    when not defined(linux):
+      if leaks:
+        echo "note: LeakSanitizer is Linux-only; running plain ASan+UBSan here"
+      leaks = false
+    let detect = if leaks: "detect_leaks=1" else: "detect_leaks=0"
+    putEnv(
+      "ASAN_OPTIONS",
+      detect &
+        ":symbolize=1:print_stacktrace=1:halt_on_error=1:abort_on_error=0:strict_string_checks=1",
+    )
+    var ubopts = "print_stacktrace=1:halt_on_error=1"
+    let usupp = sanitizerSuppPath("ubsan.supp")
+    if fileExists(usupp):
+      ubopts.add(":suppressions=" & usupp)
+    putEnv("UBSAN_OPTIONS", ubopts)
+    if leaks:
+      let lsupp = sanitizerSuppPath("lsan.supp")
+      if fileExists(lsupp):
+        putEnv("LSAN_OPTIONS", "suppressions=" & lsupp)
+    linuxSharedRuntimeOnPath("libclang_rt.asan-x86_64.so")
+
+# Back-compat shims (pre-existing call sites + external dispatch references).
+proc setAsanEnv() =
+  setSanitizerEnv("asan")
+
 proc asanCompileFlags(): string =
-  result = "-fsanitize=address -fno-omit-frame-pointer -g"
-  when defined(windows):
-    # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
-    result.add(" -gcodeview")
+  sanitizerCompileFlags("asan")
 
 proc asanLinkFlags(sharedLib: bool = false): string =
-  result = "-fsanitize=address -g"
-  when defined(linux):
-    if sharedLib:
-      result.add(" -shared-libasan")
-  when defined(windows):
-    # Tell lld to emit a PDB so ASAN frames carry function/line info.
-    result.add(" -Wl,/debug")
+  sanitizerLinkFlags("asan", sharedLib)
 
-proc testAsan(mm: string, path: string) =
-  let outputPath = joinPath("build", path & "_asan_" & mm).addFileExt(ExeExt)
-  let label = path & " [ASAN, clang, mm:" & mm & ", debug]"
-  # -d:noSignalHandler: disable Nim's SIGSEGV handler so ASAN's signal handler
-  # fires on memory faults. Without this, Nim prints its own traceback and
-  # exits before ASAN can report the underlying heap error.
-  let flags =
-    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE -d:noSignalHandler --threads:on --mm:" &
-    mm & " --passC:" & quoteArg(asanCompileFlags()) & " --passL:" &
-    quoteArg(asanLinkFlags()) & " --path:. --out:" & quoteArg(outputPath)
+proc testSan(mode, mm, path: string, extra = "") =
+  ## Build `test/<path>.nim` under the requested sanitizer `mode` + memory
+  ## manager and run it. `extra` carries per-test compile flags (e.g. the FFI
+  ## `-d:BrokerFfiApi --nimMainPrefix:<x>` set).
+  let outputPath = joinPath("build", path & "_" & mode & "_" & mm).addFileExt(ExeExt)
+  let label = path & " [" & mode & ", clang, mm:" & mm & ", debug]"
+  # -d:noSignalHandler: disable Nim's SIGSEGV handler so the sanitizer's own
+  # handler fires on faults. Without it, Nim prints a traceback and exits
+  # before the sanitizer can report the underlying error.
+  # -d:useMalloc routes Nim's heaps (incl. the shared heap backing the FFI
+  # registry/courier buffers) through the system allocator so the sanitizer
+  # actually sees those allocations. For TSan it is REQUIRED: Nim's native
+  # MemRegion allocator shares internal free-list metadata across threads in a
+  # way TSan can't see, producing false-positive races on alloc/dealloc.
+  var flags =
+    "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE " &
+    "-d:noSignalHandler -d:useMalloc --threads:on --mm:" & mm
+  if mode == "tsan":
+    flags.add(" --tlsEmulation:off")
+  flags.add(
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+      quoteArg(sanitizerLinkFlags(mode)) & " --path:. --out:" & quoteArg(outputPath)
+  )
+  if extra.len > 0:
+    flags.add(" " & extra)
   exec "nim c " & flags & " test/" & path & ".nim"
-  setAsanEnv()
+  setSanitizerEnv(mode)
   echo "=== RUN  " & label & " ==="
   exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
+
+proc testAsan(mm: string, path: string) =
+  testSan("asan", mm, path)
 
 task testMtEventBrokerAsanOrc,
   "Run multi-thread event broker tests under AddressSanitizer (clang, orc, debug)":
@@ -774,6 +1060,112 @@ task testMtBrokerConfigsAsanRefc,
   if skipRefcOnWindows("refc", "testMtBrokerConfigsAsanRefc"):
     return
   testAsan("refc", "test_multi_thread_broker_configs")
+
+# ---------------------------------------------------------------------------
+# ThreadSanitizer variants of the multi-thread broker tests. TSan is the
+# most relevant sanitizer for these: it validates the Channel[T] / shared
+# ThreadSignalPtr / Lock-protected bucket registry / Atomic happens-before
+# the MT (and FFI) lanes rely on.
+# ---------------------------------------------------------------------------
+task testMtEventBrokerTsanOrc,
+  "Run multi-thread event broker tests under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_multi_thread_event_broker")
+
+task testMtEventBrokerTsanRefc,
+  "Run multi-thread event broker tests under ThreadSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtEventBrokerTsanRefc"):
+    return
+  testSan("tsan", "refc", "test_multi_thread_event_broker")
+
+task testMtRequestBrokerTsanOrc,
+  "Run multi-thread request broker tests under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_multi_thread_request_broker")
+
+task testMtRequestBrokerTsanRefc,
+  "Run multi-thread request broker tests under ThreadSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtRequestBrokerTsanRefc"):
+    return
+  testSan("tsan", "refc", "test_multi_thread_request_broker")
+
+task testMtBrokerConfigsTsanOrc,
+  "Run multi-thread broker config showcase under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_multi_thread_broker_configs")
+
+task testMtBrokerConfigsTsanRefc,
+  "Run multi-thread broker config showcase under ThreadSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testMtBrokerConfigsTsanRefc"):
+    return
+  testSan("tsan", "refc", "test_multi_thread_broker_configs")
+
+# ---------------------------------------------------------------------------
+# Sanitizer coverage for the FFI event-teardown isolation regression test
+# (the cross-context subs-count fix). FFI build needs -d:BrokerFfiApi and a
+# distinct --nimMainPrefix.
+# ---------------------------------------------------------------------------
+const teardownTestExtra = "-d:BrokerFfiApi --nimMainPrefix:cbevt"
+
+task testApiTeardownAsanOrc,
+  "Run FFI event-teardown isolation test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+task testApiTeardownAsanRefc,
+  "Run FFI event-teardown isolation test under ASan+UBSan (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testApiTeardownAsanRefc"):
+    return
+  testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+task testApiTeardownTsanOrc,
+  "Run FFI event-teardown isolation test under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+task testApiTeardownTsanRefc,
+  "Run FFI event-teardown isolation test under ThreadSanitizer (clang, refc, debug)":
+  if skipRefcOnWindows("refc", "testApiTeardownTsanRefc"):
+    return
+  testSan("tsan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+# ---------------------------------------------------------------------------
+# Persistence C++ example under sanitizers — builds the Nim library AND the
+# C++ consumer with matching instrumentation, then runs the consumer.
+# `mode` ∈ {asan, asanleak, tsan}. Driven across orc+refc by the tasks below.
+# ---------------------------------------------------------------------------
+proc runSanitizedPersistenceCpp(mode, mm: string) =
+  let libBuild = "examples/persistence/nimlib/build"
+  let cmakeDir = "examples/persistence"
+  let buildDir = cmakeDir & "/cmake-build-" & mode
+  var libFlags =
+    "-d:BrokerFfiApi --threads:on --app:lib --path:. --cc:clang --debugger:native " &
+    "-d:noSignalHandler -d:useMalloc --mm:" & mm & " --outdir:" & libBuild
+  if mode == "tsan":
+    libFlags.add(" --tlsEmulation:off")
+  libFlags.add(nimMainPrefixFlag("persistence"))
+  libFlags.add(
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+      quoteArg(sanitizerLinkFlags(mode, sharedLib = true))
+  )
+  libFlags.add(persistenceLibOutFlag())
+  exec "nim c " & libFlags & " examples/persistence/nimlib/IPersistenceLib.nim"
+  mkDir(buildDir)
+  exec "cmake -S " & cmakeDir & " -B " & buildDir &
+    " -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=" &
+    quoteArg(sanitizerCompileFlags(mode)) & " -DCMAKE_EXE_LINKER_FLAGS=" &
+    quoteArg(sanitizerLinkFlags(mode))
+  exec "cmake --build " & buildDir & " --target persistence_cpp"
+  setSanitizerEnv(mode)
+  let label = "persistence cpp [" & mode & ", clang, mm:" & mm & "]"
+  echo "=== RUN  " & label & " ==="
+  exec quoteArg(ffiExampleExecutablePath("examples/persistence/cpp_example"))
+  echo "=== PASS " & label & " ==="
+
+task sanitizePersistenceCppAsan,
+  "Build+run the persistence C++ example under ASan+UBSan (orc + refc)":
+  for mm in memoryManagerMatrix():
+    runSanitizedPersistenceCpp("asan", mm)
+
+task sanitizePersistenceCppTsan,
+  "Build+run the persistence C++ example under ThreadSanitizer (orc + refc)":
+  for mm in memoryManagerMatrix():
+    runSanitizedPersistenceCpp("tsan", mm)
 
 # ----------------------------------------------------------------------------
 # probeWinTlsUninit — minimal repro for LIMITATION.md §2.1
@@ -904,8 +1296,38 @@ task alltests,
   exec "nimble runTypeMapTestLibCpp"
   exec "nimble runTypeMapTestLibPy"
 
-task allAsan, "Run all tests under AddressSanitizer (clang, orc/refc, debug)":
+task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testMtEventBrokerAsanOrc"
   exec "nimble testMtEventBrokerAsanRefc"
   exec "nimble testMtRequestBrokerAsanOrc"
   exec "nimble testMtRequestBrokerAsanRefc"
+  exec "nimble testMtBrokerConfigsAsanOrc"
+  exec "nimble testMtBrokerConfigsAsanRefc"
+  exec "nimble testApiTeardownAsanOrc"
+  exec "nimble testApiTeardownAsanRefc"
+
+task allTsan,
+  "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
+  exec "nimble testMtEventBrokerTsanOrc"
+  exec "nimble testMtEventBrokerTsanRefc"
+  exec "nimble testMtRequestBrokerTsanOrc"
+  exec "nimble testMtRequestBrokerTsanRefc"
+  exec "nimble testMtBrokerConfigsTsanOrc"
+  exec "nimble testMtBrokerConfigsTsanRefc"
+  exec "nimble testApiTeardownTsanOrc"
+  exec "nimble testApiTeardownTsanRefc"
+
+task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
+  # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
+  testSan("asanleak", "orc", "test_multi_thread_event_broker")
+  testSan("asanleak", "refc", "test_multi_thread_event_broker")
+  testSan("asanleak", "orc", "test_multi_thread_request_broker")
+  testSan("asanleak", "refc", "test_multi_thread_request_broker")
+  testSan("asanleak", "orc", "test_multi_thread_broker_configs")
+  testSan("asanleak", "refc", "test_multi_thread_broker_configs")
+  testSan("asanleak", "orc", "test_api_event_teardown_isolation", teardownTestExtra)
+  testSan("asanleak", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+task allSan, "Run the full sanitizer matrix: ASan+UBSan, then ThreadSanitizer":
+  exec "nimble allAsan"
+  exec "nimble allTsan"
