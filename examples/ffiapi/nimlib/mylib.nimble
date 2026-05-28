@@ -4,4 +4,4 @@ description = "Example FFI API library using nim-brokers"
 license = "MIT"
 
 requires "nim >= 2.0.0"
-requires "brokers >= 0.1.0"
+requires "brokers >= 3.1.0"
