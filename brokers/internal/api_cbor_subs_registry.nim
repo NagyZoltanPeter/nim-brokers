@@ -288,6 +288,25 @@ proc subsRegistryRemoveAllForKey*(
       dec reg.entryCount
       return 0'i32
 
+proc subsRegistryRemoveAllForKeyN*(
+    reg: ptr SubsRegistry, ctx: uint32, name: cstring
+): int32 {.gcsafe, raises: [].} =
+  ## Returns the number of subscriptions removed (>= 0), or -2 if the key was
+  ## not found. Teardown paths must decrement the shared per-event subs-count
+  ## by the exact number removed (not reset to 0) so a sibling context/instance
+  ## sharing the event name is not silenced.
+  {.cast(gcsafe).}:
+    withLock reg.lock:
+      let nameLen = cstrLen(name)
+      let bucket = findBucket(reg, ctx, name, nameLen)
+      if bucket.isNil:
+        return -2'i32
+      let removed = int32(bucket.subsCount)
+      unlinkBucket(reg, bucket)
+      disposeBucket(bucket)
+      dec reg.entryCount
+      return removed
+
 proc subsRegistrySnapshot*(
     reg: ptr SubsRegistry,
     ctx: uint32,
@@ -337,6 +356,40 @@ proc subsRegistryFreeForCtx*(
         while not cur.isNil:
           let nxt = cur.next
           if cur.ctx == ctx:
+            if prev.isNil:
+              reg.buckets[i] = nxt
+            else:
+              prev.next = nxt
+            disposeBucket(cur)
+            dec reg.entryCount
+          else:
+            prev = cur
+          cur = nxt
+
+type SubsFreedCb* = proc(name: cstring, count: int32) {.gcsafe, raises: [].}
+  ## Invoked once per disposed bucket by `subsRegistryFreeForClass` with the
+  ## bucket's event name and live subscription count, so the caller can
+  ## decrement the matching per-event subs-count atomic.
+
+proc subsRegistryFreeForClass*(
+    reg: ptr SubsRegistry, classCtx: uint16, onFreed: SubsFreedCb
+) {.gcsafe, raises: [].} =
+  ## Drops every bucket whose ctx low16 == `classCtx` — the lib ctx itself
+  ## (instanceCtx 0) plus every sub-instance sharing its classCtx. For each
+  ## disposed bucket with live subs, invokes `onFreed(eventName, subsCount)`
+  ## so the caller can decrement the shared per-event subs-count. Called from
+  ## `_shutdown(libCtx)` after both threads are joined, so no concurrent
+  ## delivery can race this teardown.
+  {.cast(gcsafe).}:
+    withLock reg.lock:
+      for i in 0 ..< reg.bucketsLen:
+        var prev: ptr BucketHead = nil
+        var cur = reg.buckets[i]
+        while not cur.isNil:
+          let nxt = cur.next
+          if (cur.ctx and 0x0000FFFF'u32) == uint32(classCtx):
+            if not onFreed.isNil and cur.subsCount > 0:
+              onFreed(cur.eventName, int32(cur.subsCount))
             if prev.isNil:
               reg.buckets[i] = nxt
             else:

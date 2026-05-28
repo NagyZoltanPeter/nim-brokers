@@ -1,0 +1,21 @@
+# Cargo manifest for the persistence Rust FFI example.
+#
+#   cargo run   # builds against the FFI library in nimlib/build/
+#
+# The generated wrapper crate is included as a module via #[path].
+
+[package]
+name = "rust_example"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+
+[[bin]]
+name = "rust_example"
+path = "src/main.rs"

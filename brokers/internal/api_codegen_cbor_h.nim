@@ -73,6 +73,13 @@ proc generateCborCHeaderFile*(
       " * not found or already shut down. */\n"
   )
   h.add("int32_t " & p & "shutdown(uint32_t ctx);\n\n")
+  h.add(
+    "/* reduced-A: release a sub-instance created by a create-instance request.\n" &
+      " * Drops that ctx's request providers + event listeners on the processing\n" &
+      " * thread; the Nim instance is then reclaimed by the GC. Idempotent and\n" &
+      " * safe on an unknown/already-released ctx. Returns 0 on success. */\n"
+  )
+  h.add("int32_t " & p & "releaseInstance(uint32_t ctx);\n\n")
 
   h.add("/* ----------------------------------------------------------------\n")
   h.add(" * Buffer ownership\n")

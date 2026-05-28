@@ -7,9 +7,85 @@
 
 import chronos, chronos/threadsync
 import std/atomics
-import std/os # `sleep` for synchronous grace window in drainPendingRingFrees
+import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
+import results
+import ../broker_context
 import ./mt_queue
 export chronos, threadsync, atomics
+
+# ---------------------------------------------------------------------------
+# reduced-A: per-classCtx event-listener installer registry.
+#
+# An EventBroker(API) event only reaches the foreign event courier if the
+# library's `installAllListeners` has been called for the *emitting* ctx. The
+# main library ctx is handled at createContext, but a SUB-INSTANCE (created via
+# a create-instance request, sharing the library classCtx with a distinct
+# instanceCtx) needs its listeners installed too. registerBrokerLibrary records
+# its installer keyed by classCtx here; the create-instance adapter calls
+# `installApiListenersForCtx(subCtx)` on the processing thread.
+#
+# Storage is a fixed POD array (the installer is a bare `nimcall` function
+# pointer, the key a uint16) so it is safe to share across threads under both
+# --mm:refc and --mm:orc — no GC'd container crosses the thread boundary.
+# ---------------------------------------------------------------------------
+
+const maxApiCtxInstallers* = 64
+
+type ApiCtxListenerInstaller* =
+  proc(ctx: BrokerContext): Result[void, string] {.nimcall.}
+
+var gApiCtxInstallers:
+  array[maxApiCtxInstallers, tuple[classCtx: uint16, fn: ApiCtxListenerInstaller]]
+var gApiCtxInstallerCount: int
+var gApiCtxInstallerLock: Lock
+var gApiCtxInstallerLockInit: Atomic[int]
+
+proc ensureApiCtxInstallerLock() {.gcsafe.} =
+  var expected = 0
+  if gApiCtxInstallerLockInit.compareExchange(expected, 1, moAcquire, moRelaxed):
+    {.cast(gcsafe).}:
+      initLock(gApiCtxInstallerLock)
+    gApiCtxInstallerLockInit.store(2, moRelease)
+  else:
+    while gApiCtxInstallerLockInit.load(moAcquire) != 2:
+      sleep(0)
+
+proc registerApiCtxListenerInstaller*(
+    classCtx: uint16, fn: ApiCtxListenerInstaller
+) {.gcsafe.} =
+  ## Record (or replace) the listener installer for a library, keyed by its
+  ## classCtx. Called once per `createContext`.
+  ensureApiCtxInstallerLock()
+  {.cast(gcsafe).}:
+    withLock gApiCtxInstallerLock:
+      for i in 0 ..< gApiCtxInstallerCount:
+        if gApiCtxInstallers[i].classCtx == classCtx:
+          gApiCtxInstallers[i].fn = fn
+          return
+      if gApiCtxInstallerCount < maxApiCtxInstallers:
+        gApiCtxInstallers[gApiCtxInstallerCount] = (classCtx, fn)
+        inc gApiCtxInstallerCount
+
+proc installApiListenersForCtx*(ctx: BrokerContext) {.gcsafe.} =
+  ## Install the owning library's event-courier listeners for a sub-instance
+  ## ctx (looked up by classCtx). Best-effort: if no installer is registered
+  ## (e.g. a library with no events) or it fails, the sub-instance simply has no
+  ## event delivery. Runs on the processing thread.
+  ensureApiCtxInstallerLock()
+  var fn: ApiCtxListenerInstaller = nil
+  let cc = classCtx(ctx)
+  {.cast(gcsafe).}:
+    withLock gApiCtxInstallerLock:
+      for i in 0 ..< gApiCtxInstallerCount:
+        if gApiCtxInstallers[i].classCtx == cc:
+          fn = gApiCtxInstallers[i].fn
+          break
+  if not fn.isNil:
+    try:
+      {.cast(gcsafe).}:
+        discard fn(ctx)
+    except Exception:
+      discard
 
 # ---------------------------------------------------------------------------
 # Thread identity

@@ -1,0 +1,17 @@
+# Cargo manifest for the hierlib Rust FFI example.
+#   cargo run   # builds against the FFI library in nimlib/build/
+[package]
+name = "hier_example"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+
+[[bin]]
+name = "hier_example"
+path = "src/main.rs"
