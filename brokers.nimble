@@ -772,6 +772,14 @@ task runPersistenceExampleGo,
       exec quoteArg(findGoExe()) & " mod tidy"
       exec quoteArg(findGoExe()) & " run ."
 
+task runPersistenceExampleNim,
+  "Build and run the pure-Nim persistence example (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runPersistenceExampleNim: --mm:" & mm & " ==="
+    setMM(mm)
+    var flags = "--threads:on --path:. --outdir:build --mm:" & mm
+    exec "nim c -r " & flags & " examples/persistence/nim_example/main.nim"
+
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
   for mm in memoryManagerMatrix():
