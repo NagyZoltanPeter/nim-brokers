@@ -3,6 +3,122 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.1.0] — 2026-05-28
+
+**Hierarchical / OOP brokers — `BrokerInterface`, `BrokerImplement`,
+RequestBroker proc-sugar, multi-interface FFI with sub-instance routing.**
+
+### Added — OOP broker layer
+
+- **`BrokerInterface` macro** (`brokers/broker_interface.nim`). Declares an
+  abstract interface (`ref object of RootObj`) with typed request methods
+  (abstract `{.base, async:(raises:[]), gcsafe.}` methods) and event facades
+  (`emit`/`listen`/`dropListener` templates forwarding via `self.brokerCtx`).
+  Two forms: `BrokerInterface IFace:` (in-process only) and
+  `BrokerInterface(API, IFace):` (generates FFI-capable `(API)` sub-brokers).
+- **`BrokerImplement` macro** (`brokers/broker_implement.nim`). Attaches
+  concrete behavior to an interface: `BrokerImplement Impl of IFace:` with
+  optional `proc init(...)` and raw `method` overrides. Generates `Impl.new()`,
+  `setupProviders` (closure-captured `self` per request), idempotent `close()`
+  (clears providers + drops all event listeners, breaking refc cycles).
+  `bindToContext(ctx, ...)` adopts an external `BrokerContext` (used by FFI
+  processing thread).
+- **Factory / dependency-injection** on every `BrokerInterface`: typed
+  `IFace.provideFactory(f)` (last-wins) + `IFace.create(...)`. Consumer
+  depends only on the interface module; implementer calls `provideFactory`;
+  composition root wires both.
+- **`RequestBroker.isProvided`** — query whether a provider is registered for
+  a given context.
+
+### Added — RequestBroker proc-sugar
+
+- **Proc-style request declaration** across single-thread, MT, and API
+  brokers. Lowercase verb procs (`proc getHealth(...)`) pair with a
+  capitalized broker name (`GetHealth`). POD form (bare scalar/string
+  return) and object form (explicit `type GetHealth = object`) both
+  supported. Two-slot naming: single signature → bare apiName; both
+  zero-arg + arg-based → bare + `<name>Arg`. Legacy `signature*` syntax
+  unchanged.
+
+### Added — Multi-interface FFI (sub-instances)
+
+- **`mainClass: IMain` in `registerBrokerLibrary`** designates the library's
+  primary interface. Only the main class exposes `_createContext` /
+  `_shutdown`. Additional `BrokerInterface(API)` interfaces become
+  sub-interface wrapper classes.
+- **`<lib>_releaseInstance(ctx)`** C-ABI entry point for sub-instance
+  teardown. Clears providers and drops all listeners for the sub-instance
+  context on the processing thread.
+- **Sub-instance routing via `BrokerContext` layout**: low 16 bits = classCtx
+  (library identity), high 16 bits = instanceCtx. `_call(subCtx)` recovers
+  the library courier by classCtx masking; the full ctx routes to the
+  sub-instance's provider. `newInstanceCtx(parentCtx)` allocates a fresh
+  instanceCtx sharing the parent's classCtx.
+- **Sub-instance events**: emit-side courier lookup is classCtx-masked so
+  sub-instance `EventBroker(API)` events reach foreign subscribers.
+  Per-classCtx listener installer registry ensures new sub-instances get
+  event-courier wiring automatically.
+- **Per-interface wrapper classes** in all four foreign-language codegens:
+  - **C++**: sub-interface class with typed methods, `close()` →
+    `releaseInstance`, `~Sub()` destructor. Event-bearing subs returned as
+    `Result<std::unique_ptr<Sub>>` (non-movable due to EventDispatcher);
+    event-free subs returned by value.
+  - **Rust**: `pub struct Sub { ctx }` + `impl Drop` → `releaseInstance`,
+    typed methods, `close()`.
+  - **Go**: `type Sub struct { ctx, mu }` + `Close()` +
+    `runtime.SetFinalizer` → `releaseInstance`, typed methods.
+  - **Python**: sub-class with `(ctx)` ctor, typed methods, context-manager
+    support, `close()` → `releaseInstance`.
+
+### Changed
+
+- **`BrokerContext` layout split** (`broker_context.nim`): classCtx (low 16)
+  + instanceCtx (high 16). `DefaultBrokerContext = makeBrokerContext(1, 0)`.
+  `NewBrokerContext()` allocates a fresh classCtx with instanceCtx 0.
+  Backward-compatible — flat brokers operate with instanceCtx = 0.
+- **`close()` clears event listeners** via compile-time interface → events
+  registry (broker_utils). Each `BrokerImplement` close now calls
+  `EventType.dropAllListeners(self.brokerCtx)` for every event declared in
+  the interface.
+
+### Fixed
+
+- **FFI event subs-count teardown**: decrement shared per-event atomic
+  counter on context teardown instead of resetting to zero (could zero out
+  other contexts' subscriptions).
+
+### CI / testing
+
+- **Sanitizer coverage expanded**: UBSan-in-ASan, separate TSan, Linux
+  ASan+LSan modes added to CI.
+- `hierlib` and `persistence` OOP examples added to CI matrix
+  (`runHierExample{Py,Cpp,Rust,Go}`, `runPersistenceExampleCpp`).
+- New test files: `test_request_broker_sugar.nim`, `test_broker_oop.nim`,
+  `test_broker_lifecycle.nim` (wired into `nimble test`);
+  `test_broker_interface_api.nim`, `test_broker_interface_mt.nim` (wired into
+  `nimble testApi`); `test/reject/*.nim` compile-fail tests (wired into
+  `nimble testSugarRejects`).
+- Broker lifecycle test (`test_broker_lifecycle.nim`): skip broadened to
+  cover Nim 2.2.4 + refc + release on Linux/Windows, and refc + Windows
+  debug.
+
+### Examples
+
+- **`examples/ffiapi/hierlib`** — single-interface OOP FFI example
+  (`BrokerInterface(API)` + `BrokerImplement` + `bindToContext` +
+  `registerBrokerLibrary`) with C++, Python, Rust, and Go consumers.
+- **`examples/persistence`** — multi-interface example
+  (`IPersistence` main + `IBackend` sub-interface) demonstrating
+  sub-instance creation, per-instance event routing, concurrent multi-context
+  scenarios, and targeted sub-instance teardown. C++ consumer with
+  Rust/Python/Go sub-instance events deferred.
+
+### Docs
+
+- `doc/HIERARCHICAL_BROKERS_PLAN.md` — full design document for the OOP
+  broker layer.
+- Updated README and AGENTS.md with OOP broker documentation.
+
 ## [3.0.0] — 2026-05-22
 
 **Native C-ABI FFI strategy retired — CBOR is now the only transport. The
@@ -275,6 +391,7 @@ wrappers.**
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[3.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.0
 [3.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.0.0
 [2.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.1.0
 [2.0.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.0.1
