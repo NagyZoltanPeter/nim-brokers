@@ -1,18 +1,23 @@
 ## Pure-Nim consumer for the persistence interface-model example.
 ##
-## Replicates the three scenarios from cpp_example/main.cpp using the broker
-## interfaces directly — same compilation unit, single thread, chronos async.
+## Uses the factory pattern: imports only PersistenceAPI (the interface) and
+## PersistenceFacade (for its side-effect factory registration). The consumer
+## never sees the concrete impl types.
 
 {.push raises: [].}
 
 import results, chronos
-import brokers/broker_context, brokers/broker_interface, brokers/broker_implement
+import brokers/broker_interface, brokers/broker_implement
 import ../nimlib/PersistenceAPI
-import ../nimlib/PersistenceFacade
+import ../nimlib/PersistenceFacade # side-effect: registers IPersistence factory
 
 const
   KindMemory = int32(bkMemory)
   KindFile = int32(bkFile)
+
+proc newPersistence(): IPersistence =
+  {.cast(gcsafe).}:
+    IPersistence.create().value
 
 proc roundtrip(b: IBackend, key, val: string): Future[string] {.async: (raises: []).} =
   var gotValue: string
@@ -34,7 +39,6 @@ proc roundtrip(b: IBackend, key, val: string): Future[string] {.async: (raises: 
   let readRes = await b.read(key)
   doAssert readRes.isOk, "read failed: " & readRes.error
 
-  # Single-thread: just yield until the async emit fires.
   let deadline = Moment.now() + seconds(2)
   while not received and Moment.now() < deadline:
     await noCancel(sleepAsync(1.milliseconds))
@@ -45,37 +49,32 @@ proc roundtrip(b: IBackend, key, val: string): Future[string] {.async: (raises: 
   gotValue
 
 # ---------------------------------------------------------------------------
-# Scenario A: two PersistenceImpl instances, each with its own backend kind.
+# Scenario A: two IPersistence instances, each with its own backend kind.
 # ---------------------------------------------------------------------------
 
 proc scenarioTwoContexts() {.async: (raises: []).} =
-  echo "  [A] two PersistenceImpl instances (File + Memory)"
+  echo "  [A] two IPersistence instances (File + Memory)"
 
-  let pFile = PersistenceImpl.bindToContext(NewBrokerContext())
+  let pFile = newPersistence()
   discard await pFile.initializeRequest("cfg")
   let bf = (await pFile.makeBackend(KindFile)).value
   doAssert (await roundtrip(bf, "alpha", "file-payload")) == "file-payload"
 
-  let pMem = PersistenceImpl.bindToContext(NewBrokerContext())
+  let pMem = newPersistence()
   discard await pMem.initializeRequest("cfg")
   let bm = (await pMem.makeBackend(KindMemory)).value
   doAssert (await roundtrip(bm, "alpha", "memory-payload")) == "memory-payload"
 
-  # Distinct contexts.
   doAssert bf.brokerCtx != bm.brokerCtx
 
-  pFile.close()
-  pMem.close()
-
 # ---------------------------------------------------------------------------
-# Scenario B: one PersistenceImpl with both File + Memory backends coexisting.
+# Scenario B: one IPersistence with both File + Memory backends coexisting.
 # ---------------------------------------------------------------------------
 
 proc scenarioMixedOneContext() {.async: (raises: []).} =
-  echo "  [B] one PersistenceImpl, File + Memory backends coexisting"
+  echo "  [B] one IPersistence, File + Memory backends coexisting"
 
-  let ctx = NewBrokerContext()
-  let p = PersistenceImpl.bindToContext(ctx)
+  let p = newPersistence()
   discard await p.initializeRequest("cfg")
 
   var createdCount = 0
@@ -90,7 +89,6 @@ proc scenarioMixedOneContext() {.async: (raises: []).} =
   let bf = (await p.makeBackend(KindFile)).value
   let bm = (await p.makeBackend(KindMemory)).value
 
-  # Yield to let the BackendCreated events fire.
   let deadline = Moment.now() + seconds(2)
   while createdCount < 2 and Moment.now() < deadline:
     await noCancel(sleepAsync(1.milliseconds))
@@ -102,18 +100,15 @@ proc scenarioMixedOneContext() {.async: (raises: []).} =
   doAssert (uint32(bm.brokerCtx) and 0xFFFF'u32) == (uint32(p.brokerCtx) and 0xFFFF'u32)
   doAssert (uint32(bf.brokerCtx) shr 16) != (uint32(bm.brokerCtx) shr 16)
 
-  # Per-instance routing: each backend's read lands on its own subscriber.
   doAssert (await roundtrip(bf, "x", "FILE-X")) == "FILE-X"
   doAssert (await roundtrip(bm, "x", "MEM-X")) == "MEM-X"
 
-  # State check.
   block:
     let st = (await p.listBackends()).value
     doAssert st.backends.len == 2
     for it in st.backends:
       doAssert it.alive
 
-  # Targeted teardown — save ctx before close() resets it.
   let bfCtx = uint32(bf.brokerCtx)
   let bmCtx = uint32(bm.brokerCtx)
   doAssert (await p.terminateBackend(bfCtx)).isOk
@@ -130,10 +125,7 @@ proc scenarioMixedOneContext() {.async: (raises: []).} =
     doAssert fileDead, "File backend should be terminated"
     doAssert memAlive, "Memory backend should still be alive"
 
-  # Sibling keeps working.
   doAssert (await roundtrip(bm, "y", "MEM-Y")) == "MEM-Y"
-
-  p.close()
 
 # ---------------------------------------------------------------------------
 # Scenario C: two backends under load — parallel chronos tasks.
@@ -143,7 +135,7 @@ proc scenarioConcurrentLoad() {.async: (raises: []).} =
   const N = 30
   echo "  [C] two backends under load, " & $N & " roundtrips each"
 
-  let p = PersistenceImpl.bindToContext(NewBrokerContext())
+  let p = newPersistence()
   discard await p.initializeRequest("cfg")
   let bf = (await p.makeBackend(KindFile)).value
   let bm = (await p.makeBackend(KindMemory)).value
@@ -186,8 +178,6 @@ proc scenarioConcurrentLoad() {.async: (raises: []).} =
     " roundtrips OK"
   doAssert okFile == N, "all File roundtrips correct under load"
   doAssert okMem == N, "all Memory roundtrips correct under load"
-
-  p.close()
 
 # ---------------------------------------------------------------------------
 
