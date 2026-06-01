@@ -722,3 +722,64 @@ suite "RequestBroker macro (multi-thread mode, void result)":
   asyncTest "void request errors when no provider set":
     let res = await MtVoidReq.request("x")
     check res.isErr()
+
+## ---------------------------------------------------------------------------
+## Multi-thread RequestBroker — proc-sugar with a literal `void` payload
+##
+## Unlike `type X = void` (lowered to a unit object), the proc-sugar keeps the
+## payload as literal `void`, so the public surface resolves to
+## `Result[void, string]`. The MT binary response codec special-cases this:
+## only the ok/err byte (+ error string) traverses the wire, no value.
+## ---------------------------------------------------------------------------
+
+RequestBroker(mt):
+  proc SugarVoid(label: string): Future[Result[void, string]] {.async.}
+
+var gSugarVoidOk: Atomic[bool]
+var gSugarVoidDone: Atomic[bool]
+
+proc sugarVoidRequester() {.thread.} =
+  let res = waitFor SugarVoid.request("go")
+  gSugarVoidOk.store(res.isOk())
+  gSugarVoidDone.store(true)
+
+suite "RequestBroker macro (multi-thread mode, sugar void result)":
+  asyncTest "same-thread sugar void request — ok and err paths":
+    check SugarVoid
+      .setProvider(
+        proc(label: string): Future[Result[void, string]] {.async.} =
+          if label.len == 0:
+            err("empty label")
+          else:
+            ok()
+      )
+      .isOk()
+
+    let okRes = await SugarVoid.request("go")
+    check okRes.isOk()
+
+    let errRes = await SugarVoid.request("")
+    check errRes.isErr()
+    check errRes.error == "empty label"
+
+    SugarVoid.clearProvider()
+
+  asyncTest "cross-thread sugar void request exercises the response codec":
+    check SugarVoid
+      .setProvider(
+        proc(label: string): Future[Result[void, string]] {.async.} =
+          ok()
+      )
+      .isOk()
+
+    gSugarVoidDone.store(false)
+    var t: Thread[void]
+    t.createThread(sugarVoidRequester)
+
+    while not gSugarVoidDone.load():
+      await sleepAsync(10.milliseconds)
+
+    t.joinThread()
+    check gSugarVoidOk.load()
+
+    SugarVoid.clearProvider()

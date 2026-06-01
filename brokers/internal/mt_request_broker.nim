@@ -368,9 +368,10 @@ proc generateMtRequestBroker*(
         buf[pos] = isOk
         pos += 1
         if res.isOk:
-          let val = res.value
-          if not mtMarshalValue(buf, cap, val, pos):
-            return -1
+          when not (`payloadType` is void):
+            let val = res.value
+            if not mtMarshalValue(buf, cap, val, pos):
+              return -1
         else:
           let errMsg = res.error
           if not mtMarshalValue(buf, cap, errMsg, pos):
@@ -388,10 +389,13 @@ proc generateMtRequestBroker*(
         let isOk = buf[pos]
         pos += 1
         if isOk == 1'u8:
-          var val: `payloadType`
-          if not mtUnmarshalValue(buf, len, val, pos):
-            return false
-          dst = ok(Result[`payloadType`, string], val)
+          when (`payloadType` is void):
+            dst.ok()
+          else:
+            var val: `payloadType`
+            if not mtUnmarshalValue(buf, len, val, pos):
+              return false
+            dst = ok(Result[`payloadType`, string], val)
         else:
           var errMsg: string
           if not mtUnmarshalValue(buf, len, errMsg, pos):
@@ -406,7 +410,8 @@ proc generateMtRequestBroker*(
         ## (1 isOk byte + value-or-error). Used to size a heap-spill buffer.
         result = 1
         if res.isOk:
-          result += mtMarshalSizeValue(res.value)
+          when not (`payloadType` is void):
+            result += mtMarshalSizeValue(res.value)
         else:
           result += mtMarshalSizeValue(res.error)
 
@@ -608,22 +613,23 @@ proc generateMtRequestBroker*(
               )
             else:
               let providerRes = catchedRes.get()
-              if providerRes.isOk():
-                let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()) and
-                    not (typeof(resultValue) is string):
-                  if resultValue.isNil():
-                    `sendReplyIdent`(
-                      `poolIdent`,
-                      `msgIdent`.responseSlotIdx,
-                      `msgIdent`.requesterSignal,
-                      err(
-                        Result[`payloadType`, string],
-                        "RequestBroker(" & `typeNameLit` &
-                          "): provider returned nil result",
-                      ),
-                    )
-                    return
+              when not (`payloadType` is void):
+                if providerRes.isOk():
+                  let resultValue = providerRes.get()
+                  when compiles(resultValue.isNil()) and
+                      not (typeof(resultValue) is string):
+                    if resultValue.isNil():
+                      `sendReplyIdent`(
+                        `poolIdent`,
+                        `msgIdent`.responseSlotIdx,
+                        `msgIdent`.requesterSignal,
+                        err(
+                          Result[`payloadType`, string],
+                          "RequestBroker(" & `typeNameLit` &
+                            "): provider returned nil result",
+                        ),
+                      )
+                      return
               `sendReplyIdent`(
                 `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
@@ -672,22 +678,23 @@ proc generateMtRequestBroker*(
               )
             else:
               let providerRes = catchedRes.get()
-              if providerRes.isOk():
-                let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()) and
-                    not (typeof(resultValue) is string):
-                  if resultValue.isNil():
-                    `sendReplyIdent`(
-                      `poolIdent`,
-                      `msgIdent`.responseSlotIdx,
-                      `msgIdent`.requesterSignal,
-                      err(
-                        Result[`payloadType`, string],
-                        "RequestBroker(" & `typeNameLit` &
-                          "): provider returned nil result",
-                      ),
-                    )
-                    return
+              when not (`payloadType` is void):
+                if providerRes.isOk():
+                  let resultValue = providerRes.get()
+                  when compiles(resultValue.isNil()) and
+                      not (typeof(resultValue) is string):
+                    if resultValue.isNil():
+                      `sendReplyIdent`(
+                        `poolIdent`,
+                        `msgIdent`.responseSlotIdx,
+                        `msgIdent`.requesterSignal,
+                        err(
+                          Result[`payloadType`, string],
+                          "RequestBroker(" & `typeNameLit` &
+                            "): provider returned nil result",
+                        ),
+                      )
+                      return
               `sendReplyIdent`(
                 `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
