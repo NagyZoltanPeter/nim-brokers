@@ -213,20 +213,74 @@ proc mtUnmarshalValue*[T](
     {.error: "mt broker payload field type is unsupported by mtUnmarshalValue: " & $T.}
 
 # ---------------------------------------------------------------------------
+# Marshal-size companion — pure byte-count walk, no writes.
+#
+# Mirrors mtMarshalValue exactly so the heap-spill path (flexible-mt-dispatch
+# Part 2) can size an exact `allocShared0` buffer in one pass when a payload
+# overflows the fixed slab cell. MUST stay structurally in lockstep with
+# mtMarshalValue: every branch that advances `pos` there adds the same count
+# here. Returns the marshaled byte length.
+# ---------------------------------------------------------------------------
+
+proc mtMarshalSizeValue*[T](value: T): int {.gcsafe.}
+
+proc mtMarshalSizeSeq*[U](value: openArray[U]): int {.gcsafe.} =
+  mixin mtMarshalSizeValue
+  result = 4 # length prefix
+  when supportsCopyMem(U):
+    result += value.len * sizeof(U)
+  else:
+    for e in value:
+      result += mtMarshalSizeValue(e)
+
+proc mtMarshalSizeValue*[T](value: T): int {.gcsafe.} =
+  mixin mtMarshalSizeValue
+  when T is ref:
+    when compiles(value.brokerCtx):
+      return sizeof(pointer)
+    else:
+      {.error: "mt broker payload field type is unsupported (ref T): " & $T.}
+  elif supportsCopyMem(T):
+    return sizeof(T)
+  elif T is string:
+    return 4 + value.len
+  elif T is seq:
+    return mtMarshalSizeSeq(value)
+  elif T is array:
+    result = 0
+    for i in 0 ..< value.len:
+      result += mtMarshalSizeValue(value[i])
+  elif T is (object or tuple):
+    result = 0
+    for _, fval in fieldPairs(value):
+      result += mtMarshalSizeValue(fval)
+  elif T is distinct:
+    var base = distinctBase(value)
+    return mtMarshalSizeValue(base)
+  else:
+    {.
+      error: "mt broker payload field type is unsupported by mtMarshalSizeValue: " & $T
+    .}
+
+# ---------------------------------------------------------------------------
 # Per-type wrapper proc generation (called from broker macros)
 # ---------------------------------------------------------------------------
 
 proc genMtCodecProcs*(
     marshalIdent, unmarshalIdent: NimNode, typeIdent: NimNode
 ): seq[NimNode] =
-  ## Emits per-type marshal/unmarshal wrappers that bottom out to the
-  ## generic primitives above. Two procs returned: [marshalProc, unmarshalProc].
+  ## Emits per-type marshal/unmarshal/size wrappers that bottom out to the
+  ## generic primitives above. Three procs returned:
+  ## [marshalProc, unmarshalProc, sizeProc]. The size proc is named
+  ## `<marshalIdent>Size` and returns the exact marshaled byte length (used by
+  ## the heap-spill path to size an allocShared0 buffer in one pass).
   let bufIdent = ident("buf")
   let capIdent = ident("cap")
   let lenIdent = ident("len")
   let valueIdent = ident("value")
   let dstIdent = ident("dst")
   let posIdent = ident("pos")
+  let sizeIdent = ident($marshalIdent & "Size")
 
   let marshalProc = quote:
     proc `marshalIdent`(
@@ -246,4 +300,8 @@ proc genMtCodecProcs*(
       var `posIdent` = 0
       return mtUnmarshalValue(`bufIdent`, `lenIdent`, `dstIdent`, `posIdent`)
 
-  @[marshalProc, unmarshalProc]
+  let sizeProc = quote:
+    proc `sizeIdent`(`valueIdent`: `typeIdent`): int {.gcsafe, raises: [].} =
+      mtMarshalSizeValue(`valueIdent`)
+
+  @[marshalProc, unmarshalProc, sizeProc]

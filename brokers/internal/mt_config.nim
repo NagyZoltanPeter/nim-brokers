@@ -21,24 +21,32 @@ type
     queueDepth*: int ## ring slots per listener bucket (power-of-2)
     slabCapacity*: int ## global slab cell count
     maxPayloadBytes*: int ## per-cell payload bytes
+    maxDynamicPayloadBytes*: int
+      ## ceiling for an auto-spilled (heap) payload that exceeds the fixed cell.
+      ## Spill is always-on; this is a dev-chosen sanity cap, default high(uint32)
+      ## (effectively unbounded). A payload above it is dropped (OOM/DoS backstop).
     freeListShards*: int ## sharded free-list partitions
     # Provenance — for the compile-time printout. "default" / "kwarg" /
     # "preset:<name>" / "auto:<reason>".
     queueDepthOrigin*: string
     slabCapacityOrigin*: string
     maxPayloadBytesOrigin*: string
+    maxDynamicPayloadBytesOrigin*: string
     freeListShardsOrigin*: string
 
   MtReqCfg* = object ## Resolved RequestBroker(mt) capacity config.
     queueDepth*: int
     slabCapacity*: int
     maxPayloadBytes*: int
+    maxDynamicPayloadBytes*: int
+      ## ceiling for an auto-spilled request OR response payload. See MtEvtCfg.
     responseSlots*: int
     maxResponseBytes*: int
     freeListShards*: int
     queueDepthOrigin*: string
     slabCapacityOrigin*: string
     maxPayloadBytesOrigin*: string
+    maxDynamicPayloadBytesOrigin*: string
     responseSlotsOrigin*: string
     maxResponseBytesOrigin*: string
     freeListShardsOrigin*: string
@@ -48,6 +56,11 @@ type
 # ---------------------------------------------------------------------------
 
 const
+  # Default ceiling for heap-spilled payloads. high(uint32) ≈ 4 GiB — also the
+  # intrinsic cap, since the cell/slot spill-length fields are uint32. Spill is
+  # always-on; this only bounds how large a single spill may grow.
+  DefaultMtMaxDynamicPayloadBytes* = int(high(uint32))
+
   DefaultMtEvtQueueDepth* = 256
   DefaultMtEvtSlabCapacity* = 1024
   DefaultMtEvtMaxPayloadBytes* = 1024
@@ -163,10 +176,12 @@ proc defaultMtEvtCfg*(): MtEvtCfg =
     queueDepth: DefaultMtEvtQueueDepth,
     slabCapacity: DefaultMtEvtSlabCapacity,
     maxPayloadBytes: DefaultMtEvtMaxPayloadBytes,
+    maxDynamicPayloadBytes: DefaultMtMaxDynamicPayloadBytes,
     freeListShards: DefaultMtEvtFreeListShards,
     queueDepthOrigin: "default",
     slabCapacityOrigin: "default",
     maxPayloadBytesOrigin: "default",
+    maxDynamicPayloadBytesOrigin: "default",
     freeListShardsOrigin: "default",
   )
 
@@ -175,12 +190,14 @@ proc defaultMtReqCfg*(): MtReqCfg =
     queueDepth: DefaultMtReqQueueDepth,
     slabCapacity: DefaultMtReqSlabCapacity,
     maxPayloadBytes: DefaultMtReqMaxPayloadBytes,
+    maxDynamicPayloadBytes: DefaultMtMaxDynamicPayloadBytes,
     responseSlots: DefaultMtReqResponseSlots,
     maxResponseBytes: DefaultMtReqMaxResponseBytes,
     freeListShards: DefaultMtReqFreeListShards,
     queueDepthOrigin: "default",
     slabCapacityOrigin: "default",
     maxPayloadBytesOrigin: "default",
+    maxDynamicPayloadBytesOrigin: "default",
     responseSlotsOrigin: "default",
     maxResponseBytesOrigin: "default",
     freeListShardsOrigin: "default",
@@ -208,8 +225,10 @@ proc intValOrFail(n: NimNode, kw: string): int =
 # Kwarg parsing — EventBroker(mt)
 # ---------------------------------------------------------------------------
 
-const ValidEvtKwargs =
-  ["queueDepth", "slabCapacity", "maxPayloadBytes", "freeListShards"]
+const ValidEvtKwargs = [
+  "queueDepth", "slabCapacity", "maxPayloadBytes", "maxDynamicPayloadBytes",
+  "freeListShards",
+]
 
 proc applyEvtKwarg(cfg: var MtEvtCfg, kw: string, n: NimNode) =
   case kw
@@ -231,6 +250,16 @@ proc applyEvtKwarg(cfg: var MtEvtCfg, kw: string, n: NimNode) =
       error("EventBroker kwarg 'maxPayloadBytes' must be > 0, got " & $v, n)
     cfg.maxPayloadBytes = v
     cfg.maxPayloadBytesOrigin = "kwarg"
+  of "maxDynamicPayloadBytes":
+    let v = intValOrFail(n, kw)
+    if v <= 0 or v > int(high(uint32)):
+      error(
+        "EventBroker kwarg 'maxDynamicPayloadBytes' must be in 1..high(uint32), got " &
+          $v,
+        n,
+      )
+    cfg.maxDynamicPayloadBytes = v
+    cfg.maxDynamicPayloadBytesOrigin = "kwarg"
   of "freeListShards":
     let v = intValOrFail(n, kw)
     if v <= 0 or v > 64:
@@ -287,8 +316,8 @@ proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
 # ---------------------------------------------------------------------------
 
 const ValidReqKwargs = [
-  "queueDepth", "slabCapacity", "maxPayloadBytes", "responseSlots", "maxResponseBytes",
-  "freeListShards",
+  "queueDepth", "slabCapacity", "maxPayloadBytes", "maxDynamicPayloadBytes",
+  "responseSlots", "maxResponseBytes", "freeListShards",
 ]
 
 proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
@@ -311,6 +340,16 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
       error("RequestBroker kwarg 'maxPayloadBytes' must be > 0, got " & $v, n)
     cfg.maxPayloadBytes = v
     cfg.maxPayloadBytesOrigin = "kwarg"
+  of "maxDynamicPayloadBytes":
+    let v = intValOrFail(n, kw)
+    if v <= 0 or v > int(high(uint32)):
+      error(
+        "RequestBroker kwarg 'maxDynamicPayloadBytes' must be in 1..high(uint32), got " &
+          $v,
+        n,
+      )
+    cfg.maxDynamicPayloadBytes = v
+    cfg.maxDynamicPayloadBytesOrigin = "kwarg"
   of "responseSlots":
     let v = intValOrFail(n, kw)
     if v <= 0:

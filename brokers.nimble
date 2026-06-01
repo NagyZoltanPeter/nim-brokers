@@ -348,7 +348,7 @@ task test, "Run all single and multi-threaded broker tests":
 
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
-    "test_multi_thread_broker_configs",
+    "test_multi_thread_broker_configs", "test_mt_large_payload",
   ]
   for f in mtTests:
     for opt in [
