@@ -267,11 +267,13 @@ proc isEmpty*[T](ring: ptr VyukovMpscRing[T]): bool {.gcsafe.} =
 # ---------------------------------------------------------------------------
 #
 # Cell layout (computed at runtime, since payload bytes are variable-size):
-#   offset 0:  Atomic[int] refcount
-#   offset 8:  uint32 payloadSize  (inline marshaled bytes used)
-#   offset 16: payloadBytes[]      (payloadCap bytes; from slab.cellPayloadCap)
+#   CellHeader fields:  refcount (Atomic[int]), payloadSize (uint32),
+#                       overflowLen (uint32), overflow (pointer)
+#   then:               payloadBytes[]  (payloadCap bytes; from
+#                       slab.cellPayloadCap), starting at sizeof(CellHeader).
 # (cellStride is alignUp(sizeof(CellHeader) + payloadCap, 8), so the exact
-#  payload offset is always sizeof(CellHeader) regardless of field packing.)
+#  payload offset is always sizeof(CellHeader) regardless of field packing —
+#  do not assume a hard-coded offset, the header grew with the spill fields.)
 #
 # We address cells by index (uint32) so the free-list can ABA-tag indices
 # rather than pointers. Pointer access is via `slab.cellPtr(idx)`.

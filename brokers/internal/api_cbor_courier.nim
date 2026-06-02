@@ -172,12 +172,18 @@ proc freeCborCourier*(c: ptr CborCourier) =
 # Cond handoff and the chronos coroutine spawn).
 # ---------------------------------------------------------------------------
 
-proc growRingLocked(r: ptr CborCallRing, newCap: int) =
+proc growRingLocked(r: ptr CborCallRing, newCap: int): bool =
   ## Grow the POD ring to `newCap` (> `r.cap`), linearising live elements.
   ## Caller MUST hold `r.lock`. Safe because `CborCallMsg` is pure POD and no
   ## thread holds a pointer into `buf` across the lock.
+  ##
+  ## Returns false — leaving the ring completely untouched — if the new buffer
+  ## cannot be allocated, so the caller can roll back the coordinated pool+ring
+  ## growth instead of dereferencing nil while holding the lock.
   let newBuf =
     cast[ptr UncheckedArray[CborCallMsg]](allocShared0(newCap * sizeof(CborCallMsg)))
+  if newBuf.isNil:
+    return false
   for i in 0 ..< r.count:
     newBuf[i] = r.buf[(r.head + i) mod r.cap]
   deallocShared(r.buf)
@@ -185,6 +191,7 @@ proc growRingLocked(r: ptr CborCallRing, newCap: int) =
   r.head = 0
   r.tail = r.count
   r.cap = newCap
+  true
 
 proc tryEnqueue*(r: ptr CborCallRing, msg: CborCallMsg): bool =
   ## Multi-producer. Returns false on full. A `_call` always claims a
@@ -272,18 +279,34 @@ proc claimSlot*(c: ptr CborCourier): int =
   let addLen = newCount - curCount
   let seg =
     cast[ptr UncheckedArray[CborRespSlot]](allocShared0(addLen * sizeof(CborRespSlot)))
+  if seg.isNil:
+    # OOM allocating the new slot segment: nothing has been mutated yet, so
+    # release the lock and retain the refusal (drop) contract rather than
+    # crashing in initLock/initCond.
+    release(c.ring.lock)
+    return -1
   for i in 0 ..< addLen:
     initLock(seg[i].lock)
     initCond(seg[i].cond)
     seg[i].inUse.store(0, moRelaxed)
-  # Claim slot 0 of the new segment BEFORE publishing it, so no concurrent
-  # scanner can race us for it.
+  # Grow the ring in step BEFORE committing any pool state. If the ring buffer
+  # can't be allocated, roll back the freshly-built segment (nothing has been
+  # published — slotCount/segs/nSegs are untouched and the ring is left intact)
+  # and retain the refusal contract.
+  if not growRingLocked(addr c.ring, newCount):
+    for i in 0 ..< addLen:
+      deinitCond(seg[i].cond)
+      deinitLock(seg[i].lock)
+    deallocShared(seg)
+    release(c.ring.lock)
+    return -1
+  # Ring grown; the pool+ring growth is guaranteed to complete. Claim slot 0 of
+  # the new segment BEFORE publishing it, so no concurrent scanner can race us.
   var expected = 0
   discard seg[0].inUse.compareExchange(expected, 1, moAcquire, moRelaxed)
   initClaimedSlot(addr seg[0])
   c.segs[segIdx] = CborSlotSegment(slots: seg, base: curCount, len: addLen)
-  c.slotCount = newCount
-  growRingLocked(addr c.ring, newCount) # keep ring cap == live slot count
+  c.slotCount = newCount # ring cap already == newCount
   c.nSegs.store(segIdx + 1, moRelease) # publish last
   release(c.ring.lock)
   curCount # global index of seg[0], already claimed

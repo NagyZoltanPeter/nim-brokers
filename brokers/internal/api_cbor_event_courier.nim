@@ -136,6 +136,11 @@ proc tryEnqueue*(r: ptr CborEventRing, msg: CborEventMsg): bool =
     let newBuf = cast[ptr UncheckedArray[CborEventMsg]](allocShared0(
       newCap * sizeof(CborEventMsg)
     ))
+    if newBuf.isNil:
+      # OOM: keep the existing buffer untouched and fall back to the drop
+      # contract (same as hitting the ceiling) rather than dereferencing nil.
+      release(r.lock)
+      return false
     for i in 0 ..< r.count:
       newBuf[i] = r.buf[(r.head + i) mod r.cap]
     deallocShared(r.buf)
