@@ -3,6 +3,101 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.1.1] — 2026-06-02
+
+**Flexible MT payload sizing, dynamic CBOR courier growth, `void`-"payload"
+for RequestBroker's proc-syntax-sugar, pure-Nim persistence example.**
+
+### Added — Multi-thread brokers
+
+- **Flexible MT payload sizing — `uint32` size fields + automatic
+  heap-spill** (`mt_queue.nim`, `mt_codec.nim`, `mt_config.nim`,
+  `mt_event_broker.nim`, `mt_request_broker.nim`). `CellHeader.payloadSize`
+  and `ResponseSlotHeader.payloadSize` widened from `uint16` to `uint32`
+  (the previous 64 KiB ceiling silently wrapped — the `largePayload` preset
+  stored `payloadSize = 0`). When a marshaled payload exceeds the fixed
+  slab cell, the producer spills the bytes to an `allocShared0` buffer
+  referenced via new `CellHeader.overflow` / `overflowLen` fields
+  (symmetric on `ResponseSlotHeader`). The MPSC ring still carries the
+  `uint32` cell index unchanged. Spill is always-on, gated only by a new
+  `maxDynamicPayloadBytes` kwarg (default `high(uint32)`) as an OOM/DoS
+  backstop. New `mtMarshalSizeValue` + per-type `<T>MtMarshalSize`
+  companions size the spill buffer in one pass. The common fits-the-cell
+  path is unchanged and allocator-free. Verified via
+  `test/test_mt_large_payload.nim` (1.5 MiB inline + spill for
+  event/request/response + over-ceiling drop) green on orc/refc × debug/
+  release; ASAN clean.
+
+### Added — RequestBroker
+
+- **`void` payload in proc-sugar form** across single-thread, MT, and API
+  brokers. `RequestBroker: proc f(...): Future[Result[void, string]]` (and its `sync`
+  variant) now lowers correctly through every dispatch path: the MT binary
+  response codec guards the four payload-value touches
+  (`marshalResp` / `unmarshalResp` / `marshalRespSize` / same-thread
+  nil-check) with `when (payloadType is void)`, and the API/CBOR adapter
+  bridges the `void` Result to a `CborUnit` envelope (bit-for-bit
+  identical to the legacy `type X = void` wire form).
+
+### Added — Examples
+
+- **Pure-Nim persistence example** (`examples/persistence/nim_example/`).
+  Replicates the three C++ scenarios (two contexts, mixed backends,
+  concurrent load) using broker interfaces directly — single-thread
+  chronos async, no FFI, no CBOR. Demonstrates the factory pattern:
+  `PersistenceFacade` registers a zero-arg `provideFactory` at module
+  init; the example uses `IPersistence.create()` and never imports any
+  concrete impl type. New `nimble runPersistenceExampleNim` task
+  (honours `MM=orc|refc`).
+
+### Fixed — FFI
+
+- **Dynamic growth for `CborCallRing` / `CborEventRing` via append-only
+  slot segments** (`api_cbor_courier.nim`, `api_cbor_event_courier.nim`,
+  `api_request_broker_cbor.nim`). Resolves #21. On response-slot-pool
+  exhaustion the pool now grows by *appending* a new segment rather than
+  reallocating one array — relocating a slot whose `Lock`/`Cond` a blocked
+  `_call` is waiting on would be a use-after-free. Append-only segments
+  keep every published slot address stable. Growth coordinates the slot
+  pool and the ring together under `ring.lock`, doubling up to a
+  `4 * origSlotCount` ceiling. A global slot index maps to its owning
+  segment via `slotAt`; claims scan the published segments lock-free.
+  Covered by new `test/test_api_courier_growth.nim`.
+- **Hardened CBOR courier growth paths against `allocShared0` OOM**.
+  `growRingLocked` now returns `bool` and leaves the ring untouched on
+  alloc failure. `claimSlot` nil-checks the new slot segment (release
+  lock + return `-1`, the refusal contract) and grows the ring *before*
+  committing any pool state — on ring OOM it rolls back the fresh segment
+  (deinit locks/conds, `deallocShared`) so `slotCount` / `segs` / `nSegs`
+  stay consistent. Event-courier path nil-checks the grown ring buffer
+  and falls back to the drop contract on OOM instead of nil-deref. Stale
+  `mt_queue` cell-layout comment corrected — payload now starts at
+  `sizeof(CellHeader)`, not offset 16.
+
+### Fixed — RequestBroker
+
+- **Single-thread `sync` keyed-overload ordering bug** uncovered by the
+  proc-sugar work (`request_broker.nim`). Pre-existing — surfaced when
+  exercising sync sugar via `test/test_request_broker_sync_void.nim`.
+
+### Changed
+
+- **Design docs relocated** to `doc/design/` (`Event_Dispatch_Options.md`,
+  `HIERARCHICAL_BROKERS_PLAN.md`, `HIERARCHICAL_BROKERS_DEFERRED.md`,
+  `HIERARCHICAL_BROKERS_REDUCED_A_PLAN.md`,
+  `PLAN_global_subscount_teardown_fix.md`). New
+  `doc/FLEXIBLE_MT_DISPATCH_PLAN.md` documents the spill design.
+
+### Tests
+
+- `test/test_mt_large_payload.nim` — 1.5 MiB inline + spill matrix for
+  event/request/response + over-ceiling drop.
+- `test/test_api_courier_growth.nim` — pool + ring growth coverage.
+- `test/test_request_broker_sync_void.nim` — sync `void`-payload
+  proc-sugar regression suite.
+- New `void`-payload cases in `test/test_request_broker.nim` and
+  `test/test_multi_thread_request_broker.nim`.
+
 ## [3.1.0] — 2026-05-28
 
 **Hierarchical / OOP brokers — `BrokerInterface`, `BrokerImplement`,
