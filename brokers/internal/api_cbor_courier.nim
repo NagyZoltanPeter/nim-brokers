@@ -39,6 +39,11 @@ const CborApiNameMax* = 256
   ## the message self-describing and avoids a separate id table that could
   ## silently desync from the dispatch `case`.
 
+const CborMaxSlotSegments = 4
+  ## Doubling the slot pool from `origSlotCount` to the 4× ceiling appends at
+  ## most two segments beyond the initial one (N → +N → +2N), so three are
+  ## ever live; 4 leaves a margin.
+
 type
   CborCallMsg* = object
     ## Pure-POD message a foreign `_call` thread hands to the processing
@@ -82,13 +87,32 @@ type
     count: int ## guarded by `lock`
     lock: Lock
 
+  CborSlotSegment = object
+    ## One append-only block of response slots. Existing segments are never
+    ## moved or freed until teardown, so a foreign thread blocked in
+    ## `waitSlot` on a slot's `Cond` keeps a stable address. This is the
+    ## reason the pool grows by *appending* segments rather than
+    ## reallocating one array: relocating a slot whose `Lock`/`Cond` a
+    ## blocked `_call` is waiting on is a use-after-free.
+    slots: ptr UncheckedArray[CborRespSlot]
+    base: int ## global index of `slots[0]`
+    len: int ## number of slots in this segment
+
   CborCourier* = object
     ## One per library context. Lives in shared heap; created in
     ## `_createContext`, freed in `_shutdown` after the processing thread
     ## has joined and all in-flight `_call`s have drained.
     ring*: CborCallRing
-    slots: ptr UncheckedArray[CborRespSlot]
+    segs: array[CborMaxSlotSegments, CborSlotSegment]
+    nSegs: Atomic[int]
+      ## Live segment count. Published with `moRelease` after a new segment is
+      ## fully populated; the lock-free claim scan reads it with `moAcquire`.
+      ## Append-only — segments are never removed before teardown.
     slotCount: int
+      ## Total live slots across all segments. Read/written only under
+      ## `ring.lock` (growth coordinates the slot pool and the ring together).
+    origSlotCount: int
+      ## Set once at construction; the growth ceiling is `4 * origSlotCount`.
     inFlight*: Atomic[int]
       ## Count of `_call`s that passed the active-check but have not yet
       ## finished reading their slot. `_shutdown` waits for this to reach
@@ -101,9 +125,10 @@ type
 
 proc newCborCourier*(slotCount: int): ptr CborCourier =
   ## Allocate a courier with `slotCount` response slots. `slotCount` is the
-  ## ceiling on concurrent in-flight `_call`s; the request ring is sized
-  ## the same, so the slot pool gates the ring (a `_call` always claims a
-  ## slot before enqueuing, so the ring cannot overflow).
+  ## *initial* ceiling on concurrent in-flight `_call`s; the request ring is
+  ## sized the same, so the slot pool gates the ring (a `_call` always claims
+  ## a slot before enqueuing). On exhaustion the pool and ring grow together
+  ## by doubling, up to a hard ceiling of `4 * slotCount` — see `claimSlot`.
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
   c.ring.buf =
     cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))
@@ -112,14 +137,17 @@ proc newCborCourier*(slotCount: int): ptr CborCourier =
   c.ring.tail = 0
   c.ring.count = 0
   initLock(c.ring.lock)
+  c.origSlotCount = slotCount
   c.slotCount = slotCount
-  c.slots = cast[ptr UncheckedArray[CborRespSlot]](allocShared0(
+  let seg0 = cast[ptr UncheckedArray[CborRespSlot]](allocShared0(
     slotCount * sizeof(CborRespSlot)
   ))
   for i in 0 ..< slotCount:
-    initLock(c.slots[i].lock)
-    initCond(c.slots[i].cond)
-    c.slots[i].inUse.store(0, moRelaxed)
+    initLock(seg0[i].lock)
+    initCond(seg0[i].cond)
+    seg0[i].inUse.store(0, moRelaxed)
+  c.segs[0] = CborSlotSegment(slots: seg0, base: 0, len: slotCount)
+  c.nSegs.store(1, moRelease)
   c
 
 proc freeCborCourier*(c: ptr CborCourier) =
@@ -127,10 +155,12 @@ proc freeCborCourier*(c: ptr CborCourier) =
   ## has joined and `inFlight` has reached zero — see `_shutdown`.
   if c.isNil:
     return
-  for i in 0 ..< c.slotCount:
-    deinitCond(c.slots[i].cond)
-    deinitLock(c.slots[i].lock)
-  deallocShared(c.slots)
+  for s in 0 ..< c.nSegs.load(moAcquire):
+    let seg = addr c.segs[s]
+    for i in 0 ..< seg.len:
+      deinitCond(seg.slots[i].cond)
+      deinitLock(seg.slots[i].lock)
+    deallocShared(seg.slots)
   deinitLock(c.ring.lock)
   if not c.ring.buf.isNil:
     deallocShared(c.ring.buf)
@@ -142,10 +172,32 @@ proc freeCborCourier*(c: ptr CborCourier) =
 # Cond handoff and the chronos coroutine spawn).
 # ---------------------------------------------------------------------------
 
+proc growRingLocked(r: ptr CborCallRing, newCap: int): bool =
+  ## Grow the POD ring to `newCap` (> `r.cap`), linearising live elements.
+  ## Caller MUST hold `r.lock`. Safe because `CborCallMsg` is pure POD and no
+  ## thread holds a pointer into `buf` across the lock.
+  ##
+  ## Returns false — leaving the ring completely untouched — if the new buffer
+  ## cannot be allocated, so the caller can roll back the coordinated pool+ring
+  ## growth instead of dereferencing nil while holding the lock.
+  let newBuf =
+    cast[ptr UncheckedArray[CborCallMsg]](allocShared0(newCap * sizeof(CborCallMsg)))
+  if newBuf.isNil:
+    return false
+  for i in 0 ..< r.count:
+    newBuf[i] = r.buf[(r.head + i) mod r.cap]
+  deallocShared(r.buf)
+  r.buf = newBuf
+  r.head = 0
+  r.tail = r.count
+  r.cap = newCap
+  true
+
 proc tryEnqueue*(r: ptr CborCallRing, msg: CborCallMsg): bool =
-  ## Multi-producer. Returns false on full (no _call may be enqueued
-  ## without first claiming a response slot, and the ring is sized to
-  ## match `slotCount`, so a `false` here is a programming error).
+  ## Multi-producer. Returns false on full. A `_call` always claims a
+  ## response slot before enqueuing and the ring is grown in step with the
+  ## slot pool (see `claimSlot`), so the ring cap always matches the live
+  ## slot count and a `false` here is a programming error, not backpressure.
   acquire(r.lock)
   if r.count >= r.cap:
     release(r.lock)
@@ -172,32 +224,103 @@ proc tryDequeue*(r: ptr CborCallRing, dst: var CborCallMsg): bool =
 # Response slots
 # ---------------------------------------------------------------------------
 
-proc claimSlot*(c: ptr CborCourier): int =
-  ## Claim a free response slot. Returns its index, or -1 if the pool is
-  ## exhausted (more concurrent `_call`s than `slotCount`).
-  for i in 0 ..< c.slotCount:
-    var expected = 0
-    if c.slots[i].inUse.compareExchange(expected, 1, moAcquire, moRelaxed):
-      let s = addr c.slots[i]
-      acquire(s.lock)
-      s.ready = 0
-      s.respBuf = nil
-      s.respLen = 0
-      s.status = 0
-      release(s.lock)
-      return i
+proc slotAt(c: ptr CborCourier, idx: int): ptr CborRespSlot {.inline.} =
+  ## Map a global slot index to its slot in the owning segment. Segments are
+  ## append-only and never relocated, so a published index stays valid.
+  for s in 0 ..< c.nSegs.load(moAcquire):
+    let seg = addr c.segs[s]
+    if idx >= seg.base and idx < seg.base + seg.len:
+      return addr seg.slots[idx - seg.base]
+  nil
+
+proc initClaimedSlot(s: ptr CborRespSlot) {.inline.} =
+  acquire(s.lock)
+  s.ready = 0
+  s.respBuf = nil
+  s.respLen = 0
+  s.status = 0
+  release(s.lock)
+
+proc tryClaimScan(c: ptr CborCourier): int =
+  ## Scan all live slots for a free one; CAS-claim and reset it. Returns the
+  ## global index, or -1 if none free. Lock-free over the published segments.
+  for sgi in 0 ..< c.nSegs.load(moAcquire):
+    let seg = addr c.segs[sgi]
+    for i in 0 ..< seg.len:
+      var expected = 0
+      if seg.slots[i].inUse.compareExchange(expected, 1, moAcquire, moRelaxed):
+        initClaimedSlot(addr seg.slots[i])
+        return seg.base + i
   -1
+
+proc claimSlot*(c: ptr CborCourier): int =
+  ## Claim a free response slot. Returns its index, or -1 only when the pool
+  ## is at its `4 * origSlotCount` ceiling and fully in-use. On exhaustion
+  ## below the ceiling the pool grows by appending a new segment (existing
+  ## slots are never moved) and the ring grows in step — both under
+  ## `ring.lock`. Growth is the rare slow path.
+  let fast = tryClaimScan(c)
+  if fast >= 0:
+    return fast
+  # Pool exhausted. Coordinate growth under the ring lock.
+  acquire(c.ring.lock)
+  # Re-scan under the lock: a concurrent release or a concurrent grow may
+  # have produced a usable slot since the lock-free scan above.
+  let again = tryClaimScan(c)
+  if again >= 0:
+    release(c.ring.lock)
+    return again
+  let curCount = c.slotCount
+  let newCount = min(curCount * 2, c.origSlotCount * 4)
+  let segIdx = c.nSegs.load(moAcquire)
+  if newCount == curCount or segIdx >= CborMaxSlotSegments:
+    release(c.ring.lock) # at the ceiling — retain the drop contract
+    return -1
+  let addLen = newCount - curCount
+  let seg =
+    cast[ptr UncheckedArray[CborRespSlot]](allocShared0(addLen * sizeof(CborRespSlot)))
+  if seg.isNil:
+    # OOM allocating the new slot segment: nothing has been mutated yet, so
+    # release the lock and retain the refusal (drop) contract rather than
+    # crashing in initLock/initCond.
+    release(c.ring.lock)
+    return -1
+  for i in 0 ..< addLen:
+    initLock(seg[i].lock)
+    initCond(seg[i].cond)
+    seg[i].inUse.store(0, moRelaxed)
+  # Grow the ring in step BEFORE committing any pool state. If the ring buffer
+  # can't be allocated, roll back the freshly-built segment (nothing has been
+  # published — slotCount/segs/nSegs are untouched and the ring is left intact)
+  # and retain the refusal contract.
+  if not growRingLocked(addr c.ring, newCount):
+    for i in 0 ..< addLen:
+      deinitCond(seg[i].cond)
+      deinitLock(seg[i].lock)
+    deallocShared(seg)
+    release(c.ring.lock)
+    return -1
+  # Ring grown; the pool+ring growth is guaranteed to complete. Claim slot 0 of
+  # the new segment BEFORE publishing it, so no concurrent scanner can race us.
+  var expected = 0
+  discard seg[0].inUse.compareExchange(expected, 1, moAcquire, moRelaxed)
+  initClaimedSlot(addr seg[0])
+  c.segs[segIdx] = CborSlotSegment(slots: seg, base: curCount, len: addLen)
+  c.slotCount = newCount # ring cap already == newCount
+  c.nSegs.store(segIdx + 1, moRelease) # publish last
+  release(c.ring.lock)
+  curCount # global index of seg[0], already claimed
 
 proc releaseSlot*(c: ptr CborCourier, idx: int) =
   ## Return a slot to the free pool. Call only after `waitSlot` returned.
-  c.slots[idx].inUse.store(0, moRelease)
+  slotAt(c, idx).inUse.store(0, moRelease)
 
 proc completeSlot*(
     c: ptr CborCourier, idx: int, respBuf: pointer, respLen: int32, status: int32
 ) =
   ## Processing-thread side: publish a response and wake the waiting
   ## `_call`. `respBuf` ownership passes to the `_call` thread.
-  let s = addr c.slots[idx]
+  let s = slotAt(c, idx)
   acquire(s.lock)
   s.respBuf = respBuf
   s.respLen = respLen
@@ -211,7 +334,7 @@ proc waitSlot*(
 ): tuple[respBuf: pointer, respLen: int32, status: int32] =
   ## Foreign `_call` side: block until `completeSlot` publishes a response.
   ## Zero-fd blocking handoff via `Cond` — no busy-poll.
-  let s = addr c.slots[idx]
+  let s = slotAt(c, idx)
   acquire(s.lock)
   while s.ready == 0:
     wait(s.cond, s.lock)

@@ -785,3 +785,60 @@ suite "RequestBroker macro (void result type)":
     check res.error == "flag was false"
 
     VoidActionSync.clearProvider()
+
+## ---------------------------------------------------------------------------
+## Proc-sugar with a literal `void` payload (single-thread async + sync).
+##
+## Mirrors the `RequestBroker(sync): proc f(...): Result[void, string]` shape
+## the user asked for. Unlike `type X = void` (a unit object), the payload here
+## is literal `void`, so the public surface resolves to `Result[void, string]`.
+## ---------------------------------------------------------------------------
+
+RequestBroker:
+  proc SugarVoidAsync(label: string): Future[Result[void, string]] {.async.}
+
+RequestBroker(sync):
+  proc SugarVoidSync(flag: bool): Result[void, string]
+
+static:
+  doAssert typeof(SugarVoidAsync.request("x")) is Future[Result[void, string]]
+  doAssert typeof(SugarVoidSync.request(true)) is Result[void, string]
+
+suite "RequestBroker macro (proc-sugar void payload)":
+  test "async sugar void — ok and err paths":
+    check SugarVoidAsync
+      .setProvider(
+        proc(label: string): Future[Result[void, string]] {.async.} =
+          if label.len == 0:
+            err("empty label")
+          else:
+            ok()
+      )
+      .isOk()
+
+    check (waitFor SugarVoidAsync.request("go")).isOk()
+
+    let res = waitFor SugarVoidAsync.request("")
+    check res.isErr()
+    check res.error == "empty label"
+
+    SugarVoidAsync.clearProvider()
+
+  test "sync sugar void — ok and err paths":
+    check SugarVoidSync
+      .setProvider(
+        proc(flag: bool): Result[void, string] =
+          if flag:
+            ok()
+          else:
+            err("flag was false")
+      )
+      .isOk()
+
+    check SugarVoidSync.request(true).isOk()
+
+    let res = SugarVoidSync.request(false)
+    check res.isErr()
+    check res.error == "flag was false"
+
+    SugarVoidSync.clearProvider()

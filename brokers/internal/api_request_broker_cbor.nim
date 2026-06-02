@@ -206,27 +206,55 @@ proc emitArgsType(
 # ---------------------------------------------------------------------------
 
 proc emitZeroArgAdapter(
-    typeIdent: NimNode, payloadType: NimNode, adapterIdent: NimNode
+    typeIdent: NimNode, payloadType: NimNode, adapterIdent: NimNode, isVoid: bool
 ): NimNode {.compileTime.} =
   ## Adapter for a zero-argument request: ignore the input buffer, await
   ## the broker call, encode the response envelope. `typeIdent` is the
   ## dispatch tag; `payloadType` is the (decoupled) value type the request
   ## resolves to and the envelope carries.
-  quote:
-    proc `adapterIdent`*(
-        ctx: BrokerContext, reqBuf: seq[byte]
-    ): Future[seq[byte]] {.async: (raises: []), gcsafe.} =
-      discard reqBuf
-      let r = await `typeIdent`.request(ctx)
-      let envBytes = cborEncodeResultEnvelope(r)
-      if envBytes.isOk:
-        return envBytes.value
-      let errEnv = cborEncodeResultEnvelope(
-        Result[`payloadType`, string].err("response encode failed: " & envBytes.error)
-      )
-      if errEnv.isOk:
-        return errEnv.value
-      return @[]
+  ##
+  ## For a `void` payload the public broker resolves to `Result[void, string]`,
+  ## which has no `Option[void]`-encodable envelope. We bridge it to the wire
+  ## unit type `CborUnit` (a zero-field map `{}`), matching the legacy
+  ## `type X = void` form bit-for-bit.
+  if isVoid:
+    quote:
+      proc `adapterIdent`*(
+          ctx: BrokerContext, reqBuf: seq[byte]
+      ): Future[seq[byte]] {.async: (raises: []), gcsafe.} =
+        discard reqBuf
+        let r = await `typeIdent`.request(ctx)
+        let unitR =
+          if r.isOk:
+            Result[CborUnit, string].ok(CborUnit())
+          else:
+            Result[CborUnit, string].err(r.error)
+        let envBytes = cborEncodeResultEnvelope(unitR)
+        if envBytes.isOk:
+          return envBytes.value
+        let errEnv = cborEncodeResultEnvelope(
+          Result[CborUnit, string].err("response encode failed: " & envBytes.error)
+        )
+        if errEnv.isOk:
+          return errEnv.value
+        return @[]
+
+  else:
+    quote:
+      proc `adapterIdent`*(
+          ctx: BrokerContext, reqBuf: seq[byte]
+      ): Future[seq[byte]] {.async: (raises: []), gcsafe.} =
+        discard reqBuf
+        let r = await `typeIdent`.request(ctx)
+        let envBytes = cborEncodeResultEnvelope(r)
+        if envBytes.isOk:
+          return envBytes.value
+        let errEnv = cborEncodeResultEnvelope(
+          Result[`payloadType`, string].err("response encode failed: " & envBytes.error)
+        )
+        if errEnv.isOk:
+          return errEnv.value
+        return @[]
 
 proc emitArgAdapter(
     typeIdent: NimNode,
@@ -234,6 +262,7 @@ proc emitArgAdapter(
     adapterIdent: NimNode,
     argsTypeIdent: NimNode,
     argParams: seq[NimNode],
+    isVoid: bool,
 ): NimNode {.compileTime, raises: [ValueError].} =
   ## Adapter for an arg-based request. Decodes the request buffer into the
   ## synthesised `argsTypeIdent`, awaits the broker call with each field
@@ -266,22 +295,38 @@ proc emitArgAdapter(
     argList.add(", decoded." & f)
 
   let typeIdentName = $typeIdent
-  let payloadTypeName = payloadType.repr.strip()
+  # A `void` payload resolves to `Result[void, string]` (no encodable
+  # envelope); bridge it to the wire unit type `CborUnit`, matching the
+  # legacy `type X = void` form. Every envelope on this path then carries
+  # `CborUnit`, and the awaited result is converted before encoding.
+  let envTypeName =
+    if isVoid:
+      "CborUnit"
+    else:
+      payloadType.repr.strip()
   let argsTypeIdentName = $argsTypeIdent
   let adapterIdentName = $adapterIdent
+
+  let encodeRespSrc =
+    if isVoid:
+      "  let unitR =\n" & "    if r.isOk: Result[CborUnit, string].ok(CborUnit())\n" &
+        "    else: Result[CborUnit, string].err(r.error)\n" &
+        "  let envBytes = cborEncodeResultEnvelope(unitR)\n"
+    else:
+      "  let envBytes = cborEncodeResultEnvelope(r)\n"
 
   let src =
     "proc " & adapterIdentName & "*(\n" & "    ctx: BrokerContext, reqBuf: seq[byte]\n" &
     "): Future[seq[byte]] {.async: (raises: []), gcsafe.} =\n" &
     "  let decRes = cborDecode(reqBuf, " & argsTypeIdentName & ")\n" &
     "  if decRes.isErr:\n" & "    let errEnv = cborEncodeResultEnvelope(\n" &
-    "      Result[" & payloadTypeName &
+    "      Result[" & envTypeName &
     ", string].err(\"request decode failed: \" & decRes.error)\n" & "    )\n" &
     "    if errEnv.isOk:\n" & "      return errEnv.value\n" & "    return @[]\n" &
     "  let decoded = decRes.value\n" & "  let r = await " & typeIdentName &
-    ".request(ctx" & argList & ")\n" & "  let envBytes = cborEncodeResultEnvelope(r)\n" &
-    "  if envBytes.isOk:\n" & "    return envBytes.value\n" &
-    "  let errEnv = cborEncodeResultEnvelope(\n" & "    Result[" & payloadTypeName &
+    ".request(ctx" & argList & ")\n" & encodeRespSrc & "  if envBytes.isOk:\n" &
+    "    return envBytes.value\n" & "  let errEnv = cborEncodeResultEnvelope(\n" &
+    "    Result[" & envTypeName &
     ", string].err(\"response encode failed: \" & envBytes.error)\n" & "  )\n" &
     "  if errEnv.isOk:\n" & "    return errEnv.value\n" & "  return @[]\n"
 
@@ -483,7 +528,9 @@ proc generateApiCborRequestBrokerImpl(
     if returnsIface.len > 0:
       result.add(emitZeroArgInstanceAdapter(typeIdent, adapterIdent))
     else:
-      result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
+      result.add(
+        emitZeroArgAdapter(typeIdent, payloadType, adapterIdent, parsed.isVoid)
+      )
     registerCborRequestEntry(
       apiName, $adapterIdent, typeName, @[], returnsInterface = returnsIface
     )
@@ -495,7 +542,9 @@ proc generateApiCborRequestBrokerImpl(
     if returnsIface.len > 0:
       result.add(emitZeroArgInstanceAdapter(typeIdent, adapterIdent))
     else:
-      result.add(emitZeroArgAdapter(typeIdent, payloadType, adapterIdent))
+      result.add(
+        emitZeroArgAdapter(typeIdent, payloadType, adapterIdent, parsed.isVoid)
+      )
     registerCborRequestEntry(
       apiName & zeroApiSuffix,
       $adapterIdent,
@@ -515,7 +564,9 @@ proc generateApiCborRequestBrokerImpl(
       )
     else:
       result.add(
-        emitArgAdapter(typeIdent, payloadType, adapterIdent, argsTypeIdent, argParams)
+        emitArgAdapter(
+          typeIdent, payloadType, adapterIdent, argsTypeIdent, argParams, parsed.isVoid
+        )
       )
     let fields = paramFields(argParams)
     registerCborRequestEntry(

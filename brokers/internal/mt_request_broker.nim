@@ -232,12 +232,15 @@ proc generateMtRequestBroker*(
   let shardHintIdent = ident("shardHint" & typeDisplayName)
   let marshalIdent = ident(typeDisplayName & "MtMarshal")
   let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
+  let marshalSizeIdent = ident(typeDisplayName & "MtMarshalSize")
   let marshalRespIdent = ident(typeDisplayName & "MtMarshalResp")
   let unmarshalRespIdent = ident(typeDisplayName & "MtUnmarshalResp")
+  let marshalRespSizeIdent = ident(typeDisplayName & "MtMarshalRespSize")
 
   let queueDepthLit = newLit(cfg.queueDepth)
   let slabCapacityLit = newLit(cfg.slabCapacity)
   let payloadBytesLit = newLit(cfg.maxPayloadBytes)
+  let maxDynPayloadLit = newLit(cfg.maxDynamicPayloadBytes)
   let responseSlotsLit = newLit(cfg.responseSlots)
   let responseBytesLit = newLit(cfg.maxResponseBytes)
   let freeListShardsLit = newLit(uint32(cfg.freeListShards))
@@ -365,9 +368,10 @@ proc generateMtRequestBroker*(
         buf[pos] = isOk
         pos += 1
         if res.isOk:
-          let val = res.value
-          if not mtMarshalValue(buf, cap, val, pos):
-            return -1
+          when not (`payloadType` is void):
+            let val = res.value
+            if not mtMarshalValue(buf, cap, val, pos):
+              return -1
         else:
           let errMsg = res.error
           if not mtMarshalValue(buf, cap, errMsg, pos):
@@ -385,16 +389,31 @@ proc generateMtRequestBroker*(
         let isOk = buf[pos]
         pos += 1
         if isOk == 1'u8:
-          var val: `payloadType`
-          if not mtUnmarshalValue(buf, len, val, pos):
-            return false
-          dst = ok(Result[`payloadType`, string], val)
+          when (`payloadType` is void):
+            dst.ok()
+          else:
+            var val: `payloadType`
+            if not mtUnmarshalValue(buf, len, val, pos):
+              return false
+            dst = ok(Result[`payloadType`, string], val)
         else:
           var errMsg: string
           if not mtUnmarshalValue(buf, len, errMsg, pos):
             return false
           dst = err(Result[`payloadType`, string], errMsg)
         return true
+
+      proc `marshalRespSizeIdent`(
+          res: Result[`payloadType`, string]
+      ): int {.gcsafe, raises: [].} =
+        ## Exact marshaled byte length of a response — mirrors `marshalRespIdent`
+        ## (1 isOk byte + value-or-error). Used to size a heap-spill buffer.
+        result = 1
+        if res.isOk:
+          when not (`payloadType` is void):
+            result += mtMarshalSizeValue(res.value)
+        else:
+          result += mtMarshalSizeValue(res.error)
 
   )
 
@@ -503,26 +522,49 @@ proc generateMtRequestBroker*(
             `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), resp)
           except Exception:
             -1
-        if written < 0:
-          # Marshal overflow — record an err via commitWrite of an err
-          # message into the slot, then fall through.  In practice this
-          # path is rare: the response would only overflow if the broker
-          # type and error message are both unusually large.
-          let fallback =
-            err(Result[`payloadType`, string], "response too large to marshal")
-          let writtenFb =
+        if written >= 0:
+          pool[].commitWrite(slotIdx, uint32(written))
+        else:
+          # Response exceeded the inline slot — auto-spill onto the heap so the
+          # full response is delivered instead of replaced by an err. Falls back
+          # to an err only if the spill itself cannot be sized/allocated.
+          let needed =
             try:
-              `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), fallback)
+              `marshalRespSizeIdent`(resp)
             except Exception:
               -1
-          if writtenFb < 0:
-            # Last resort: commit zero bytes; requester will see an err on
-            # unmarshal failure path.
-            pool[].commitWrite(slotIdx, 0'u16)
-          else:
-            pool[].commitWrite(slotIdx, uint16(writtenFb))
-        else:
-          pool[].commitWrite(slotIdx, uint16(written))
+          var spilled = false
+          if needed >= 0 and needed <= `maxDynPayloadLit`:
+            let spillBuf = allocShared0(needed)
+            if not spillBuf.isNil:
+              let w2 =
+                try:
+                  `marshalRespIdent`(
+                    cast[ptr UncheckedArray[byte]](spillBuf), needed, resp
+                  )
+                except Exception:
+                  -1
+              if w2 < 0:
+                deallocShared(spillBuf)
+              else:
+                pool[].commitWriteOverflow(slotIdx, spillBuf, uint32(w2))
+                spilled = true
+          if not spilled:
+            # Could not spill (over ceiling / OOM / marshal error) — commit a
+            # compact err so the requester gets a clean failure, not garbage.
+            let fallback = err(
+              Result[`payloadType`, string],
+              "RequestBroker(" & `typeNameLit` & "): response too large to deliver",
+            )
+            let writtenFb =
+              try:
+                `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), fallback)
+              except Exception:
+                -1
+            if writtenFb < 0:
+              pool[].commitWrite(slotIdx, 0'u32)
+            else:
+              pool[].commitWrite(slotIdx, uint32(writtenFb))
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
 
@@ -571,22 +613,23 @@ proc generateMtRequestBroker*(
               )
             else:
               let providerRes = catchedRes.get()
-              if providerRes.isOk():
-                let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()) and
-                    not (typeof(resultValue) is string):
-                  if resultValue.isNil():
-                    `sendReplyIdent`(
-                      `poolIdent`,
-                      `msgIdent`.responseSlotIdx,
-                      `msgIdent`.requesterSignal,
-                      err(
-                        Result[`payloadType`, string],
-                        "RequestBroker(" & `typeNameLit` &
-                          "): provider returned nil result",
-                      ),
-                    )
-                    return
+              when not (`payloadType` is void):
+                if providerRes.isOk():
+                  let resultValue = providerRes.get()
+                  when compiles(resultValue.isNil()) and
+                      not (typeof(resultValue) is string):
+                    if resultValue.isNil():
+                      `sendReplyIdent`(
+                        `poolIdent`,
+                        `msgIdent`.responseSlotIdx,
+                        `msgIdent`.requesterSignal,
+                        err(
+                          Result[`payloadType`, string],
+                          "RequestBroker(" & `typeNameLit` &
+                            "): provider returned nil result",
+                        ),
+                      )
+                      return
               `sendReplyIdent`(
                 `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
@@ -635,22 +678,23 @@ proc generateMtRequestBroker*(
               )
             else:
               let providerRes = catchedRes.get()
-              if providerRes.isOk():
-                let resultValue = providerRes.get()
-                when compiles(resultValue.isNil()) and
-                    not (typeof(resultValue) is string):
-                  if resultValue.isNil():
-                    `sendReplyIdent`(
-                      `poolIdent`,
-                      `msgIdent`.responseSlotIdx,
-                      `msgIdent`.requesterSignal,
-                      err(
-                        Result[`payloadType`, string],
-                        "RequestBroker(" & `typeNameLit` &
-                          "): provider returned nil result",
-                      ),
-                    )
-                    return
+              when not (`payloadType` is void):
+                if providerRes.isOk():
+                  let resultValue = providerRes.get()
+                  when compiles(resultValue.isNil()) and
+                      not (typeof(resultValue) is string):
+                    if resultValue.isNil():
+                      `sendReplyIdent`(
+                        `poolIdent`,
+                        `msgIdent`.responseSlotIdx,
+                        `msgIdent`.requesterSignal,
+                        err(
+                          Result[`payloadType`, string],
+                          "RequestBroker(" & `typeNameLit` &
+                            "): provider returned nil result",
+                        ),
+                      )
+                      return
               `sendReplyIdent`(
                 `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
                 providerRes,
@@ -697,13 +741,14 @@ proc generateMtRequestBroker*(
                 enqueuePendingRingFree(capturedRing, capturedSlab, capturedPool)
                 return 2
               return 0
-            # Got a cell — unmarshal ReqMsg, dispatch.
+            # Got a cell — unmarshal ReqMsg, dispatch. dataPtr/dataLen resolve
+            # the heap-spill buffer when the request spilled, else inline.
             var msg: `requestMsgName`
-            let cellPtr = capturedSlab[].cellPtr(cellIdx)
-            let payloadPtr = capturedSlab[].cellPayloadPtr(cellIdx)
+            let payloadPtr = capturedSlab[].dataPtr(cellIdx)
+            let payloadLen = capturedSlab[].dataLen(cellIdx)
             let ok =
               try:
-                `unmarshalIdent`(payloadPtr, int(cellPtr.payloadSize), msg)
+                `unmarshalIdent`(payloadPtr, payloadLen, msg)
               except Exception:
                 false
             if ok:
@@ -900,11 +945,39 @@ proc generateMtRequestBroker*(
             `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
           except Exception:
             -1
-        if written < 0:
-          slab[].release(cellIdx, `shardHintIdent`())
-          pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): request payload too large")
-        cellPtr.payloadSize = uint16(written)
+        if written >= 0:
+          cellPtr.payloadSize = uint32(written)
+        else:
+          # Auto-spill the request onto the heap instead of failing.
+          let needed =
+            try:
+              `marshalSizeIdent`(msgCopy)
+            except Exception:
+              -1
+          if needed < 0 or needed > `maxDynPayloadLit`:
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): request payload exceeds maxDynamicPayloadBytes"
+            )
+          let spillBuf = allocShared0(needed)
+          if spillBuf.isNil:
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return
+              err("RequestBroker(" & `typeNameLit` & "): request spill alloc failed")
+          let w2 =
+            try:
+              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
+            except Exception:
+              -1
+          if w2 < 0:
+            deallocShared(spillBuf)
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return err("RequestBroker(" & `typeNameLit` & "): request marshal failed")
+          slab[].setOverflow(cellIdx, spillBuf, uint32(w2))
         cellPtr.refcount.store(1, moRelease)
         if not ring.tryEnqueue(cellIdx):
           slab[].release(cellIdx, `shardHintIdent`())
@@ -927,11 +1000,11 @@ proc generateMtRequestBroker*(
               # This is the §2.2 fix: no cross-thread `=copy` of the typed
               # Result value.
               var decoded: Result[`payloadType`, string]
-              let payloadPtr = capturedPool[].slotPayloadPtr(capturedSlotIdx)
-              let payloadSize = capturedPool[].payloadSize(capturedSlotIdx)
+              let payloadPtr = capturedPool[].respDataPtr(capturedSlotIdx)
+              let payloadSize = capturedPool[].respDataLen(capturedSlotIdx)
               let ok =
                 try:
-                  `unmarshalRespIdent`(payloadPtr, int(payloadSize), decoded)
+                  `unmarshalRespIdent`(payloadPtr, payloadSize, decoded)
                 except Exception:
                   false
               if not ok:
@@ -999,11 +1072,39 @@ proc generateMtRequestBroker*(
             `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
           except Exception:
             -1
-        if written < 0:
-          slab[].release(cellIdx, `shardHintIdent`())
-          pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): request payload too large")
-        cellPtr.payloadSize = uint16(written)
+        if written >= 0:
+          cellPtr.payloadSize = uint32(written)
+        else:
+          # Auto-spill the request onto the heap instead of failing.
+          let needed =
+            try:
+              `marshalSizeIdent`(msgCopy)
+            except Exception:
+              -1
+          if needed < 0 or needed > `maxDynPayloadLit`:
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): request payload exceeds maxDynamicPayloadBytes"
+            )
+          let spillBuf = allocShared0(needed)
+          if spillBuf.isNil:
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return
+              err("RequestBroker(" & `typeNameLit` & "): request spill alloc failed")
+          let w2 =
+            try:
+              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
+            except Exception:
+              -1
+          if w2 < 0:
+            deallocShared(spillBuf)
+            slab[].release(cellIdx, `shardHintIdent`())
+            pool[].release(slotIdx, `shardHintIdent`())
+            return err("RequestBroker(" & `typeNameLit` & "): request marshal failed")
+          slab[].setOverflow(cellIdx, spillBuf, uint32(w2))
         cellPtr.refcount.store(1, moRelease)
         if not ring.tryEnqueue(cellIdx):
           slab[].release(cellIdx, `shardHintIdent`())
@@ -1015,11 +1116,11 @@ proc generateMtRequestBroker*(
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx):
             var decoded: Result[`payloadType`, string]
-            let payloadPtr = pool[].slotPayloadPtr(slotIdx)
-            let payloadSize = pool[].payloadSize(slotIdx)
+            let payloadPtr = pool[].respDataPtr(slotIdx)
+            let payloadSize = pool[].respDataLen(slotIdx)
             let ok =
               try:
-                `unmarshalRespIdent`(payloadPtr, int(payloadSize), decoded)
+                `unmarshalRespIdent`(payloadPtr, payloadSize, decoded)
               except Exception:
                 false
             pool[].release(slotIdx, `shardHintIdent`())
