@@ -9,6 +9,14 @@
 ##     thread (bucket-owner for per-bucket structures, global-slab-owner
 ##     for events). Hot path (claim / release / enqueue / dequeue) never
 ##     calls any Nim allocator.
+##     CARVE-OUT (flexible-mt-dispatch): when a marshaled payload exceeds the
+##     fixed cell, the producer `allocShared0`s a heap-spill buffer and the
+##     consumer-side `release` `deallocShared`s it. So the spill path DOES
+##     allocate on the hot path — a deliberate trade so oversized payloads
+##     (>cell, e.g. >1 MiB) succeed instead of being dropped. The common
+##     fits-the-cell path is unchanged and allocator-free. Spill buffers are
+##     POD bytes with single producer→consumer ownership, same cross-thread
+##     contract as `storage` itself.
 ## I1  Senders only execute: atomic load / store / CAS, memcpy into
 ##     pre-allocated cells, and `ThreadSignalPtr.fireSync()` (external).
 ## I2  The owner thread must outlive every structure it owns.
@@ -259,9 +267,13 @@ proc isEmpty*[T](ring: ptr VyukovMpscRing[T]): bool {.gcsafe.} =
 # ---------------------------------------------------------------------------
 #
 # Cell layout (computed at runtime, since payload bytes are variable-size):
-#   offset 0:  Atomic[int] refcount
-#   offset 8:  uint16 payloadSize  (marshaled bytes used)
-#   offset 12: payloadBytes[]      (payloadCap bytes; from slab.cellPayloadCap)
+#   CellHeader fields:  refcount (Atomic[int]), payloadSize (uint32),
+#                       overflowLen (uint32), overflow (pointer)
+#   then:               payloadBytes[]  (payloadCap bytes; from
+#                       slab.cellPayloadCap), starting at sizeof(CellHeader).
+# (cellStride is alignUp(sizeof(CellHeader) + payloadCap, 8), so the exact
+#  payload offset is always sizeof(CellHeader) regardless of field packing —
+#  do not assume a hard-coded offset, the header grew with the spill fields.)
 #
 # We address cells by index (uint32) so the free-list can ABA-tag indices
 # rather than pointers. Pointer access is via `slab.cellPtr(idx)`.
@@ -269,10 +281,16 @@ proc isEmpty*[T](ring: ptr VyukovMpscRing[T]): bool {.gcsafe.} =
 type
   CellHeader* = object
     refcount*: Atomic[int]
-    payloadSize*: uint16
-    pad: uint16
-      ## not currently used; preserves 8-byte alignment of the payload that
-      ## follows the header
+    payloadSize*: uint32
+      ## inline marshaled bytes used. uint32 (not uint16) so a configured cell
+      ## may exceed 64 KiB — broker messages can be >1 MiB. 0 when the payload
+      ## spilled to the heap (see `overflow`).
+    overflowLen*: uint32 ## spilled byte count; 0 when the payload fit inline.
+    overflow*: pointer
+      ## heap-spill buffer (`allocShared0`) when the marshaled payload exceeded
+      ## the fixed cell; `nil` on the inline fast path. Owned by the cell: freed
+      ## in `release` (refcount→0 chokepoint) and walked by `deinitPayloadSlab`.
+      ## POD bytes only — same cross-thread ownership contract as `storage`.
 
   PayloadSlab* = object
     capacity: uint32
@@ -306,15 +324,6 @@ proc initPayloadSlab*(
   for i in 0 ..< capacity:
     push(slab.freeList, i, i)
 
-proc deinitPayloadSlab*(slab: var PayloadSlab) {.gcsafe.} =
-  ## MUST be called on the owner thread after every outstanding cell has
-  ## been released (caller responsibility). Frees the slab's storage and
-  ## the free-list's internal arrays.
-  deinitShardedFreeList(slab.freeList)
-  if not slab.storage.isNil:
-    deallocShared(slab.storage)
-    slab.storage = nil
-
 proc cellPtr*(slab: PayloadSlab, idx: uint32): ptr CellHeader {.gcsafe.} =
   ## Returns the header pointer for the cell at `idx`. The payload bytes
   ## immediately follow the header (at `cast[ptr byte](header) +%
@@ -328,13 +337,67 @@ proc cellPayloadPtr*(
     int(idx) * int(slab.cellStride)
   ]) + uint(sizeof(CellHeader)))
 
+proc deinitPayloadSlab*(slab: var PayloadSlab) {.gcsafe.} =
+  ## MUST be called on the owner thread after every outstanding cell has
+  ## been released (caller responsibility). Frees the slab's storage and
+  ## the free-list's internal arrays. Also walks every cell to free any
+  ## heap-spill buffer still attached — covers shutdown / clearProvider with
+  ## undelivered in-flight cells (a cell closed before delivery never passes
+  ## through `release`, so its spill would otherwise leak).
+  if not slab.storage.isNil:
+    for i in 0'u32 ..< slab.capacity:
+      let cell = slab.cellPtr(i)
+      if not cell.overflow.isNil:
+        deallocShared(cell.overflow)
+        cell.overflow = nil
+        cell.overflowLen = 0
+  deinitShardedFreeList(slab.freeList)
+  if not slab.storage.isNil:
+    deallocShared(slab.storage)
+    slab.storage = nil
+
+proc setOverflow*(
+    slab: PayloadSlab, idx: uint32, buf: pointer, len: uint32
+) {.gcsafe.} =
+  ## Attach a heap-spill buffer to a cell (payload exceeded the inline cell).
+  ## The cell takes ownership; `release`/`deinitPayloadSlab` free it.
+  let cell = slab.cellPtr(idx)
+  cell.overflow = buf
+  cell.overflowLen = len
+  cell.payloadSize = 0
+
+proc dataPtr*(slab: PayloadSlab, idx: uint32): ptr UncheckedArray[byte] {.gcsafe.} =
+  ## Pointer to the marshaled bytes for a cell — the heap-spill buffer when the
+  ## payload spilled, else the inline payload region.
+  let cell = slab.cellPtr(idx)
+  if not cell.overflow.isNil:
+    cast[ptr UncheckedArray[byte]](cell.overflow)
+  else:
+    slab.cellPayloadPtr(idx)
+
+proc dataLen*(slab: PayloadSlab, idx: uint32): int {.gcsafe.} =
+  ## Marshaled byte count for a cell (spill length or inline payloadSize).
+  let cell = slab.cellPtr(idx)
+  if not cell.overflow.isNil:
+    int(cell.overflowLen)
+  else:
+    int(cell.payloadSize)
+
 proc claim*(slab: var PayloadSlab, shardHint: uint32): uint32 {.gcsafe.} =
   ## Returns a cell index or `EmptyIdx` if the slab is exhausted.
   pop(slab.freeList, shardHint)
 
 proc release*(slab: var PayloadSlab, idx: uint32, shardHint: uint32) {.gcsafe.} =
   ## Returns a cell to the free-list. Caller must ensure no other thread
-  ## still holds a reference (refcount == 0).
+  ## still holds a reference (refcount == 0). This is the single chokepoint a
+  ## cell passes through on its way back to the free-list (all delivery / drop /
+  ## error paths funnel here once refcount hits 0), so any heap-spill buffer is
+  ## freed here exactly once.
+  let cell = slab.cellPtr(idx)
+  if not cell.overflow.isNil:
+    deallocShared(cell.overflow)
+    cell.overflow = nil
+    cell.overflowLen = 0
   push(slab.freeList, idx, shardHint)
 
 proc incRef*(slab: PayloadSlab, idx: uint32) {.gcsafe.} =
@@ -373,8 +436,15 @@ type
 
   ResponseSlotHeader = object
     state: Atomic[uint8]
-    payloadSize: uint16
-    pad: array[5, byte] ## align payload bytes to 8
+    pad0: array[3, byte] ## align the uint32 payloadSize to a 4-byte boundary
+    payloadSize: uint32
+      ## uint32 (not uint16) so a response slot may exceed 64 KiB.
+      ## state(1) + pad0(3) + payloadSize(4) = 8 bytes → 8-aligned.
+    overflowLen: uint32 ## spilled response byte count; 0 when the response fit inline.
+    pad1: uint32 ## keep the pointer that follows 8-aligned (overflowLen at +8)
+    overflow: pointer
+      ## heap-spill buffer for an oversized response; `nil` inline. Owned by the
+      ## slot: freed in `release` and walked by `deinitResponseSlotPool`.
 
   ResponseSlotPool* = object
     capacity*: uint32
@@ -418,6 +488,15 @@ proc initResponseSlotPool*(
     push(pool.freeList, i, i)
 
 proc deinitResponseSlotPool*(pool: var ResponseSlotPool) {.gcsafe.} =
+  ## Walk every slot to free any heap-spill buffer still attached (shutdown
+  ## with an undelivered response), then free storage + free-list arrays.
+  if not pool.storage.isNil:
+    for i in 0'u32 ..< pool.capacity:
+      let hdr = pool.slotHeaderPtr(i)
+      if not hdr.overflow.isNil:
+        deallocShared(hdr.overflow)
+        hdr.overflow = nil
+        hdr.overflowLen = 0
   deinitShardedFreeList(pool.freeList)
   if not pool.storage.isNil:
     deallocShared(pool.storage)
@@ -428,10 +507,23 @@ proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
   if idx != EmptyIdx:
     let hdr = pool.slotHeaderPtr(idx)
     hdr.payloadSize = 0
+    # release() already frees+nils any spill, but defend against a slot that
+    # reached the free-list without passing release (it should not).
+    if not hdr.overflow.isNil:
+      deallocShared(hdr.overflow)
+      hdr.overflow = nil
+    hdr.overflowLen = 0
     hdr.state.store(uint8(ResponseState.Empty), moRelease)
   idx
 
 proc release*(pool: var ResponseSlotPool, idx: uint32, shardHint: uint32) {.gcsafe.} =
+  ## Single chokepoint a slot passes through back to the free-list (requester
+  ## after read, or provider on abandon). Free any heap-spill buffer here.
+  let hdr = pool.slotHeaderPtr(idx)
+  if not hdr.overflow.isNil:
+    deallocShared(hdr.overflow)
+    hdr.overflow = nil
+    hdr.overflowLen = 0
   push(pool.freeList, idx, shardHint)
 
 proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
@@ -443,13 +535,44 @@ proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
     expected, uint8(ResponseState.Writing), moAcquireRelease, moAcquire
   )
 
-proc commitWrite*(pool: ResponseSlotPool, idx: uint32, payloadSize: uint16) {.gcsafe.} =
+proc commitWrite*(pool: ResponseSlotPool, idx: uint32, payloadSize: uint32) {.gcsafe.} =
   ## Provider: finalize after writing payload bytes. Stores size + flips
   ## state to Ready (release-ordered, so the bytes-write is visible to
   ## any acquire-loader on the state).
   let hdr = pool.slotHeaderPtr(idx)
   hdr.payloadSize = payloadSize
   hdr.state.store(uint8(ResponseState.Ready), moRelease)
+
+proc commitWriteOverflow*(
+    pool: ResponseSlotPool, idx: uint32, buf: pointer, len: uint32
+) {.gcsafe.} =
+  ## Provider: finalize an oversized response that spilled to the heap. The
+  ## slot takes ownership of `buf` (freed in `release`/`deinitResponseSlotPool`).
+  ## Sets inline payloadSize = 0 and flips state to Ready (release-ordered so the
+  ## buffer pointer + the bytes it points to are visible to an acquire-loader).
+  let hdr = pool.slotHeaderPtr(idx)
+  hdr.overflow = buf
+  hdr.overflowLen = len
+  hdr.payloadSize = 0
+  hdr.state.store(uint8(ResponseState.Ready), moRelease)
+
+proc respDataPtr*(
+    pool: ResponseSlotPool, idx: uint32
+): ptr UncheckedArray[byte] {.gcsafe.} =
+  ## Pointer to the marshaled response bytes — spill buffer when spilled, else
+  ## the inline slot payload region.
+  let hdr = pool.slotHeaderPtr(idx)
+  if not hdr.overflow.isNil:
+    cast[ptr UncheckedArray[byte]](hdr.overflow)
+  else:
+    pool.slotPayloadPtr(idx)
+
+proc respDataLen*(pool: ResponseSlotPool, idx: uint32): int {.gcsafe.} =
+  let hdr = pool.slotHeaderPtr(idx)
+  if not hdr.overflow.isNil:
+    int(hdr.overflowLen)
+  else:
+    int(hdr.payloadSize)
 
 proc abandon*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
   ## Requester: CAS Empty→Abandoned. Returns true if abandonment took
@@ -465,5 +588,5 @@ proc abandon*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
 proc readyState*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
   pool.slotHeaderPtr(idx).state.load(moAcquire) == uint8(ResponseState.Ready)
 
-proc payloadSize*(pool: ResponseSlotPool, idx: uint32): uint16 {.gcsafe.} =
+proc payloadSize*(pool: ResponseSlotPool, idx: uint32): uint32 {.gcsafe.} =
   pool.slotHeaderPtr(idx).payloadSize

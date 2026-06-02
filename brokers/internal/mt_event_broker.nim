@@ -130,6 +130,7 @@ proc generateMtEventBroker*(
 
   let marshalIdent = ident(typeDisplayName & "MtMarshal")
   let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
+  let marshalSizeIdent = ident(typeDisplayName & "MtMarshalSize")
 
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
@@ -158,6 +159,7 @@ proc generateMtEventBroker*(
   let queueDepthLit = newLit(cfg.queueDepth)
   let slabCapacityLit = newLit(cfg.slabCapacity)
   let payloadBytesLit = newLit(cfg.maxPayloadBytes)
+  let maxDynPayloadLit = newLit(cfg.maxDynamicPayloadBytes)
   let freeListShardsLit = newLit(uint32(cfg.freeListShards))
 
   result = newStmtList()
@@ -360,13 +362,15 @@ proc generateMtEventBroker*(
               `clearListenersIdent`(capturedCtx)
               return 1
             else:
-              # Normal cell: decode, dispatch, decRef.
+              # Normal cell: decode, dispatch, decRef. dataPtr/dataLen resolve
+              # the heap-spill buffer when the payload spilled, else the inline
+              # cell region.
               var ev: `typeIdent`
-              let cellPtr = `globalSlabIdent`.cellPtr(cellIdx)
-              let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
+              let payloadPtr = `globalSlabIdent`.dataPtr(cellIdx)
+              let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
               let ok =
                 try:
-                  `unmarshalIdent`(payloadPtr, int(cellPtr.payloadSize), ev)
+                  `unmarshalIdent`(payloadPtr, payloadLen, ev)
                 except Exception:
                   false
               if ok:
@@ -548,12 +552,38 @@ proc generateMtEventBroker*(
             `marshalIdent`(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
           except Exception:
             -1
-        if written < 0:
-          error "event payload exceeds maxPayloadBytes",
-            eventType = `typeNameLit`, cap = `globalSlabIdent`.cellPayloadCap
-          `globalSlabIdent`.release(cellIdx, shardHint)
-          return
-        cell.payloadSize = uint16(written)
+        if written >= 0:
+          # Fast path: payload fit the fixed cell.
+          cell.payloadSize = uint32(written)
+        else:
+          # Auto-spill: payload exceeded the cell — marshal into an exact-size
+          # heap buffer instead of dropping. Owned by the cell; freed at release.
+          let needed =
+            try:
+              `marshalSizeIdent`(event)
+            except Exception:
+              -1
+          if needed < 0 or needed > `maxDynPayloadLit`:
+            error "event dropped: payload exceeds maxDynamicPayloadBytes",
+              eventType = `typeNameLit`, needed = needed, cap = `maxDynPayloadLit`
+            `globalSlabIdent`.release(cellIdx, shardHint)
+            return
+          let spillBuf = allocShared0(needed)
+          if spillBuf.isNil:
+            error "event dropped: spill allocation failed",
+              eventType = `typeNameLit`, needed = needed
+            `globalSlabIdent`.release(cellIdx, shardHint)
+            return
+          let w2 =
+            try:
+              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, event)
+            except Exception:
+              -1
+          if w2 < 0:
+            deallocShared(spillBuf)
+            `globalSlabIdent`.release(cellIdx, shardHint)
+            return
+          `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
         cell.refcount.store(crossTargets.len, moRelease)
 
         for target in crossTargets:

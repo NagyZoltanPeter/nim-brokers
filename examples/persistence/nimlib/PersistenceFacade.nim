@@ -5,7 +5,7 @@
 ## `listBackends` (state) + `terminateBackend` (targeted Nim-side teardown).
 
 import results, chronos
-import brokers/broker_interface, brokers/broker_implement
+import brokers/broker_context, brokers/broker_interface, brokers/broker_implement
 import ./PersistenceAPI, ./MemoryBackend, ./FileBackend
 
 type
@@ -81,3 +81,8 @@ BrokerImplement PersistenceImpl of IPersistence:
       self: PersistenceImpl
   ): Future[Result[ShutdownRequest, string]] {.async.} =
     ok(ShutdownRequest(status: 0))
+
+IPersistence.provideFactory(
+  proc(): Result[IPersistence, string] {.gcsafe.} =
+    ok(IPersistence(PersistenceImpl.bindToContext(NewBrokerContext())))
+)

@@ -580,15 +580,8 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
       )
     of rbSync:
-      result.add(
-        quote do:
-          proc request*(
-              _: typedesc[`typeIdent`]
-          ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
-            return request(`typeIdent`, DefaultBrokerContext)
-
-      )
-
+      # Keyed variant first — the forwarder below calls it, and `sync` bodies
+      # are sem-checked eagerly (no forward references for overloaded routines).
       result.add(
         quote do:
           proc request*(
@@ -630,6 +623,15 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                   )
             return providerRes
+
+      )
+
+      result.add(
+        quote do:
+          proc request*(
+              _: typedesc[`typeIdent`]
+          ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
+            return request(`typeIdent`, DefaultBrokerContext)
 
       )
   if not argSig.isNil():
@@ -722,17 +724,21 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
           return `forwardCall`
       )
 
-    result.add(
-      newTree(
-        nnkProcDef,
-        postfix(ident("request"), "*"),
-        newEmptyNode(),
-        newEmptyNode(),
-        formalParams,
-        requestPragmas,
-        newEmptyNode(),
-        requestBody,
-      )
+    # Built now, but added to `result` only *after* the keyed variant below:
+    # the forwarder's body calls the keyed `request`, and in `sync` mode the
+    # body is sem-checked eagerly, so the keyed overload must already be
+    # declared (Nim has no forward references for overloaded routines). Async
+    # tolerates either order because the `async` macro reprocesses the body
+    # after the surrounding scope is fully populated.
+    let nonKeyedRequestProc = newTree(
+      nnkProcDef,
+      postfix(ident("request"), "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      formalParams,
+      requestPragmas,
+      newEmptyNode(),
+      requestBody,
     )
 
     # Keyed request variant for the argument-based signature.
@@ -841,6 +847,9 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         requestBodyKeyed,
       )
     )
+
+    # Now the keyed overload is in scope for the forwarder's body.
+    result.add(nonKeyedRequestProc)
 
   block:
     var formalParamsClearKeyed = newTree(nnkFormalParams)

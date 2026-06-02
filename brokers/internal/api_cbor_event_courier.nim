@@ -63,6 +63,7 @@ type
     ## the producer thread exits before the consumer fully drains).
     buf: ptr UncheckedArray[CborEventMsg]
     cap: int
+    origCap: int ## set once at construction; growth ceiling is `4 * origCap`
     head: int ## next index the consumer reads
     tail: int ## next index a producer writes
     count: int ## guarded by `lock`
@@ -88,6 +89,7 @@ proc newCborEventCourier*(ringCap: int): ptr CborEventCourier =
   c.ring.buf =
     cast[ptr UncheckedArray[CborEventMsg]](allocShared0(ringCap * sizeof(CborEventMsg)))
   c.ring.cap = ringCap
+  c.ring.origCap = ringCap
   c.ring.head = 0
   c.ring.tail = 0
   c.ring.count = 0
@@ -125,8 +127,27 @@ proc tryEnqueue*(r: ptr CborEventRing, msg: CborEventMsg): bool =
   ## entered the ring, so the ring never took ownership).
   acquire(r.lock)
   if r.count >= r.cap:
-    release(r.lock)
-    return false
+    # Full: grow by doubling, up to a hard ceiling of `4 * origCap`. At the
+    # ceiling retain the fire-and-forget drop contract.
+    let newCap = min(r.cap * 2, r.origCap * 4)
+    if newCap == r.cap:
+      release(r.lock)
+      return false
+    let newBuf = cast[ptr UncheckedArray[CborEventMsg]](allocShared0(
+      newCap * sizeof(CborEventMsg)
+    ))
+    if newBuf.isNil:
+      # OOM: keep the existing buffer untouched and fall back to the drop
+      # contract (same as hitting the ceiling) rather than dereferencing nil.
+      release(r.lock)
+      return false
+    for i in 0 ..< r.count:
+      newBuf[i] = r.buf[(r.head + i) mod r.cap]
+    deallocShared(r.buf)
+    r.buf = newBuf
+    r.head = 0
+    r.tail = r.count
+    r.cap = newCap
   r.buf[r.tail] = msg
   r.tail = (r.tail + 1) mod r.cap
   inc r.count

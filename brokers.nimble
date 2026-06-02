@@ -335,7 +335,8 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
 task test, "Run all single and multi-threaded broker tests":
   let tests = [
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
-    "test_multi_request_broker", "test_broker_oop", "test_broker_lifecycle",
+    "test_request_broker_sync_void", "test_multi_request_broker", "test_broker_oop",
+    "test_broker_lifecycle",
   ]
   for f in tests:
     for opt in [
@@ -348,7 +349,7 @@ task test, "Run all single and multi-threaded broker tests":
 
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
-    "test_multi_thread_broker_configs",
+    "test_multi_thread_broker_configs", "test_mt_large_payload",
   ]
   for f in mtTests:
     for opt in [
@@ -771,6 +772,15 @@ task runPersistenceExampleGo,
     withDir "examples/persistence/go_example":
       exec quoteArg(findGoExe()) & " mod tidy"
       exec quoteArg(findGoExe()) & " run ."
+
+task runPersistenceExampleNim, "Build and run the pure-Nim persistence example":
+  let mm =
+    if existsEnv("MM"):
+      getEnv("MM")
+    else:
+      "orc"
+  var flags = "--threads:on --path:. --outdir:build --mm:" & mm
+  exec "nim c -r " & flags & " examples/persistence/nim_example/main.nim"
 
 task runHierExamplePy,
   "Build hierlib + Python wrapper and run hierlib/python_example/main.py (orc + refc)":
