@@ -1,4 +1,4 @@
-import std/[os, strutils]
+import std/[os, strutils, tables, sets, algorithm]
 
 # Package
 version = "3.1.1"
@@ -1341,3 +1341,191 @@ task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; or
 task allSan, "Run the full sanitizer matrix: ASan+UBSan, then ThreadSanitizer":
   exec "nimble allAsan"
   exec "nimble allTsan"
+
+# --------------------------------------------------------------------------
+# Test coverage (gcov line coverage, debug/orc only)
+# --------------------------------------------------------------------------
+# Nim compiles to C and, in debug with --lineDir:on, emits `#line` directives
+# back to the .nim sources. gcov HONORS those directives (clang's LLVM
+# source-based coverage does NOT — it keys regions to the generated .c), so the
+# gcov route is the one that attributes hits onto the original brokers/*.nim
+# files. We run each test once under --coverage, gcov the per-module .gcda, and
+# union-merge the resulting .gcov line data across all tests in NimScript.
+#
+# Debug + --mm:orc ONLY: release inlining and dropped line dirs ruin the
+# mapping. Macro caveat: the broker macros expand at the call site, so generated
+# dispatch procs are attributed to the test's `XBroker:` declaration, not
+# line-granular — the meaningful numbers are for hand-written code under
+# brokers/internal/. lcov/genhtml are optional and only used for the HTML
+# report when present (macOS: `brew install lcov`); the text summary always runs.
+
+proc gcovInvocation(): string =
+  ## Resolve a gcov-compatible tool. Apple's system gcov is incompatible with
+  ## clang's .gcno format, so on macOS we use `xcrun llvm-cov gcov`.
+  when defined(macosx):
+    if findExe("xcrun").len > 0:
+      return "xcrun llvm-cov gcov"
+  if findExe("gcov").len > 0:
+    return "gcov"
+  if findExe("llvm-cov").len > 0:
+    return "llvm-cov gcov"
+  quit "No gcov tool found (need gcov, or llvm-cov via xcrun on macOS)."
+
+proc brokersRelPath(src, projRoot: string): string =
+  ## Normalize a gcov `Source:` path (which may be absolute or relative to the
+  ## project root) to a project-relative path, then return it iff it names a
+  ## brokers/*.nim source — otherwise "".
+  var s = src
+  let absPrefix = projRoot & "/"
+  if s.startsWith(absPrefix):
+    s = s[absPrefix.len ..^ 1]
+  if s.startsWith("brokers/") and s.endsWith(".nim"):
+    return s
+  return ""
+
+proc accumGcov(
+    gcovPath, projRoot: string, execLines, hitLines: var Table[string, HashSet[int]]
+) =
+  ## Fold one .gcov file into the union accumulators, keyed by the project-
+  ## relative brokers/*.nim path. A line is executable if it carries a count
+  ## (not "-"), hit if that count is non-zero in ANY test.
+  var key = ""
+  for raw in readFile(gcovPath).splitLines:
+    let i1 = raw.find(':')
+    if i1 < 0:
+      continue
+    let i2 = raw.find(':', i1 + 1)
+    if i2 < 0:
+      continue
+    let cnt = raw[0 ..< i1].strip()
+    let lno = raw[i1 + 1 ..< i2].strip()
+    if lno == "0":
+      let rest = raw[i2 + 1 ..^ 1]
+      if rest.startsWith("Source:"):
+        key = brokersRelPath(rest["Source:".len ..^ 1].strip(), projRoot)
+      continue
+    if key.len == 0:
+      return # not a brokers source — skip the whole file
+    if cnt == "-":
+      continue # non-executable line
+    var line: int
+    try:
+      line = parseInt(lno)
+    except ValueError:
+      continue
+    if not execLines.hasKey(key):
+      execLines[key] = initHashSet[int]()
+      hitLines[key] = initHashSet[int]()
+    execLines[key].incl(line)
+    if cnt != "#####" and cnt != "=====":
+      hitLines[key].incl(line)
+
+task coverage, "Measure test coverage (gcov line coverage; debug/orc only)":
+  when defined(windows):
+    quit "The coverage task targets POSIX + gcov; not supported on Windows."
+
+  # (test file, compile env, nimMainPrefix)  — prefix only used by FFI tests so
+  # their generated NimMain symbols stay distinct (see testApi).
+  var covTests: seq[(string, string, string)]
+  # Single-thread core brokers — no --threads:on (matches `test`).
+  for f in [
+    "test_event_broker", "test_request_broker", "test_request_broker_sugar",
+    "test_request_broker_sync_void", "test_multi_request_broker", "test_broker_oop",
+    "test_broker_lifecycle",
+  ]:
+    covTests.add (f, "--mm:orc", "")
+  # Multi-thread brokers.
+  for f in [
+    "test_multi_thread_request_broker", "test_multi_thread_event_broker",
+    "test_multi_thread_broker_configs", "test_mt_large_payload",
+  ]:
+    covTests.add (f, "--mm:orc --threads:on", "")
+  # Codec + FFI library/runtime.
+  covTests.add ("test_api_codec", "--mm:orc", "")
+  for ft in [
+    ("test_api_library_init", "apitest"),
+    ("test_api_event_teardown_isolation", "cbevt"),
+    ("test_api_discovery", "apidisc"),
+    ("test_broker_interface_api", "brokerifaceapi"),
+    ("test_broker_interface_mt", "brokerifacemt"),
+    ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
+  ]:
+    covTests.add (ft[0], "-d:BrokerFfiApi --mm:orc --threads:on", ft[1])
+
+  let covDir = joinPath("build", "cov")
+  mkDir covDir
+  let projRoot = getCurrentDir()
+  let gcov = gcovInvocation()
+  let covFlags =
+    " --cc:clang --lineDir:on --debugger:native" &
+    " --passC:--coverage --passL:--coverage"
+
+  var execLines = initTable[string, HashSet[int]]()
+  var hitLines = initTable[string, HashSet[int]]()
+
+  for (path, env, prefix) in covTests:
+    let name = path.extractFilename
+    let cacheDir = joinPath(covDir, "cache", name)
+    let outBin = joinPath(covDir, name & "_cov").addFileExt(ExeExt)
+    let prefixFlag =
+      if prefix.len > 0:
+        nimMainPrefixFlag(prefix)
+      else:
+        ""
+    echo "=== COVER compile " & path & " ==="
+    exec "nim c " & env & covFlags & prefixFlag & " --nimcache:" & quoteArg(cacheDir) &
+      " --path:. --out:" & quoteArg(outBin) & " test/" & path & ".nim"
+    echo "=== COVER run " & name & " ==="
+    exec quoteArg(outBin)
+    # gcov each brokers package module (.gcda whose mangled name carries the
+    # `brokers@s` path segment). Run gcov from the PROJECT ROOT (the default
+    # nimble cwd) so the relative `brokers/...nim` Source paths resolve — gcov
+    # must read the source to emit per-line counts, and from cacheDir they
+    # don't resolve. The leading `./` keeps the `@`-mangled name from being
+    # read as an `@response-file`. Macro modules (event_broker, mt_*, …) have
+    # no own runtime .c, so the meaningful coverage is the hand-written
+    # internal/ runtime — exactly what these .gcda hold. gcov drops .gcov into
+    # the cwd; we fold the brokers ones and delete every .gcov it emitted.
+    for gcda in listFiles(cacheDir):
+      let base = gcda.extractFilename
+      if not (base.endsWith(".gcda") and "brokers@s" in base):
+        continue
+      exec gcov & " " & quoteArg("./" & gcda) & " > /dev/null 2>&1"
+      for produced in listFiles(projRoot):
+        if produced.endsWith(".gcov"):
+          if produced.endsWith(".nim.gcov"):
+            accumGcov(produced, projRoot, execLines, hitLines)
+          rmFile(produced)
+
+  # ---- Summary -----------------------------------------------------------
+  var paths: seq[string]
+  for k in execLines.keys:
+    paths.add k
+  paths.sort()
+
+  echo "\n========================= COVERAGE (brokers/) ========================="
+  echo "lines = executable Nim lines reached across the whole test suite\n"
+  var totExec, totHit = 0
+  for p in paths:
+    let ex = execLines[p].len
+    let hi = hitLines[p].len
+    totExec += ex
+    totHit += hi
+    let pct =
+      if ex == 0:
+        0.0
+      else:
+        hi.float / ex.float * 100.0
+    echo align($hi, 5) & "/" & align($ex, 5) & "  " &
+      align(formatFloat(pct, ffDecimal, 1) & "%", 7) & "  " & p
+  let totPct =
+    if totExec == 0:
+      0.0
+    else:
+      totHit.float / totExec.float * 100.0
+  echo "----------------------------------------------------------------------"
+  echo align($totHit, 5) & "/" & align($totExec, 5) & "  " &
+    align(formatFloat(totPct, ffDecimal, 1) & "%", 7) & "  TOTAL"
+  echo "\nNote: broker-macro-generated dispatch is attributed to the test's"
+  echo "broker declaration, not line-granular. For HTML, `brew install lcov`"
+  echo "then run lcov --capture over build/cov/cache (see the task comment)."
