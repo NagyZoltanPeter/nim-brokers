@@ -218,17 +218,33 @@ suite "API library init (CBOR mode)":
     # the broker thread procs now reclaim it via closeThreadDispatcherSelector.
     # Without that fix this loop leaks ~2 fds per cycle (~40 over 20 cycles).
     #
-    # `/dev/fd` lists the calling process's open fds on both macOS and Linux
-    # (Linux symlinks it to /proc/self/fd). The transient dir handle opened by
-    # walkDir cancels out across the two measurements.
-    proc openFdCount(): int =
-      when defined(linux):
+    # Counting strategy per platform:
+    #   Linux:   walk /proc/self/fd (the walkDir dir-handle cancels out).
+    #   macOS:   lsof (kqueue fds are not reliably in /dev/fd).
+    #   Windows: GetProcessHandleCount — counts open kernel HANDLEs, which
+    #            catches the IOCP-HANDLE leak the same way fds catch the
+    #            kqueue/epoll one.
+    when defined(windows):
+      proc getCurrentProcess(): pointer {.
+        stdcall, dynlib: "kernel32", importc: "GetCurrentProcess"
+      .}
+
+      proc getProcessHandleCount(hProc: pointer, pdwCount: ptr uint32): int32 {.
+        stdcall, dynlib: "kernel32", importc: "GetProcessHandleCount"
+      .}
+
+      proc openFdCount(): int =
+        var n: uint32 = 0
+        if getProcessHandleCount(getCurrentProcess(), addr n) == 0:
+          return -1
+        result = n.int
+    elif defined(linux):
+      proc openFdCount(): int =
         result = 0
         for _ in walkDir("/proc/self/fd"):
           inc result
-      else:
-        # macOS / BSD: /dev/fd does not reliably enumerate kqueue handles;
-        # shell out to lsof for ground truth.
+    else:
+      proc openFdCount(): int =
         let pid = getCurrentProcessId()
         let (outp, rc) = execCmdEx("lsof -p " & $pid & " 2>/dev/null | wc -l")
         result =
