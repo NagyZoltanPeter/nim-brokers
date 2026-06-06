@@ -12,7 +12,7 @@
 ## - `<lib>_call` framework-error path for unknown apiName
 ## - `<lib>_shutdown` cleanup
 
-import std/[options, strutils]
+import std/[options, strutils, os, osproc]
 import results
 import testutils/unittests
 import brokers/[event_broker, request_broker, broker_context, api_library]
@@ -210,3 +210,51 @@ suite "API library init (CBOR mode)":
 
     check cbtest_shutdown(ctxA) == 0'i32
     check cbtest_shutdown(ctxB) == 0'i32
+
+  test "repeated createContext/shutdown does not leak file descriptors":
+    # Regression for the chronos per-thread dispatcher leak: each ctx spawns a
+    # processing + delivery thread, each runs a chronos loop that opens one
+    # selector fd (kqueue on macOS, epoll on Linux). chronos never closes it;
+    # the broker thread procs now reclaim it via closeThreadDispatcherSelector.
+    # Without that fix this loop leaks ~2 fds per cycle (~40 over 20 cycles).
+    #
+    # `/dev/fd` lists the calling process's open fds on both macOS and Linux
+    # (Linux symlinks it to /proc/self/fd). The transient dir handle opened by
+    # walkDir cancels out across the two measurements.
+    proc openFdCount(): int =
+      when defined(linux):
+        result = 0
+        for _ in walkDir("/proc/self/fd"):
+          inc result
+      else:
+        # macOS / BSD: /dev/fd does not reliably enumerate kqueue handles;
+        # shell out to lsof for ground truth.
+        let pid = getCurrentProcessId()
+        let (outp, rc) = execCmdEx("lsof -p " & $pid & " 2>/dev/null | wc -l")
+        result =
+          if rc == 0:
+            parseInt(outp.strip())
+          else:
+            -1
+
+    # Warm up: the first cycle lazily initialises one-time process state
+    # (subs registry, ctx lock, foreign-thread GC) that is intentionally not
+    # reclaimed. Measure the steady state after it.
+    block:
+      var e: cstring = nil
+      let c = cbtest_createContext(addr e)
+      check c != 0'u32
+      check cbtest_shutdown(c) == 0'i32
+
+    let before = openFdCount()
+    const cycles = 20
+    for _ in 0 ..< cycles:
+      var e: cstring = nil
+      let c = cbtest_createContext(addr e)
+      check c != 0'u32
+      check cbtest_shutdown(c) == 0'i32
+    let after = openFdCount()
+
+    # Steady state must be flat. Allow a tiny slack for unrelated runtime
+    # bookkeeping; the pre-fix leak (~2 * cycles) is far outside this bound.
+    check (after - before) <= 4

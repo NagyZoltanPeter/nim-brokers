@@ -6,6 +6,7 @@
 {.push raises: [].}
 
 import chronos, chronos/threadsync
+import chronos/selectors2 # `close2` on the per-thread dispatcher's Selector
 import std/atomics
 import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
 import results
@@ -322,3 +323,25 @@ proc stopBrokerDispatchHere*() =
 
   waitFor awaitLoopExit()
   gBrokerDispatchStopRequested = false
+
+proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
+  ## Close the calling thread's chronos dispatcher selector fd (kqueue fd on
+  ## macOS, epoll fd on Linux).
+  ##
+  ## chronos (4.2.2) has no `PDispatcher` teardown and its `SelectorImpl` has
+  ## no `=destroy` — the per-thread dispatcher's selector OS fd is never
+  ## closed, so it leaks once per thread that ever ran a chronos loop
+  ## (verified: newDispatcher -> Selector.new -> kqueue()/epoll_create(); the
+  ## only close path is `Selector.close`, which nothing on the dispatcher
+  ## calls). The broker per-context threads (processing + delivery) are
+  ## spawned and joined per `_createContext` / `_shutdown`, so without this
+  ## every context lifecycle leaks 2 fds regardless of --mm:refc vs --mm:orc.
+  ##
+  ## Call as the LAST action of a broker thread proc, AFTER
+  ## `stopBrokerDispatchHere()` has closed the per-thread `ThreadSignalPtr`
+  ## and the dispatch loop has exited; at that point the selector holds no
+  ## live registered fds, so closing it only reclaims the kqueue/epoll fd.
+  {.cast(gcsafe).}:
+    let disp = getThreadDispatcher()
+    if not disp.isNil:
+      discard close2(getIoHandler(disp))

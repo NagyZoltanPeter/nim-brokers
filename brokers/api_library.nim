@@ -1057,6 +1057,9 @@ proc registerBrokerLibraryCborImpl(
         # still queued in the courier ring at this point are freed by
         # `drainAndFree(arg.eventCourier)` in `_shutdown`.
         stopBrokerDispatchHere()
+        # Reclaim this thread's chronos dispatcher selector fd — chronos has
+        # no PDispatcher teardown, so it would otherwise leak per ctx cycle.
+        closeThreadDispatcherSelector()
 
   )
 
@@ -1207,6 +1210,9 @@ proc registerBrokerLibraryCborImpl(
         # (while this thread is still handling) before it sets
         # `shutdownFlag`, so no courier message is in flight here.
         stopBrokerDispatchHere()
+        # Reclaim this thread's chronos dispatcher selector fd — chronos has
+        # no PDispatcher teardown, so it would otherwise leak per ctx cycle.
+        closeThreadDispatcherSelector()
 
   )
 
