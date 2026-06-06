@@ -6,7 +6,12 @@
 {.push raises: [].}
 
 import chronos, chronos/threadsync
-import chronos/selectors2 # `close2` on the per-thread dispatcher's Selector
+when not defined(windows):
+  import chronos/selectors2 # `close2` on the per-thread dispatcher's Selector
+else:
+  # `closeHandle(HANDLE)` on the per-thread dispatcher's IOCP. Use chronos'
+  # own osdefs so the HANDLE distinct type matches `getIoHandler` exactly.
+  import chronos/osdefs
 import std/atomics
 import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
 import results
@@ -325,23 +330,29 @@ proc stopBrokerDispatchHere*() =
   gBrokerDispatchStopRequested = false
 
 proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
-  ## Close the calling thread's chronos dispatcher selector fd (kqueue fd on
-  ## macOS, epoll fd on Linux).
+  ## Close the calling thread's chronos dispatcher OS handle:
+  ## - POSIX (kqueue / epoll / poll engine): the `Selector` fd
+  ## - Windows (IOCP engine):                 the IOCP `HANDLE`
   ##
-  ## chronos (4.2.2) has no `PDispatcher` teardown and its `SelectorImpl` has
-  ## no `=destroy` — the per-thread dispatcher's selector OS fd is never
-  ## closed, so it leaks once per thread that ever ran a chronos loop
-  ## (verified: newDispatcher -> Selector.new -> kqueue()/epoll_create(); the
-  ## only close path is `Selector.close`, which nothing on the dispatcher
-  ## calls). The broker per-context threads (processing + delivery) are
-  ## spawned and joined per `_createContext` / `_shutdown`, so without this
-  ## every context lifecycle leaks 2 fds regardless of --mm:refc vs --mm:orc.
+  ## chronos (4.2.2) has no `PDispatcher` teardown and neither `SelectorImpl`
+  ## (POSIX) nor the Windows IOCP `PDispatcher` has a `=destroy` — the
+  ## per-thread handle opened by `newDispatcher` (`kqueue()` / `epoll_create()`
+  ## / `CreateIoCompletionPort`) is never closed, so it leaks once per thread
+  ## that ever ran a chronos loop. The broker per-context threads
+  ## (processing + delivery) are spawned and joined per `_createContext` /
+  ## `_shutdown`, so without this every context lifecycle leaks 2 handles
+  ## regardless of --mm:refc vs --mm:orc.
   ##
   ## Call as the LAST action of a broker thread proc, AFTER
   ## `stopBrokerDispatchHere()` has closed the per-thread `ThreadSignalPtr`
-  ## and the dispatch loop has exited; at that point the selector holds no
-  ## live registered fds, so closing it only reclaims the kqueue/epoll fd.
+  ## and the dispatch loop has exited; at that point the dispatcher holds no
+  ## live registered handles, so closing it only reclaims the dispatcher
+  ## handle itself.
   {.cast(gcsafe).}:
     let disp = getThreadDispatcher()
-    if not disp.isNil:
+    if disp.isNil:
+      return
+    when defined(windows):
+      discard closeHandle(getIoHandler(disp))
+    else:
       discard close2(getIoHandler(disp))
