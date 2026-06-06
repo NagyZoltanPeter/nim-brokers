@@ -229,20 +229,22 @@ suite "API library init (CBOR mode)":
         stdcall, dynlib: "kernel32", importc: "GetCurrentProcess"
       .}
 
-      proc getProcessHandleCount(hProc: pointer, pdwCount: ptr uint32): int32 {.
-        stdcall, dynlib: "kernel32", importc: "GetProcessHandleCount"
-      .}
+      proc getProcessHandleCount(
+        hProc: pointer, pdwCount: ptr uint32
+      ): int32 {.stdcall, dynlib: "kernel32", importc: "GetProcessHandleCount".}
 
       proc openFdCount(): int =
         var n: uint32 = 0
         if getProcessHandleCount(getCurrentProcess(), addr n) == 0:
           return -1
         result = n.int
+
     elif defined(linux):
       proc openFdCount(): int =
         result = 0
         for _ in walkDir("/proc/self/fd"):
           inc result
+
     else:
       proc openFdCount(): int =
         let pid = getCurrentProcessId()
