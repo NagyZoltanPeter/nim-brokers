@@ -9,9 +9,16 @@ import chronos, chronos/threadsync
 when not defined(windows):
   import chronos/selectors2 # `close2` on the per-thread dispatcher's Selector
 else:
-  # `closeHandle(HANDLE)` on the per-thread dispatcher's IOCP. Use chronos'
-  # own osdefs so the HANDLE distinct type matches `getIoHandler` exactly.
-  import chronos/osdefs
+  # IOCP HANDLE close: forward-declare CloseHandle inline rather than
+  # importing `chronos/osdefs`. Pulling osdefs into this module's compile
+  # unit destabilises Windows + Nim 2.2.4 + --mm:refc + -d:release builds
+  # (test/test_multi_thread_request_broker silently crashes on createThread
+  # in that combination; ORC + same Nim + same matrix is fine, as is every
+  # other Nim version refc + release). Declaring just the proc we need
+  # keeps the symbol surface of this module unchanged from the pre-PR shape.
+  proc closeHandle(h: pointer): int32 {.
+    stdcall, dynlib: "kernel32", importc: "CloseHandle", sideEffect
+  .}
 import std/atomics
 import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
 import results
@@ -353,6 +360,8 @@ proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
     if disp.isNil:
       return
     when defined(windows):
-      discard closeHandle(getIoHandler(disp))
+      # chronos `HANDLE = distinct uint`; cast through pointer for our
+      # inline CloseHandle prototype (Win32 `HANDLE` is `void*` ABI-wise).
+      discard closeHandle(cast[pointer](getIoHandler(disp)))
     else:
       discard close2(getIoHandler(disp))
