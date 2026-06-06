@@ -1291,6 +1291,7 @@ proc registerBrokerLibraryCborImpl(
               else:
                 errOut[] = allocCStringCopy("delivery thread did not become ready")
             freeCborCourier(arg.courier)
+            drainAndFree(arg.eventCourier)
             deallocShared(arg)
             deallocShared(entry)
             return 0'u32
