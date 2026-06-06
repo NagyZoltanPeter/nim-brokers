@@ -106,6 +106,10 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   var eventNames: seq[string] = @[]
   var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
   var requestVerbs: seq[(string, string)] = @[] # (verb, sanitized type name)
+  when defined(brokerCoverage):
+    # (generatedMethodNode, sourceRequestSubBlock) pairs, so each abstract
+    # method maps to its own RequestBroker sub-block at line granularity.
+    var covAbstract: seq[(NimNode, NimNode)] = @[]
   for stmt in body:
     let headName = brokerHeadName(stmt)
     if headName notin ["EventBroker", "RequestBroker"]:
@@ -142,19 +146,19 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       requestTypes.add(sanitizeIdentName(sg.typeIdent))
       requestVerbs.add((sg.verb, sanitizeIdentName(sg.typeIdent)))
       if not sg.zeroArgProc.isNil:
-        result.add(
-          parseStmt(
-            renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)
-          )
+        let am0 = parseStmt(
+          renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async)
         )
+        result.add(am0)
+        when defined(brokerCoverage):
+          covAbstract.add((am0, stmt))
       if not sg.argProc.isNil:
-        result.add(
-          parseStmt(
-            renderAbstractMethod(
-              ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async
-            )
-          )
+        let am1 = parseStmt(
+          renderAbstractMethod(ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async)
         )
+        result.add(am1)
+        when defined(brokerCoverage):
+          covAbstract.add((am1, stmt))
     elif headName == "EventBroker":
       # Record the event type so BrokerImplement.close() can drop listeners.
       let evParsed = parseSingleTypeDef(innerBody, "BrokerInterface EventBroker")
@@ -241,3 +245,12 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
         `facVar`(addr c)
 
   )
+
+  when defined(brokerCoverage):
+    # Attribute every generated proc onto the interface decl site (the call-site
+    # ident), then refine the abstract methods onto their own RequestBroker
+    # sub-block so gcov maps the dispatch back onto the .nim decl, not the test.
+    for child in result:
+      stampLineInfo(child, ifaceName)
+    for (m, src) in covAbstract:
+      stampLineInfo(m, src)

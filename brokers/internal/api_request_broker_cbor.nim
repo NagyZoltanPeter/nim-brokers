@@ -577,6 +577,13 @@ proc generateApiCborRequestBrokerImpl(
       returnsInterface = returnsIface,
     )
 
+  when defined(brokerCoverage):
+    # Attribute the API (CBOR) RequestBroker layer — the underlying MT broker
+    # (idempotent re-stamp) plus the per-request CBOR adapter procs — onto the
+    # user's request type decl. Gated; normal builds unchanged.
+    for child in result:
+      stampLineInfo(child, typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug(
       "RequestBrokerApi", typeName, result, header = "apiName='" & apiName & "'"

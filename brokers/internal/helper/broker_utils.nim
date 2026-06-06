@@ -1,5 +1,20 @@
 import std/[macros, strutils]
 
+when defined(brokerCoverage):
+  # Coverage-only: rewrite the line info of a generated AST subtree onto the
+  # source declaration it implements. Used by BrokerInterface / BrokerImplement
+  # so that gcov (with --lineDir:on) attributes the generated dispatch procs
+  # back onto the macro decl site in brokers/*.nim instead of the test's broker
+  # block. Strictly gated — normal builds never see this and are byte-for-byte
+  # unchanged (no stamping, no overhead).
+  static:
+    echo "broker coverage stamping ON"
+
+  proc stampLineInfo*(n, src: NimNode) =
+    n.copyLineInfo(src)
+    for c in n:
+      stampLineInfo(c, src)
+
 type ParsedBrokerType* = object
   ## Result of parsing the single `type` definition inside a broker macro body.
   ##

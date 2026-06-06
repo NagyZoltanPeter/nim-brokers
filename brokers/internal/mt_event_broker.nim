@@ -929,6 +929,13 @@ proc generateMtEventBroker*(
 
   )
 
+  when defined(brokerCoverage):
+    # Attribute the generated multi-thread EventBroker dispatch (channel + signal
+    # courier path) onto the user's broker type decl. Gated; normal builds
+    # unchanged. Also covers EventBroker(API), which rides this MT lane.
+    for child in result:
+      stampLineInfo(child, parsed.typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

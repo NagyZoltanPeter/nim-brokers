@@ -558,6 +558,13 @@ proc generateEventBroker(body: NimNode): NimNode =
     )
     result.add(typedescEmitProcCtx)
 
+  when defined(brokerCoverage):
+    # Attribute the generated single-thread EventBroker dispatch onto the user's
+    # broker type decl so gcov (--lineDir:on) maps it back to .nim. Gated; normal
+    # builds are byte-for-byte unchanged.
+    for child in result:
+      stampLineInfo(child, parsed.typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBroker", sanitized, result)
     when defined(brokerDebugStdout):

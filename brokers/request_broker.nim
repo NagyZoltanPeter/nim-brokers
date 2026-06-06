@@ -954,6 +954,12 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
   )
 
+  when defined(brokerCoverage):
+    # Attribute the generated RequestBroker dispatch (sync/async, both signature
+    # slots) onto the user's request type decl. Gated; normal builds unchanged.
+    for child in result:
+      stampLineInfo(child, typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)
     when defined(brokerDebugStdout):

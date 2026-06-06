@@ -66,6 +66,10 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   var initBody = newStmtList()
   # (verb, brokerName, argParams, payloadRepr, async)
   var methods: seq[(string, string, seq[NimNode], string, bool)] = @[]
+  when defined(brokerCoverage):
+    # (generatedMethodNode, sourceMethodDef) so each override maps to its own
+    # `method` source line, not the impl decl site.
+    var covMethods: seq[(NimNode, NimNode)] = @[]
 
   for stmt in body:
     case stmt.kind
@@ -94,6 +98,8 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       var m = copyNimTree(stmt)
       m[4] = canonPragma(async)
       result.add(m)
+      when defined(brokerCoverage):
+        covMethods.add((m, stmt))
       var margs: seq[NimNode] = @[]
       for i in 2 ..< p.len: # skip return (0) and self (1)
         margs.add(copyNimTree(p[i]))
@@ -263,6 +269,15 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     closeSrc.add("      discard " & ev & ".dropAllListeners(self.brokerCtx)\n")
   closeSrc.add("  self.brokerCtx = DefaultBrokerContext\n")
   result.add(parseStmt(closeSrc))
+
+  when defined(brokerCoverage):
+    # Attribute every generated proc onto the impl decl site (the call-site
+    # ident), then refine the `method` overrides onto their own source line so
+    # gcov maps the dispatch back onto the .nim decl, not the test.
+    for child in result:
+      stampLineInfo(child, implName)
+    for (m, src) in covMethods:
+      stampLineInfo(m, src)
 
   when defined(brokerDebug):
     echo result.repr

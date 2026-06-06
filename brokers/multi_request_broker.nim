@@ -740,6 +740,12 @@ macro MultiRequestBroker*(body: untyped): untyped =
 
       )
 
+  when defined(brokerCoverage):
+    # Attribute the generated MultiRequestBroker fan-out dispatch onto the user's
+    # request type decl. Gated; normal builds unchanged.
+    for child in result:
+      stampLineInfo(child, typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug("MultiRequestBroker", sanitized, result)
     when defined(brokerDebugStdout):

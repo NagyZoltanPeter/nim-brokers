@@ -1650,6 +1650,13 @@ proc generateMtRequestBroker*(
 
   )
 
+  when defined(brokerCoverage):
+    # Attribute the generated multi-thread RequestBroker dispatch onto the user's
+    # request type decl. Gated; normal builds unchanged. Also covers
+    # RequestBroker(API), which rides this MT lane.
+    for child in result:
+      stampLineInfo(child, typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

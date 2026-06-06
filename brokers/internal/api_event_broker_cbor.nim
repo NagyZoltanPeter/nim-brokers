@@ -63,6 +63,13 @@ proc generateApiCborEventBrokerImpl(body: NimNode, cfg: MtEvtCfg): NimNode =
     registerCborPrimitiveType(typeName, parsed)
   registerCborEventEntry(apiName, typeName)
 
+  when defined(brokerCoverage):
+    # Attribute the API (CBOR) EventBroker layer onto the user's event type decl.
+    # The underlying MT broker is already stamped (same source node, idempotent);
+    # this also covers any API-specific adapter procs added here. Gated.
+    for child in result:
+      stampLineInfo(child, parsed.typeIdent)
+
   when defined(brokerDebug):
     writeBrokerDebug(
       "EventBrokerApi", typeName, result, header = "eventName='" & apiName & "'"

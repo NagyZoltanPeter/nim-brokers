@@ -1757,6 +1757,13 @@ proc registerBrokerLibraryCborImpl(
 
   )
 
+  when defined(brokerCoverage):
+    # Attribute the generated FFI library surface (lifecycle, courier wiring,
+    # dispatch table, request adapters) onto the registerBrokerLibrary call site.
+    # Gated; normal builds unchanged.
+    for child in result:
+      stampLineInfo(child, body)
+
   when defined(brokerDebug):
     writeBrokerDebug(
       "BrokerLibrary",

@@ -2,6 +2,7 @@ nimble.develop
 nimble.paths
 nimbledeps
 build/
+.cov-cache/
 **/build*/*
 **/cmake-build*/*
 **/target/*

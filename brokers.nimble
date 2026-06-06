@@ -1529,3 +1529,27 @@ task coverage, "Measure test coverage (gcov line coverage; debug/orc only)":
   echo "\nNote: broker-macro-generated dispatch is attributed to the test's"
   echo "broker declaration, not line-granular. For HTML, `brew install lcov`"
   echo "then run lcov --capture over build/cov/cache (see the task comment)."
+
+# --------------------------------------------------------------------------
+# Coverage of the MACRO-GENERATED dispatch code (gcovr + HTML, debug/orc)
+# --------------------------------------------------------------------------
+# The `coverage` task above deliberately excludes the broker-macro output (the
+# macros expand at the call site, so there is no brokers/<macro>.nim.c TU). The
+# two tasks below target exactly that generated code, via gcovr, in two modes:
+#   coverage_c   — Mode A: C-level, maps onto the generated @mtest_*.nim.c TUs
+#                  (no source changes; --lineDir:off).
+#   coverage_nim — Mode B: .nim line attribution, requires -d:brokerCoverage so
+#                  BrokerInterface/BrokerImplement stamp generated procs onto
+#                  their source decl; maps (coarsely) onto the .nim decl sites.
+# Both shell out to the matching scripts/coverage-*.sh driver. See the
+# "Coverage" section in CLAUDE.md and doc/design/TEST_COVERAGE.md.
+
+task coverage_c, "Mode A: C-level coverage of broker-generated TUs (gcovr HTML)":
+  when defined(windows):
+    quit "coverage_c targets POSIX + gcov; not supported on Windows."
+  exec "bash scripts/coverage-c.sh"
+
+task coverage_nim, "Mode B: .nim-mapped coverage of broker-generated code (gcovr HTML)":
+  when defined(windows):
+    quit "coverage_nim targets POSIX + gcov; not supported on Windows."
+  exec "bash scripts/coverage-nim.sh"
