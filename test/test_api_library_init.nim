@@ -278,9 +278,18 @@ suite "API library init (CBOR mode)":
       check cbtest_shutdown(c) == 0'i32
       let postShutdown = openFdCount()
       if i < 3 or i == cycles - 1:
-        echo "[fd-leak cycle ", i, "] preCreate=", preCreate, " postCreate=",
-          postCreate, " postShutdown=", postShutdown, " createDelta=",
-          postCreate - preCreate, " shutdownDelta=", postShutdown - postCreate
+        echo "[fd-leak cycle ",
+          i,
+          "] preCreate=",
+          preCreate,
+          " postCreate=",
+          postCreate,
+          " postShutdown=",
+          postShutdown,
+          " createDelta=",
+          postCreate - preCreate,
+          " shutdownDelta=",
+          postShutdown - postCreate
     let after = openFdCount()
     let delta = after - before
 
