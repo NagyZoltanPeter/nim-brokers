@@ -358,11 +358,22 @@ proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
   ## handle itself.
   {.cast(gcsafe).}:
     let disp = getThreadDispatcher()
-    if disp.isNil:
-      return
-    when defined(windows):
-      # chronos `HANDLE = distinct uint`; cast through pointer for our
-      # inline CloseHandle prototype (Win32 `HANDLE` is `void*` ABI-wise).
-      discard closeHandle(cast[pointer](getIoHandler(disp)))
+    when defined(brokerSelectorCloseDebug) and defined(windows):
+      # Diagnostic — compile with `-d:brokerSelectorCloseDebug` to print
+      # whether the dispatcher exists, the HANDLE value, and the
+      # CloseHandle return code (0 = FAIL / handle was invalid).
+      if disp.isNil:
+        echo "[closeDispSel] disp=nil"
+        return
+      let h = cast[pointer](getIoHandler(disp))
+      let rc = closeHandle(h)
+      echo "[closeDispSel] h=", cast[uint](h), " rc=", rc
     else:
-      discard close2(getIoHandler(disp))
+      if disp.isNil:
+        return
+      when defined(windows):
+        # chronos `HANDLE = distinct uint`; cast through pointer for our
+        # inline CloseHandle prototype (Win32 `HANDLE` is `void*` ABI-wise).
+        discard closeHandle(cast[pointer](getIoHandler(disp)))
+      else:
+        discard close2(getIoHandler(disp))
