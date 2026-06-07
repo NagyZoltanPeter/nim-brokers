@@ -531,12 +531,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ]:
       if skipRefcOnWindows(opt, f):
         continue
-      var extraOpt = nimMainPrefixFlag(prefix)
-      # One-shot evidence flag: enable diagnostic prints inside
-      # closeThreadDispatcherSelector for the fd-leak regression test.
-      # Remove once the Windows IOCP HANDLE close is proven correct.
-      if f == "test_api_library_init":
-        extraOpt.add(" -d:brokerSelectorCloseDebug")
+      let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
 
 proc findCargoExe(): string =
