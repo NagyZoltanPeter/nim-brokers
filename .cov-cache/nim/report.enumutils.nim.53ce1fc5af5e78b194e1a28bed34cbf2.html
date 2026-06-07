@@ -1,0 +1,1545 @@
+<!DOCTYPE html>
+<html class="theme-green">
+
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+    <title>nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib/std/enumutils.nim - GCC Code Coverage Report</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <link rel="stylesheet" href="report.css"/>
+    <script src="report.js"></script>
+  </head>
+
+  <body>
+    <div class="Layout-main">
+      <div class="Layout-main-centered-lg" style="max-width: 1280px;">
+        <div class="d-flex flex-justify-center">
+          <h1>GCC Code Coverage Report</h1>
+        </div>
+        <hr class="block-separator"/>
+        <header>
+<div id="summary-report.enumutils.nim.53ce1fc5af5e78b194e1a28bed34cbf2.html" class="summary">
+  <div>
+    <table class="legend">
+      <tr>
+        <th scope="row">Directory:</th>
+        <td>./</td>
+      </tr>
+      <tr>
+        <th scope="row">Coverage:</th>
+        <td class="legend">
+          <span class="coverage-low">low: &ge; 0%</span>
+          <span class="coverage-medium">medium: &ge; 75.0%</span>
+          <span class="coverage-high">high: &ge; 90.0%</span>
+        </td>
+      </tr>
+    </table>
+  </div>
+  <div>
+    <table class="coverage">
+      <tr>
+        <th></th>
+        <th scope="col">Coverage</th>
+        <th scope="col">Exec / Excl / Total</th>
+      </tr>
+      <tr>
+        <th scope="row">Lines:</th>
+        <td class="coverage-none">0.0%</td>
+        <td class="coverage-none">0 / 0 / 4</td>
+      </tr>
+      <tr>
+        <th scope="row">Functions:</th>
+        <td class="coverage-unknown">-%</td>
+        <td class="coverage-unknown">0 / 1 / 1</td>
+      </tr>
+      <tr>
+        <th scope="row">Branches:</th>
+        <td class="coverage-none">0.0%</td>
+        <td class="coverage-none">0 / 0 / 10</td>
+      </tr>
+    </table>
+  </div>
+</div>
+        </header>
+        <hr/>
+        <nav>
+<div class="m-3">
+  <details>
+    <summary>List of functions</summary>
+<div class="Box m-3 functionslist">
+  <div class="Box-header py-2 d-flex sticky">
+    <div role="rowheader" class="color-fg-muted flex-auto min-width-0 col-md-2">Function (File:Line)</div>
+    <div role="rowheader" class="color-fg-muted flex-auto min-width-0 d-flex flex-justify-end flex-wrap flex-items-baseline">Calls</div>
+    <div role="rowheader" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">Lines</div>
+    <div role="rowheader" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">Branches</div>
+    <div role="rowheader" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">Blocks</div>
+  </div>
+  <div class="Box-row Box-row--focus-gray py-2 d-flex">
+    <div role="gridcell" class="color-fg-muted flex-auto min-width-0 col-md-2"><a href="#l28">&lt;unknown function&gt; (nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib/std/enumutils.nim:28)</a>    </div>
+    <div role="gridcell" class="color-fg-muted flex-auto min-width-0 d-flex flex-justify-end flex-wrap flex-items-baseline" data-sort="-">excluded</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">0.0%</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">0.0%</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">-%</div>
+  </div>
+</div>  </details>
+</div>
+
+        </nav>
+        <main>
+<div class="Box m-3 file-source">
+  <div class="Box-header d-flex flex-space-between sticky">
+    nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib/std/enumutils.nim
+    <div class="toggle-buttons">
+      <button type="button" class="button_toggle_coveredLine show_coveredLine" value="coveredLine" title="Toggle covered lines">0 covered</button>
+      <button type="button" class="button_toggle_uncoveredLine show_uncoveredLine" value="uncoveredLine" title="Toggle uncovered lines">4 uncovered</button>
+      <button type="button" class="button_toggle_partialCoveredLine show_partialCoveredLine" value="partialCoveredLine" title="Toggle partial covered lines">0 partial covered</button>
+      <button type="button" class="button_toggle_excludedLine show_excludedLine" value="excludedLine" title="Toggle excluded lines">0 excluded</button>
+    </div>
+    <div class="nav">
+      <a class="nav prev" href="report.cmdline.nim.647a1c54a254d32a3507bacfe601fb96.html"></a>
+      <a class="nav index" href="report.html"></a>
+      <a class="nav next" href="report.envvars.nim.f27552f0138aba0334492ea8469db14f.html"></a>
+    </div>
+  </div>
+  <div class="source-table-container">
+    <table class="text-mono text-small">
+      <tr>
+        <th align="right">Line</th>
+        <th align="right">Branch</th>
+        <th align="right">Exec</th>
+        <th align="left" style="width: 100%;">Source</th>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l1" href="#l1">1</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l2" href="#l2">2</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l3" href="#l3">3</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#            Nim&#39;s Runtime Library</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l4" href="#l4">4</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#        (c) Copyright 2020 Nim contributors</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l5" href="#l5">5</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l6" href="#l6">6</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#    See the file &quot;copying.txt&quot;, included in this</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l7" href="#l7">7</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#    distribution, for details about the copyright.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l8" href="#l8">8</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c">#</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l9" href="#l9">9</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l10" href="#l10">10</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="kn">import</span><span class="w"> </span><span class="n">std</span><span class="o">/</span><span class="n">macros</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l11" href="#l11">11</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="kn">from</span><span class="w"> </span><span class="n">std</span><span class="o">/</span><span class="n">typetraits</span><span class="w"> </span><span class="kn">import</span><span class="w"> </span><span class="n">OrdinalEnum</span><span class="p">,</span><span class="w"> </span><span class="n">HoleyEnum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l12" href="#l12">12</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l13" href="#l13">13</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">when</span><span class="w"> </span><span class="n">defined</span><span class="p">(</span><span class="n">nimPreviewSlimSystem</span><span class="p">):</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l14" href="#l14">14</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kn">import</span><span class="w"> </span><span class="n">std</span><span class="o">/</span><span class="n">assertions</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l15" href="#l15">15</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l16" href="#l16">16</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l17" href="#l17">17</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="c"># xxx `genEnumCaseStmt` needs tests and runnableExamples</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l18" href="#l18">18</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l19" href="#l19">19</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">macro</span><span class="w"> </span><span class="nf">genEnumCaseStmt</span><span class="o">*</span><span class="p">(</span><span class="n">typ</span><span class="p">:</span><span class="w"> </span><span class="n">typedesc</span><span class="p">,</span><span class="w"> </span><span class="n">argSym</span><span class="p">:</span><span class="w"> </span><span class="n">typed</span><span class="p">,</span><span class="w"> </span><span class="n">default</span><span class="p">:</span><span class="w"> </span><span class="n">typed</span><span class="p">,</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l20" href="#l20">20</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">            </span><span class="n">userMin</span><span class="p">,</span><span class="w"> </span><span class="n">userMax</span><span class="p">:</span><span class="w"> </span><span class="k">static</span><span class="o">[</span><span class="nb">int</span><span class="o">]</span><span class="p">,</span><span class="w"> </span><span class="n">normalizer</span><span class="p">:</span><span class="w"> </span><span class="k">static</span><span class="o">[</span><span class="n">proc</span><span class="p">(</span><span class="n">s</span><span class="w"> </span><span class="p">:</span><span class="nb">string</span><span class="p">):</span><span class="w"> </span><span class="nb">string</span><span class="o">]</span><span class="p">):</span><span class="w"> </span><span class="n">untyped</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l21" href="#l21">21</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># Generates a case stmt, which assigns the correct enum field given</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l22" href="#l22">22</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># a normalized string comparison to the `argSym` input.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l23" href="#l23">23</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># string normalization is done using passed normalizer.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l24" href="#l24">24</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">let</span><span class="w"> </span><span class="n">typ</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">typ</span><span class="p">.</span><span class="n">getTypeInst</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l25" href="#l25">25</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">let</span><span class="w"> </span><span class="n">typSym</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">typ</span><span class="p">.</span><span class="n">getTypeImpl</span><span class="p">.</span><span class="n">getTypeInst</span><span class="w"> </span><span class="c"># skip aliases etc to get type sym</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l26" href="#l26">26</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">let</span><span class="w"> </span><span class="n">impl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">typSym</span><span class="p">.</span><span class="n">getImpl</span><span class="o">[</span><span class="mi">2</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l27" href="#l27">27</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">expectKind</span><span class="w"> </span><span class="n">impl</span><span class="p">,</span><span class="w"> </span><span class="n">nnkEnumTy</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l28" href="#l28">28</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">  </span><span class="k">let</span><span class="w"> </span><span class="n">normalizerNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">quote</span><span class="p">:</span><span class="w"> </span><span class="p">`</span><span class="n">normalizer</span><span class="p">`</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l29" href="#l29">29</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">expectKind</span><span class="w"> </span><span class="n">normalizerNode</span><span class="p">,</span><span class="w"> </span><span class="n">nnkSym</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l30" href="#l30">30</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nnkCaseStmt</span><span class="p">.</span><span class="n">newTree</span><span class="p">(</span><span class="n">newCall</span><span class="p">(</span><span class="n">normalizerNode</span><span class="p">,</span><span class="w"> </span><span class="n">argSym</span><span class="p">))</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l31" href="#l31">31</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># stores all processed field strings to give error msg for ambiguous enums</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l32" href="#l32">32</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">foundFields</span><span class="p">:</span><span class="w"> </span><span class="nb">seq</span><span class="o">[</span><span class="nb">string</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">@[]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l33" href="#l33">33</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">fVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l34" href="#l34">34</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w"> </span><span class="c"># string of current field</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l35" href="#l35">35</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">fNum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BiggestInt</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="c"># int value of current field</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l36" href="#l36">36</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="n">f</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">impl</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l37" href="#l37">37</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">kind</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l38" href="#l38">38</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkEmpty</span><span class="o">:</span><span class="w"> </span><span class="k">continue</span><span class="w"> </span><span class="c"># skip first node of `enumTy`</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l39" href="#l39">39</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkSym</span><span class="p">,</span><span class="w"> </span><span class="nl">nnkIdent</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l40" href="#l40">40</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l41" href="#l41">41</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l42" href="#l42">42</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkAccQuoted</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l43" href="#l43">43</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l44" href="#l44">44</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="n">ch</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">f</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l45" href="#l45">45</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fVal</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">ch</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l46" href="#l46">46</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l47" href="#l47">47</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkEnumFieldDef</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l48" href="#l48">48</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fVal</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">0</span><span class="o">]</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l49" href="#l49">49</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span><span class="p">.</span><span class="n">kind</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l50" href="#l50">50</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkStrLit</span><span class="w"> </span><span class="nl">..</span><span class="w"> </span><span class="nl">nnkTripleStrLit</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l51" href="#l51">51</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l52" href="#l52">52</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkTupleConstr</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l53" href="#l53">53</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">][</span><span class="mi">1</span><span class="o">]</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l54" href="#l54">54</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fNum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">][</span><span class="mi">0</span><span class="o">]</span><span class="p">.</span><span class="n">intVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l55" href="#l55">55</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">of</span><span class="w"> </span><span class="nl">nnkIntLit</span><span class="o">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l56" href="#l56">56</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">0</span><span class="o">]</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l57" href="#l57">57</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">fNum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span><span class="p">.</span><span class="n">intVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l58" href="#l58">58</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">else</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l59" href="#l59">59</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="k">let</span><span class="w"> </span><span class="n">fAst</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">0</span><span class="o">]</span><span class="p">.</span><span class="n">getImpl</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l60" href="#l60">60</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">fAst</span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="p">{</span><span class="n">nnkStrLit</span><span class="w"> </span><span class="p">..</span><span class="w"> </span><span class="n">nnkTripleStrLit</span><span class="p">}:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l61" href="#l61">61</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">          </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fAst</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l62" href="#l62">62</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="k">else</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l63" href="#l63">63</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">          </span><span class="n">error</span><span class="p">(</span><span class="s">&quot;Invalid tuple syntax!&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">f</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l64" href="#l64">64</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">else</span><span class="p">:</span><span class="w"> </span><span class="n">error</span><span class="p">(</span><span class="s">&quot;Invalid node for enum type `&quot;</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">$</span><span class="n">f</span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="s">&quot;`!&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">f</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l65" href="#l65">65</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="c"># add field if string not already added</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l66" href="#l66">66</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">fNum</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">userMin</span><span class="w"> </span><span class="ow">and</span><span class="w"> </span><span class="n">fNum</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">userMax</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l67" href="#l67">67</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">fStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">normalizer</span><span class="p">(</span><span class="n">fStr</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l68" href="#l68">68</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="n">fStr</span><span class="w"> </span><span class="ow">notin</span><span class="w"> </span><span class="n">foundFields</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l69" href="#l69">69</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">result</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">nnkOfBranch</span><span class="p">.</span><span class="n">newTree</span><span class="p">(</span><span class="n">newLit</span><span class="w"> </span><span class="n">fStr</span><span class="p">,</span><span class="w"> </span><span class="n">newDotExpr</span><span class="p">(</span><span class="n">typ</span><span class="p">,</span><span class="w"> </span><span class="n">ident</span><span class="w"> </span><span class="n">fVal</span><span class="p">))</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l70" href="#l70">70</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">foundFields</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">fStr</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l71" href="#l71">71</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">else</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l72" href="#l72">72</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">error</span><span class="p">(</span><span class="s">&quot;Ambiguous enums cannot be parsed, field &quot;</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">$</span><span class="n">fStr</span><span class="w"> </span><span class="o">&amp;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l73" href="#l73">73</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">          </span><span class="s">&quot; appears multiple times!&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">f</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l74" href="#l74">74</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">inc</span><span class="w"> </span><span class="n">fNum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l75" href="#l75">75</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># finally add else branch to raise or use default</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l76" href="#l76">76</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="n">default</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kp">nil</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l77" href="#l77">77</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">    </span><span class="k">let</span><span class="w"> </span><span class="n">raiseStmt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">quote</span><span class="w"> </span><span class="k">do</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l78" href="#l78">78</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">      </span><span class="k">raise</span><span class="w"> </span><span class="n">newException</span><span class="p">(</span><span class="n">ValueError</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Invalid enum value: &quot;</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">$</span><span class="p">`</span><span class="n">argSym</span><span class="p">`)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l79" href="#l79">79</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">    </span><span class="n">result</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">nnkElse</span><span class="p">.</span><span class="n">newTree</span><span class="p">(</span><span class="n">raiseStmt</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l80" href="#l80">80</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">else</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l81" href="#l81">81</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">expectKind</span><span class="p">(</span><span class="n">default</span><span class="p">,</span><span class="w"> </span><span class="n">nnkSym</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l82" href="#l82">82</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">result</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">nnkElse</span><span class="p">.</span><span class="n">newTree</span><span class="p">(</span><span class="n">default</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l83" href="#l83">83</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l84" href="#l84">84</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">macro</span><span class="w"> </span><span class="nf">enumFullRange</span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="w"> </span><span class="n">typed</span><span class="p">):</span><span class="w"> </span><span class="n">untyped</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l85" href="#l85">85</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">newNimNode</span><span class="p">(</span><span class="n">nnkBracket</span><span class="p">).</span><span class="n">add</span><span class="p">(</span><span class="n">a</span><span class="p">.</span><span class="n">getType</span><span class="o">[</span><span class="mi">1</span><span class="o">][</span><span class="mf">1</span><span class="p">..^</span><span class="mi">1</span><span class="o">]</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l86" href="#l86">86</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l87" href="#l87">87</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">macro</span><span class="w"> </span><span class="nf">enumNames</span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="w"> </span><span class="n">typed</span><span class="p">):</span><span class="w"> </span><span class="n">untyped</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l88" href="#l88">88</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="c"># this could be exported too; in particular this could be useful for enum with holes.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l89" href="#l89">89</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newNimNode</span><span class="p">(</span><span class="n">nnkBracket</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l90" href="#l90">90</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">a</span><span class="p">.</span><span class="n">getType</span><span class="o">[</span><span class="mi">1</span><span class="o">][</span><span class="mf">1</span><span class="p">..^</span><span class="mi">1</span><span class="o">]</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l91" href="#l91">91</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">ai</span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">nnkSym</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l92" href="#l92">92</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">result</span><span class="p">.</span><span class="n">add</span><span class="w"> </span><span class="n">newLit</span><span class="w"> </span><span class="n">ai</span><span class="p">.</span><span class="n">strVal</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l93" href="#l93">93</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l94" href="#l94">94</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">iterator</span><span class="w"> </span><span class="n">items</span><span class="o">*[</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="n">HoleyEnum</span><span class="o">]</span><span class="p">(</span><span class="n">E</span><span class="p">:</span><span class="w"> </span><span class="n">typedesc</span><span class="o">[</span><span class="n">T</span><span class="o">]</span><span class="p">):</span><span class="w"> </span><span class="n">T</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l95" href="#l95">95</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="sd">## Iterates over an enum with holes.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l96" href="#l96">96</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">runnableExamples</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l97" href="#l97">97</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">type</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l98" href="#l98">98</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">A</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l99" href="#l99">99</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l100" href="#l100">100</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l101" href="#l101">101</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l102" href="#l102">102</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">B</span><span class="o">[</span><span class="n">T</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l103" href="#l103">103</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">b0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l104" href="#l104">104</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">b1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l105" href="#l105">105</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="kn">from</span><span class="w"> </span><span class="n">std</span><span class="o">/</span><span class="n">sequtils</span><span class="w"> </span><span class="kn">import</span><span class="w"> </span><span class="n">toSeq</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l106" href="#l106">106</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">A</span><span class="p">.</span><span class="n">toSeq</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="o">[</span><span class="n">a0</span><span class="p">,</span><span class="w"> </span><span class="n">a1</span><span class="p">,</span><span class="w"> </span><span class="n">a2</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l107" href="#l107">107</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">B</span><span class="o">[</span><span class="nb">float</span><span class="o">]</span><span class="p">.</span><span class="n">toSeq</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="o">[</span><span class="n">B</span><span class="o">[</span><span class="nb">float</span><span class="o">]</span><span class="p">.</span><span class="n">b0</span><span class="p">,</span><span class="w"> </span><span class="n">B</span><span class="o">[</span><span class="nb">float</span><span class="o">]</span><span class="p">.</span><span class="n">b1</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l108" href="#l108">108</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">enumFullRange</span><span class="p">(</span><span class="n">E</span><span class="p">):</span><span class="w"> </span><span class="k">yield</span><span class="w"> </span><span class="n">a</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l109" href="#l109">109</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l110" href="#l110">110</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">func</span><span class="w"> </span><span class="nf">span</span><span class="p">(</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="n">typedesc</span><span class="o">[</span><span class="n">HoleyEnum</span><span class="o">]</span><span class="p">):</span><span class="w"> </span><span class="nb">int</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l111" href="#l111">111</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="p">(</span><span class="n">T</span><span class="p">.</span><span class="n">high</span><span class="p">.</span><span class="n">ord</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">T</span><span class="p">.</span><span class="n">low</span><span class="p">.</span><span class="n">ord</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l112" href="#l112">112</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l113" href="#l113">113</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">const</span><span class="w"> </span><span class="n">invalidSlot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uint8</span><span class="p">.</span><span class="n">high</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l114" href="#l114">114</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l115" href="#l115">115</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">proc</span><span class="w"> </span><span class="nf">genLookup</span><span class="o">[</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="n">typedesc</span><span class="o">[</span><span class="n">HoleyEnum</span><span class="o">]]</span><span class="p">(</span><span class="err">_: T): auto =</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l116" href="#l116">116</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">span</span><span class="p">(</span><span class="n">T</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l117" href="#l117">117</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l118" href="#l118">118</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">assert</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">invalidSlot</span><span class="p">.</span><span class="nb">int</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l119" href="#l119">119</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="sx">{.noinit.}</span><span class="p">:</span><span class="w"> </span><span class="nb">array</span><span class="o">[</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="n">uint8</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l120" href="#l120">120</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">mitems</span><span class="p">(</span><span class="n">ret</span><span class="p">):</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">invalidSlot</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l121" href="#l121">121</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">items</span><span class="p">(</span><span class="n">T</span><span class="p">):</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l122" href="#l122">122</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">ret</span><span class="o">[</span><span class="n">ai</span><span class="p">.</span><span class="n">ord</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">T</span><span class="p">.</span><span class="n">low</span><span class="p">.</span><span class="n">ord</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uint8</span><span class="p">(</span><span class="n">i</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l123" href="#l123">123</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">inc</span><span class="p">(</span><span class="n">i</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l124" href="#l124">124</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l125" href="#l125">125</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l126" href="#l126">126</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">func</span><span class="w"> </span><span class="nf">symbolRankImpl</span><span class="o">[</span><span class="n">T</span><span class="o">]</span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="w"> </span><span class="n">T</span><span class="p">):</span><span class="w"> </span><span class="nb">int</span><span class="w"> </span><span class="sx">{.inline.}</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l127" href="#l127">127</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">T</span><span class="p">.</span><span class="n">span</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l128" href="#l128">128</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">thres</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">255</span><span class="w"> </span><span class="c"># must be &lt;= `invalidSlot`, but this should be tuned.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l129" href="#l129">129</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">when</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">thres</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l130" href="#l130">130</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">lookup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">genLookup</span><span class="p">(</span><span class="n">T</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l131" href="#l131">131</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">let</span><span class="w"> </span><span class="n">lookup2</span><span class="w"> </span><span class="sx">{.global.}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lookup</span><span class="w"> </span><span class="c"># xxx improve pending https://github.com/timotheecour/Nim/issues/553</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l132" href="#l132">132</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="cm">#[</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l133" href="#l133">133</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="cm">    This could be optimized using a hash adapted to `T` (possible since it&#39;s known at CT)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l134" href="#l134">134</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="cm">    to get better key distribution before indexing into the lookup table table.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l135" href="#l135">135</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="cm">    ]#</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l136" href="#l136">136</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">{.noSideEffect.}</span><span class="p">:</span><span class="w"> </span><span class="c"># because it&#39;s immutable</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l137" href="#l137">137</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">let</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lookup2</span><span class="o">[</span><span class="n">ord</span><span class="p">(</span><span class="n">a</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">T</span><span class="p">.</span><span class="n">low</span><span class="p">.</span><span class="n">ord</span><span class="o">]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l138" href="#l138">138</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">invalidSlot</span><span class="p">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">ret</span><span class="p">.</span><span class="nb">int</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l139" href="#l139">139</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">else</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l140" href="#l140">140</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l141" href="#l141">141</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="c"># we could also generate a case statement as optimization</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l142" href="#l142">142</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="ow">in</span><span class="w"> </span><span class="n">items</span><span class="p">(</span><span class="n">T</span><span class="p">):</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l143" href="#l143">143</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="n">ai</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">a</span><span class="p">:</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">i</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l144" href="#l144">144</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">inc</span><span class="p">(</span><span class="n">i</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l145" href="#l145">145</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">raise</span><span class="w"> </span><span class="n">newException</span><span class="p">(</span><span class="n">IndexDefect</span><span class="p">,</span><span class="w"> </span><span class="o">$</span><span class="n">ord</span><span class="p">(</span><span class="n">a</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="s">&quot; invalid for &quot;</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">$</span><span class="n">T</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l146" href="#l146">146</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l147" href="#l147">147</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">template</span><span class="w"> </span><span class="nf">symbolRank</span><span class="o">*[</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="k">enum</span><span class="o">]</span><span class="p">(</span><span class="n">a</span><span class="p">:</span><span class="w"> </span><span class="n">T</span><span class="p">):</span><span class="w"> </span><span class="nb">int</span><span class="w"> </span><span class="o">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l148" href="#l148">148</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="sd">## Returns the index in which `a` is listed in `T`.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l149" href="#l149">149</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="sd">##</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l150" href="#l150">150</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="sd">## The cost for a `HoleyEnum` is implementation defined, currently optimized</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l151" href="#l151">151</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="sd">## for small enums, otherwise is `O(T.enumLen)`.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l152" href="#l152">152</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="n">runnableExamples</span><span class="p">:</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l153" href="#l153">153</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="k">type</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l154" href="#l154">154</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">A</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="c"># HoleyEnum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l155" href="#l155">155</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="mi">3</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l156" href="#l156">156</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l157" href="#l157">157</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l158" href="#l158">158</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">a3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="mi">20</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;f3Alt&quot;</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l159" href="#l159">159</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">B</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="c"># OrdinalEnum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l160" href="#l160">160</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">b0</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l161" href="#l161">161</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">b1</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l162" href="#l162">162</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">b2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l163" href="#l163">163</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="n">C</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="c"># OrdinalEnum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l164" href="#l164">164</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">c0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l165" href="#l165">165</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">c1</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l166" href="#l166">166</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">        </span><span class="n">c2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l167" href="#l167">167</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">a2</span><span class="p">.</span><span class="n">symbolRank</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l168" href="#l168">168</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">b2</span><span class="p">.</span><span class="n">symbolRank</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l169" href="#l169">169</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">c2</span><span class="p">.</span><span class="n">symbolRank</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l170" href="#l170">170</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">c2</span><span class="p">.</span><span class="n">ord</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">12</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l171" href="#l171">171</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">assert</span><span class="w"> </span><span class="n">a2</span><span class="p">.</span><span class="n">ord</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">11</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l172" href="#l172">172</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="n">invalid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">7.</span><span class="n">A</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l173" href="#l173">173</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="n">doAssertRaises</span><span class="p">(</span><span class="n">IndexDefect</span><span class="p">):</span><span class="w"> </span><span class="k">discard</span><span class="w"> </span><span class="n">invalid</span><span class="p">.</span><span class="n">symbolRank</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l174" href="#l174">174</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">when</span><span class="w"> </span><span class="n">T</span><span class="w"> </span><span class="ow">is</span><span class="w"> </span><span class="n">Ordinal</span><span class="p">:</span><span class="w"> </span><span class="n">ord</span><span class="p">(</span><span class="n">a</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">T</span><span class="p">.</span><span class="n">low</span><span class="p">.</span><span class="n">ord</span><span class="p">.</span><span class="k">static</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l175" href="#l175">175</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">  </span><span class="k">else</span><span class="p">:</span><span class="w"> </span><span class="n">symbolRankImpl</span><span class="p">(</span><span class="n">a</span><span class="p">)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l176" href="#l176">176</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l177" href="#l177">177</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="k">proc</span><span class="w"> </span><span class="nf">rangeBase</span><span class="p">(</span><span class="n">T</span><span class="p">:</span><span class="w"> </span><span class="n">typedesc</span><span class="p">):</span><span class="w"> </span><span class="n">typedesc</span><span class="w"> </span><span class="sx">{.magic</span>:<span class="w"> </span><span class="sx">&quot;TypeTrait&quot;.}</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l178" href="#l178">178</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  # skip</span><span class="w"> </span><span class="sx">one</span><span class="w"> </span><span class="sx">level</span><span class="w"> </span><span class="sx">of</span><span class="w"> </span><span class="sx">range; return</span><span class="w"> </span><span class="sx">the</span><span class="w"> </span><span class="sx">base</span><span class="w"> </span><span class="sx">type</span><span class="w"> </span><span class="sx">of</span><span class="w"> </span><span class="sx">a</span><span class="w"> </span><span class="sx">range</span><span class="w"> </span><span class="sx">type</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l179" href="#l179">179</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l180" href="#l180">180</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">func</span><span class="w"> </span><span class="sx">symbolName*[T</span>:<span class="w"> </span><span class="sx">enum](a</span>:<span class="w"> </span><span class="sx">T): string</span><span class="w"> </span><span class="sx">=</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l181" href="#l181">181</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  ## Returns</span><span class="w"> </span><span class="sx">the</span><span class="w"> </span><span class="sx">symbol</span><span class="w"> </span><span class="sx">name</span><span class="w"> </span><span class="sx">of</span><span class="w"> </span><span class="sx">an</span><span class="w"> </span><span class="sx">enum.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l182" href="#l182">182</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  ##</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l183" href="#l183">183</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  ## This</span><span class="w"> </span><span class="sx">uses</span><span class="w"> </span><span class="sx">`symbolRank`.</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l184" href="#l184">184</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  runnableExamples</span>:</td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l185" href="#l185">185</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">type</span><span class="w"> </span><span class="sx">B</span><span class="w"> </span><span class="sx">= enum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l186" href="#l186">186</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="sx">b0</span><span class="w"> </span><span class="sx">= (10</span>,<span class="w"> </span><span class="sx">&quot;kb0&quot;)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l187" href="#l187">187</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">      b1</span><span class="w"> </span><span class="sx">= &quot;kb1&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l188" href="#l188">188</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">      b2</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l189" href="#l189">189</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">let</span><span class="w"> </span><span class="sx">b</span><span class="w"> </span><span class="sx">= B.low</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l190" href="#l190">190</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">assert</span><span class="w"> </span><span class="sx">b.symbolName</span><span class="w"> </span><span class="sx">== &quot;b0&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l191" href="#l191">191</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">    assert</span><span class="w"> </span><span class="sx">$b</span><span class="w"> </span><span class="sx">== &quot;kb0&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l192" href="#l192">192</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">    static</span>:<span class="w"> </span><span class="sx">assert</span><span class="w"> </span><span class="sx">B.high.symbolName</span><span class="w"> </span><span class="sx">== &quot;b2&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l193" href="#l193">193</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">    type</span><span class="w"> </span><span class="sx">C</span><span class="w"> </span><span class="sx">= enum</span><span class="w"> </span><span class="sx"># HoleyEnum</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l194" href="#l194">194</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="sx">c0</span><span class="w"> </span><span class="sx">= -3</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l195" href="#l195">195</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="sx">c1</span><span class="w"> </span><span class="sx">= 4</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l196" href="#l196">196</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">      </span><span class="sx">c2</span><span class="w"> </span><span class="sx">= 20</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l197" href="#l197">197</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">assert</span><span class="w"> </span><span class="sx">c1.symbolName</span><span class="w"> </span><span class="sx">== &quot;c1&quot;</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l198" href="#l198">198</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  when</span><span class="w"> </span><span class="sx">T</span><span class="w"> </span><span class="sx">is</span><span class="w"> </span><span class="sx">range</span>:</td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l199" href="#l199">199</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">const</span><span class="w"> </span><span class="sx">names</span><span class="w"> </span><span class="sx">= enumNames(rangeBase</span><span class="w"> </span><span class="sx">T)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l200" href="#l200">200</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  else</span>:</td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l201" href="#l201">201</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="w">    </span><span class="sx">const</span><span class="w"> </span><span class="sx">names</span><span class="w"> </span><span class="sx">= enumNames(T)</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l202" href="#l202">202</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "><span class="sx">  names[a.symbolRank]</span></td>
+      </tr>
+      <tr class="source-line">
+        <td class="lineno"><a id="l203" href="#l203">203</a></td>
+        <td class="linebranch">
+        </td>
+        <td class="linecount"></td>
+        <td class="src "></td>
+      </tr>
+    </table>
+  </div>
+</div>
+        </main>
+        <hr class="block-separator"/>
+        <footer class="text-center">
+          Created using <a href="http://gcovr.com/en/8.5">GCOVR (Version 8.5)</a>
+          at 2026-06-06 00:35:57
+        </footer>
+      </div>
+    </div>
+  </body>
+
+</html>

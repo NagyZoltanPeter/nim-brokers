@@ -1,0 +1,260 @@
+{
+  "cacheVersion": "D20240927T193831",
+  "outputFile": "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker.bin",
+  "outputLastModificationTime": "",
+  "compile": [
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sexceptions.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sexceptions.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sexceptions.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sprivate@sdigitsutils.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sprivate@sdigitsutils.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sprivate@sdigitsutils.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sassertions.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sassertions.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sassertions.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sobjectdollar.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sobjectdollar.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sobjectdollar.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sdollars.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sdollars.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sdollars.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@ssyncio.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@ssyncio.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@ssyncio.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@phashes.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@phashes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@phashes.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pmath.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pmath.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pmath.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psets.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psets.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psets.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@palgorithm.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@palgorithm.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@palgorithm.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punicode.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punicode.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punicode.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrutils.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrutils.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrutils.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstreams.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstreams.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstreams.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptables.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptables.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptables.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pposix.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pposix.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pposix.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptimes.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptimes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptimes.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@smonotimes.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@smonotimes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@smonotimes.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@soserrors.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@soserrors.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@soserrors.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@senvvars.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@senvvars.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@senvvars.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@scmdline.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@scmdline.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@scmdline.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pos.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pos.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pos.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrformat.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrformat.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrformat.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pterminal.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pterminal.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pterminal.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sexitprocs.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sexitprocs.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sexitprocs.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punittest2.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punittest2.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punittest2.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pnativesockets.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pnativesockets.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pnativesockets.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pheapqueue.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pheapqueue.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pheapqueue.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pdeques.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pdeques.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pdeques.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@presults.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@presults.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@presults.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstew@sbase10.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstew@sbase10.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstew@sbase10.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@ssrcloc.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@ssrcloc.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@ssrcloc.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sfutures.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sfutures.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stimer.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stimer.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stimer.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sraisesfutures.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sraisesfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sraisesfutures.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sselectors2.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sselectors2.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sselectors2.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncengine.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncengine.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncengine.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncfutures.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncfutures.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sasyncsync.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sasyncsync.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sasyncsync.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stransports@scommon.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stransports@scommon.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stransports@scommon.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sbroker_context.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sbroker_context.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sbroker_context.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stopics_registry.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stopics_registry.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stopics_registry.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pserialization@serrors.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pserialization@serrors.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pserialization@serrors.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stimestamp.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stimestamp.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stimestamp.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@slog_output.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@slog_output.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@slog_output.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sinternal@smt_broker_common.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sinternal@smt_broker_common.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sinternal@smt_broker_common.nim.c"
+    ],
+    [
+      "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@mtest_request_broker.nim.c",
+      "clang -c -w -ferror-limit=3 -fno-strict-aliasing -pthread --coverage -O0 -g -g   -I/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/lib -I/Users/schwarzy/dev/status/nim-brokers/test -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@mtest_request_broker.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@mtest_request_broker.nim.c"
+    ]
+  ],
+  "link": [
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sexceptions.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sprivate@sdigitsutils.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sassertions.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sobjectdollar.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sdollars.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@ssyncio.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@phashes.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pmath.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psets.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@palgorithm.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punicode.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrutils.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstreams.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptables.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pposix.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptimes.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@smonotimes.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@soserrors.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@senvvars.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@scmdline.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pos.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrformat.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pterminal.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sexitprocs.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punittest2.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pnativesockets.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pheapqueue.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pdeques.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@presults.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstew@sbase10.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@ssrcloc.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sfutures.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stimer.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sraisesfutures.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sselectors2.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncengine.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncfutures.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sasyncsync.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stransports@scommon.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sbroker_context.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stopics_registry.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pserialization@serrors.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stimestamp.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@slog_output.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sinternal@smt_broker_common.nim.c.o",
+    "/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@mtest_request_broker.nim.c.o"
+  ],
+  "linkcmd": "clang   -o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker.bin /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sexceptions.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sprivate@sdigitsutils.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sassertions.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sobjectdollar.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem@sdollars.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@ssyncio.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psystem.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@phashes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pmath.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@psets.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@palgorithm.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punicode.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrutils.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstreams.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptables.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pposix.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@ptimes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@smonotimes.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@soserrors.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@senvvars.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@scmdline.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pos.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstrformat.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pterminal.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstd@sexitprocs.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@punittest2.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pnativesockets.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pheapqueue.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pdeques.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@presults.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pstew@sbase10.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@ssrcloc.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stimer.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sraisesfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sselectors2.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncengine.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sinternal@sasyncfutures.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@sasyncsync.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronos@stransports@scommon.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sbroker_context.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stopics_registry.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pserialization@serrors.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@stimestamp.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pchronicles@slog_output.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@pbrokers@sinternal@smt_broker_common.nim.c.o /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker/@mtest_request_broker.nim.c.o   --coverage  -ldl",
+  "extraCmds": [
+    "dsymutil /Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_request_broker.bin"
+  ],
+  "configFiles": [
+    "/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/config/nim.cfg",
+    "/Users/schwarzy/dev/status/nim-brokers/nimbledeps/pkgs2/nim-2.2.10-17ec440fdb89f8903db29a17898af590087d2b64/config/config.nims",
+    "/Users/schwarzy/dev/status/nim-brokers/config.nims"
+  ],
+  "stdinInput": false,
+  "projectIsCmd": false,
+  "cmdInput": "",
+  "currentDir": "/Users/schwarzy/dev/status/nim-brokers",
+  "cmdline": "",
+  "depfiles": [],
+  "nimexe": ""
+}

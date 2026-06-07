@@ -16,9 +16,10 @@ else:
   # in that combination; ORC + same Nim + same matrix is fine, as is every
   # other Nim version refc + release). Declaring just the proc we need
   # keeps the symbol surface of this module unchanged from the pre-PR shape.
-  proc closeHandle(h: pointer): int32 {.
-    stdcall, dynlib: "kernel32", importc: "CloseHandle", sideEffect
-  .}
+  proc closeHandle(
+    h: pointer
+  ): int32 {.stdcall, dynlib: "kernel32", importc: "CloseHandle", sideEffect.}
+
 import std/atomics
 import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
 import results

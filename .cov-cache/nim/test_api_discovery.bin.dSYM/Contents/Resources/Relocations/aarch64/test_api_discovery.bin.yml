@@ -1,0 +1,43 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/schwarzy/dev/status/nim-brokers/.cov-cache/nim/test_api_discovery.bin'
+relocations:
+  - { offset: 0x8DEAB, size: 0x8, addend: 0x0, symName: _llvm_gcda_start_file, symObjAddr: 0x0, symBinAddr: 0x100194B08, symSize: 0x388 }
+  - { offset: 0x8E120, size: 0x8, addend: 0x0, symName: _llvm_gcda_emit_function, symObjAddr: 0x388, symBinAddr: 0x100194E90, symSize: 0x204 }
+  - { offset: 0x8E24A, size: 0x8, addend: 0x0, symName: _llvm_gcda_emit_arcs, symObjAddr: 0x58C, symBinAddr: 0x100195094, symSize: 0x31C }
+  - { offset: 0x8E3B0, size: 0x8, addend: 0x0, symName: _llvm_gcda_summary_info, symObjAddr: 0x8A8, symBinAddr: 0x1001953B0, symSize: 0x3AC }
+  - { offset: 0x8E626, size: 0x8, addend: 0x0, symName: _llvm_gcda_end_file, symObjAddr: 0xC54, symBinAddr: 0x10019575C, symSize: 0x138 }
+  - { offset: 0x8E720, size: 0x8, addend: 0x0, symName: _llvm_register_writeout_function, symObjAddr: 0xD8C, symBinAddr: 0x100195894, symSize: 0x60 }
+  - { offset: 0x8E74C, size: 0x8, addend: 0x0, symName: _llvm_writeout_files, symObjAddr: 0xDEC, symBinAddr: 0x1001958F4, symSize: 0x54 }
+  - { offset: 0x8E775, size: 0x8, addend: 0x0, symName: _llvm_writeout_and_clear, symObjAddr: 0xE40, symBinAddr: 0x100195948, symSize: 0xD8 }
+  - { offset: 0x8E7C9, size: 0x8, addend: 0x0, symName: _llvm_register_reset_function, symObjAddr: 0xF18, symBinAddr: 0x100195A20, symSize: 0x60 }
+  - { offset: 0x8E7F5, size: 0x8, addend: 0x0, symName: _llvm_delete_reset_function_list, symObjAddr: 0xF78, symBinAddr: 0x100195A80, symSize: 0xAC }
+  - { offset: 0x8E829, size: 0x8, addend: 0x0, symName: _llvm_reset_counters, symObjAddr: 0x1024, symBinAddr: 0x100195B2C, symSize: 0x54 }
+  - { offset: 0x8E84C, size: 0x8, addend: 0x0, symName: ___gcov_fork, symObjAddr: 0x1078, symBinAddr: 0x100195B80, symSize: 0x80 }
+  - { offset: 0x8E8C1, size: 0x8, addend: 0x0, symName: _llvm_gcov_init, symObjAddr: 0x10F8, symBinAddr: 0x100195C00, symSize: 0xCC }
+  - { offset: 0x8E957, size: 0x8, addend: 0x0, symName: ___gcov_dump, symObjAddr: 0x11C4, symBinAddr: 0x100195CCC, symSize: 0x38 }
+  - { offset: 0x8E974, size: 0x8, addend: 0x0, symName: ___gcov_reset, symObjAddr: 0x11FC, symBinAddr: 0x100195D04, symSize: 0x38 }
+  - { offset: 0x8E991, size: 0x8, addend: 0x0, symName: ___GLOBAL_init_100, symObjAddr: 0x1240, symBinAddr: 0x100195D3C, symSize: 0x18 }
+  - { offset: 0x8E9C8, size: 0x8, addend: 0x0, symName: ___llvm_profile_recursive_mkdir, symObjAddr: 0x0, symBinAddr: 0x100195D54, symSize: 0x5C }
+  - { offset: 0x8E9DB, size: 0x8, addend: 0x0, symName: ___llvm_profile_recursive_mkdir, symObjAddr: 0x0, symBinAddr: 0x100195D54, symSize: 0x5C }
+  - { offset: 0x8EA16, size: 0x8, addend: 0x0, symName: ___llvm_profile_get_dir_mode, symObjAddr: 0x5C, symBinAddr: 0x100195DB0, symSize: 0xC }
+  - { offset: 0x8EA27, size: 0x8, addend: 0x0, symName: ___llvm_profile_set_dir_mode, symObjAddr: 0x68, symBinAddr: 0x100195DBC, symSize: 0xC }
+  - { offset: 0x8EA38, size: 0x8, addend: 0x0, symName: _lprofGetHostName, symObjAddr: 0x74, symBinAddr: 0x100195DC8, symSize: 0x80 }
+  - { offset: 0x8EA5E, size: 0x8, addend: 0x0, symName: _lprofLockFd, symObjAddr: 0xF4, symBinAddr: 0x100195E48, symSize: 0x90 }
+  - { offset: 0x8EABB, size: 0x8, addend: 0x0, symName: _lprofUnlockFd, symObjAddr: 0x184, symBinAddr: 0x100195ED8, symSize: 0x90 }
+  - { offset: 0x8EB07, size: 0x8, addend: 0x0, symName: _lprofLockFileHandle, symObjAddr: 0x214, symBinAddr: 0x100195F68, symSize: 0x94 }
+  - { offset: 0x8EB7C, size: 0x8, addend: 0x0, symName: _lprofUnlockFileHandle, symObjAddr: 0x2A8, symBinAddr: 0x100195FFC, symSize: 0x94 }
+  - { offset: 0x8EBE4, size: 0x8, addend: 0x0, symName: _lprofOpenFileEx, symObjAddr: 0x33C, symBinAddr: 0x100196090, symSize: 0xD4 }
+  - { offset: 0x8EC83, size: 0x8, addend: 0x0, symName: _lprofGetFileContentBuffer, symObjAddr: 0x410, symBinAddr: 0x100196164, symSize: 0x208 }
+  - { offset: 0x8EDBF, size: 0x8, addend: 0x0, symName: _lprofReleaseBuffer, symObjAddr: 0x618, symBinAddr: 0x10019636C, symSize: 0xA4 }
+  - { offset: 0x8EE00, size: 0x8, addend: 0x0, symName: _lprofGetPathPrefix, symObjAddr: 0x6BC, symBinAddr: 0x100196410, symSize: 0x98 }
+  - { offset: 0x8EE54, size: 0x8, addend: 0x0, symName: _lprofApplyPathPrefix, symObjAddr: 0x754, symBinAddr: 0x1001964A8, symSize: 0xAC }
+  - { offset: 0x8EE73, size: 0x8, addend: 0x0, symName: _lprofFindFirstDirSeparator, symObjAddr: 0x800, symBinAddr: 0x100196554, symSize: 0x8 }
+  - { offset: 0x8EE99, size: 0x8, addend: 0x0, symName: _lprofFindLastDirSeparator, symObjAddr: 0x808, symBinAddr: 0x10019655C, symSize: 0x8 }
+  - { offset: 0x8EEBF, size: 0x8, addend: 0x0, symName: _lprofInstallSignalHandler, symObjAddr: 0x810, symBinAddr: 0x100196564, symSize: 0x58 }
+  - { offset: 0x8EEF2, size: 0x8, addend: 0x0, symName: _lprofSuspendSigKill, symObjAddr: 0x868, symBinAddr: 0x1001965BC, symSize: 0x8 }
+  - { offset: 0x8EF03, size: 0x8, addend: 0x0, symName: _lprofRestoreSigKill, symObjAddr: 0x870, symBinAddr: 0x1001965C4, symSize: 0x4 }
+  - { offset: 0x8EF20, size: 0x8, addend: 0x0, symName: _lprofReleaseMemoryPagesToOS, symObjAddr: 0x874, symBinAddr: 0x1001965C8, symSize: 0x58 }
+  - { offset: 0x8EF86, size: 0x8, addend: 0x0, symName: _lprofAtExit, symObjAddr: 0x8CC, symBinAddr: 0x100196620, symSize: 0x4 }
+  - { offset: 0x8EF9B, size: 0x8, addend: 0x0, symName: _lprofAtExit, symObjAddr: 0x8CC, symBinAddr: 0x100196620, symSize: 0x4 }
+...
