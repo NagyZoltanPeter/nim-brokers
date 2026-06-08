@@ -266,30 +266,11 @@ suite "API library init (CBOR mode)":
 
     let before = openFdCount()
     const cycles = 20
-    # Per-cycle measurement: tells us whether the leak is in createContext,
-    # shutdown, or somewhere else. Only echo the first three and last cycle
-    # to keep CI logs small.
-    for i in 0 ..< cycles:
-      let preCreate = openFdCount()
+    for _ in 0 ..< cycles:
       var e: cstring = nil
       let c = cbtest_createContext(addr e)
       check c != 0'u32
-      let postCreate = openFdCount()
       check cbtest_shutdown(c) == 0'i32
-      let postShutdown = openFdCount()
-      if i < 3 or i == cycles - 1:
-        echo "[fd-leak cycle ",
-          i,
-          "] preCreate=",
-          preCreate,
-          " postCreate=",
-          postCreate,
-          " postShutdown=",
-          postShutdown,
-          " createDelta=",
-          postCreate - preCreate,
-          " shutdownDelta=",
-          postShutdown - postCreate
     let after = openFdCount()
     let delta = after - before
 

@@ -713,6 +713,9 @@ proc buildPersistenceExampleLibrary(
     flags.add(" --mm:" & getEnv("MM"))
   else:
     flags.add(" --mm:orc")
+  if existsEnv("SRCGEN"):
+    flags.add(" -d:brokerDebug")
+    echo "=== Building persistence example with source-gen debug info (set SRCGEN=1 to enable) ==="
   if generatePy or existsEnv("GEN_PY"):
     flags.add(" -d:BrokerFfiApiGenPy")
   if generateRust or existsEnv("GEN_RUST"):
