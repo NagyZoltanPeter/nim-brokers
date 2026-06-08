@@ -6,6 +6,20 @@
 {.push raises: [].}
 
 import chronos, chronos/threadsync
+when not defined(windows):
+  import chronos/selectors2 # `close2` on the per-thread dispatcher's Selector
+else:
+  # IOCP HANDLE close: forward-declare CloseHandle inline rather than
+  # importing `chronos/osdefs`. Pulling osdefs into this module's compile
+  # unit destabilises Windows + Nim 2.2.4 + --mm:refc + -d:release builds
+  # (test/test_multi_thread_request_broker silently crashes on createThread
+  # in that combination; ORC + same Nim + same matrix is fine, as is every
+  # other Nim version refc + release). Declaring just the proc we need
+  # keeps the symbol surface of this module unchanged from the pre-PR shape.
+  proc closeHandle(
+    h: pointer
+  ): int32 {.stdcall, dynlib: "kernel32", importc: "CloseHandle", sideEffect.}
+
 import std/atomics
 import std/[os, locks] # `sleep`; `Lock` for the API listener-installer registry
 import results
@@ -322,3 +336,33 @@ proc stopBrokerDispatchHere*() =
 
   waitFor awaitLoopExit()
   gBrokerDispatchStopRequested = false
+
+proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
+  ## Close the calling thread's chronos dispatcher OS handle:
+  ## - POSIX (kqueue / epoll / poll engine): the `Selector` fd
+  ## - Windows (IOCP engine):                 the IOCP `HANDLE`
+  ##
+  ## chronos (4.2.2) has no `PDispatcher` teardown and neither `SelectorImpl`
+  ## (POSIX) nor the Windows IOCP `PDispatcher` has a `=destroy` — the
+  ## per-thread handle opened by `newDispatcher` (`kqueue()` / `epoll_create()`
+  ## / `CreateIoCompletionPort`) is never closed, so it leaks once per thread
+  ## that ever ran a chronos loop. The broker per-context threads
+  ## (processing + delivery) are spawned and joined per `_createContext` /
+  ## `_shutdown`, so without this every context lifecycle leaks 2 handles
+  ## regardless of --mm:refc vs --mm:orc.
+  ##
+  ## Call as the LAST action of a broker thread proc, AFTER
+  ## `stopBrokerDispatchHere()` has closed the per-thread `ThreadSignalPtr`
+  ## and the dispatch loop has exited; at that point the dispatcher holds no
+  ## live registered handles, so closing it only reclaims the dispatcher
+  ## handle itself.
+  {.cast(gcsafe).}:
+    let disp = getThreadDispatcher()
+    if disp.isNil:
+      return
+    when defined(windows):
+      # chronos `HANDLE = distinct uint`; cast through pointer for our
+      # inline CloseHandle prototype (Win32 `HANDLE` is `void*` ABI-wise).
+      discard closeHandle(cast[pointer](getIoHandler(disp)))
+    else:
+      discard close2(getIoHandler(disp))

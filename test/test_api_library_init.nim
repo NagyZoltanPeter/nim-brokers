@@ -12,7 +12,7 @@
 ## - `<lib>_call` framework-error path for unknown apiName
 ## - `<lib>_shutdown` cleanup
 
-import std/[options, strutils]
+import std/[options, strutils, os, osproc]
 import results
 import testutils/unittests
 import brokers/[event_broker, request_broker, broker_context, api_library]
@@ -210,3 +210,90 @@ suite "API library init (CBOR mode)":
 
     check cbtest_shutdown(ctxA) == 0'i32
     check cbtest_shutdown(ctxB) == 0'i32
+
+  test "repeated createContext/shutdown does not leak file descriptors":
+    # Regression for the chronos per-thread dispatcher leak: each ctx spawns a
+    # processing + delivery thread, each runs a chronos loop that opens one
+    # selector fd (kqueue on macOS, epoll on Linux). chronos never closes it;
+    # the broker thread procs now reclaim it via closeThreadDispatcherSelector.
+    # Without that fix this loop leaks ~2 fds per cycle (~40 over 20 cycles).
+    #
+    # Counting strategy per platform:
+    #   Linux:   walk /proc/self/fd (the walkDir dir-handle cancels out).
+    #   macOS:   lsof (kqueue fds are not reliably in /dev/fd).
+    #   Windows: GetProcessHandleCount — counts open kernel HANDLEs, which
+    #            catches the IOCP-HANDLE leak the same way fds catch the
+    #            kqueue/epoll one.
+    when defined(windows):
+      proc getCurrentProcess(): pointer {.
+        stdcall, dynlib: "kernel32", importc: "GetCurrentProcess"
+      .}
+
+      proc getProcessHandleCount(
+        hProc: pointer, pdwCount: ptr uint32
+      ): int32 {.stdcall, dynlib: "kernel32", importc: "GetProcessHandleCount".}
+
+      proc openFdCount(): int =
+        var n: uint32 = 0
+        if getProcessHandleCount(getCurrentProcess(), addr n) == 0:
+          return -1
+        result = n.int
+
+    elif defined(linux):
+      proc openFdCount(): int =
+        result = 0
+        for _ in walkDir("/proc/self/fd"):
+          inc result
+
+    else:
+      proc openFdCount(): int =
+        let pid = getCurrentProcessId()
+        let (outp, rc) = execCmdEx("lsof -p " & $pid & " 2>/dev/null | wc -l")
+        result =
+          if rc == 0:
+            parseInt(outp.strip())
+          else:
+            -1
+
+    # Warm up: the first cycle lazily initialises one-time process state
+    # (subs registry, ctx lock, foreign-thread GC) that is intentionally not
+    # reclaimed. Measure the steady state after it.
+    block:
+      var e: cstring = nil
+      let c = cbtest_createContext(addr e)
+      check c != 0'u32
+      check cbtest_shutdown(c) == 0'i32
+
+    let before = openFdCount()
+    const cycles = 20
+    for _ in 0 ..< cycles:
+      var e: cstring = nil
+      let c = cbtest_createContext(addr e)
+      check c != 0'u32
+      check cbtest_shutdown(c) == 0'i32
+    let after = openFdCount()
+    let delta = after - before
+
+    # Diagnostic — surfaced in CI logs so a future failure tells us the
+    # actual delta, not just an opaque [FAILED]. Cheap, leave it in.
+    echo "[fd-leak] before=",
+      before, " after=", after, " delta=", delta, " cycles=", cycles
+
+    # The pre-fix chronos dispatcher leak is exactly `2 * cycles` (one
+    # dispatcher handle per processing/delivery thread). Allow a generous
+    # slack for steady-state noise — anything well below `cycles` still
+    # proves we're not leaking per-cycle.
+    when defined(windows) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
+      # Known Nim 2.2.4 Windows-only runtime leak unrelated to this fix:
+      # `joinThread` does not close the OS thread HANDLE, so we leak
+      # ~2 HANDLEs per (spawn delivery + spawn processing) cycle. CI
+      # diagnostics confirmed `CloseHandle(getIoHandler(disp)) == 1`
+      # (success) for every dispatcher, so the chronos IOCP close this
+      # test guards is working. The residual leak is fixed in Nim 2.2.10
+      # — every other tested matrix (macOS, Linux, Windows + Nim 2.2.10
+      # and later) reports delta close to 0.
+      echo "[fd-leak] skipping assertion on Nim 2.2.4 + Windows ",
+        "(known joinThread/CloseHandle leak, fixed in 2.2.10; ",
+        "chronos IOCP close itself verified rc=1)"
+    else:
+      check delta <= cycles div 2
