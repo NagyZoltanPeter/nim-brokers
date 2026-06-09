@@ -8,6 +8,7 @@
 mod lib;
 
 use lib::{Inner, KeyRange, Slot, Tag, Typemappingtestlib};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2816,6 +2817,49 @@ fn test_str_array_event() {
 // main
 // ===========================================================================
 
+// Associative containers — Table[K, V]. Rust currently supports string-keyed
+// tables (ciborium/serde decode them natively); non-string keys are exercised
+// by the Python parity test (see doc/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+
+fn test_map_param_roundtrip() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let mut scores: HashMap<String, i32> = HashMap::new();
+    scores.insert("x".to_string(), 10);
+    scores.insert("y".to_string(), 20);
+    scores.insert("z".to_string(), 30);
+    let r = lib.map_param_request(scores);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.total, 60i64);
+        check_eq!(&v.joined, &"x|y|z".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_map_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let received: SafeList<HashMap<String, i32>> = list_new();
+    let received_cb = received.clone();
+    let h = lib.on_map_event(move |counts: HashMap<String, i32>| {
+        list_push(&received_cb, counts);
+    });
+    check_ne!(h, 0u64);
+    let mut scores: HashMap<String, i32> = HashMap::new();
+    scores.insert("a".to_string(), 1);
+    scores.insert("b".to_string(), 2);
+    let _ = lib.map_param_request(scores);
+    let received_w = received.clone();
+    wait_for_default(|| list_size(&received_w) >= 1);
+    check_eq!(list_size(&received), 1usize);
+    let snap = list_snapshot(&received);
+    check_eq!(*snap[0].get("a").unwrap(), 1i32);
+    check_eq!(*snap[0].get("b").unwrap(), 2i32);
+    lib.off_map_event(h);
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -2984,6 +3028,10 @@ fn main() {
     run_test("test_nested_obj_inline_field", test_nested_obj_inline_field);
     run_test("test_set_slots_obj_array_param", test_set_slots_obj_array_param);
     run_test("test_str_array_event", test_str_array_event);
+
+    println!("\n--- TestTableTypes ---");
+    run_test("test_map_param_roundtrip", test_map_param_roundtrip);
+    run_test("test_map_event", test_map_event);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);
