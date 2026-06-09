@@ -82,3 +82,55 @@ suite "BrokerInterface: method calls tunnel through the broker":
     installMock(a.brokerCtx)
     check (waitFor a.greet("x")).value == "MOCK<x>"
     check (waitFor b.greet("x")).value == "real:b:x"
+
+suite "RequestBroker: getCurrentProvider round-trip (criterion 3)":
+  test "with-arg slot: capture -> replace -> restore":
+    let g = GreeterImpl.create(prefix = "p:")
+    let ctx = g.brokerCtx
+    let orig = Greet.getCurrentProvider(ctx)
+    check orig.isSome
+    discard Greet.replaceProvider(
+      ctx,
+      proc(name: string): Future[Result[string, string]] {.async.} =
+        ok("MOCK<" & name & ">"),
+    )
+    check (waitFor g.greet("bob")).value == "MOCK<bob>"
+    discard Greet.replaceProvider(ctx, orig.get)
+    check (waitFor g.greet("bob")).value == "real:p:bob"
+
+  test "zero-arg slot: capture -> replace -> restore":
+    let g = GreeterImpl.create(prefix = "p:")
+    let ctx = g.brokerCtx
+    let orig = Version.getCurrentProviderNoArgs(ctx)
+    check orig.isSome
+    discard Version.replaceProvider(
+      ctx,
+      proc(): Future[Result[string, string]] {.async.} =
+        ok("MOCK<v>"),
+    )
+    check (waitFor g.version()).value == "MOCK<v>"
+    discard Version.replaceProvider(ctx, orig.get)
+    check (waitFor g.version()).value == "real:v"
+
+suite "RequestBroker: withMockProvider scoped restore (criterion 5)":
+  test "with-arg slot restores after the block":
+    let g = GreeterImpl.create(prefix = "p:")
+    let ctx = g.brokerCtx
+    Greet.withMockProvider(
+      ctx,
+      proc(name: string): Future[Result[string, string]] {.async.} =
+        ok("MOCK<" & name & ">"),
+    ):
+      check (waitFor g.greet("bob")).value == "MOCK<bob>"
+    check (waitFor g.greet("bob")).value == "real:p:bob"
+
+  test "zero-arg slot restores after the block":
+    let g = GreeterImpl.create(prefix = "p:")
+    let ctx = g.brokerCtx
+    Version.withMockProvider(
+      ctx,
+      proc(): Future[Result[string, string]] {.async.} =
+        ok("MOCK<v>"),
+    ):
+      check (waitFor g.version()).value == "MOCK<v>"
+    check (waitFor g.version()).value == "real:v"
