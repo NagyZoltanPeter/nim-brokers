@@ -156,7 +156,7 @@
 ## If no `signature` proc is declared, a zero-argument form is generated
 ## automatically, so the caller only needs to provide the type definition.
 
-import std/[macros, strutils]
+import std/[macros, strutils, options]
 from std/sequtils import keepItIf
 import chronos
 import results
@@ -174,7 +174,7 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_request_broker_cbor
   export api_request_broker_cbor
 
-export results, chronos, keepItIf, broker_context
+export results, chronos, keepItIf, broker_context, options
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
   ## Build a future that is already completed with an error result.
@@ -953,6 +953,130 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         isProvided(`typeIdent`, DefaultBrokerContext)
 
   )
+
+  # ── getCurrentProvider / replaceProvider ───────────────────────────
+  # Read the currently-installed provider closure (per ctx, per slot), and
+  # overwrite it without setProvider's "already set" guard. Together they let a
+  # test capture → mock → restore (see the generated `withMockProvider`). Two
+  # slots can coexist on one broker, so the zero-arg getter takes a distinct
+  # name (return-type-only overloads are illegal); `replaceProvider` overloads
+  # cleanly on the handler proc type.
+  if not zeroArgSig.isNil():
+    let zeroArgProvidersFieldName = ident("providersNoArgs")
+    result.add(
+      quote do:
+        proc getCurrentProviderNoArgs*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): Option[`zeroArgProviderName`] =
+          var provider: `zeroArgProviderName`
+          if brokerCtx == DefaultBrokerContext:
+            provider = `accessProcIdent`().`zeroArgProvidersFieldName`[0].handler
+          else:
+            for entry in `accessProcIdent`().`zeroArgProvidersFieldName`:
+              if entry.brokerCtx == brokerCtx:
+                provider = entry.handler
+                break
+          if provider.isNil():
+            none(`zeroArgProviderName`)
+          else:
+            some(provider)
+
+        proc replaceProvider*(
+            _: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            handler: `zeroArgProviderName`,
+        ): Result[void, string] =
+          ## Replace-or-insert; unlike setProvider it never errors on an existing
+          ## entry. `default(handler-type)` clears the slot.
+          if brokerCtx == DefaultBrokerContext:
+            `accessProcIdent`().`zeroArgProvidersFieldName`[0].handler = handler
+            return ok()
+          for i in 0 ..< `accessProcIdent`().`zeroArgProvidersFieldName`.len:
+            if `accessProcIdent`().`zeroArgProvidersFieldName`[i].brokerCtx == brokerCtx:
+              `accessProcIdent`().`zeroArgProvidersFieldName`[i].handler = handler
+              return ok()
+          `accessProcIdent`().`zeroArgProvidersFieldName`.add(
+            (brokerCtx: brokerCtx, handler: handler)
+          )
+          ok()
+
+        template withMockProvider*(
+            t: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            mock: `zeroArgProviderName`,
+            body: untyped,
+        ): untyped =
+          ## Install `mock` for the duration of `body`, then restore the captured
+          ## provider (or clear it if none was set). Scoped, exception-safe.
+          let savedMockProvider = getCurrentProviderNoArgs(t, brokerCtx)
+          discard replaceProvider(t, brokerCtx, mock)
+          try:
+            body
+          finally:
+            if savedMockProvider.isSome:
+              discard replaceProvider(t, brokerCtx, savedMockProvider.get)
+            else:
+              clearProvider(t, brokerCtx)
+
+    )
+  if not argSig.isNil():
+    let argProvidersFieldName = ident("providersWithArgs")
+    result.add(
+      quote do:
+        proc getCurrentProvider*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): Option[`argProviderName`] =
+          var provider: `argProviderName`
+          if brokerCtx == DefaultBrokerContext:
+            provider = `accessProcIdent`().`argProvidersFieldName`[0].handler
+          else:
+            for entry in `accessProcIdent`().`argProvidersFieldName`:
+              if entry.brokerCtx == brokerCtx:
+                provider = entry.handler
+                break
+          if provider.isNil():
+            none(`argProviderName`)
+          else:
+            some(provider)
+
+        proc replaceProvider*(
+            _: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            handler: `argProviderName`,
+        ): Result[void, string] =
+          ## Replace-or-insert; unlike setProvider it never errors on an existing
+          ## entry. `default(handler-type)` clears the slot.
+          if brokerCtx == DefaultBrokerContext:
+            `accessProcIdent`().`argProvidersFieldName`[0].handler = handler
+            return ok()
+          for i in 0 ..< `accessProcIdent`().`argProvidersFieldName`.len:
+            if `accessProcIdent`().`argProvidersFieldName`[i].brokerCtx == brokerCtx:
+              `accessProcIdent`().`argProvidersFieldName`[i].handler = handler
+              return ok()
+          `accessProcIdent`().`argProvidersFieldName`.add(
+            (brokerCtx: brokerCtx, handler: handler)
+          )
+          ok()
+
+        template withMockProvider*(
+            t: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            mock: `argProviderName`,
+            body: untyped,
+        ): untyped =
+          ## Install `mock` for the duration of `body`, then restore the captured
+          ## provider (or clear it if none was set). Scoped, exception-safe.
+          let savedMockProvider = getCurrentProvider(t, brokerCtx)
+          discard replaceProvider(t, brokerCtx, mock)
+          try:
+            body
+          finally:
+            if savedMockProvider.isSome:
+              discard replaceProvider(t, brokerCtx, savedMockProvider.get)
+            else:
+              clearProvider(t, brokerCtx)
+
+    )
 
   when defined(brokerDebug):
     writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)

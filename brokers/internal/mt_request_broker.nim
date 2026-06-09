@@ -22,14 +22,15 @@
 
 {.push raises: [].}
 
-import std/[macros, strutils, locks, os, atomics]
+import std/[macros, strutils, locks, os, atomics, options]
 import chronos, chronicles
 import results
 import ./helper/broker_utils, ../broker_context
 
 import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
 import ./broker_debug
-export results, chronos, chronicles, broker_context, mt_broker_common, mt_config
+export
+  results, chronos, chronicles, broker_context, mt_broker_common, mt_config, options
 
 # Capacity defaults moved to `mt_config.nim` and re-exported via the
 # `mt_config` module so existing references to `DefaultMtReq*` constants
@@ -1649,6 +1650,115 @@ proc generateMtRequestBroker*(
         isProvided(`typeIdent`, DefaultBrokerContext)
 
   )
+
+  # ── getCurrentProvider / replaceProvider (owning thread only) ───────
+  # MT introspection reads the per-thread threadvar slot, so it MUST be called
+  # on the provider's owning thread (the one that ran setProvider). Cross-thread
+  # introspection is not supported (the shared bucket holds a ring, not the
+  # closure). Distinct zero-arg getter name avoids return-type-only overloads;
+  # replaceProvider overloads on the handler proc type.
+  if not zeroArgSig.isNil():
+    result.add(
+      quote do:
+        proc getCurrentProviderNoArgs*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): Option[`zeroArgProviderName`] =
+          for i in 0 ..< `tvNoArgCtxIdent`.len:
+            if `tvNoArgCtxIdent`[i] == brokerCtx:
+              return some(`tvNoArgHandlerIdent`[i])
+          none(`zeroArgProviderName`)
+
+        proc replaceProvider*(
+            _: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            handler: `zeroArgProviderName`,
+        ): Result[void, string] =
+          ## Replace-or-insert on the owning thread; never errors on an existing
+          ## entry (unlike setProvider). A new ctx also sets up its bucket.
+          `initProcIdent`()
+          for i in 0 ..< `tvNoArgCtxIdent`.len:
+            if `tvNoArgCtxIdent`[i] == brokerCtx:
+              `tvNoArgHandlerIdent`[i] = handler
+              return ok()
+          `tvNoArgCtxIdent`.add(brokerCtx)
+          `tvNoArgHandlerIdent`.add(handler)
+          let r = `setupBucketIdent`(brokerCtx)
+          if r.isErr():
+            `tvNoArgCtxIdent`.setLen(`tvNoArgCtxIdent`.len - 1)
+            `tvNoArgHandlerIdent`.setLen(`tvNoArgHandlerIdent`.len - 1)
+            return r
+          ok()
+
+        template withMockProvider*(
+            t: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            mock: `zeroArgProviderName`,
+            body: untyped,
+        ): untyped =
+          ## Owning-thread only. Install `mock` for the duration of `body`, then
+          ## restore the captured provider (or clear it if none was set).
+          let savedMockProvider = getCurrentProviderNoArgs(t, brokerCtx)
+          discard replaceProvider(t, brokerCtx, mock)
+          try:
+            body
+          finally:
+            if savedMockProvider.isSome:
+              discard replaceProvider(t, brokerCtx, savedMockProvider.get)
+            else:
+              clearProvider(t, brokerCtx)
+
+    )
+  if not argSig.isNil():
+    result.add(
+      quote do:
+        proc getCurrentProvider*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): Option[`argProviderName`] =
+          for i in 0 ..< `tvWithArgCtxIdent`.len:
+            if `tvWithArgCtxIdent`[i] == brokerCtx:
+              return some(`tvWithArgHandlerIdent`[i])
+          none(`argProviderName`)
+
+        proc replaceProvider*(
+            _: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            handler: `argProviderName`,
+        ): Result[void, string] =
+          ## Replace-or-insert on the owning thread; never errors on an existing
+          ## entry (unlike setProvider). A new ctx also sets up its bucket.
+          `initProcIdent`()
+          for i in 0 ..< `tvWithArgCtxIdent`.len:
+            if `tvWithArgCtxIdent`[i] == brokerCtx:
+              `tvWithArgHandlerIdent`[i] = handler
+              return ok()
+          `tvWithArgCtxIdent`.add(brokerCtx)
+          `tvWithArgHandlerIdent`.add(handler)
+          let r = `setupBucketIdent`(brokerCtx)
+          if r.isErr():
+            `tvWithArgCtxIdent`.setLen(`tvWithArgCtxIdent`.len - 1)
+            `tvWithArgHandlerIdent`.setLen(`tvWithArgHandlerIdent`.len - 1)
+            return r
+          ok()
+
+        template withMockProvider*(
+            t: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            mock: `argProviderName`,
+            body: untyped,
+        ): untyped =
+          ## Owning-thread only. Install `mock` for the duration of `body`, then
+          ## restore the captured provider (or clear it if none was set).
+          let savedMockProvider = getCurrentProvider(t, brokerCtx)
+          discard replaceProvider(t, brokerCtx, mock)
+          try:
+            body
+          finally:
+            if savedMockProvider.isSome:
+              discard replaceProvider(t, brokerCtx, savedMockProvider.get)
+            else:
+              clearProvider(t, brokerCtx)
+
+    )
 
   when defined(brokerDebug):
     writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)

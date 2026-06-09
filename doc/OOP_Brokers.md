@@ -50,7 +50,7 @@ compile-time type guard.
 # -- registration (implementation module) --
 IGreeter.provideFactory(
   proc(cfg: string): Result[IGreeter, string] =
-    ok(GreeterImpl.new(prefix = cfg))
+    ok(GreeterImpl.create(prefix = cfg))
 )
 
 # -- consumption (consumer module, knows only IGreeter) --
@@ -60,7 +60,7 @@ let res = waitFor svc.greet("alice")   # virtual dispatch → GreeterImpl.greet
 
 ### Per-instance isolation
 
-Every instance created via `new()` or `bindToContext()` gets its own
+Every instance created via `create()` or `createUnderContext()` gets its own
 `BrokerContext`. Providers and event listeners registered by one instance are
 completely isolated from another — two `GreeterImpl` instances serve
 independent request streams, emit independent events, and can be closed
@@ -91,8 +91,11 @@ generates:
 - A **`ref object of RootObj`** base type with a hidden `brokerCtx` field.
 - The underlying `EventBroker` / `RequestBroker` definitions (re-emitted
   verbatim from the block body).
-- One **abstract `{.base.}` method** per request — pure-virtual until a
-  `BrokerImplement` overrides it.
+- One **public request `proc`** per request verb that *tunnels* through the
+  broker: `proc greet(self, …) = Greet.request(self.brokerCtx, …)`. It is a
+  plain proc, **not** a `{.base.}` virtual method — routing is by ctx, so the
+  call always goes through the broker dispatch path (see *Method calls tunnel
+  through the broker* below).
 - An **instance-scoped event facade** (`self.emit`, `self.listen`,
   `self.dropListener`) that automatically injects `self.brokerCtx`.
 - A **factory broker** for dependency injection (`provideFactory` / `create`).
@@ -113,39 +116,57 @@ BrokerInterface(IGreeter):
 ```
 
 After this block, `IGreeter` is a `ref object` type, `Greeted` is an event
-broker, `Greet` and `Version` are request brokers, and `IGreeter` has abstract
-methods `greet` and `version` that raise until overridden.
+broker, `Greet` and `Version` are request brokers, and `IGreeter` has public
+tunneling procs `greet` and `version` that forward to `Greet.request` /
+`Version.request` (keyed by `self.brokerCtx`).
 
 #### Request syntax — proc sugar
 
 Inside a `BrokerInterface`, requests use a **proc-sugar** form: a lowercase
-verb proc whose name becomes the abstract method. The macro derives the
-broker type name from the proc name (e.g. `greet` -> `Greet` broker type).
-This is more concise than the flat `type + proc signature*` form and maps
-directly to the method that implementations override.
+verb proc whose name becomes the interface's public request proc. The macro
+derives the broker type name from the proc name (e.g. `greet` -> `Greet`
+broker type). This is more concise than the flat `type + proc signature*` form
+and maps directly to the `<Broker>.request(...)` call the proc tunnels to.
 
 ### BrokerImplement — the fulfillment
 
 `BrokerImplement` attaches behavior to a concrete `ref object of IFace` type.
-It generates:
+The user authors a natural `proc new` constructor that builds and returns a
+**bare** instance; the macro generates the decorators that bind a context and
+wire providers. It generates:
 
-- **`Impl.new(args...)`** — allocates the instance, assigns a fresh
-  `BrokerContext`, runs the user's `init` block, and wires per-instance
-  provider closures that dispatch each request to the overriding method.
-- **`Impl.bindToContext(ctx, args...)`** — same as `new()` but adopts an
+- **`Impl.create(args...)`** — allocates a fresh `BrokerContext`, calls the
+  user `new`, runs the optional `init(self)` hook, and wires per-instance
+  provider closures. This is the normal in-process constructor.
+- **`Impl.createUnderContext(ctx, args...)`** — same, but **adopts** an
   externally-provided `BrokerContext` instead of allocating one. Used by the
   FFI layer to wire an implementation onto the context created by
-  `<lib>_createContext()`.
+  `<lib>_createContext()`, and by facades that hand sub-instances a child ctx.
 - **`close(self)`** — clears providers + drops listeners, breaking the
   closure cycle.
+
+The body of `BrokerImplement` accepts:
+
+- **`proc new(T: typedesc[Impl], args...): Impl`** *(optional)* — builds and
+  returns a bare instance (no ctx, no providers). Omit it and a zero-arg
+  default (`Impl()`) is synthesized. Note: a bare instance is unwired — call
+  `create` / `createUnderContext` to get a working one.
+- **`proc init(self: Impl)`** *(optional)* — a post-context hook that runs
+  *after* `self.brokerCtx` is bound and *before* providers are wired. Use it
+  for ctor logic that derives per-instance state from `self.brokerCtx` (the
+  bare `new` cannot see the ctx, since it is assigned afterwards).
+- **`method <verb>(self: Impl, args...): …`** — the raw body for each request
+  verb. It is emitted as a private `<verb>Impl` proc and invoked **only** by
+  the provider closure; the public entry point is the interface's tunneling
+  proc.
 
 ```nim
 type GreeterImpl = ref object of IGreeter
   prefix: string
 
 BrokerImplement GreeterImpl of IGreeter:
-  proc init(prefix: string) =
-    self.prefix = prefix
+  proc new(T: typedesc[GreeterImpl], prefix: string): GreeterImpl =
+    GreeterImpl(prefix: prefix)
 
   method greet(
       self: GreeterImpl, name: string
@@ -156,11 +177,60 @@ BrokerImplement GreeterImpl of IGreeter:
       self: GreeterImpl
   ): Future[Result[string, string]] {.async.} =
     ok("v2")
+
+let g = GreeterImpl.create(prefix = "hello ")   # wired, fresh ctx
 ```
 
-The `init` block is optional. `self` is the freshly-allocated instance.
-Every abstract method from the interface **must** be overridden — the macro
-verifies this at compile time.
+Every request verb from the interface **must** have a `method` body — the
+macro verifies this at compile time.
+
+#### Method calls tunnel through the broker
+
+A call to `g.greet("bob")` — or via a base-typed ref, `IGreeter(g).greet("bob")`
+— does **not** run the method body inline. It invokes the interface's public
+proc, which calls `Greet.request(self.brokerCtx, "bob")`; the broker then
+dispatches to the registered provider closure, which runs the raw `greetImpl`
+body. Consequences:
+
+- **Mocks intercept direct calls.** Swapping `Greet`'s provider for a ctx is
+  honored by `g.greet(...)`, not just by `Greet.request(...)`.
+- **MT cross-thread is safe.** With the `(API)`/multi-thread lane, calling a
+  method from a thread other than the instance's owner tunnels via the channel
+  to the owning thread; the body never runs on the wrong thread. Under
+  `--mm:refc` the caller only borrows `self` and reads the value field
+  `brokerCtx` (no refcount mutation across heaps).
+
+#### Inner broker modes — `mt` / `sync` (and how to get cross-thread without FFI)
+
+`BrokerInterface` does **not** force a single mode on its brokers. How the inner
+brokers are emitted depends on the interface form:
+
+| Interface form | Inner broker | Resulting lane |
+|----------------|--------------|----------------|
+| `BrokerInterface(API, IFace):` | must be **plain** `EventBroker:` / `RequestBroker:` (an explicit mode marker is a compile error) | `(API)` is auto-applied to every inner broker — the FFI/MT lane. |
+| `BrokerInterface(IFace):` | `RequestBroker(mt):` / `EventBroker(mt):` | re-emitted verbatim → **multi-thread** broker with cross-thread channel tunneling, **no FFI machinery**. |
+| `BrokerInterface(IFace):` | `RequestBroker(sync):` | re-emitted verbatim → **sync** broker; the interface proc tunnels to the sync `request`. |
+| `BrokerInterface(IFace):` | plain `RequestBroker:` | single-thread, thread-local broker — **same-thread only**. |
+
+So there are **two** ways to get cross-thread method tunneling:
+
+1. `BrokerInterface(API, IFace):` — the FFI lane (also exposes a C ABI).
+2. `BrokerInterface(IFace):` with `RequestBroker(mt):` inner brokers — pure
+   in-process multi-thread, no FFI. An instance created on the owning thread can
+   have its methods invoked from another thread; the call tunnels to the owner
+   via the channel, exactly as in the `(API)` case.
+
+```nim
+BrokerInterface(ISvc):              # plain interface (no API)
+  RequestBroker(mt):                # ← MT inner broker: cross-thread tunneling
+    proc work(n: int): Future[Result[int, string]] {.async.}
+
+  RequestBroker(sync):              # ← sync inner broker is fine too
+    proc tag(): Result[string, string]
+```
+
+A plain interface with plain inner brokers stays single-thread (thread-local);
+add `(mt)` per broker to opt into cross-thread dispatch without the FFI layer.
 
 ---
 
@@ -222,11 +292,11 @@ BrokerInterface(API, IPersistence):
     proc terminateBackend(handle: uint32): Future[Result[bool, string]] {.async.}
 ```
 
-After this, `IBackend` and `IPersistence` are abstract base types with
-abstract methods. **No concrete implementation exists here.** Any module that
-imports `PersistenceAPI` can call `store` / `read` / `makeBackend` etc.
-through the interface — it never needs to know which implementation is behind
-it.
+After this, `IBackend` and `IPersistence` are abstract base types whose request
+verbs are public tunneling procs. **No concrete implementation exists here.**
+Any module that imports `PersistenceAPI` can call `store` / `read` /
+`makeBackend` etc. through the interface — it never needs to know which
+implementation is behind it.
 
 ### Step 2 — Implement (separate modules, swappable)
 
@@ -240,8 +310,8 @@ type MemoryBackendImpl* = ref object of IBackend
   data: Table[string, string]
 
 BrokerImplement MemoryBackendImpl of IBackend:
-  proc init() =
-    self.data = initTable[string, string]()
+  proc new(T: typedesc[MemoryBackendImpl]): MemoryBackendImpl =
+    MemoryBackendImpl(data: initTable[string, string]())
 
   method store(self: MemoryBackendImpl, key, value: string
   ): Future[Result[bool, string]] {.async.} =
@@ -263,7 +333,10 @@ type FileBackendImpl* = ref object of IBackend
   dir: string
 
 BrokerImplement FileBackendImpl of IBackend:
-  proc init() =
+  # `init(self)` runs after brokerCtx is bound, so the dir can derive from it.
+  # (A bare `proc new` cannot — the ctx is assigned by createUnderContext after
+  # `new` returns.)
+  proc init(self: FileBackendImpl) =
     self.dir = "persist_" & $uint32(self.brokerCtx)
 
   method store(self: FileBackendImpl, key, value: string
@@ -301,9 +374,9 @@ BrokerImplement PersistenceImpl of IPersistence:
     let subCtx = newInstanceCtx(self.brokerCtx)
     var be: IBackend
     if kind == int32(bkFile):
-      be = FileBackendImpl.bindToContext(subCtx)
+      be = FileBackendImpl.createUnderContext(subCtx)
     else:
-      be = MemoryBackendImpl.bindToContext(subCtx)
+      be = MemoryBackendImpl.createUnderContext(subCtx)
     # ...track, emit BackendCreated...
     ok(be)
 
@@ -321,11 +394,12 @@ BrokerImplement PersistenceImpl of IPersistence:
    methods, different behavior underneath.
 
 2. **Implementations are runtime-swappable.** The facade picks the concrete
-   type from a parameter. In tests you could register a mock backend; in
-   production a real one — the consumer code is identical.
+   type from a parameter. In tests you can mock a backend's provider per ctx
+   (see *Testing — mocking providers* below); in production a real one — the
+   consumer code is identical.
 
 3. **Each sub-instance is fully isolated.** Every backend created by
-   `bindToContext(newInstanceCtx(...))` gets its own `BrokerContext`, its own
+   `createUnderContext(newInstanceCtx(...))` gets its own `BrokerContext`, its own
    providers, its own event listeners. `terminateBackend` closes one backend
    without disturbing others.
 
@@ -349,7 +423,7 @@ built-in factory broker offers direct DI:
 # -- registration (in the implementation module) --
 IGreeter.provideFactory(
   proc(): Result[IGreeter, string] =
-    ok(GreeterImpl.new(prefix = "default:"))
+    ok(GreeterImpl.create(prefix = "default:"))
 )
 
 # -- consumption (in the consumer module — knows only IGreeter) --
@@ -362,7 +436,7 @@ The factory can also accept a typed configuration argument:
 ```nim
 IGreeter.provideFactory(
   proc(cfg: string): Result[IGreeter, string] =
-    ok(GreeterImpl.new(prefix = cfg))
+    ok(GreeterImpl.create(prefix = cfg))
 )
 
 let svc = IGreeter.create("custom:")
@@ -370,11 +444,46 @@ let svc = IGreeter.create("custom:")
 assert IGreeter.create(123).isErr()
 ```
 
+### Testing — mocking providers
+
+Because every method call tunnels through `<Broker>.request(self.brokerCtx, …)`,
+a test can replace the provider for one broker on one context and the swap is
+honored by **direct method calls** (`g.greet(...)`), base-typed calls
+(`IGreeter(g).greet(...)`), and `Greet.request(...)` alike — no need to touch
+the implementation. The RequestBroker exposes:
+
+- **`Greet.getCurrentProvider(ctx)`** → `Option[<with-arg provider>]` — capture
+  the installed provider. For a zero-arg verb use
+  **`Version.getCurrentProviderNoArgs(ctx)`** (distinct name: a return-type-only
+  overload is illegal, and both slots may coexist on one broker).
+- **`Greet.replaceProvider(ctx, handler)`** — overwrite without `setProvider`'s
+  "already set" error (replace-or-insert).
+- **`Greet.withMockProvider(ctx, mock): body`** — scoped, exception-safe: install
+  `mock`, run `body`, then restore the captured provider (or clear it if none).
+
+```nim
+let g = GreeterImpl.create(prefix = "real:")
+
+Greet.withMockProvider(
+  g.brokerCtx,
+  proc(name: string): Future[Result[string, string]] {.async.} =
+    ok("MOCK<" & name & ">"),
+):
+  check (waitFor g.greet("bob")).value == "MOCK<bob>"   # direct call hits mock
+check (waitFor g.greet("bob")).value == "real:bob"      # restored after block
+```
+
+> **Multi-thread / `(API)` note.** The introspection API reads the provider's
+> per-thread storage, so `getCurrentProvider` / `replaceProvider` /
+> `withMockProvider` must be called on the provider's **owning thread** (the one
+> that ran `setProvider` / `createUnderContext`). Cross-thread introspection is
+> not supported.
+
 ### Context split — `classCtx` / `instanceCtx`
 
 The `BrokerContext` `uint32` encodes two halves: bits `[15:0]` are `classCtx`
 (identifies the interface / library), bits `[31:16]` are `instanceCtx`
-(identifies the instance). `bindToContext(newInstanceCtx(parent.brokerCtx))`
+(identifies the instance). `createUnderContext(newInstanceCtx(parent.brokerCtx))`
 shares the parent's `classCtx` with a fresh `instanceCtx`.
 
 This split lets the FFI dispatch layer recover the owning library context by
@@ -410,25 +519,25 @@ automatically. No per-broker annotation needed.
 
 ### Connecting to `registerBrokerLibrary`
 
-The FFI lifecycle hook `setupProviders(ctx)` uses `bindToContext` to adopt the
-library-allocated context:
+The FFI lifecycle hook `setupProviders(ctx)` uses `createUnderContext` to adopt
+the library-allocated context:
 
 ```nim
 type HierImpl = ref object of IHier
   value: int32
 
 BrokerImplement HierImpl of IHier:
-  proc init() =
-    self.value = 7
+  proc new(T: typedesc[HierImpl]): HierImpl =
+    HierImpl(value: 7)
   method getValue(self: HierImpl): Future[Result[int32, string]] {.async.} =
     ok(self.value)
   method makeWidget(self: HierImpl, size: int32): Future[Result[IWidget, string]] {.async.} =
-    let w = WidgetImpl.bindToContext(newInstanceCtx(self.brokerCtx), size)
+    let w = WidgetImpl.createUnderContext(newInstanceCtx(self.brokerCtx), size)
     ok(IWidget(w))
-  # ... other method overrides ...
+  # ... other method bodies ...
 
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
-  discard HierImpl.bindToContext(ctx)
+  discard HierImpl.createUnderContext(ctx)
   ok()
 
 registerBrokerLibrary:
@@ -570,16 +679,19 @@ context is gone.
 |--------|-------------|-------------|
 | Definition | `EventBroker:` / `RequestBroker:` at module level | `BrokerInterface(IFace):` groups related brokers |
 | State | Stateless; global or context-keyed | Per-instance `ref object` with fields |
-| Provider registration | Manual `setProvider` / `listen` | Auto-wired by `BrokerImplement` on `new()` |
-| Polymorphism | None — one provider per context | Nim `method` dispatch; multiple impls of one interface |
+| Provider registration | Manual `setProvider` / `listen` | Auto-wired by `BrokerImplement` on `create()` / `createUnderContext()` |
+| Polymorphism | None — one provider per context | Per-ctx broker dispatch; multiple impls of one interface, one per context |
 | Lifecycle | Manual `clearProvider` / `dropAllListeners` | `close()` cleans up everything |
 | DI / Factory | Manual wiring | Built-in `provideFactory` / `create` |
 | FFI | `RequestBroker(API)` / `EventBroker(API)` | `BrokerInterface(API, IFace):` — same ABI output |
 | When to use | Simple, stateless services; leaf modules | Components with state, multiple implementations, or hierarchical structure |
 
 Both styles produce the same underlying broker machinery at runtime. The OOP
-layer is sugar + structure — it does not add runtime overhead beyond the
-virtual method dispatch (one indirect call per request).
+layer is sugar + structure — a method call is a `<Broker>.request(...)` round
+trip (provider lookup keyed by ctx, then the provider closure), not a virtual
+vtable call. On the multi-thread / `(API)` lane this is what makes cross-thread
+tunneling and provider mocking work for direct method calls; on the same thread
+it is a thread-local lookup plus a closure call.
 
 ---
 
@@ -587,10 +699,11 @@ virtual method dispatch (one indirect call per request).
 
 | Aspect | `--mm:refc` | `--mm:orc` |
 |--------|-------------|------------|
-| Instance allocation | `new()` → GC-managed ref | `new()` → GC-managed ref |
+| Instance allocation | `create()` → GC-managed ref | `create()` → GC-managed ref |
 | Closure cycle | `instance -> provider closure -> instance` — **must** call `close()` to break | Cycle collector handles it, but `close()` is still recommended for deterministic cleanup |
 | `close()` | Mandatory to avoid leaks | Recommended for prompt resource release |
-| `bindToContext` | Same ownership rules | Same ownership rules |
+| `createUnderContext` | Same ownership rules | Same ownership rules |
+| cross-thread method call | caller borrows `self` (no incref), reads value `brokerCtx`, tunnels via channel | shared heap + atomic RC; tunnels via channel |
 
 ---
 
@@ -598,8 +711,8 @@ virtual method dispatch (one indirect call per request).
 
 | File | Role |
 |------|------|
-| `brokers/broker_interface.nim` | `BrokerInterface` macro — generates the abstract base type, event facade, abstract methods, factory |
-| `brokers/broker_implement.nim` | `BrokerImplement` macro — generates `new()`, `bindToContext()`, provider wiring, `close()` |
+| `brokers/broker_interface.nim` | `BrokerInterface` macro — generates the base type, event facade, public tunneling request procs, factory |
+| `brokers/broker_implement.nim` | `BrokerImplement` macro — re-emits the user `proc new`, generates `create()` / `createUnderContext()`, the optional `init(self)` hook, provider wiring, `close()` |
 | `test/test_broker_oop.nim` | In-process unit tests: lifecycle, dispatch, events, factory/DI, sub-instances |
 | `test/test_broker_interface_api.nim` | FFI API integration tests |
 | `test/test_broker_interface_mt.nim` | Multi-thread interface tests |

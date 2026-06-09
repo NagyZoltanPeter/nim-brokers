@@ -1,7 +1,7 @@
 ## hierlib — Broker FFI API example built with the OOP interface model.
 ##
 ## A single main `BrokerInterface(API)` defines the whole library surface; a
-## `BrokerImplement` provides the request methods; `bindToContext` adopts the
+## `BrokerImplement` provides the request methods; `createUnderContext` adopts the
 ## FFI context allocated by `<lib>_createContext` and wires the providers; and
 ## `registerBrokerLibrary` emits the C ABI + wrappers — exactly the same ABI a
 ## flat (mylib-style) library produces, but authored as an interface + impl.
@@ -63,8 +63,8 @@ type WidgetImpl = ref object of IWidget
   size: int32
 
 BrokerImplement WidgetImpl of IWidget:
-  proc init(size: int32) =
-    self.size = size
+  proc new(T: typedesc[WidgetImpl], size: int32): WidgetImpl =
+    WidgetImpl(size: size)
 
   method area(self: WidgetImpl): Future[Result[int32, string]] {.async.} =
     ok(self.size * self.size)
@@ -79,8 +79,8 @@ type HierImpl = ref object of IHier
   value: int32
 
 BrokerImplement HierImpl of IHier:
-  proc init() =
-    self.value = 7
+  proc new(T: typedesc[HierImpl]): HierImpl =
+    HierImpl(value: 7)
 
   method getValue(self: HierImpl): Future[Result[int32, string]] {.async.} =
     ok(self.value)
@@ -90,9 +90,10 @@ BrokerImplement HierImpl of IHier:
   ): Future[Result[IWidget, string]] {.async.} =
     # Build a sub-instance that SHARES this library's classCtx (so its calls
     # route to the same processing thread) but gets a fresh instanceCtx. Use
-    # bindToContext, NOT new() (new() would allocate its own classCtx and break
-    # the classCtx-mask routing). gcsafe: new()/bindToContext are gcsafe (A0).
-    let w = WidgetImpl.bindToContext(newInstanceCtx(self.brokerCtx), size)
+    # createUnderContext, NOT create() (create() would allocate its own classCtx
+    # and break the classCtx-mask routing). gcsafe: create/createUnderContext
+    # are gcsafe (A0).
+    let w = WidgetImpl.createUnderContext(newInstanceCtx(self.brokerCtx), size)
     ok(IWidget(w))
 
   method echoLen(self: HierImpl, s: string): Future[Result[int32, string]] {.async.} =
@@ -116,7 +117,7 @@ BrokerImplement HierImpl of IHier:
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ## Called by registerBrokerLibrary on the processing thread: construct the
   ## main impl adopting the FFI context, wiring its providers under `ctx`.
-  discard HierImpl.bindToContext(ctx)
+  discard HierImpl.createUnderContext(ctx)
   ok()
 
 registerBrokerLibrary:

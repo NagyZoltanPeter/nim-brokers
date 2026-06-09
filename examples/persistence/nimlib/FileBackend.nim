@@ -20,11 +20,11 @@ proc emitReadResult(
   await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
 
 BrokerImplement FileBackendImpl of IBackend:
-  proc init() =
-    # `brokerCtx` is already assigned by the time the init body runs, so it
-    # yields a per-instance directory name. No filesystem IO here (kept simple
-    # and gcsafe — the new()/bindToContext path is gcsafe); the dir is created
-    # lazily on first store.
+  proc init(self: FileBackendImpl) =
+    # Post-context hook: runs after `brokerCtx` is bound (and before providers),
+    # so it yields a per-instance directory name. No filesystem IO here (kept
+    # simple and gcsafe — the createUnderContext path is gcsafe); the dir is
+    # created lazily on first store.
     self.dir = "build" / "persist_be_" & $uint32(self.brokerCtx)
     self.rng = initRand(int64(uint32(self.brokerCtx)) * 2)
 

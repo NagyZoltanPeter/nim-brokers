@@ -25,8 +25,8 @@ type GreeterImpl = ref object of IGreeter
   prefix: string
 
 BrokerImplement GreeterImpl of IGreeter:
-  proc init(prefix: string) =
-    self.prefix = prefix
+  proc new(T: typedesc[GreeterImpl], prefix: string): GreeterImpl =
+    GreeterImpl(prefix: prefix)
 
   method greet(
       self: GreeterImpl, name: string
@@ -38,25 +38,25 @@ BrokerImplement GreeterImpl of IGreeter:
 
 suite "BrokerImplement: instance lifecycle + dispatch":
   test "new() runs init and wires providers; request dispatches to the override":
-    let g = GreeterImpl.new(prefix = "hello ")
+    let g = GreeterImpl.create(prefix = "hello ")
     check (waitFor Greet.request(g.brokerCtx, "bob")).value == "hello bob"
     check (waitFor Version.request(g.brokerCtx)).value == "v2"
 
   test "virtual dispatch through a base-typed ref resolves to the override":
-    let g = GreeterImpl.new(prefix = "hi ")
+    let g = GreeterImpl.create(prefix = "hi ")
     let base: IGreeter = g
     check (waitFor base.greet("sue")).value == "hi sue"
 
   test "instances get independent contexts and providers":
-    let a = GreeterImpl.new(prefix = "a:")
-    let b = GreeterImpl.new(prefix = "b:")
+    let a = GreeterImpl.create(prefix = "a:")
+    let b = GreeterImpl.create(prefix = "b:")
     check a.brokerCtx != b.brokerCtx
     check (waitFor Greet.request(a.brokerCtx, "x")).value == "a:x"
     check (waitFor Greet.request(b.brokerCtx, "x")).value == "b:x"
 
   test "close() clears this instance's providers, leaving others intact":
-    let a = GreeterImpl.new(prefix = "a:")
-    let b = GreeterImpl.new(prefix = "b:")
+    let a = GreeterImpl.create(prefix = "a:")
+    let b = GreeterImpl.create(prefix = "b:")
     let actx = a.brokerCtx
     a.close()
     check (waitFor Greet.request(actx, "x")).isErr() # a cleared
@@ -64,13 +64,13 @@ suite "BrokerImplement: instance lifecycle + dispatch":
     b.close()
 
   test "close() is idempotent":
-    let g = GreeterImpl.new(prefix = "g:")
+    let g = GreeterImpl.create(prefix = "g:")
     g.close()
     g.close() # must not raise
 
 suite "BrokerInterface: event facade":
   test "self.listen + self.emit inject the instance context":
-    let g = GreeterImpl.new(prefix = "x")
+    let g = GreeterImpl.create(prefix = "x")
     let fut = newFuture[string]("oop-event")
     discard g.listen(
       Greeted,
@@ -83,7 +83,7 @@ suite "BrokerInterface: event facade":
     check (waitFor fut) == "bob"
 
   test "close() drops the instance's event listeners (B2)":
-    let g = GreeterImpl.new(prefix = "x")
+    let g = GreeterImpl.create(prefix = "x")
     let ctx = g.brokerCtx
     var fired = 0
     discard g.listen(
@@ -104,7 +104,7 @@ suite "BrokerInterface: factory / dependency-injection":
   test "zero-arg factory; create returns the impl behind the interface":
     IGreeter.provideFactory(
       proc(): Result[IGreeter, string] =
-        ok(GreeterImpl.new(prefix = "zero:"))
+        ok(GreeterImpl.create(prefix = "zero:"))
     )
     let d = IGreeter.create()
     check d.isOk()
@@ -113,7 +113,7 @@ suite "BrokerInterface: factory / dependency-injection":
   test "typed-config factory (last wins) + config-type guard":
     IGreeter.provideFactory(
       proc(cfg: string): Result[IGreeter, string] =
-        ok(GreeterImpl.new(prefix = cfg))
+        ok(GreeterImpl.create(prefix = cfg))
     )
     let d = IGreeter.create("cfg:")
     check d.isOk()
@@ -141,8 +141,8 @@ type WidgetImpl2 = ref object of IWidget
   size: int32
 
 BrokerImplement WidgetImpl2 of IWidget:
-  proc init(size: int32) =
-    self.size = size
+  proc new(T: typedesc[WidgetImpl2], size: int32): WidgetImpl2 =
+    WidgetImpl2(size: size)
 
   method area(self: WidgetImpl2): Future[Result[int32, string]] {.async.} =
     ok(self.size * self.size)
@@ -160,25 +160,25 @@ BrokerImplement FactoryImpl of IFactory:
       self: FactoryImpl, size: int32
   ): Future[Result[IWidget, string]] {.async.} =
     # Sub-instance SHARES the factory's classCtx (routing) + a fresh instanceCtx.
-    ok(IWidget(WidgetImpl2.bindToContext(newInstanceCtx(self.brokerCtx), size)))
+    ok(IWidget(WidgetImpl2.createUnderContext(newInstanceCtx(self.brokerCtx), size)))
 
 suite "reduced-A: in-process create-instance + sub routing invariants":
   test "makeWidget returns a working sub-instance; methods dispatch":
-    let f = FactoryImpl.bindToContext(NewBrokerContext())
+    let f = FactoryImpl.createUnderContext(NewBrokerContext())
     let w = (waitFor f.makeWidget(5)).value
     check (waitFor w.area()).value == 25
     check (waitFor w.scale(3)).value == 15
     check (waitFor w.area()).value == 225
 
   test "sub shares the factory classCtx, distinct nonzero instanceCtx":
-    let f = FactoryImpl.bindToContext(NewBrokerContext())
+    let f = FactoryImpl.createUnderContext(NewBrokerContext())
     let w = (waitFor f.makeWidget(2)).value
     check classCtx(w.brokerCtx) == classCtx(f.brokerCtx) # routes to same lib ctx
     check instanceCtx(w.brokerCtx) != 0'u16
     check instanceCtx(w.brokerCtx) != instanceCtx(f.brokerCtx)
 
   test "independent sub-instances get distinct ctxs":
-    let f = FactoryImpl.bindToContext(NewBrokerContext())
+    let f = FactoryImpl.createUnderContext(NewBrokerContext())
     let a = (waitFor f.makeWidget(2)).value
     let b = (waitFor f.makeWidget(3)).value
     check a.brokerCtx != b.brokerCtx
@@ -186,13 +186,13 @@ suite "reduced-A: in-process create-instance + sub routing invariants":
     check (waitFor b.area()).value == 9
 
   test "classCtx mask recovers the parent (FFI _call routing invariant)":
-    let f = FactoryImpl.bindToContext(NewBrokerContext())
+    let f = FactoryImpl.createUnderContext(NewBrokerContext())
     let w = (waitFor f.makeWidget(2)).value
     # `_call` masks instanceCtx off (low16) to find the owning library context.
     check (uint32(w.brokerCtx) and 0x0000FFFF'u32) == uint32(f.brokerCtx)
 
   test "closing a sub clears its providers (others intact)":
-    let f = FactoryImpl.bindToContext(NewBrokerContext())
+    let f = FactoryImpl.createUnderContext(NewBrokerContext())
     let a = (waitFor f.makeWidget(2)).value
     let b = (waitFor f.makeWidget(3)).value
     WidgetImpl2(a).close()
