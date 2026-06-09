@@ -2321,6 +2321,39 @@ func test_str_array_event() {
 // main — runs all tests in cpp order.
 // ============================================================================
 
+// Associative containers — Table[K, V]. Go currently supports string-keyed
+// tables (fxamacker/cbor decodes them natively); non-string keys are exercised
+// by the Python parity test (see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+
+func test_map_param_roundtrip() {
+	lib := newLib()
+	lib.CreateContext()
+	scores := map[string]int32{"x": 10, "y": 20, "z": 30}
+	r, err := lib.MapParamRequest(scores)
+	check(err == nil, "mapParamRequest is_ok")
+	checkEq(r.Total, int64(60), "total")
+	checkEq(r.Joined, "x|y|z", "joined")
+	lib.Close()
+}
+
+func test_map_event() {
+	lib := newLib()
+	lib.CreateContext()
+	received := &safeList[map[string]int32]{}
+	h := lib.OnMapEvent(func(counts map[string]int32) {
+		received.push(counts)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.MapParamRequest(map[string]int32{"a": 1, "b": 2})
+	waitFor(func() bool { return received.size() >= 1 })
+	checkEq(received.size(), 1, "received.size")
+	snap := received.snapshot()
+	checkEq(snap[0]["a"], int32(1), "a")
+	checkEq(snap[0]["b"], int32(2), "b")
+	lib.OffMapEvent(h)
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2484,6 +2517,9 @@ func main() {
 	runTest("test_nested_obj_inline_field", test_nested_obj_inline_field)
 	runTest("test_set_slots_obj_array_param", test_set_slots_obj_array_param)
 	runTest("test_str_array_event", test_str_array_event)
+
+	runTest("test_map_param_roundtrip", test_map_param_roundtrip)
+	runTest("test_map_event", test_map_event)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

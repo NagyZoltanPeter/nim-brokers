@@ -209,6 +209,52 @@ proc resolveAliasBase(sym: NimNode): string {.compileTime.} =
     return $typeInst
   return sym.repr.strip()
 
+proc validateTableKey(keySym: NimNode, fieldName, ownerName: string) {.compileTime.} =
+  ## Reject Table key types that cannot round-trip across the FFI text-key
+  ## wire. Allowed: string / int8..64 / char (primitives), enum, and
+  ## distinct whose base resolves to one of those. Everything else
+  ## (plain int/uint, bool, float, object, tuple, seq, ...) is a hard error.
+  let where = "field '" & fieldName & "' of '" & ownerName & "'"
+  if keySym.kind != nnkSym:
+    error(
+      "Table key in " & where & " must be a scalar type; got composite '" &
+        keySym.repr.strip() & "'. Supported keys: string, int8/16/32/64, char, " &
+        "enum, or a distinct of those.",
+      keySym,
+    )
+  let keyName = $keySym
+  if isNimPrimitive(keyName):
+    if not isAllowedTableKeyPrimitive(keyName):
+      error(
+        "Table key type '" & keyName & "' in " & where & " is not supported. " &
+          "Use string, int8/16/32/64, char, enum, or a distinct of those " &
+          "(plain int/uint, bool and float are excluded — see " &
+          "doc/design/ASSOC_CONTAINERS_PLAN.md).",
+        keySym,
+      )
+    return
+  let impl = getTypeImpl(keySym)
+  case impl.kind
+  of nnkEnumTy:
+    discard # enum keys travel as symbol names
+  of nnkDistinctTy:
+    let base = resolveAliasBase(keySym)
+    if not isAllowedTableKeyPrimitive(base):
+      let baseImpl = getTypeImpl(impl[0])
+      if baseImpl.kind != nnkEnumTy:
+        error(
+          "Table key '" & keyName & "' in " & where & " is a distinct of '" & base &
+            "', which is not a supported key scalar. Supported bases: " &
+            "string, int8/16/32/64, char, enum.",
+          keySym,
+        )
+  else:
+    error(
+      "Table key type '" & keyName & "' in " & where &
+        "' is not a supported scalar/enum/distinct key.",
+      keySym,
+    )
+
 proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
   ## Walk the fields of a resolved type symbol and return NimNodes for
   ## any nested custom object types or seq[T] element types that need
@@ -270,6 +316,22 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         let elemImpl = getTypeImpl(elemSym)
         if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
+
+    # Table[K, V] — validate the key, then register custom key (enum/distinct)
+    # and value types so the codegen has their schema entries.
+    elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
+        $fieldType[0] == "Table":
+      let ownerName = $sym
+      let fieldName =
+        (if field[0].kind == nnkSym or field[0].kind == nnkIdent: $field[0]
+        else: "?")
+      validateTableKey(fieldType[1], fieldName, ownerName)
+      for idx in 1 .. 2:
+        let elemSym = fieldType[idx]
+        if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
+          let elemImpl = getTypeImpl(elemSym)
+          if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
+            result.add(elemSym)
 
 macro autoRegisterApiType*(T: typed): untyped =
   ## Phase 2: Receives a resolved type symbol, extracts fields,
@@ -389,6 +451,11 @@ proc scanTypeNode(ft: NimNode, result: var seq[NimNode]) {.compileTime.} =
     let elemName = $ft[2]
     if not isNimPrimitive(elemName):
       result.add(ft[2])
+  # Table[K, V] — scan both key and value so enum/distinct keys and custom
+  # value types (including seq[Custom]/array[N, Custom]) get registered.
+  elif ft.kind == nnkBracketExpr and ft.len == 3 and $ft[0] == "Table":
+    scanTypeNode(ft[1], result)
+    scanTypeNode(ft[2], result)
   # Plain custom type
   elif ft.kind == nnkIdent and not isNimPrimitive($ft):
     result.add(ft)

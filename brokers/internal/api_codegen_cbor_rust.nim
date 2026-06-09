@@ -75,12 +75,43 @@ proc parseArrayInner(s: string): string {.compileTime.} =
     return ""
   inner[comma + 1 .. ^1].strip()
 
+proc parseTableParams(s: string): (string, string) {.compileTime.} =
+  ## "Table[K, V]" -> ("K", "V"); split on the first top-level comma.
+  let inner = s.strip()[6 ..^ 2]
+  var depth = 0
+  for i in 0 ..< inner.len:
+    case inner[i]
+    of '[', '(':
+      inc depth
+    of ']', ')':
+      dec depth
+    of ',':
+      if depth == 0:
+        return (inner[0 ..< i].strip(), inner[i + 1 .. ^1].strip())
+    else:
+      discard
+  ("", "")
+
 proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → Rust type. Falls back to "" for types we can't yet map.
   let t = nimType.strip()
   let lower = t.toLowerAscii()
   if isRustPrimitive(t):
     return primRustHint(t)
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # String-keyed Table -> HashMap<String, V>. ciborium/serde decode a
+    # string-keyed CBOR map natively; non-string keys arrive as text and
+    # need explicit conversion (a follow-up — see impl plan §9b), so they
+    # fall through to "" and the typed surface is TODO-skipped.
+    let (k, v) = parseTableParams(t)
+    if resolveUnderlyingType(k.strip()).toLowerAscii() != "string":
+      return ""
+    let vr = nimTypeToRustHint(v)
+    return
+      if vr.len > 0:
+        "HashMap<String, " & vr & ">"
+      else:
+        ""
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToRustHint(unwrapBracket(t, "seq"))
     return
