@@ -60,6 +60,25 @@ proc parseArrayInner(s: string): string {.compileTime.} =
     return ""
   inner[comma + 1 .. ^1].strip()
 
+proc parseTableParams*(s: string): (string, string) {.compileTime.} =
+  ## "Table[K, V]" -> ("K", "V"). The key is always a scalar (no nested
+  ## commas), so the first top-level comma separates key from value; the
+  ## value may itself carry commas (array[N, T], nested Table[..]).
+  let inner = s.strip()[6 ..^ 2] # strip "Table[" and "]"
+  var depth = 0
+  for i in 0 ..< inner.len:
+    case inner[i]
+    of '[', '(':
+      inc depth
+    of ']', ')':
+      dec depth
+    of ',':
+      if depth == 0:
+        return (inner[0 ..< i].strip(), inner[i + 1 .. ^1].strip())
+    else:
+      discard
+  ("", "")
+
 proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → C++ type mapping. Returns "" for unmappable types
   ## (callers emit a TODO and skip the affected typed surface).
@@ -68,6 +87,18 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
   let prim = primCppType(t)
   if prim.len > 0:
     return prim
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # Table[K, V] -> std::unordered_map<Kcpp, Vcpp>. Keys ride the wire as
+    # CBOR text strings; jsoncons' non-string-key map traits stringify on
+    # encode and parse on decode, matching the Nim cbor_serialization wire.
+    let (k, v) = parseTableParams(t)
+    let kc = nimTypeToCppType(k)
+    let vc = nimTypeToCppType(v)
+    return
+      if kc.len > 0 and vc.len > 0:
+        "std::unordered_map<" & kc & ", " & vc & ">"
+      else:
+        ""
   if lower == "seq[byte]":
     # `jsoncons::byte_string` is jsoncons' own byte-string container. It
     # satisfies `is_basic_byte_string`, so jsoncons encodes/decodes it as
@@ -189,6 +220,14 @@ proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
     return
       if inner.len > 0:
         "std::optional<" & inner & ">"
+      else:
+        ""
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # Deliver the decoded map by const reference (no view materialisation).
+    let m = nimTypeToCppType(t)
+    return
+      if m.len > 0:
+        "const " & m & "&"
       else:
         ""
   if isTypeRegistered(t):

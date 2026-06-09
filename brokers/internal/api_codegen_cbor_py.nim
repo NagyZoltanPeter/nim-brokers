@@ -79,6 +79,24 @@ proc parseArrayInner(s: string): string {.compileTime.} =
     return ""
   inner[comma + 1 .. ^1].strip()
 
+proc parseTableParams*(s: string): (string, string) {.compileTime.} =
+  ## "Table[K, V]" -> ("K", "V"). Splits on the first top-level comma so a
+  ## composite value type's own commas (array/nested Table) are preserved.
+  let inner = s.strip()[6 ..^ 2]
+  var depth = 0
+  for i in 0 ..< inner.len:
+    case inner[i]
+    of '[', '(':
+      inc depth
+    of ']', ')':
+      dec depth
+    of ',':
+      if depth == 0:
+        return (inner[0 ..< i].strip(), inner[i + 1 .. ^1].strip())
+    else:
+      discard
+  ("", "")
+
 proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → Python type hint. Falls back to "" for types we
   ## don't yet know how to map (the caller emits a TODO).
@@ -113,6 +131,15 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
         "Optional[" & inner & "]"
       else:
         "Optional[Any]"
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    let (k, v) = parseTableParams(t)
+    let kh = nimTypeToPyHint(k)
+    let vh = nimTypeToPyHint(v)
+    return
+      if kh.len > 0 and vh.len > 0:
+        "Dict[" & kh & ", " & vh & "]"
+      else:
+        "Dict[Any, Any]"
   if isTypeRegistered(t):
     let entry = lookupTypeEntry(t)
     case entry.kind
