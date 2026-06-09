@@ -162,6 +162,28 @@ sized int; `char`→`char`/`int`/`u8`/`byte` per lang; `enum`→generated enum t
   bytes before the ABI), same lifetime story as `seq`; run the refc matrix.
 - **Enum key hashing in C++/Rust** — add the required hash/derive (§6 notes).
 
+## 9b. Per-language key-conversion status (discovered during impl)
+
+The Nim wire emits **text keys for all key types** (int→"5", enum→ordinal "0",
+char→"a", distinct→base text). Foreign CBOR libs decode these as **string**
+keys and do **not** auto-convert to non-string key types:
+
+- **Python** (`cbor2`): full support. The generated `_encode`/`_decode` helpers
+  convert keys explicitly (`int(_k)`, `Priority(int(_k))`, `str(int(_k))`).
+  ✅ all key types (string/int8..64/char/enum/distinct), result+param+event.
+- **C++** (`jsoncons`): `JSONCONS_ALL_MEMBER_TRAITS` is declarative and cannot
+  convert a text key into a non-string key (`decode failed: Cannot convert to
+  integer`). **String-keyed `Table` is supported now**; non-string keys are
+  TODO-skipped (the typed method is omitted) until the codegen emits custom
+  key-converting `json_type_traits`. **Follow-up.**
+- **Rust / Go**: mappers not yet added (Phase 4). Same text-key reality applies;
+  plan to support string keys first, then per-key conversion.
+
+So: Python = full; C++ = string-keyed; Rust/Go = pending. The
+`typemappingtestlib` `MapResultRequest` (mixed key types) is verified end-to-end
+by the Python parity test; `MapParamRequest` + `MapEvent` (string-keyed) are
+verified by both Python and C++.
+
 ## 10. Sequencing
 
 Step 0 spike → §4 codec patch (+pin) → §5 recognition (compile one field) →

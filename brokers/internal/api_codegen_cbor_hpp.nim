@@ -88,15 +88,23 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
   if prim.len > 0:
     return prim
   if lower.startsWith("table[") and lower.endsWith("]"):
-    # Table[K, V] -> std::unordered_map<Kcpp, Vcpp>. Keys ride the wire as
-    # CBOR text strings; jsoncons' non-string-key map traits stringify on
-    # encode and parse on decode, matching the Nim cbor_serialization wire.
+    # Table[K, V] -> std::unordered_map<std::string, Vcpp>.
+    #
+    # Keys ride the wire as CBOR text strings. jsoncons decodes a string-keyed
+    # map natively, but it does NOT parse a text key back into a non-string
+    # key type (int/enum/char) — `decode failed: Cannot convert to integer`.
+    # Until the C++ codegen emits custom key-converting traits, only
+    # string-keyed tables are mapped here; other key types fall through to ""
+    # so the affected typed surface is TODO-skipped rather than mis-decoded.
+    # (Python has full key-type support; see doc/ASSOC_CONTAINERS_IMPL_PLAN.md.)
     let (k, v) = parseTableParams(t)
-    let kc = nimTypeToCppType(k)
+    let kBase = resolveUnderlyingType(k.strip())
+    if kBase.toLowerAscii() != "string":
+      return ""
     let vc = nimTypeToCppType(v)
     return
-      if kc.len > 0 and vc.len > 0:
-        "std::unordered_map<" & kc & ", " & vc & ">"
+      if vc.len > 0:
+        "std::unordered_map<std::string, " & vc & ">"
       else:
         ""
   if lower == "seq[byte]":

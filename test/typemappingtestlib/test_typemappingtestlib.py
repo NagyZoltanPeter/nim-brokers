@@ -1022,5 +1022,62 @@ class TestPreviouslyRestrictedShapes(unittest.TestCase):
         self.lib.off_str_array_event(h)
 
 
+# ---------------------------------------------------------------------------
+# Associative containers — Table[K, V]
+# ---------------------------------------------------------------------------
+
+
+class TestTableTypes(unittest.TestCase):
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    def test_map_result_all_key_flavors(self):
+        r = self.lib.map_result_request(3)
+        self.assertTrue(r.is_ok(), r.error)
+        v = r.value
+        # string keys
+        self.assertEqual(v.strKeyed, {"key-0": 0, "key-1": 1, "key-2": 2})
+        # int32 keys — rebuilt from text keys
+        self.assertEqual(v.intKeyed, {0: "val-0", 1: "val-1", 2: "val-2"})
+        # char keys (char maps to 1-char str)
+        self.assertEqual(v.charKeyed, {"a": 0, "b": 2, "c": 4})
+        # enum keys — ordinal on the wire, rebuilt to Priority members
+        self.assertEqual(
+            v.enumKeyed,
+            {Priority.pLow: 0, Priority.pMedium: 1, Priority.pHigh: 2},
+        )
+        # distinct int32 keys
+        self.assertEqual(v.jobKeyed, {0: 0, 1: 3, 2: 6})
+
+    def test_map_result_empty(self):
+        r = self.lib.map_result_request(0)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.strKeyed, {})
+        self.assertEqual(r.value.enumKeyed, {})
+
+    def test_map_param_roundtrip(self):
+        r = self.lib.map_param_request({"x": 10, "y": 20, "z": 30})
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.total, 60)
+        self.assertEqual(r.value.joined, "x|y|z")
+
+    def test_map_event(self):
+        received = []
+        evt = threading.Event()
+
+        def cb(_lib, counts):
+            received.append(dict(counts))
+            evt.set()
+
+        h = self.lib.on_map_event(cb)
+        self.lib.map_param_request({"a": 1, "b": 2})
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(received, [{"a": 1, "b": 2}])
+        self.lib.off_map_event(h)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

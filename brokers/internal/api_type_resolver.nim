@@ -222,7 +222,6 @@ proc validateTableKey(keySym: NimNode, fieldName, ownerName: string) {.compileTi
         "enum, or a distinct of those.",
       keySym,
     )
-    return
   let keyName = $keySym
   if isNimPrimitive(keyName):
     if not isAllowedTableKeyPrimitive(keyName):

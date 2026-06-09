@@ -17,7 +17,7 @@
 
 {.push raises: [].}
 
-import std/options
+import std/[options, tables, algorithm, strutils, hashes]
 import brokers/[event_broker, request_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,10 @@ type Priority* = enum
 
 ## JobId — exercises distinct int32 mapping (→ Python int alias).
 type JobId* = distinct int32
+
+## Borrowed `==`/`hash` so JobId can be used as a Table key.
+proc `==`*(a, b: JobId): bool {.borrow.}
+proc hash*(a: JobId): Hash {.borrow.}
 
 ## Timestamp — exercises distinct int64 mapping (→ Python int alias).
 type Timestamp* = distinct int64
@@ -505,6 +509,39 @@ RequestBroker(API):
   proc signature*(
     prefix: string
   ): Future[Result[TriggerStrArrayRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# Request Brokers — associative container (Table[K, V]) coverage
+# ---------------------------------------------------------------------------
+
+## MapResultRequest — returns Table[K, V] for every supported key flavor:
+## string, int32, char, enum (Priority), and distinct-of-int32 (JobId).
+## Each map has `n` entries. Also emits MapEvent.
+RequestBroker(API):
+  type MapResultRequest* = object
+    strKeyed*: Table[string, int32]
+    intKeyed*: Table[int32, string]
+    charKeyed*: Table[char, int32]
+    enumKeyed*: Table[Priority, int32]
+    jobKeyed*: Table[JobId, int32]
+
+  proc signature*(n: int32): Future[Result[MapResultRequest, string]] {.async.}
+
+## MapParamRequest — Table[string, int32] as an INPUT param. Returns the
+## sum of the values and the keys joined (sorted) with "|".
+RequestBroker(API):
+  type MapParamRequest* = object
+    total*: int64
+    joined*: string
+
+  proc signature*(
+    scores: Table[string, int32]
+  ): Future[Result[MapParamRequest, string]] {.async.}
+
+## MapEvent — Table[string, int32] in an event payload.
+EventBroker(API):
+  type MapEvent* = object
+    counts*: Table[string, int32]
 
 # ---------------------------------------------------------------------------
 # Event Brokers — original
@@ -990,6 +1027,47 @@ proc setupProviders(ctx: BrokerContext) =
         words[i] = prefix & "-" & $i
       await StrArrayEvent.emit(gProviderCtx, StrArrayEvent(words: words))
       return ok(TriggerStrArrayRequest(fired: 4)),
+  )
+
+  # ----- Table[K, V] providers -----
+
+  discard MapResultRequest.setProvider(
+    ctx,
+    proc(n: int32): Future[Result[MapResultRequest, string]] {.closure, async.} =
+      var
+        s: Table[string, int32]
+        i: Table[int32, string]
+        c: Table[char, int32]
+        e: Table[Priority, int32]
+        j: Table[JobId, int32]
+      for k in 0 ..< int(n):
+        s["key-" & $k] = int32(k)
+        i[int32(k)] = "val-" & $k
+        c[char(ord('a') + k)] = int32(k * 2)
+        e[Priority(k mod 4)] = int32(k)
+        j[JobId(int32(k))] = int32(k * 3)
+      return ok(
+        MapResultRequest(
+          strKeyed: s, intKeyed: i, charKeyed: c, enumKeyed: e, jobKeyed: j
+        )
+      ),
+  )
+
+  discard MapParamRequest.setProvider(
+    ctx,
+    proc(
+        scores: Table[string, int32]
+    ): Future[Result[MapParamRequest, string]] {.closure, async.} =
+      var total: int64 = 0
+      var keys: seq[string] = @[]
+      for k, v in scores:
+        total += int64(v)
+        keys.add(k)
+      keys.sort()
+      # Echo the received map back through a (string-keyed) event so every
+      # wrapper — including the string-key-only ones — can verify MapEvent.
+      await MapEvent.emit(gProviderCtx, MapEvent(counts: scores))
+      return ok(MapParamRequest(total: total, joined: keys.join("|"))),
   )
 
 # ---------------------------------------------------------------------------

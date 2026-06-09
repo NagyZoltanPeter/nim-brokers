@@ -2516,6 +2516,46 @@ static void test_str_array_event() {
 }
 
 // ============================================================================
+// Associative containers — Table[K, V]
+// ============================================================================
+
+// NOTE: C++ currently supports only string-keyed Table (jsoncons cannot
+// convert text keys to non-string key types). Non-string-key coverage
+// (MapResultRequest's int/char/enum/distinct maps) is exercised by the
+// Python parity test; the C++ method is TODO-skipped until custom
+// key-converting traits land. See doc/ASSOC_CONTAINERS_IMPL_PLAN.md.
+
+static void test_map_param_roundtrip() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    std::unordered_map<std::string, int32_t> scores{{"x", 10}, {"y", 20}, {"z", 30}};
+    auto r = lib.mapParamRequest(scores);
+    CHECK(r.isOk());
+    CHECK_EQ(r->total, 60);
+    CHECK_EQ(r->joined, std::string("x|y|z"));
+    lib.shutdown();
+}
+
+static void test_map_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::unordered_map<std::string, int32_t>> received;
+    auto h = lib.onMapEvent(
+        [&received](Typemappingtestlib&, const std::unordered_map<std::string, int32_t>& counts) {
+            received.push(counts);
+        });
+    CHECK_NE(h, 0ull);
+    std::unordered_map<std::string, int32_t> scores{{"a", 1}, {"b", 2}};
+    lib.mapParamRequest(scores);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    CHECK_EQ(received.at(0).at("a"), 1);
+    CHECK_EQ(received.at(0).at("b"), 2);
+    lib.offMapEvent(h);
+    lib.shutdown();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -2689,6 +2729,9 @@ int main() {
     RUN(test_nested_obj_inline_field);
     RUN(test_set_slots_obj_array_param);
     RUN(test_str_array_event);
+
+    RUN(test_map_param_roundtrip);
+    RUN(test_map_event);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

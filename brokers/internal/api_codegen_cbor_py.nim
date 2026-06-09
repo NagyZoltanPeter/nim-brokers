@@ -200,12 +200,41 @@ proc isPyMappable*(nimType: string): bool {.compileTime.} =
 # Python anyway.
 # ---------------------------------------------------------------------------
 
+proc pyKeyClass(keyType: string): string {.compileTime.} =
+  ## Classify a Table key type for text-key conversion: "str" (string/char),
+  ## "int" (int8..64), or "enum:<Name>". Distinct keys resolve to their base.
+  let t = keyType.strip()
+  if isTypeRegistered(t):
+    let entry = lookupTypeEntry(t)
+    if entry.kind == atkEnum:
+      return "enum:" & t
+    if entry.kind in {atkAlias, atkDistinct}:
+      return pyKeyClass(resolveUnderlyingType(t))
+  let lo = t.toLowerAscii()
+  if lo == "string" or lo == "char":
+    return "str"
+  "int"
+
 proc pyDecodeExpr(nimType, src: string): string {.compileTime.} =
   ## Python expression that decodes the value at `src` (a Python
   ## expression yielding the raw cbor2 result) into the in-memory
   ## representation of `nimType`.
   let t = nimType.strip()
   let lower = t.toLowerAscii()
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # Keys arrive as CBOR text strings; rebuild the declared key type.
+    let (k, v) = parseTableParams(t)
+    let kc = pyKeyClass(k)
+    let keyExpr =
+      if kc == "str":
+        "_k"
+      elif kc == "int":
+        "int(_k)"
+      else:
+        kc[5 ..^ 1] & "(int(_k))" # enum:<Name> -> Name(int(_k))
+    return
+      "{" & keyExpr & ": " & pyDecodeExpr(v, "_v") & " for _k, _v in (" & src &
+      " or {}).items()}"
   if t == "bool":
     return "bool(" & src & ") if isinstance(" & src & ", bool) else False"
   if t == "string" or t == "char":
@@ -253,6 +282,20 @@ proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return src
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # Stringify non-string keys so the wire matches the Nim text-key format.
+    let (k, v) = parseTableParams(t)
+    let kc = pyKeyClass(k)
+    let keyExpr =
+      if kc == "str":
+        "str(_k)"
+      elif kc == "int":
+        "str(_k)"
+      else:
+        "str(int(_k))" # enum -> ordinal text
+    return
+      "{" & keyExpr & ": " & pyEncodeExpr(v, "_v") & " for _k, _v in (" & src &
+      " or {}).items()}"
   if lower == "seq[byte]":
     # cbor2 encodes Python `bytes` as CBOR byte string (major type 2),
     # which is what the Nim provider expects. Tolerate list-of-int input
