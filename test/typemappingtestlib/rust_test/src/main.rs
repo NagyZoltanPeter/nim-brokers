@@ -2819,7 +2819,7 @@ fn test_str_array_event() {
 
 // Associative containers — Table[K, V]. Rust currently supports string-keyed
 // tables (ciborium/serde decode them natively); non-string keys are exercised
-// by the Python parity test (see doc/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+// by the Python parity test (see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
 
 fn test_map_param_roundtrip() {
     let mut lib = Typemappingtestlib::new();

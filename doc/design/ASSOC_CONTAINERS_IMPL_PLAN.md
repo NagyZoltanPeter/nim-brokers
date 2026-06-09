@@ -1,7 +1,7 @@
 # Implementation Plan — `Table[K,V]` FFI Support
 
 Branch: `api-support-associative-containers`
-Companion to: `doc/ASSOC_CONTAINERS_PLAN.md` (research/decision doc)
+Companion to: `doc/design/ASSOC_CONTAINERS_PLAN.md` (research/decision doc)
 Status: **implemented (string-keyed all wrappers; full keys via Python)** — see status below.
 
 ### Implementation status

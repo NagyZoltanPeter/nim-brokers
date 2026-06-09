@@ -2523,7 +2523,7 @@ static void test_str_array_event() {
 // convert text keys to non-string key types). Non-string-key coverage
 // (MapResultRequest's int/char/enum/distinct maps) is exercised by the
 // Python parity test; the C++ method is TODO-skipped until custom
-// key-converting traits land. See doc/ASSOC_CONTAINERS_IMPL_PLAN.md.
+// key-converting traits land. See doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md.
 
 static void test_map_param_roundtrip() {
     Typemappingtestlib lib;

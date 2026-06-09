@@ -161,7 +161,7 @@ proc isTableType*(nimType: NimNode): bool {.compileTime.} =
 const allowedTableKeyPrimitives* = ["string", "int8", "int16", "int32", "int64", "char"]
   ## Primitive key types that round-trip across the FFI text-key wire format.
   ## Deliberately excludes platform-width `int`/`uint`, `bool`, and `float`
-  ## (see doc/ASSOC_CONTAINERS_PLAN.md). Enum and distinct-of-scalar keys are
+  ## (see doc/design/ASSOC_CONTAINERS_PLAN.md). Enum and distinct-of-scalar keys are
   ## validated against the registry by api_type_resolver.
 
 proc isAllowedTableKeyPrimitive*(typeName: string): bool {.compileTime.} =

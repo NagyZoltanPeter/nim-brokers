@@ -229,7 +229,7 @@ proc validateTableKey(keySym: NimNode, fieldName, ownerName: string) {.compileTi
         "Table key type '" & keyName & "' in " & where & " is not supported. " &
           "Use string, int8/16/32/64, char, enum, or a distinct of those " &
           "(plain int/uint, bool and float are excluded — see " &
-          "doc/ASSOC_CONTAINERS_PLAN.md).",
+          "doc/design/ASSOC_CONTAINERS_PLAN.md).",
         keySym,
       )
     return

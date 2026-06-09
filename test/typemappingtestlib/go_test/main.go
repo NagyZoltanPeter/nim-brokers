@@ -2323,7 +2323,7 @@ func test_str_array_event() {
 
 // Associative containers — Table[K, V]. Go currently supports string-keyed
 // tables (fxamacker/cbor decodes them natively); non-string keys are exercised
-// by the Python parity test (see doc/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+// by the Python parity test (see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
 
 func test_map_param_roundtrip() {
 	lib := newLib()

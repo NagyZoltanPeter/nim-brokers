@@ -96,7 +96,7 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
     # Until the C++ codegen emits custom key-converting traits, only
     # string-keyed tables are mapped here; other key types fall through to ""
     # so the affected typed surface is TODO-skipped rather than mis-decoded.
-    # (Python has full key-type support; see doc/ASSOC_CONTAINERS_IMPL_PLAN.md.)
+    # (Python has full key-type support; see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md.)
     let (k, v) = parseTableParams(t)
     let kBase = resolveUnderlyingType(k.strip())
     if kBase.toLowerAscii() != "string":
