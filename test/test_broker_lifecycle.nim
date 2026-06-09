@@ -46,8 +46,9 @@ else:
     mark: LifeMark
 
   BrokerImplement LifeImpl of ILife:
-    proc init() =
+    proc new(T: typedesc[LifeImpl]): LifeImpl =
       inc gAlive
+      LifeImpl()
 
     method ping(self: LifeImpl): Future[Result[int, string]] {.async.} =
       ok(1)
@@ -55,7 +56,7 @@ else:
   suite "BrokerImplement: close() releases the instance":
     test "instance is freed after close() + collection":
       proc scope() =
-        let g = LifeImpl.new()
+        let g = LifeImpl.create()
         check gAlive == 1
         # exercise the provider (closure captures `self`)
         check (waitFor Ping.request(g.brokerCtx)).value == 1
@@ -70,7 +71,7 @@ else:
     test "without close(), the instance is retained by the provider table":
       var ctx: BrokerContext
       proc scope2() =
-        let g = LifeImpl.new()
+        let g = LifeImpl.create()
         ctx = g.brokerCtx
         # no close()
 

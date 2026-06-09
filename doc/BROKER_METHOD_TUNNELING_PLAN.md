@@ -1,7 +1,27 @@
 # Plan: brokerDebug for interface/implement + tunnel all method calls through the broker
 
 Branch: current (`refine-broker-interface-and-implementation`).
-Status: **PLAN — awaiting "execute and implement"**. No code written yet.
+Status: **IMPLEMENTED** — Parts 0,1,2,3,4,5 landed as phased commits.
+
+## Results / memory-model behavior (verified)
+
+Every interface request call is now `proc <verb>(self, …) = <Broker>.request(
+self.brokerCtx, …)`; the raw body (`<verb>Impl`) runs only inside the provider
+closure on the owning thread. Behavior:
+
+| Mode | Path | Reason it is correct/safe |
+|------|------|---------------------------|
+| single-thread (plain `RequestBroker`) | `request` → thread-local provider seq lookup → direct call | one event loop; provider + caller on same thread. Mock swap visible to direct calls (was bypassed). |
+| MT / API, same-thread | `request` fast path = direct threadvar handler call (no channel) | provider owned by the calling thread; no cross-heap access. |
+| MT / API, cross-thread (`--mm:orc`) | `request` → `Channel[T]` tunnel to owning thread | body + `self` stay on the owner; shared heap + atomic RC anyway. |
+| MT / API, cross-thread (`--mm:refc`) | same channel tunnel | caller only BORROWS `self` (ref param = no incref in refc) and READS the value field `brokerCtx`; no refcount mutation cross-heap. Verified green + clang-ASAN clean (`test_broker_interface_mt`, criterion 2). |
+
+Constructor surface: user `proc new(T, …): Impl` (bare) + generated
+`create(…)` (fresh ctx) / `createUnderContext(ctx, …)` (adopt ctx). Optional
+`proc init(self: Impl)` post-context hook runs after `brokerCtx` is bound for
+ctx-derived state. `getCurrentProvider` / `getCurrentProviderNoArgs` /
+`replaceProvider` / `withMockProvider` added to both single-thread and MT
+RequestBroker (MT introspection is owning-thread only).
 
 This plan covers the two-part request:
 
