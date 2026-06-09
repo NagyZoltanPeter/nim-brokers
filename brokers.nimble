@@ -501,7 +501,7 @@ task perftest, "Run performance and stress tests":
 
 task testApi, "Run codec unit tests + library init integration tests":
   # Codec round-trip tests (no FFI flags needed).
-  let codecTests = ["test_api_codec"]
+  let codecTests = ["test_api_codec", "test_api_table_codec"]
   for f in codecTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",

@@ -1,25 +1,37 @@
 # Implementation Plan — `Table[K,V]` FFI Support
 
-Branch: `api-support-associative-containers`
+Branch: `api-support-assoc-containers-nolibpatch`
 Companion to: `doc/design/ASSOC_CONTAINERS_PLAN.md` (research/decision doc)
-Status: **implemented (string-keyed all wrappers; full keys via Python)** — see status below.
+Status: **implemented — no dependency change** (string-keyed all wrappers; full keys via Python).
 
 ### Implementation status
 
-| Phase | Result |
-|-------|--------|
-| 1 — codec patch (`nim-cbor-serialization`) | ✅ branch `feature/table-scalar-keys`; text keys, int8..64/char/enum(ordinal)/distinct read overloads; 9 round-trips + suite 204/204 |
-| 2 — brokers recognition + key validation | ✅ committed; recognition test + baseline/mt Table fields compile |
-| 3 — C++ (string-keyed) + Python (full keys) | ✅ committed; jsoncons cannot convert non-string text keys, so C++ is string-keyed; Python converts keys explicitly |
-| 4 — Rust (`HashMap<String,V>`) + Go (`map[string]V`), string-keyed | ✅ committed |
+> **Two branches exist:**
+> - `api-support-associative-containers` — patches `nim-cbor-serialization`
+>   (`std/tables.nim`). Preserved, but the dependency change was deemed
+>   unacceptable.
+> - **`api-support-assoc-containers-nolibpatch`** (this branch) — delivers the
+>   **same** functionality with **no dependency change**. The Table CBOR codec
+>   lives in `brokers/internal/api_cbor_tables.nim` and supplies the `write` /
+>   `read` hooks through the library's public `reader`/`writer` API; the
+>   library's own `cbor_serialization/std/tables` binding is *not* imported, so
+>   it never reaches the int/float/string-only `to()` overloads. The
+>   `cbor_serialization` pin stays at its upstream release.
+
+| Phase | Result (no-libpatch branch) |
+|-------|------------------------------|
+| 1 — Table CBOR codec | ✅ `brokers/internal/api_cbor_tables.nim`; text keys, int8..64/char/enum(ordinal)/distinct; `test/test_api_table_codec.nim` round-trips 9 shapes against the **upstream** lib |
+| 2 — brokers recognition + key validation | ✅ recognition test + baseline/mt Table fields compile |
+| 3 — C++ (string-keyed) + Python (full keys) | ✅ jsoncons cannot convert non-string text keys → C++ string-keyed; Python converts keys explicitly |
+| 4 — Rust (`HashMap<String,V>`) + Go (`map[string]V`), string-keyed | ✅ |
 | 5 — CDDL `{* tstr => V}`, refc matrix, docs | ✅ this commit |
 
-Verified across **orc + refc**: `runTypeMapTestLib{Py 86, Cpp 132, Rust 132, Go 132}`,
-plus `nimble testApi` green. Non-string-key support for C++/Rust/Go is the
-remaining follow-up (§9b). Examples (`mylib` + 5 consumers) intentionally
-untouched — the parity testlib is the authoritative coverage. **Dependency
-caveat:** the patched codec is currently file-synced into `nimbledeps`; before
-merge, tag `nim-cbor-serialization` and bump the `brokers.nimble` pin.
+Verified across **orc + refc** against the **unpatched** dependency:
+`runTypeMapTestLib{Py 86, Cpp 132, Rust 132, Go 132}` + `nimble testApi` green.
+Non-string-key support for C++/Rust/Go is the remaining follow-up (§9b).
+Examples (`mylib` + 5 consumers) intentionally untouched — the parity testlib is
+the authoritative coverage. **No dependency change, no `nimbledeps` patch, no
+version-pin bump required.**
 
 ---
 
