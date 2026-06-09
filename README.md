@@ -316,13 +316,15 @@ When no `BrokerContext` argument is passed, the `DefaultBrokerContext` is used.
 A global context lock is available via `lockGlobalBrokerContext` for serialized cross-module coordination within `chronos` async procs.
 
 s
-`BrokerInterface` and `BrokerImplement` are **syntactic sugar over the same `EventBroker` and `RequestBroker` macros** documented above. Inner broker blocks are re-emitted verbatim — you can use any broker variant (`EventBroker`, `RequestBroker(sync)`, `RequestBroker(mt)`, etc.) inside an interface body. The one exception is `BrokerInterface(API, IFace):`, which auto-propagates `(API)` to every inner broker. The OOP layer adds interface/implementation separation, per-instance state, virtual dispatch, deterministic lifecycle, and dependency injection without changing the underlying broker machinery.
+`BrokerInterface` and `BrokerImplement` are **syntactic sugar over the same `EventBroker` and `RequestBroker` macros** documented above. Inner broker blocks are re-emitted verbatim — you can use any broker variant (`EventBroker`, `RequestBroker(sync)`, `RequestBroker(mt)`, etc.) inside an interface body. The one exception is `BrokerInterface(API, IFace):`, which auto-propagates `(API)` to every inner broker. The OOP layer adds interface/implementation separation, per-instance state, deterministic lifecycle, and dependency injection without changing the underlying broker machinery.
 
-The key idea: **define your communication contract once as an interface, implement it separately, swap implementations at runtime.** The macros generate all the boilerplate — broker definitions, abstract methods, provider wiring, instance isolation, and cleanup.
+The key idea: **define your communication contract once as an interface, implement it separately, swap implementations at runtime.** The macros generate all the boilerplate — broker definitions, public request procs, provider wiring, instance isolation, and cleanup.
 
-**`BrokerInterface`** declares the *contract*: a `ref object` base type grouping related events and requests. It generates one abstract method per request (pure-virtual until overridden), an instance-scoped event facade (`self.emit` / `self.listen`), and a built-in factory broker for DI (`provideFactory` / `create`).
+**`BrokerInterface`** declares the *contract*: a `ref object` base type grouping related events and requests. For each request verb it generates a **public proc that tunnels through the broker** (`proc greet(self, …) = Greet.request(self.brokerCtx, …)`) — a plain proc, not a `{.base.}` virtual method, so every call (including a direct `g.greet(…)` or a base-typed `IGreeter(g).greet(…)`) routes through the broker dispatch path. It also generates an instance-scoped event facade (`self.emit` / `self.listen`) and a built-in factory broker for DI (`provideFactory` / `create`).
 
-**`BrokerImplement`** provides the *fulfillment*: it wires a concrete `ref object of IFace` to the interface. It generates `Impl.new(args...)` (allocates an instance with its own `BrokerContext`, runs an optional `init` block, auto-registers per-instance providers), and `close()` (deterministic cleanup of providers + listeners — mandatory under `--mm:refc` to break the closure cycle, recommended under `--mm:orc`).
+**`BrokerImplement`** provides the *fulfillment*: it wires a concrete `ref object of IFace` to the interface. The user authors a natural `proc new` that returns a **bare** instance; the macro generates `Impl.create(args...)` (allocates a fresh `BrokerContext`, calls `new`, runs the optional `init(self)` hook, auto-registers per-instance providers), `Impl.createUnderContext(ctx, args...)` (same but adopts an external `BrokerContext` — used by the FFI lane and sub-instance facades), and `close()` (deterministic cleanup of providers + listeners — mandatory under `--mm:refc` to break the closure cycle, recommended under `--mm:orc`). Each `method` body becomes a private `<verb>Impl` proc invoked only by the provider closure.
+
+Because method calls tunnel through the broker, **a test can swap a broker's provider for one context and the direct method call honors it** — `Greet.withMockProvider(ctx, mock): body` (plus `getCurrentProvider` / `replaceProvider`) scopes the swap and restores it afterwards.
 
 ```nim
 import brokers/broker_interface
@@ -342,8 +344,8 @@ type GreeterImpl = ref object of IGreeter
   prefix: string
 
 BrokerImplement GreeterImpl of IGreeter:
-  proc init(prefix: string) =
-    self.prefix = prefix
+  proc new(T: typedesc[GreeterImpl], prefix: string): GreeterImpl =
+    GreeterImpl(prefix: prefix)            # bare instance; create() wires it
 
   method greet(
       self: GreeterImpl, name: string
@@ -351,16 +353,24 @@ BrokerImplement GreeterImpl of IGreeter:
     ok(self.prefix & name)
 
 # --- Usage ---
-let a = GreeterImpl.new(prefix = "hello ")
-let b = GreeterImpl.new(prefix = "hi ")
+let a = GreeterImpl.create(prefix = "hello ")
+let b = GreeterImpl.create(prefix = "hi ")
 
-# Each instance has its own BrokerContext — fully isolated
+# Each instance has its own BrokerContext — fully isolated.
+# The call tunnels through the broker (Greet.request) — no direct vtable call.
 assert (waitFor a.greet("alice")).value == "hello alice"
 assert (waitFor b.greet("alice")).value == "hi alice"
 
+# Testing: swapping the provider is honored by the direct method call.
+Greet.withMockProvider(a.brokerCtx,
+  proc(name: string): Future[Result[string, string]] {.async.} =
+    ok("MOCK<" & name & ">")):
+  assert (waitFor a.greet("alice")).value == "MOCK<alice>"
+assert (waitFor a.greet("alice")).value == "hello alice"  # restored
+
 # DI: consumer depends only on the interface
 IGreeter.provideFactory(proc(): Result[IGreeter, string] =
-  ok(GreeterImpl.new(prefix = "default:")))
+  ok(GreeterImpl.create(prefix = "default:")))
 let svc = IGreeter.create().value
 assert (waitFor svc.greet("x")).value == "default:x"
 
