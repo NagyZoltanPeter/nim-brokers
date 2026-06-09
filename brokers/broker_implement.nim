@@ -156,8 +156,7 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       discard
     else:
       macros.error(
-        "BrokerImplement only allows `new` / `init` procs and `method` overrides",
-        stmt,
+        "BrokerImplement only allows `new` / `init` procs and `method` overrides", stmt
       )
 
   # Compile-time fulfillment check: every request verb declared in the
