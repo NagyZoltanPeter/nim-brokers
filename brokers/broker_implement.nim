@@ -91,10 +91,23 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
             (if async: "Future[Result[T, string]]" else: "Result[T, string]"),
           stmt,
         )
-      # Stamp the canonical override pragma and emit the method verbatim.
-      var m = copyNimTree(stmt)
-      m[4] = canonPragma(async)
-      result.add(m)
+      # Emit the user's method body as a PRIVATE `<verb>Impl` proc — NOT a
+      # virtual `method` override. The public entry point is the interface's
+      # tunneling proc (`<Broker>.request(self.brokerCtx, …)`); the provider
+      # closure below calls this raw `<verb>Impl` on the owning thread. This is
+      # the only call site of the raw body, so a direct `instance.verb(…)` (or
+      # `IFace(instance).verb(…)`) routes through the broker — honoring mocks,
+      # MT cross-thread tunneling, and thread affinity — instead of bypassing it.
+      let implProc = nnkProcDef.newTree(
+        ident(verb & "Impl"), # private (unexported): broker-internal raw body
+        newEmptyNode(),
+        newEmptyNode(),
+        copyNimTree(stmt.params),
+        canonPragma(async),
+        newEmptyNode(),
+        copyNimTree(stmt.body),
+      )
+      result.add(implProc)
       var margs: seq[NimNode] = @[]
       for i in 2 ..< p.len: # skip return (0) and self (1)
         margs.add(copyNimTree(p[i]))
@@ -134,7 +147,9 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   )
 
   # setupProviders — register a per-instance provider closure per request that
-  # dispatches to the overriding method (capturing `self`).
+  # dispatches to the raw `<verb>Impl` body (capturing `self`). This is the only
+  # call site of the raw body; the public entry point is the interface's
+  # tunneling proc, so all calls route through the broker.
   var setupSrc = "proc " & $setupName & "(self: " & implStr & ") {.gcsafe.} =\n"
   if methods.len == 0:
     setupSrc.add("  discard\n")
@@ -154,7 +169,7 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     # (request_broker `makeProcType`): plain `{.async.}` for async,
     # `{.gcsafe, raises: [CatchableError].}` for sync.
     let prag = if async: "{.async.}" else: "{.gcsafe, raises: [CatchableError].}"
-    let call = (if async: "await " else: "") & "self." & verb & "(" & argNames & ")"
+    let call = (if async: "await " else: "") & "self." & verb & "Impl(" & argNames & ")"
     setupSrc.add(
       "  discard " & brokerName & ".setProvider(self.brokerCtx, proc(" & paramDecls &
         "): " & ret & " " & prag & " =\n    " & call & ")\n"
