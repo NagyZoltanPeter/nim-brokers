@@ -21,6 +21,7 @@ import chronos, results
 import ./broker_context
 import ./request_broker, ./event_broker
 import ./internal/helper/broker_utils
+import ./internal/broker_debug
 
 export chronos, results, broker_context, request_broker, event_broker
 
@@ -265,4 +266,6 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   result.add(parseStmt(closeSrc))
 
   when defined(brokerDebug):
-    echo result.repr
+    writeBrokerDebug("BrokerImplement", implStr, result, header = "of " & ifaceStr)
+    when defined(brokerDebugStdout):
+      echo result.repr

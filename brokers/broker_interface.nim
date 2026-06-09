@@ -28,6 +28,7 @@ import chronos, results
 import ./broker_context
 import ./request_broker, ./event_broker
 import ./internal/helper/broker_utils
+import ./internal/broker_debug
 
 export chronos, results, broker_context, request_broker, event_broker
 
@@ -241,3 +242,8 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
         `facVar`(addr c)
 
   )
+
+  when defined(brokerDebug):
+    writeBrokerDebug("BrokerInterface", ifaceNameStr, result)
+    when defined(brokerDebugStdout):
+      echo result.repr
