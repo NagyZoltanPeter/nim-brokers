@@ -27,8 +27,8 @@ type GreeterImpl = ref object of IGreeter
   prefix: string
 
 BrokerImplement GreeterImpl of IGreeter:
-  proc init(prefix: string) =
-    self.prefix = prefix
+  proc new(T: typedesc[GreeterImpl], prefix: string): GreeterImpl =
+    GreeterImpl(prefix: prefix)
 
   method greet(
       self: GreeterImpl, name: string
@@ -57,12 +57,12 @@ proc installMock(ctx: BrokerContext) =
 
 suite "BrokerInterface: method calls tunnel through the broker":
   test "sanity: real provider answers the direct call":
-    let g = GreeterImpl.new(prefix = "p:")
+    let g = GreeterImpl.create(prefix = "p:")
     check (waitFor g.greet("bob")).value == "real:p:bob"
     check (waitFor g.version()).value == "real:v"
 
   test "criterion 1: mock honored on a direct instance.method() call":
-    let g = GreeterImpl.new(prefix = "p:")
+    let g = GreeterImpl.create(prefix = "p:")
     installMock(g.brokerCtx)
     # With-arg slot: direct call must hit the mocked provider, not the impl body.
     check (waitFor g.greet("bob")).value == "MOCK<bob>"
@@ -70,15 +70,15 @@ suite "BrokerInterface: method calls tunnel through the broker":
     check (waitFor g.version()).value == "MOCK<v>"
 
   test "criterion 2: mock honored on a base-typed IFace(instance).method() call":
-    let g = GreeterImpl.new(prefix = "p:")
+    let g = GreeterImpl.create(prefix = "p:")
     installMock(g.brokerCtx)
     let base: IGreeter = g
     check (waitFor base.greet("sue")).value == "MOCK<sue>"
     check (waitFor base.version()).value == "MOCK<v>"
 
   test "mock is per-ctx: a second instance keeps the real provider":
-    let a = GreeterImpl.new(prefix = "a:")
-    let b = GreeterImpl.new(prefix = "b:")
+    let a = GreeterImpl.create(prefix = "a:")
+    let b = GreeterImpl.create(prefix = "b:")
     installMock(a.brokerCtx)
     check (waitFor a.greet("x")).value == "MOCK<x>"
     check (waitFor b.greet("x")).value == "real:b:x"

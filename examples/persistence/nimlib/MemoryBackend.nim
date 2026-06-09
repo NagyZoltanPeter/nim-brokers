@@ -19,7 +19,8 @@ proc emitReadResult(
   await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
 
 BrokerImplement MemoryBackendImpl of IBackend:
-  proc init() =
+  proc init(self: MemoryBackendImpl) =
+    # Post-context hook: runs after `brokerCtx` is bound (and before providers).
     self.data = initTable[string, string]()
     # Seed deterministically from the instance ctx so runs are reproducible.
     self.rng = initRand(int64(uint32(self.brokerCtx)) * 2 + 1)

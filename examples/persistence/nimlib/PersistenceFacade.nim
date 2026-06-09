@@ -20,8 +20,8 @@ type
     backends: seq[BackendEntry]
 
 BrokerImplement PersistenceImpl of IPersistence:
-  proc init() =
-    self.backends = @[]
+  proc new(T: typedesc[PersistenceImpl]): PersistenceImpl =
+    PersistenceImpl(backends: @[])
 
   method makeBackend(
       self: PersistenceImpl, kind: int32
@@ -33,13 +33,13 @@ BrokerImplement PersistenceImpl of IPersistence:
     var be: IBackend
     var term: proc() {.gcsafe, raises: [].}
     if kind == int32(bkFile):
-      let f = FileBackendImpl.bindToContext(subCtx)
+      let f = FileBackendImpl.createUnderContext(subCtx)
       be = f
       term = proc() {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
           f.close()
     else:
-      let m = MemoryBackendImpl.bindToContext(subCtx)
+      let m = MemoryBackendImpl.createUnderContext(subCtx)
       be = m
       term = proc() {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
@@ -84,5 +84,5 @@ BrokerImplement PersistenceImpl of IPersistence:
 
 IPersistence.provideFactory(
   proc(): Result[IPersistence, string] {.gcsafe.} =
-    ok(IPersistence(PersistenceImpl.bindToContext(NewBrokerContext())))
+    ok(IPersistence(PersistenceImpl.createUnderContext(NewBrokerContext())))
 )

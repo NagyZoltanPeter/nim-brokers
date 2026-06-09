@@ -2,7 +2,7 @@
 
 ## D3 — cross-thread dispatch for a BrokerInterface(API). The `(API)` marker
 ## lowers the interface's RequestBroker onto the multi-thread lane, so an impl
-## wired via bindToContext on one thread (running its chronos loop) services
+## wired via createUnderContext on one thread (running its chronos loop) services
 ## requests issued from a *different* thread. (Plain BrokerInterface uses
 ## single-thread, thread-local brokers and is same-thread only — see
 ## test_broker_oop.nim / test_broker_interface_api.nim.)
@@ -48,7 +48,7 @@ suite "BrokerInterface(API) cross-thread dispatch (MT lane)":
       gResult.store(-99)
 
       # Main thread is the provider: wire the impl under gCtx here, on the loop.
-      discard MtSvcImpl.bindToContext(gCtx)
+      discard MtSvcImpl.createUnderContext(gCtx)
 
       var req: Thread[void]
       req.createThread(requesterThread)
@@ -64,7 +64,7 @@ suite "BrokerInterface(API) cross-thread dispatch (MT lane)":
       gCtx = NewBrokerContext()
       gResultReady.store(false)
       gResult.store(-99)
-      discard MtSvcImpl.bindToContext(gCtx)
+      discard MtSvcImpl.createUnderContext(gCtx)
       var req: Thread[void]
       req.createThread(requesterThread)
       while not gResultReady.load():

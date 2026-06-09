@@ -10,5 +10,5 @@ import ./PersistenceAPI, ./MemoryBackend, ./FileBackend, ./PersistenceFacade
 
 IPersistence.provideFactory(
   proc(): Result[IPersistence, string] {.gcsafe.} =
-    ok(IPersistence(PersistenceImpl.bindToContext(NewBrokerContext())))
+    ok(IPersistence(PersistenceImpl.createUnderContext(NewBrokerContext())))
 )

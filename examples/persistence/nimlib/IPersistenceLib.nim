@@ -15,7 +15,7 @@ import ./PersistenceFacade
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ## Called by registerBrokerLibrary on the processing thread: construct the
   ## main facade impl adopting the FFI context, wiring its providers under `ctx`.
-  discard PersistenceImpl.bindToContext(ctx)
+  discard PersistenceImpl.createUnderContext(ctx)
   ok()
 
 registerBrokerLibrary:
