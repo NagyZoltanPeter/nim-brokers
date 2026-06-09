@@ -945,7 +945,7 @@ proc generateCborCppHeaderFile*(
       h.add("  std::unique_ptr<" & dispType & "> " & dispMember & ";\n")
     h.add("\n public:\n")
     # Ctor/dtor/copy/move — declared here, defined out-of-class in detail::.
-    h.add("  explicit " & sub & "(uint32_t ctx);\n")
+    h.add("  explicit " & sub & "(uint32_t ctx) noexcept;\n")
     h.add("  ~" & sub & "();\n")
     h.add("  " & sub & "(const " & sub & "&) = delete;\n")
     h.add("  " & sub & "& operator=(const " & sub & "&) = delete;\n")
@@ -1374,7 +1374,7 @@ proc generateCborCppHeaderFile*(
     h.add("// ---- " & sub & " implementations ----\n")
     # Ctor
     if hasEvts:
-      h.add("inline " & sub & "::" & sub & "(uint32_t ctx)\n")
+      h.add("inline " & sub & "::" & sub & "(uint32_t ctx) noexcept\n")
       h.add("    : ctx_(ctx)\n")
       for ev in subEvts:
         let dispType = ev.typeName & "Dispatcher"
