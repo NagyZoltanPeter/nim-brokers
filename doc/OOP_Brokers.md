@@ -193,13 +193,44 @@ dispatches to the registered provider closure, which runs the raw `greetImpl`
 body. Consequences:
 
 - **Mocks intercept direct calls.** Swapping `Greet`'s provider for a ctx is
-  honored by `g.greet(...)`, not just by `Greet.request(...)`. (Before this
-  change a direct method call bypassed the broker and ran the real body.)
+  honored by `g.greet(...)`, not just by `Greet.request(...)`.
 - **MT cross-thread is safe.** With the `(API)`/multi-thread lane, calling a
   method from a thread other than the instance's owner tunnels via the channel
   to the owning thread; the body never runs on the wrong thread. Under
   `--mm:refc` the caller only borrows `self` and reads the value field
   `brokerCtx` (no refcount mutation across heaps).
+
+#### Inner broker modes — `mt` / `sync` (and how to get cross-thread without FFI)
+
+`BrokerInterface` does **not** force a single mode on its brokers. How the inner
+brokers are emitted depends on the interface form:
+
+| Interface form | Inner broker | Resulting lane |
+|----------------|--------------|----------------|
+| `BrokerInterface(API, IFace):` | must be **plain** `EventBroker:` / `RequestBroker:` (an explicit mode marker is a compile error) | `(API)` is auto-applied to every inner broker — the FFI/MT lane. |
+| `BrokerInterface(IFace):` | `RequestBroker(mt):` / `EventBroker(mt):` | re-emitted verbatim → **multi-thread** broker with cross-thread channel tunneling, **no FFI machinery**. |
+| `BrokerInterface(IFace):` | `RequestBroker(sync):` | re-emitted verbatim → **sync** broker; the interface proc tunnels to the sync `request`. |
+| `BrokerInterface(IFace):` | plain `RequestBroker:` | single-thread, thread-local broker — **same-thread only**. |
+
+So there are **two** ways to get cross-thread method tunneling:
+
+1. `BrokerInterface(API, IFace):` — the FFI lane (also exposes a C ABI).
+2. `BrokerInterface(IFace):` with `RequestBroker(mt):` inner brokers — pure
+   in-process multi-thread, no FFI. An instance created on the owning thread can
+   have its methods invoked from another thread; the call tunnels to the owner
+   via the channel, exactly as in the `(API)` case.
+
+```nim
+BrokerInterface(ISvc):              # plain interface (no API)
+  RequestBroker(mt):                # ← MT inner broker: cross-thread tunneling
+    proc work(n: int): Future[Result[int, string]] {.async.}
+
+  RequestBroker(sync):              # ← sync inner broker is fine too
+    proc tag(): Result[string, string]
+```
+
+A plain interface with plain inner brokers stays single-thread (thread-local);
+add `(mt)` per broker to opt into cross-thread dispatch without the FFI layer.
 
 ---
 
