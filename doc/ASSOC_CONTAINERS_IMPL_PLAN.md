@@ -2,7 +2,24 @@
 
 Branch: `api-support-associative-containers`
 Companion to: `doc/ASSOC_CONTAINERS_PLAN.md` (research/decision doc)
-Status: **plan — awaiting "execute and implement" before any code**
+Status: **implemented (string-keyed all wrappers; full keys via Python)** — see status below.
+
+### Implementation status
+
+| Phase | Result |
+|-------|--------|
+| 1 — codec patch (`nim-cbor-serialization`) | ✅ branch `feature/table-scalar-keys`; text keys, int8..64/char/enum(ordinal)/distinct read overloads; 9 round-trips + suite 204/204 |
+| 2 — brokers recognition + key validation | ✅ committed; recognition test + baseline/mt Table fields compile |
+| 3 — C++ (string-keyed) + Python (full keys) | ✅ committed; jsoncons cannot convert non-string text keys, so C++ is string-keyed; Python converts keys explicitly |
+| 4 — Rust (`HashMap<String,V>`) + Go (`map[string]V`), string-keyed | ✅ committed |
+| 5 — CDDL `{* tstr => V}`, refc matrix, docs | ✅ this commit |
+
+Verified across **orc + refc**: `runTypeMapTestLib{Py 86, Cpp 132, Rust 132, Go 132}`,
+plus `nimble testApi` green. Non-string-key support for C++/Rust/Go is the
+remaining follow-up (§9b). Examples (`mylib` + 5 consumers) intentionally
+untouched — the parity testlib is the authoritative coverage. **Dependency
+caveat:** the patched codec is currently file-synced into `nimbledeps`; before
+merge, tag `nim-cbor-serialization` and bump the `brokers.nimble` pin.
 
 ---
 

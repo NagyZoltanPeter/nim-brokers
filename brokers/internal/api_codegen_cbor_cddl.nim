@@ -91,6 +91,28 @@ proc nimTypeToCddl*(nimType: string): string {.compileTime.} =
   else:
     discard
 
+  if lower.startsWith("table[") and lower.endsWith("]"):
+    # Keys always travel as CBOR text strings (major type 3), regardless of
+    # the declared key type, so the CDDL key is `tstr`. Split on the first
+    # top-level comma to isolate the value type.
+    let inner = t[6 .. ^2]
+    var depth = 0
+    var vType = ""
+    for i in 0 ..< inner.len:
+      case inner[i]
+      of '[', '(':
+        inc depth
+      of ']', ')':
+        dec depth
+      of ',':
+        if depth == 0:
+          vType = inner[i + 1 .. ^1].strip()
+          break
+      else:
+        discard
+    if vType.len > 0:
+      return "{* tstr => " & nimTypeToCddl(vType) & "}"
+
   if lower.startsWith("seq[") and lower.endsWith("]"):
     return "[* " & nimTypeToCddl(stripGenericPrefix(t, "seq")) & "]"
 
