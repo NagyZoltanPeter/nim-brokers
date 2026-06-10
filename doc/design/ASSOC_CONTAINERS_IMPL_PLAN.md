@@ -2,7 +2,7 @@
 
 Branch: `api-support-assoc-containers-nolibpatch`
 Companion to: `doc/design/ASSOC_CONTAINERS_PLAN.md` (research/decision doc)
-Status: **implemented — no dependency change** (string-keyed all wrappers; full keys via Python).
+Status: **implemented — no dependency change; full scalar-key coverage in all four wrappers**.
 
 ### Implementation status
 
@@ -22,13 +22,12 @@ Status: **implemented — no dependency change** (string-keyed all wrappers; ful
 |-------|------------------------------|
 | 1 — Table CBOR codec | ✅ `brokers/internal/api_cbor_tables.nim`; text keys, int8..64/char/enum(ordinal)/distinct; `test/test_api_table_codec.nim` round-trips 9 shapes against the **upstream** lib |
 | 2 — brokers recognition + key validation | ✅ recognition test + baseline/mt Table fields compile |
-| 3 — C++ (string-keyed) + Python (full keys) | ✅ jsoncons cannot convert non-string text keys → C++ string-keyed; Python converts keys explicitly |
-| 4 — Rust (`HashMap<String,V>`) + Go (`map[string]V`), string-keyed | ✅ |
+| 3 — **full key coverage, all four wrappers** | ✅ Python (`_encode`/`_decode` key conv), C++ (`<Name>__wire` + custom `json_type_traits`), Rust (`cbor_strkey_map` serde adapter + enum `Display`/`FromStr`), Go (generated `Marshal`/`UnmarshalCBOR`) |
+| 4 — same wrappers, every scalar key (string/int8..64/char/enum/distinct) | ✅ `test_map_result_all_key_flavors` green in all four parity harnesses |
 | 5 — CDDL `{* tstr => V}`, refc matrix, docs | ✅ this commit |
 
 Verified across **orc + refc** against the **unpatched** dependency:
-`runTypeMapTestLib{Py 86, Cpp 132, Rust 132, Go 132}` + `nimble testApi` green.
-Non-string-key support for C++/Rust/Go is the remaining follow-up (§9b).
+`runTypeMapTestLib{Py 86, Cpp 133, Rust 133, Go 133}` + `nimble testApi` green.
 Examples (`mylib` + 5 consumers) intentionally untouched — the parity testlib is
 the authoritative coverage. **No dependency change, no `nimbledeps` patch, no
 version-pin bump required.**
@@ -191,27 +190,36 @@ sized int; `char`→`char`/`int`/`u8`/`byte` per lang; `enum`→generated enum t
   bytes before the ABI), same lifetime story as `seq`; run the refc matrix.
 - **Enum key hashing in C++/Rust** — add the required hash/derive (§6 notes).
 
-## 9b. Per-language key-conversion status (discovered during impl)
+## 9b. Per-language key conversion (full coverage)
 
 The Nim wire emits **text keys for all key types** (int→"5", enum→ordinal "0",
-char→"a", distinct→base text). Foreign CBOR libs decode these as **string**
-keys and do **not** auto-convert to non-string key types:
+char→"a", distinct→base text) — the `cbor_serialization` writer can only put a
+string in a CBOR map's key slot, and patching that core was rejected. Foreign
+CBOR libs decode these as **string** keys and do **not** auto-convert to a
+non-string key type (confirmed empirically in all three: C++ jsoncons errors
+`Cannot convert to integer`; Rust ciborium decode fails; Go fxamacker silently
+drops the entries). Each wrapper therefore converts text ⇄ typed key in
+generated code:
 
-- **Python** (`cbor2`): full support. The generated `_encode`/`_decode` helpers
-  convert keys explicitly (`int(_k)`, `Priority(int(_k))`, `str(int(_k))`).
-  ✅ all key types (string/int8..64/char/enum/distinct), result+param+event.
-- **C++** (`jsoncons`): `JSONCONS_ALL_MEMBER_TRAITS` is declarative and cannot
-  convert a text key into a non-string key (`decode failed: Cannot convert to
-  integer`). **String-keyed `Table` is supported now**; non-string keys are
-  TODO-skipped (the typed method is omitted) until the codegen emits custom
-  key-converting `json_type_traits`. **Follow-up.**
-- **Rust / Go**: mappers not yet added (Phase 4). Same text-key reality applies;
-  plan to support string keys first, then per-key conversion.
+- **Python** (`cbor2`): `_encode`/`_decode` helpers convert per key —
+  `int(_k)`, `Priority(int(_k))`, `str(int(_k))`.
+- **C++** (`jsoncons`): a struct with a non-string-keyed map gets a string-keyed
+  `<Name>__wire` mirror (`JSONCONS_ALL_MEMBER_TRAITS`) plus a hand-written
+  `json_type_traits<Json, Name>` that delegates field handling to the wire and
+  converts only the map keys (`std::stoll` / `std::to_string`, char via the
+  first byte; enum key types namespace-qualified).
+- **Rust** (`serde`/`ciborium`): a generic `cbor_strkey_map` `#[serde(with)]`
+  adapter (emitted when needed) converts via `Display`/`FromStr`; generated
+  enums gain `Display` (ordinal), `FromStr`, and `Hash`.
+- **Go** (`fxamacker`): structs with non-string-keyed maps get generated
+  `Marshal`/`UnmarshalCBOR` that round-trip through a string-keyed wire struct
+  (`strconv` both ways).
 
-So: Python = full; C++ = string-keyed; Rust/Go = pending. The
-`typemappingtestlib` `MapResultRequest` (mixed key types) is verified end-to-end
-by the Python parity test; `MapParamRequest` + `MapEvent` (string-keyed) are
-verified by both Python and C++.
+`string`/`char` keys map to the wrapper's native string type and need no
+adapter (except C++, where `char` is a distinct key handled by the same path).
+
+**Result:** `test_map_result_all_key_flavors` (string / int32 / char / enum /
+distinct keys) is green in all four parity harnesses, orc + refc.
 
 ## 10. Sequencing
 
