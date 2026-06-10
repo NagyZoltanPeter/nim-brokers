@@ -6,7 +6,7 @@ Add new findings here before fixing.
 
 Work branch: **`fix/ffi-wrapper-type-mapping`** (uncommitted).
 
-Status: **#1 fixed · #3 fixed+verified · #2 deferred · #4 open**
+Status: **#1 fixed · #3 fixed+verified · #4 fixed+verified · #2 deferred**
 
 ---
 
@@ -119,7 +119,48 @@ fix; affects `paginationLimit` etc.
 
 ---
 
-## 4. `seq[byte]` maps to `jsoncons::byte_string`, not `std::vector<uint8_t>`  — 🔶 OPEN (deliberate; needs wire traits)
+## 4. `seq[byte]` maps to `jsoncons::byte_string`, not `std::vector<uint8_t>`  — ✅ FIXED + VERIFIED (C++ only)
+
+**Done (branch `fix/ffi-wrapper-type-mapping`):** the composable `Bytes`-wrapper
+landed in `api_codegen_cbor_hpp.nim`. `seq[byte]` now maps to a per-library
+`struct Bytes : std::vector<uint8_t>` (idiomatic, dependency-free) whose
+`json_type_traits` force a CBOR byte string (major type 2) on the wire.
+
+**Why it composes (the key mechanism):** specialising
+`is_json_type_traits_declared<LIB::Bytes>` is what makes it work. jsoncons'
+built-in byte-container paths — the `json_conv_traits` container partial-spec
+(`json_conv_traits.hpp:546`, gated `!is_json_conv_traits_declared`, which
+*inherits* from `is_json_type_traits_declared`) and the three `encode_traits`
+container specs (`encode_traits.hpp:238/266/293`, gated
+`!is_json_type_traits_declared`) — would otherwise encode `std::vector<uint8_t>`
+as a CBOR **array** (major type 4). Setting the declared flag disables all of
+them, so both encode and decode fall through to the custom traits. Because the
+traits attach to the *type*, `std::optional<Bytes>`, `std::vector<Bytes>`, and
+nested structs (`Inner.bytes`) compose automatically — no per-struct wire mirror
+(the dead end documented below).
+
+**Other languages were already correct** — #4 was C++-only:
+| Wrapper | Byte encoding | Status |
+| --- | --- | --- |
+| C++ (jsoncons) | encoded `vector<uint8_t>` as CBOR array | **fixed via `Bytes`** |
+| Python (cbor2) | `bytes` → byte string natively | already correct |
+| Rust (ciborium) | `#[serde(with="serde_bytes")]` already emitted | already correct |
+| Go (fxamacker/cbor) | `[]byte` → byte string by default | already correct |
+
+**Verified:** `test/typemappingtestlib` exercises `seq[byte]` as result
+(`ByteSeqRequest`), input param (`BytesEchoRequest`), `Option[seq[byte]]`
+(`OptSeqRequest`), and `seq[Inner]` with an inner `seq[byte]` field
+(`ListInnersRequest`/`BulkInnersRequest`/`InnersUpdatedEvent`). All four wrapper
+round-trip suites pass: **C++ 133/133 under both `--mm:orc` and `--mm:refc`**,
+Python 86/86, Rust 133/133, Go 133/133. The hand-written C++ test now constructs
+`Bytes payload{...}` (was `jsoncons::byte_string`); the result-side accessors
+(`.size()`, `[]`) were already vector-compatible and needed no change.
+
+---
+
+### Original analysis (kept for context)
+
+## 4-orig. `seq[byte]` maps to `jsoncons::byte_string`, not `std::vector<uint8_t>`
 
 `logosdelivery.hpp` emits binary fields (`payload`, `meta`, `proof`) as
 `jsoncons::byte_string{}`. That ties the public struct to a **jsoncons-specific

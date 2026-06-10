@@ -731,7 +731,7 @@ static void test_seq_byte_empty() {
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
     CHECK(r.isOk());
-    // `seq[byte]` maps to jsoncons::byte_string (no `.empty()`; use size()).
+    // `seq[byte]` maps to the public `Bytes` (std::vector<uint8_t>) wrapper.
     CHECK_EQ(r->data.size(), static_cast<size_t>(0));
     lib.shutdown();
 }
@@ -1347,13 +1347,14 @@ static void test_obj_as_param() {
     lib.shutdown();
 }
 
-// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
-// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
-// string (major type 2) — the form the Nim provider expects.
+// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to the public
+// `Bytes` (std::vector<uint8_t>) wrapper, whose json_type_traits force a
+// CBOR byte string (major type 2) on the wire — the form the Nim provider
+// expects.
 static void test_bytes_echo_request_roundtrip() {
     Typemappingtestlib lib;
     lib.createContext();
-    jsoncons::byte_string payload{10, 20, 30, 40, 50};
+    Bytes payload{10, 20, 30, 40, 50};
     auto r = lib.bytesEchoRequest(payload);
     CHECK(r.isOk());
     CHECK_EQ(r->length, 5);
@@ -1365,7 +1366,7 @@ static void test_bytes_echo_request_roundtrip() {
 static void test_bytes_echo_request_empty() {
     Typemappingtestlib lib;
     lib.createContext();
-    jsoncons::byte_string payload;
+    Bytes payload;
     auto r = lib.bytesEchoRequest(payload);
     CHECK(r.isOk());
     CHECK_EQ(r->length, 0);

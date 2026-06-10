@@ -101,14 +101,17 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
       else:
         ""
   if lower == "seq[byte]":
-    # `jsoncons::byte_string` is jsoncons' own byte-string container. It
-    # satisfies `is_basic_byte_string`, so jsoncons encodes/decodes it as
-    # a CBOR byte string (major type 2) — what the Nim cbor_serialization
-    # decoder expects for `seq[byte]`. A plain `std::vector<uint8_t>` would
-    # ride the wire as a CBOR array (major type 4) and be rejected on
-    # INBOUND request params. `byte_string` is container-like (data/size/
-    # begin/end/operator[]/push_back).
-    return "jsoncons::byte_string"
+    # `Bytes` is a per-library wrapper over `std::vector<uint8_t>` (idiomatic,
+    # dependency-free, supports .size()/[]/begin()/end()) that carries a
+    # `json_type_traits` specialisation forcing CBOR byte-string (major type 2)
+    # on the wire — what the Nim cbor_serialization decoder expects for
+    # `seq[byte]`. A bare `std::vector<uint8_t>` would ride as a CBOR array
+    # (major type 4) and be rejected on INBOUND params. Because the traits
+    # attach to the TYPE (not per field), `std::optional<Bytes>`,
+    # `std::vector<Bytes>`, and nested structs compose automatically.
+    # The type + traits are emitted once per library (see emitBytesType /
+    # emitBytesTraits in generateCborCppHeaderFile).
+    return "Bytes"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
     return
@@ -602,6 +605,23 @@ proc generateCborCppHeaderFile*(
   h.add("    bool isErr() const { return !ok_; }\n")
   h.add("    explicit operator bool() const { return isOk(); }\n")
   h.add("    const std::string& error() const { return error_; }\n")
+  h.add("};\n\n")
+
+  # ---- Bytes ----
+  # Idiomatic byte vector for `seq[byte]`. Derives std::vector<uint8_t> so the
+  # public surface is dependency-free (.size()/[]/begin()/end()/push_back),
+  # while a json_type_traits specialisation (emitted after this namespace)
+  # forces a CBOR byte string (major type 2) on the wire. Setting
+  # is_json_type_traits_declared<Bytes> there disables jsoncons' built-in
+  # byte-container paths (which would encode std::vector<uint8_t> as a CBOR
+  # array), so the custom traits drive both encode and decode and compose
+  # through std::optional<Bytes>, std::vector<Bytes>, and nested structs.
+  h.add("struct Bytes : std::vector<uint8_t> {\n")
+  h.add("  using std::vector<uint8_t>::vector;\n")
+  h.add("  Bytes() = default;\n")
+  h.add(
+    "  explicit Bytes(std::vector<uint8_t> v) : std::vector<uint8_t>(std::move(v)) {}\n"
+  )
   h.add("};\n\n")
 
   # ---- All registered enums + distinct/alias aliases + structs ----
@@ -1168,6 +1188,41 @@ proc generateCborCppHeaderFile*(
   # Section 4: JSONCONS macros (global scope)
   # ==================================================================
   h.add("} // namespace " & libName & "\n\n")
+
+  # ---- Bytes json_type_traits ----
+  # Forces CBOR byte-string (major type 2) for the public `Bytes` vector and
+  # decodes a byte string back into it. Specialising is_json_type_traits_declared
+  # is what disables jsoncons' built-in byte-container conv/encode paths (which
+  # would otherwise encode std::vector<uint8_t> as a CBOR array): both the
+  # json_conv_traits container partial-spec and the encode_traits container
+  # specialisations are gated on !is_json_type_traits_declared, so this routes
+  # all encode/decode through the traits below.
+  block:
+    let q = libName & "::Bytes"
+    h.add("namespace jsoncons {\n")
+    h.add(
+      "template <> struct is_json_type_traits_declared<" & q &
+        "> : public std::true_type {};\n"
+    )
+    h.add("template <typename Json>\n")
+    h.add("struct json_type_traits<Json, " & q & "> {\n")
+    h.add("  using allocator_type = typename Json::allocator_type;\n")
+    h.add("  static bool is(const Json& j) noexcept { return j.is_byte_string(); }\n")
+    h.add("  static " & q & " as(const Json& j) {\n")
+    h.add("    auto bsv = j.as_byte_string_view();\n")
+    h.add("    return " & q & "(bsv.begin(), bsv.end());\n")
+    h.add("  }\n")
+    h.add(
+      "  static Json to_json(const " & q &
+        "& v, const allocator_type& alloc = allocator_type()) {\n"
+    )
+    h.add(
+      "    return jsoncons::make_obj_using_allocator<Json>(\n" &
+        "        alloc, jsoncons::byte_string_arg, v, jsoncons::semantic_tag::none);\n"
+    )
+    h.add("  }\n")
+    h.add("};\n")
+    h.add("} // namespace jsoncons\n\n")
 
   if enumNames.len > 0:
     h.add(
