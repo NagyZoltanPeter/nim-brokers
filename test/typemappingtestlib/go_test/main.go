@@ -2321,9 +2321,26 @@ func test_str_array_event() {
 // main — runs all tests in cpp order.
 // ============================================================================
 
-// Associative containers — Table[K, V]. Go currently supports string-keyed
-// tables (fxamacker/cbor decodes them natively); non-string keys are exercised
-// by the Python parity test (see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+// Associative containers — Table[K, V], full key coverage.
+
+func test_map_result_all_key_flavors() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.MapResultRequest(3)
+	check(err == nil, "mapResultRequest is_ok")
+	checkEq(len(r.StrKeyed), 3, "strKeyed len")
+	checkEq(r.StrKeyed["key-0"], int32(0), "strKeyed key-0")
+	checkEq(len(r.IntKeyed), 3, "intKeyed len")
+	checkEq(r.IntKeyed[0], "val-0", "intKeyed 0")
+	checkEq(r.IntKeyed[2], "val-2", "intKeyed 2")
+	checkEq(r.CharKeyed["a"], int32(0), "charKeyed a")
+	checkEq(r.CharKeyed["c"], int32(4), "charKeyed c")
+	checkEq(len(r.EnumKeyed), 3, "enumKeyed len")
+	checkEq(r.EnumKeyed[typemappingtestlib.Priority_pLow], int32(0), "enumKeyed pLow")
+	checkEq(r.EnumKeyed[typemappingtestlib.Priority_pHigh], int32(2), "enumKeyed pHigh")
+	checkEq(r.JobKeyed[1], int32(3), "jobKeyed 1")
+	lib.Close()
+}
 
 func test_map_param_roundtrip() {
 	lib := newLib()
@@ -2518,6 +2535,7 @@ func main() {
 	runTest("test_set_slots_obj_array_param", test_set_slots_obj_array_param)
 	runTest("test_str_array_event", test_str_array_event)
 
+	runTest("test_map_result_all_key_flavors", test_map_result_all_key_flavors)
 	runTest("test_map_param_roundtrip", test_map_param_roundtrip)
 	runTest("test_map_event", test_map_event)
 

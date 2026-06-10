@@ -2519,11 +2519,26 @@ static void test_str_array_event() {
 // Associative containers — Table[K, V]
 // ============================================================================
 
-// NOTE: C++ currently supports only string-keyed Table (jsoncons cannot
-// convert text keys to non-string key types). Non-string-key coverage
-// (MapResultRequest's int/char/enum/distinct maps) is exercised by the
-// Python parity test; the C++ method is TODO-skipped until custom
-// key-converting traits land. See doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md.
+static void test_map_result_all_key_flavors() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.mapResultRequest(3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->strKeyed.size(), 3u);
+    CHECK_EQ(r->strKeyed.at("key-0"), 0);
+    CHECK_EQ(r->intKeyed.size(), 3u);
+    CHECK_EQ(r->intKeyed.at(0), std::string("val-0"));
+    CHECK_EQ(r->intKeyed.at(2), std::string("val-2"));
+    CHECK_EQ(r->charKeyed.size(), 3u);
+    CHECK_EQ(r->charKeyed.at('a'), 0);
+    CHECK_EQ(r->charKeyed.at('c'), 4);
+    CHECK_EQ(r->enumKeyed.size(), 3u);
+    CHECK_EQ(r->enumKeyed.at(Priority::pLow), 0);
+    CHECK_EQ(r->enumKeyed.at(Priority::pHigh), 2);
+    CHECK_EQ(r->jobKeyed.size(), 3u);
+    CHECK_EQ(r->jobKeyed.at(1), 3);
+    lib.shutdown();
+}
 
 static void test_map_param_roundtrip() {
     Typemappingtestlib lib;
@@ -2730,6 +2745,7 @@ int main() {
     RUN(test_set_slots_obj_array_param);
     RUN(test_str_array_event);
 
+    RUN(test_map_result_all_key_flavors);
     RUN(test_map_param_roundtrip);
     RUN(test_map_event);
 

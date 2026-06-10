@@ -88,23 +88,16 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
   if prim.len > 0:
     return prim
   if lower.startsWith("table[") and lower.endsWith("]"):
-    # Table[K, V] -> std::unordered_map<std::string, Vcpp>.
-    #
-    # Keys ride the wire as CBOR text strings. jsoncons decodes a string-keyed
-    # map natively, but it does NOT parse a text key back into a non-string
-    # key type (int/enum/char) — `decode failed: Cannot convert to integer`.
-    # Until the C++ codegen emits custom key-converting traits, only
-    # string-keyed tables are mapped here; other key types fall through to ""
-    # so the affected typed surface is TODO-skipped rather than mis-decoded.
-    # (Python has full key-type support; see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md.)
+    # Table[K, V] -> std::unordered_map<Kcpp, Vcpp>, all scalar key types.
+    # Keys ride the wire as CBOR text strings; jsoncons cannot parse a text key
+    # into a non-string key, so structs holding such a field get a wire-struct
+    # + custom json_type_traits that convert (see generateCborHppFile).
     let (k, v) = parseTableParams(t)
-    let kBase = resolveUnderlyingType(k.strip())
-    if kBase.toLowerAscii() != "string":
-      return ""
+    let kc = nimTypeToCppType(k)
     let vc = nimTypeToCppType(v)
     return
-      if vc.len > 0:
-        "std::unordered_map<std::string, " & vc & ">"
+      if kc.len > 0 and vc.len > 0:
+        "std::unordered_map<" & kc & ", " & vc & ">"
       else:
         ""
   if lower == "seq[byte]":
@@ -157,6 +150,40 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
 
 proc isCppMappable*(nimType: string): bool {.compileTime.} =
   nimTypeToCppType(nimType).len > 0
+
+proc cppTableKeyType*(nimType: string): string {.compileTime.} =
+  let (k, _) = parseTableParams(nimType.strip())
+  nimTypeToCppType(k)
+
+proc cppTableValType*(nimType: string): string {.compileTime.} =
+  let (_, v) = parseTableParams(nimType.strip())
+  nimTypeToCppType(v)
+
+proc cppTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
+  ## True for a Table[K, V] whose C++ key type is not `std::string`
+  ## (int / enum / char / distinct-of-scalar). jsoncons can't parse a text
+  ## key into such a type, so the owning struct gets a wire-struct + custom
+  ## json_type_traits that convert.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if not (lower.startsWith("table[") and lower.endsWith("]")):
+    return false
+  let kc = cppTableKeyType(t)
+  kc.len > 0 and kc != "std::string"
+
+proc cppWireFieldType*(nimType: string): string {.compileTime.} =
+  ## Field type for the string-keyed wire struct: non-string-keyed maps
+  ## become `std::unordered_map<std::string, V>`; everything else is itself.
+  if cppTableNeedsKeyConv(nimType):
+    "std::unordered_map<std::string, " & cppTableValType(nimType) & ">"
+  else:
+    nimTypeToCppType(nimType)
+
+proc structHasKeyConv*(entry: ApiTypeEntry): bool {.compileTime.} =
+  for f in entry.fields:
+    if cppTableNeedsKeyConv(f.nimType):
+      return true
+  false
 
 # ---------------------------------------------------------------------------
 # Identifier helpers
@@ -368,6 +395,74 @@ proc emitEnvelopeTraits*(h: var string, qualifiedName: string) {.compileTime.} =
   ## are optional on the wire (`omitOptionalFields = true` in the
   ## BrokerCbor flavor), so the required-count is 0.
   h.add("JSONCONS_N_MEMBER_TRAITS(" & qualifiedName & ", 0, ok, err)\n")
+
+proc emitCppMapStructTraits*(
+    h: var string, libName, name: string, entry: ApiTypeEntry
+) {.compileTime.} =
+  ## Custom `json_type_traits<Json, <name>>` for a struct holding non-string-
+  ## keyed maps. Delegates all field (de)serialisation to the auto-generated
+  ## `<name>__wire` traits and converts only the map keys: text <-> typed
+  ## (char via the first byte; int / enum / distinct via std::stoll / to_string).
+  let q = libName & "::" & name
+  let qw = libName & "::" & name & "__wire"
+  h.add("namespace jsoncons {\n")
+  h.add("template <typename Json>\n")
+  h.add("struct json_type_traits<Json, " & q & "> {\n")
+  h.add("  using allocator_type = typename Json::allocator_type;\n")
+  h.add("  static bool is(const Json& j) noexcept { return j.is_object(); }\n")
+  h.add("  static " & q & " as(const Json& j) {\n")
+  h.add("    auto w = j.template as<" & qw & ">();\n")
+  h.add("    " & q & " v;\n")
+  for f in entry.fields:
+    if nimTypeToCppType(f.nimType).len == 0:
+      continue
+    if cppTableNeedsKeyConv(f.nimType):
+      let kt = cppTableKeyType(f.nimType)
+      # Enum key types live in the lib namespace; qualify them for use here
+      # inside `namespace jsoncons`. Primitive keys (int*/char) stay bare.
+      let ktQ =
+        if isTypeRegistered(kt) and lookupTypeEntry(kt).kind == atkEnum:
+          libName & "::" & kt
+        else:
+          kt
+      if kt == "char":
+        h.add(
+          "    for (const auto& kv : w." & f.name & ") v." & f.name &
+            "[kv.first.empty() ? char(0) : kv.first[0]] = kv.second;\n"
+        )
+      else:
+        h.add(
+          "    for (const auto& kv : w." & f.name & ") v." & f.name & "[static_cast<" &
+            ktQ & ">(std::stoll(kv.first))] = kv.second;\n"
+        )
+    else:
+      h.add("    v." & f.name & " = w." & f.name & ";\n")
+  h.add("    return v;\n  }\n")
+  h.add(
+    "  static Json to_json(const " & q &
+      "& v, const allocator_type& alloc = allocator_type()) {\n"
+  )
+  h.add("    " & qw & " w;\n")
+  for f in entry.fields:
+    if nimTypeToCppType(f.nimType).len == 0:
+      continue
+    if cppTableNeedsKeyConv(f.nimType):
+      let kt = cppTableKeyType(f.nimType)
+      if kt == "char":
+        h.add(
+          "    for (const auto& kv : v." & f.name & ") w." & f.name &
+            "[std::string(1, kv.first)] = kv.second;\n"
+        )
+      else:
+        h.add(
+          "    for (const auto& kv : v." & f.name & ") w." & f.name &
+            "[std::to_string(static_cast<long long>(kv.first))] = kv.second;\n"
+        )
+    else:
+      h.add("    w." & f.name & " = v." & f.name & ";\n")
+  h.add("    return json_type_traits<Json, " & qw & ">::to_json(w, alloc);\n  }\n")
+  h.add("};\n")
+  h.add("} // namespace jsoncons\n\n")
 
 # ---------------------------------------------------------------------------
 # Header file emission
@@ -581,6 +676,14 @@ proc generateCborCppHeaderFile*(
       else:
         h.add("  " & cppType & " " & f.name & "{};\n")
     h.add("};\n")
+    # A string-keyed mirror struct for structs holding non-string-keyed maps.
+    # jsoncons auto-(de)serialises this; the public struct's custom traits
+    # convert keys to/from it (see the json_type_traits emission below).
+    if allMapped and structHasKeyConv(entry):
+      h.add("struct " & name & "__wire {\n")
+      for f in entry.fields:
+        h.add("  " & cppWireFieldType(f.nimType) & " " & f.name & "{};\n")
+      h.add("};\n")
     if allMapped:
       var fieldNames: seq[string] = @[]
       for f in entry.fields:
@@ -1091,7 +1194,13 @@ proc generateCborCppHeaderFile*(
     h.add("} // namespace jsoncons\n\n")
 
   for (name, fields) in payloadFields:
-    emitMemberTraitsMacro(h, libName & "::" & name, name, fields)
+    if isTypeRegistered(name) and structHasKeyConv(lookupTypeEntry(name)):
+      # Non-string-keyed map struct: auto-traits on the string-keyed wire
+      # mirror, then custom traits on the public struct that convert keys.
+      emitMemberTraitsMacro(h, libName & "::" & name & "__wire", name, fields)
+      emitCppMapStructTraits(h, libName, name, lookupTypeEntry(name))
+    else:
+      emitMemberTraitsMacro(h, libName & "::" & name, name, fields)
   for envName in envelopeNames:
     emitEnvelopeTraits(h, libName & "::" & envName)
   if anyInstanceReturn:

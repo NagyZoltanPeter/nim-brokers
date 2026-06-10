@@ -99,17 +99,16 @@ proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
   if isRustPrimitive(t):
     return primRustHint(t)
   if lower.startsWith("table[") and lower.endsWith("]"):
-    # String-keyed Table -> HashMap<String, V>. ciborium/serde decode a
-    # string-keyed CBOR map natively; non-string keys arrive as text and
-    # need explicit conversion (a follow-up — see impl plan §9b), so they
-    # fall through to "" and the typed surface is TODO-skipped.
+    # Table[K, V] -> HashMap<Krust, Vrust>, all scalar key types. Keys ride the
+    # wire as CBOR text strings; non-String key fields get a `#[serde(with =
+    # "cbor_strkey_map")]` adapter (see generateCborRustFile) that converts
+    # text <-> typed key. string/char keys map to String and need no adapter.
     let (k, v) = parseTableParams(t)
-    if resolveUnderlyingType(k.strip()).toLowerAscii() != "string":
-      return ""
+    let kr = nimTypeToRustHint(k)
     let vr = nimTypeToRustHint(v)
     return
-      if vr.len > 0:
-        "HashMap<String, " & vr & ">"
+      if kr.len > 0 and vr.len > 0:
+        "HashMap<" & kr & ", " & vr & ">"
       else:
         ""
   if lower.startsWith("seq[") and lower.endsWith("]"):
@@ -181,6 +180,19 @@ proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
 
 proc isRustMappable*(nimType: string): bool {.compileTime.} =
   nimTypeToRustHint(nimType).len > 0
+
+proc rustTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
+  ## True when the field is a `Table[K, V]` whose Rust key type is not
+  ## `String` — i.e. an int / enum / distinct-of-int key that must be
+  ## converted to/from the text key on the wire via the `cbor_strkey_map`
+  ## serde helper. (string / char keys map to `String` and need no helper.)
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if not (lower.startsWith("table[") and lower.endsWith("]")):
+    return false
+  let (k, _) = parseTableParams(t)
+  let kr = nimTypeToRustHint(k)
+  kr.len > 0 and kr != "String"
 
 # ---------------------------------------------------------------------------
 # File emission
@@ -414,7 +426,9 @@ proc generateCborRustFile*(
   # Enums.
   for name in enumNames:
     let entry = lookupTypeEntry(name)
-    rs.add("#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n")
+    rs.add(
+      "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]\n"
+    )
     rs.add("#[repr(i32)]\n")
     rs.add("#[serde(into = \"i32\", from = \"i32\")]\n")
     rs.add("pub enum " & name & " {\n")
@@ -444,6 +458,20 @@ proc generateCborRustFile*(
     rs.add("impl From<" & name & "> for i32 {\n")
     rs.add("    fn from(v: " & name & ") -> Self { v as i32 }\n")
     rs.add("}\n\n")
+    # Display / FromStr over the ordinal so the enum can be a Table key via the
+    # `cbor_strkey_map` serde helper (keys travel as text on the wire).
+    rs.add("impl std::fmt::Display for " & name & " {\n")
+    rs.add(
+      "    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, \"{}\", *self as i32) }\n"
+    )
+    rs.add("}\n\n")
+    rs.add("impl std::str::FromStr for " & name & " {\n")
+    rs.add("    type Err = std::num::ParseIntError;\n")
+    rs.add(
+      "    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> { Ok(" & name &
+        "::from(s.parse::<i32>()?)) }\n"
+    )
+    rs.add("}\n\n")
 
   # Distinct / alias.
   for name in aliasNames:
@@ -456,6 +484,47 @@ proc generateCborRustFile*(
       )
       continue
     rs.add("pub type " & name & " = " & pyU & ";\n\n")
+
+  # Generic text-key <-> typed-key map adapter, emitted only when some object
+  # field is a non-string-keyed Table. Table keys ride the wire as CBOR text
+  # strings; this serde `with` helper converts them to/from the typed key
+  # (int / enum / distinct) — string/char keys map to `String` and skip it.
+  var needsStrKeyMap = false
+  for name in objectNames:
+    for f in lookupTypeEntry(name).fields:
+      if rustTableNeedsKeyConv(f.nimType):
+        needsStrKeyMap = true
+  if needsStrKeyMap:
+    rs.add("mod cbor_strkey_map {\n")
+    rs.add("    use serde::de::Error as _;\n")
+    rs.add("    use serde::ser::SerializeMap;\n")
+    rs.add("    use serde::{Deserialize, Deserializer, Serialize, Serializer};\n")
+    rs.add("    use std::collections::HashMap;\n")
+    rs.add("    use std::fmt::Display;\n")
+    rs.add("    use std::hash::Hash;\n")
+    rs.add("    use std::str::FromStr;\n")
+    rs.add(
+      "    pub fn serialize<S, K, V>(m: &HashMap<K, V>, s: S) -> std::result::Result<S::Ok, S::Error>\n"
+    )
+    rs.add("    where S: Serializer, K: Display + Eq + Hash, V: Serialize {\n")
+    rs.add("        let mut map = s.serialize_map(Some(m.len()))?;\n")
+    rs.add("        for (k, v) in m { map.serialize_entry(&k.to_string(), v)?; }\n")
+    rs.add("        map.end()\n")
+    rs.add("    }\n")
+    rs.add(
+      "    pub fn deserialize<'de, D, K, V>(d: D) -> std::result::Result<HashMap<K, V>, D::Error>\n"
+    )
+    rs.add(
+      "    where D: Deserializer<'de>, K: FromStr + Eq + Hash, <K as FromStr>::Err: Display, V: Deserialize<'de> {\n"
+    )
+    rs.add("        let sm = HashMap::<String, V>::deserialize(d)?;\n")
+    rs.add("        let mut out = HashMap::with_capacity(sm.len());\n")
+    rs.add(
+      "        for (k, v) in sm { out.insert(k.parse::<K>().map_err(D::Error::custom)?, v); }\n"
+    )
+    rs.add("        Ok(out)\n")
+    rs.add("    }\n")
+    rs.add("}\n\n")
 
   # Objects.
   for name in objectNames:
@@ -472,6 +541,8 @@ proc generateCborRustFile*(
       let useByteBuf = f.nimType.strip().toLowerAscii() == "seq[byte]"
       if useByteBuf:
         rs.add("    #[serde(with = \"serde_bytes\")]\n")
+      elif rustTableNeedsKeyConv(f.nimType):
+        rs.add("    #[serde(with = \"cbor_strkey_map\")]\n")
       rs.add("    pub " & f.name & ": " & hint & ",\n")
       anyField = true
     if not anyField:
