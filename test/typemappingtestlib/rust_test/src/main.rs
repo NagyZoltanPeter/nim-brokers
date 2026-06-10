@@ -2817,9 +2817,30 @@ fn test_str_array_event() {
 // main
 // ===========================================================================
 
-// Associative containers — Table[K, V]. Rust currently supports string-keyed
-// tables (ciborium/serde decode them natively); non-string keys are exercised
-// by the Python parity test (see doc/design/ASSOC_CONTAINERS_IMPL_PLAN.md §9b).
+// Associative containers — Table[K, V], full key coverage.
+
+fn test_map_result_all_key_flavors() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.map_result_request(3);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.strKeyed.len(), 3usize);
+        check_eq!(*v.strKeyed.get("key-0").unwrap(), 0i32);
+        check_eq!(v.intKeyed.len(), 3usize);
+        check_eq!(v.intKeyed.get(&0i32).unwrap().as_str(), "val-0");
+        check_eq!(v.intKeyed.get(&2i32).unwrap().as_str(), "val-2");
+        check_eq!(v.charKeyed.len(), 3usize);
+        check_eq!(*v.charKeyed.get("a").unwrap(), 0i32);
+        check_eq!(*v.charKeyed.get("c").unwrap(), 4i32);
+        check_eq!(v.enumKeyed.len(), 3usize);
+        check_eq!(*v.enumKeyed.get(&lib::Priority::pLow).unwrap(), 0i32);
+        check_eq!(*v.enumKeyed.get(&lib::Priority::pHigh).unwrap(), 2i32);
+        check_eq!(v.jobKeyed.len(), 3usize);
+        check_eq!(*v.jobKeyed.get(&1i32).unwrap(), 3i32);
+    }
+    lib.shutdown();
+}
 
 fn test_map_param_roundtrip() {
     let mut lib = Typemappingtestlib::new();
@@ -3030,6 +3051,7 @@ fn main() {
     run_test("test_str_array_event", test_str_array_event);
 
     println!("\n--- TestTableTypes ---");
+    run_test("test_map_result_all_key_flavors", test_map_result_all_key_flavors);
     run_test("test_map_param_roundtrip", test_map_param_roundtrip);
     run_test("test_map_event", test_map_event);
 
