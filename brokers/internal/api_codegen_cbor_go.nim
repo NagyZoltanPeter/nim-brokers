@@ -84,17 +84,16 @@ proc nimTypeToGoCborHint*(nimType: string): string {.compileTime.} =
   if isGoPrimitive(t):
     return primGoHint(t)
   if lower.startsWith("table[") and lower.endsWith("]"):
-    # String-keyed Table -> map[string]V. fxamacker/cbor decodes a
-    # string-keyed CBOR map natively; non-string keys arrive as text and
-    # need explicit conversion (follow-up — see impl plan §9b), so they
-    # fall through to "" and the typed surface is TODO-skipped.
+    # Table[K, V] -> map[Kgo]Vgo. Keys ride the wire as CBOR text strings;
+    # non-string key fields are converted text <-> typed via generated
+    # Marshal/UnmarshalCBOR (see generateCborGoFile). string/char keys map to
+    # string and need no conversion.
     let (k, v) = parseTableParams(t)
-    if resolveUnderlyingType(k.strip()).toLowerAscii() != "string":
-      return ""
+    let kg = nimTypeToGoCborHint(k)
     let vg = nimTypeToGoCborHint(v)
     return
-      if vg.len > 0:
-        "map[string]" & vg
+      if kg.len > 0 and vg.len > 0:
+        "map[" & kg & "]" & vg
       else:
         ""
   if lower.startsWith("seq[") and lower.endsWith("]"):
@@ -139,6 +138,40 @@ proc goExportedField*(name: string): string {.compileTime.} =
     chr(ord(name[0]) - 32) & name[1 ..^ 1]
   else:
     name
+
+proc goTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
+  ## True for a Table[K, V] whose Go key type is not `string` (int / enum /
+  ## distinct-of-int). Such fields ride the wire as text-keyed maps and need
+  ## conversion in the owning struct's Marshal/UnmarshalCBOR.
+  let t = nimType.strip()
+  let lower = t.toLowerAscii()
+  if not (lower.startsWith("table[") and lower.endsWith("]")):
+    return false
+  let (k, _) = parseTableParams(t)
+  let kg = nimTypeToGoCborHint(k)
+  kg.len > 0 and kg != "string"
+
+proc goTableKeyType*(nimType: string): string {.compileTime.} =
+  let (k, _) = parseTableParams(nimType.strip())
+  nimTypeToGoCborHint(k)
+
+proc goTableValType*(nimType: string): string {.compileTime.} =
+  let (_, v) = parseTableParams(nimType.strip())
+  nimTypeToGoCborHint(v)
+
+proc goWireStructField*(f: ApiFieldDef): string {.compileTime.} =
+  ## One field line for the string-keyed wire struct used by Marshal/
+  ## UnmarshalCBOR — non-string-keyed maps become `map[string]V`.
+  let fx = goExportedField(f.name)
+  if goTableNeedsKeyConv(f.nimType):
+    "\t\t" & fx & " map[string]" & goTableValType(f.nimType) & " `cbor:\"" & f.name &
+      "\"`\n"
+  else:
+    let hint = nimTypeToGoCborHint(f.nimType)
+    if hint.len == 0:
+      ""
+    else:
+      "\t\t" & fx & " " & hint & " `cbor:\"" & f.name & "\"`\n"
 
 const goReservedWords = [
   "break", "case", "chan", "const", "continue", "default", "defer", "else",
@@ -320,12 +353,14 @@ proc generateCborGoFile*(
   g.add("\t\"errors\"\n")
   g.add("\t\"runtime\"\n")
   g.add("\t\"runtime/cgo\"\n")
+  g.add("\t\"strconv\"\n")
   g.add("\t\"sync\"\n")
   g.add("\t\"unsafe\"\n")
   g.add("\t\"github.com/fxamacker/cbor/v2\"\n")
   g.add(")\n\n")
   g.add("var _ = errors.New\n")
   g.add("var _ = runtime.SetFinalizer\n")
+  g.add("var _ = strconv.Itoa\n")
   g.add("var _ cgo.Handle\n")
   g.add("var _ sync.Mutex\n")
   g.add("var _ unsafe.Pointer\n")
@@ -416,6 +451,58 @@ proc generateCborGoFile*(
     if not anyField:
       g.add("\t_ struct{}\n")
     g.add("}\n\n")
+
+    # When a field is a non-string-keyed Table, fxamacker cannot decode the
+    # text-keyed wire map into the typed-key Go map (it silently drops the
+    # entries). Emit Marshal/UnmarshalCBOR that round-trip through a
+    # string-keyed wire struct, converting keys via strconv. int / enum /
+    # distinct-of-int keys all convert through int64.
+    var hasConv = false
+    for f in entry.fields:
+      if goTableNeedsKeyConv(f.nimType):
+        hasConv = true
+    if hasConv:
+      g.add("func (s " & name & ") MarshalCBOR() ([]byte, error) {\n")
+      g.add("\ttype wire struct {\n")
+      for f in entry.fields:
+        g.add(goWireStructField(f))
+      g.add("\t}\n\tvar w wire\n")
+      for f in entry.fields:
+        if nimTypeToGoCborHint(f.nimType).len == 0:
+          continue
+        let fx = goExportedField(f.name)
+        if goTableNeedsKeyConv(f.nimType):
+          let vt = goTableValType(f.nimType)
+          g.add("\tw." & fx & " = make(map[string]" & vt & ", len(s." & fx & "))\n")
+          g.add(
+            "\tfor k, v := range s." & fx & " { w." & fx &
+              "[strconv.FormatInt(int64(k), 10)] = v }\n"
+          )
+        else:
+          g.add("\tw." & fx & " = s." & fx & "\n")
+      g.add("\treturn cbor.Marshal(w)\n}\n\n")
+
+      g.add("func (s *" & name & ") UnmarshalCBOR(data []byte) error {\n")
+      g.add("\ttype wire struct {\n")
+      for f in entry.fields:
+        g.add(goWireStructField(f))
+      g.add("\t}\n\tvar w wire\n")
+      g.add("\tif err := cbor.Unmarshal(data, &w); err != nil {\n\t\treturn err\n\t}\n")
+      for f in entry.fields:
+        if nimTypeToGoCborHint(f.nimType).len == 0:
+          continue
+        let fx = goExportedField(f.name)
+        if goTableNeedsKeyConv(f.nimType):
+          let kt = goTableKeyType(f.nimType)
+          let vt = goTableValType(f.nimType)
+          g.add("\ts." & fx & " = make(map[" & kt & "]" & vt & ", len(w." & fx & "))\n")
+          g.add("\tfor k, v := range w." & fx & " {\n")
+          g.add("\t\tn, err := strconv.ParseInt(k, 10, 64)\n")
+          g.add("\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n")
+          g.add("\t\ts." & fx & "[" & kt & "(n)] = v\n\t}\n")
+        else:
+          g.add("\ts." & fx & " = w." & fx & "\n")
+      g.add("\treturn nil\n}\n\n")
 
   # ---- Lib struct + event handler type -----------------------------------
   g.add("// -------- Event dispatch --------\n\n")
