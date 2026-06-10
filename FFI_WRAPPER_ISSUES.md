@@ -134,9 +134,50 @@ but Nim `cbor_serialization` decodes `seq[byte]` from a CBOR **byte string**
 encodes as major type 2 — required for correctness, at the cost of an
 unergonomic public type.
 
-**Fix (bigger):** expose the public field as the idiomatic byte vector
-(`std::vector<uint8_t>` / `bytes` / `Vec<u8>` / `[]byte`) and add a
-**wire-struct + custom jsoncons `json_type_traits`** that converts to/from the
-CBOR byte string — the exact pattern already used for non-string Table keys
-(`cppTableNeedsKeyConv` / `cppWireFieldType` / `structHasKeyConv`). Replicate
-that machinery for `seq[byte]` fields across all four codegens.
+**Design (refined after a spike):**
+
+- ❌ **Per-struct wire-mirror does NOT compose.** I prototyped the Table-key
+  pattern for direct `seq[byte]` fields (public `std::vector<uint8_t>`, wire
+  `jsoncons::byte_string`, field-by-field conversion in the struct's custom
+  traits). It works for a *direct* `seq[byte]` field, but the conversion is
+  per-field and keyed on the exact type string `"seq[byte]"`, so it misses
+  `Option[seq[byte]]` (→ `std::optional<std::vector<uint8_t>>`) and
+  `seq[seq[byte]]` — those then ride the wire as CBOR arrays and break. The
+  test lib already has `Option[seq[byte]]`, so this approach *regresses* it.
+  (Prototype reverted; mapping is back to `byte_string`.)
+
+- ✅ **Composable fix: a `Bytes` wrapper type.** Emit one type per library that
+  derives the idiomatic vector but carries byte-string wire traits:
+  ```cpp
+  struct Bytes : std::vector<uint8_t> { using std::vector<uint8_t>::vector; };
+  namespace jsoncons {
+  template <typename Json> struct json_type_traits<Json, LIB::Bytes> {
+    using allocator_type = typename Json::allocator_type;
+    static bool is(const Json& j) noexcept { return j.is_byte_string(); }
+    static LIB::Bytes as(const Json& j) {
+      auto bs = j.template as_byte_string<jsoncons::byte_string>();
+      return LIB::Bytes(bs.data(), bs.data() + bs.size());
+    }
+    static Json to_json(const LIB::Bytes& v, const allocator_type& a = {}) {
+      return Json(jsoncons::byte_string_arg,
+                  jsoncons::span<const uint8_t>(v.data(), v.size()),
+                  jsoncons::semantic_tag::none, a);
+    }
+  };
+  }
+  ```
+  Then map `seq[byte] → LIB::Bytes` in `nimTypeToCppType`. Because the traits
+  attach to the *type*, `Option<Bytes>`, `std::vector<Bytes>`, nested structs,
+  etc. all compose automatically — no per-struct wire mirror.
+  Verified-available jsoncons API: `byte_string`'s `(const uint8_t*, size_t)`
+  ctor + `data()/size()`; `Json::is_byte_string()` / `as_byte_string<T>()` /
+  `Json(byte_string_arg, span, semantic_tag, alloc)`.
+
+- Replicate the equivalent wrapper per target: Python `bytes` (cbor2 already
+  encodes it as a byte string), Rust `serde_bytes`/`Vec<u8>` with a byte-string
+  serde adapter, Go `[]byte` (fxamacker/cbor encodes `[]byte` as a byte string
+  by default — likely already correct; verify).
+
+Needs a focused session: implement `Bytes`, verify compile + round-trip against
+`test/typemappingtestlib` (it already exercises `seq[byte]` and
+`Option[seq[byte]]`), then do the other three languages.
