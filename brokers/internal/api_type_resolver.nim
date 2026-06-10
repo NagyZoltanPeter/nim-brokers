@@ -294,9 +294,12 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
       elif innerImpl.kind == nnkTupleTy:
         result.add(fieldType)
       else:
-        # Could be an alias — check if it resolves to something different
-        let instName = $getTypeInst(fieldType)
-        if instName != $fieldType and not isNimPrimitive(instName):
+        # Alias field (`type ContentTopic = string`). `innerImpl` is
+        # `getTypeImpl(fieldType)`, which resolves through the alias chain to the
+        # underlying symbol; if its printed base differs from the field type's own
+        # name, register it so the codegen maps the field through the alias.
+        # (getTypeInst was used here before but only echoes the alias name.)
+        if innerImpl.repr.strip() != $fieldType:
           result.add(fieldType)
 
     # seq[T] where T is a custom type (e.g. `devices: seq[DeviceInfo]`)
@@ -307,6 +310,8 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
         let elemImpl = getTypeImpl(elemSym)
         if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
           result.add(elemSym)
+        elif elemImpl.kind == nnkSym and elemImpl.repr.strip() != $elemSym:
+          result.add(elemSym) # alias element, e.g. `seq[ContentTopic]`
 
     # array[N, T] where T is a custom type
     elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
@@ -384,6 +389,16 @@ macro autoRegisterApiType*(T: typed): untyped =
       if targetName != typeName:
         registerTypeEntry(makeAliasEntry(typeName, targetName, atkAlias))
         return result
+
+  # Simple alias to a primitive or another named type: `type ContentTopic =
+  # string`, `type Timestamp = int64`, including alias-of-alias chains.
+  # `getTypeImpl` resolves fully through the chain to the underlying symbol
+  # (`getTypeInst` only echoes the alias's own name, so it cannot be used here).
+  if typeImpl.kind == nnkSym:
+    let baseName = typeImpl.repr.strip()
+    if baseName != typeName:
+      registerTypeEntry(makeAliasEntry(typeName, baseName, atkAlias))
+    return result
 
   # Tuple types — register as a synthesised object so the CBOR codegen
   # modules (which iterate `gApiTypeRegistry` for `atkObject` entries)

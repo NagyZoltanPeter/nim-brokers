@@ -49,6 +49,12 @@ export mt_broker_common
 
 export results, chronos, chronicles, broker_context, api_common
 
+# Optional override for where the generated FFI artifacts (headers, wrappers,
+# cmake, cddl) are written. Set with `-d:BrokerFfiApiOutDir:<dir>`. Empty (the
+# default) makes `detectOutputDir` fall back to the project path. Declared here
+# as a `{.strdefine.}` so the `when defined(...)` use below resolves to a value.
+const BrokerFfiApiOutDir* {.strdefine.} = ""
+
 # ---------------------------------------------------------------------------
 # Macro helpers
 # ---------------------------------------------------------------------------
