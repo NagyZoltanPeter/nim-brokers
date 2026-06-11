@@ -145,9 +145,19 @@ and Python at runtime — i.e. the fix is locked by the cross-lang tests, not a
 throwaway probe. Suites: C++ 141/141 (orc+refc), Python 94/94, Rust 141/141,
 Go 141/141.
 
-**Still open within this item:** `Option[uint64]` is discovered as
-`Option[CompiledIntTypes]` (generic int typeclass not concretized) — separate
-fix; affects `paginationLimit` etc.
+**Follow-up (now FIXED):** the field-capture used `getTypeImpl` (structurally
+resolved), which leaked `Option[Timestamp]` -> `Option[CompiledIntTypes]` (int
+alias inside `Option`) and renamed structurally-identical array aliases
+(`Option[WakuMessageHash]` -> `Option[Curve25519Key]`). Switched
+`extractFieldsFromSym` + `collectNestedTypeNodes` to `getImpl` (AS-WRITTEN field
+types, export-marker stripped), taught `scanTypeNode` to recurse through
+`Option[T]` (it only handled `seq`/`array`/`Table`), and added an array-alias
+registration branch (`type WakuMessageHash = array[32, byte]`) so `array[N,byte]`
+maps to `std::vector<uint8_t>` / `bytes` / `Vec<u8>` / `[]byte` (wire-correct —
+Nim encodes `array[N,byte]` as a CBOR array, verified by round-trip). Locked by
+`StoreLikeRequest` (`Option[Epoch]`, `seq[Hash32]`, `Option[Key32]`) across all
+four suites. This clears logos `StoreQueryRequest`'s `startTime`/`endTime`/
+`messageHashes`/`paginationCursor` and the `store_query` method.
 
 ---
 

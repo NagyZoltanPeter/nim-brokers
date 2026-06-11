@@ -2728,6 +2728,39 @@ static void test_library_version_from_const() {
     CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
 }
 
+// Mirrors logos StoreQueryRequest: Option[alias-of-int64], seq[array[N,byte]
+// alias], Option[array[N,byte] alias]. Exercises the as-written field-capture
+// fix (no Option[CompiledIntTypes] / WakuMessageHash->Curve25519Key rename) and
+// array-alias registration + wire round-trip.
+static void test_store_like_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.storeLikeRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->startTime.has_value());
+    CHECK_EQ(*r->startTime, 1700);
+    CHECK_EQ(r->hashes.size(), 1u);
+    CHECK_EQ(r->hashes[0].size(), 32u);
+    CHECK_EQ(r->hashes[0][0], 0u);
+    CHECK_EQ(r->hashes[0][31], 31u);
+    CHECK(r->cursor.has_value());
+    CHECK_EQ(r->cursor->size(), 32u);
+    CHECK_EQ((*r->cursor)[0], 255u);
+    CHECK_EQ((*r->cursor)[31], 224u);
+    lib.shutdown();
+}
+
+static void test_store_like_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.storeLikeRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->startTime.has_value());
+    CHECK_EQ(r->hashes.size(), 0u);
+    CHECK(!r->cursor.has_value());
+    lib.shutdown();
+}
+
 // Proc-sugar broker whose payload is a CONTAINER (seq[ContentTopic]).
 static void test_proc_sugar_seq_payload() {
     Typemappingtestlib lib;
@@ -2931,6 +2964,8 @@ int main() {
     RUN(test_proc_sugar_alias_payload);
     RUN(test_proc_sugar_distinct_payload);
     RUN(test_proc_sugar_seq_payload);
+    RUN(test_store_like_present);
+    RUN(test_store_like_absent);
     RUN(test_library_version_from_const);
 
     printf("\n----------------------------------------------------------------------\n");

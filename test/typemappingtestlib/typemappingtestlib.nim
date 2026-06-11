@@ -66,6 +66,19 @@ type Slot* = object
 ## ConstArrayLen — exercises const-defined array size in FFI codegen.
 const ConstArrayLen* = 6
 
+## Epoch — pure alias of int64 (NOT distinct), mirroring logos `Timestamp =
+## int64`. Exercises `Option[Epoch]`: the field-capture fix must keep the
+## written name (was leaking `Option[CompiledIntTypes]`).
+type Epoch* = int64
+
+## Hash32 / Key32 — two STRUCTURALLY IDENTICAL `array[32, byte]` aliases,
+## mirroring logos `WakuMessageHash` / `Curve25519Key`. Used in `seq[Hash32]`
+## and `Option[Key32]`: the field capture must keep each written name (was
+## renaming `Option[WakuMessageHash]` -> `Option[Curve25519Key]`), and the
+## resolver must register the array alias so it maps to bytes.
+type Hash32* = array[32, byte]
+type Key32* = array[32, byte]
+
 ## ContentTopic — a PURE primitive alias (`type X = string`, NOT distinct).
 ## This is the exact shape the type-resolver alias fix targets: the
 ## wrapper type discovery must follow the alias to `string` so a field /
@@ -646,6 +659,16 @@ RequestBroker(API):
   proc listTopics(
     prefix: ContentTopic, n: int32
   ): Future[Result[seq[ContentTopic], string]] {.async.}
+
+## StoreLike — mirrors logos StoreQueryRequest's previously-unmapped fields:
+## Option[alias-of-int64], seq[array[N,byte] alias], Option[array[N,byte] alias].
+RequestBroker(API):
+  type StoreLikeRequest* = object
+    startTime*: Option[Epoch]
+    hashes*: seq[Hash32]
+    cursor*: Option[Key32]
+
+  proc signature*(present: bool): Future[Result[StoreLikeRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Event Brokers — original
@@ -1255,6 +1278,29 @@ proc setupProviders(ctx: BrokerContext) =
       for i in 0 ..< int(n):
         topics.add(prefix & "/" & $i)
       return ok(topics),
+  )
+
+  discard StoreLikeRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[StoreLikeRequest, string]] {.closure, async.} =
+      var h: Hash32
+      for i in 0 .. 31:
+        h[i] = byte(i)
+      var k: Key32
+      for i in 0 .. 31:
+        k[i] = byte(255 - i)
+      if present:
+        return ok(
+          StoreLikeRequest(
+            startTime: some(Epoch(1700)), hashes: @[h], cursor: some(k)
+          )
+        )
+      else:
+        return ok(
+          StoreLikeRequest(
+            startTime: none(Epoch), hashes: @[], cursor: none(Key32)
+          )
+        ),
   )
 
 # ---------------------------------------------------------------------------

@@ -3047,6 +3047,33 @@ fn test_proc_sugar_seq_payload() {
     lib.shutdown();
 }
 
+fn test_store_like_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.store_like_request(true);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.startTime, Some(1700i64)); // Option[Epoch=int64]
+        check_eq!(v.hashes.len(), 1usize);
+        check_eq!(v.hashes[0].clone(), (0u8..32u8).collect::<Vec<u8>>()); // Hash32 = Vec<u8>
+        check_eq!(v.cursor.clone(), Some((0u8..32u8).map(|i| 255 - i).collect::<Vec<u8>>()));
+    }
+    lib.shutdown();
+}
+
+fn test_store_like_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.store_like_request(false);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.startTime, None::<i64>);
+        check_eq!(v.hashes.len(), 0usize);
+        check_eq!(v.cursor.clone(), None::<Vec<u8>>);
+    }
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -3233,6 +3260,8 @@ fn main() {
     run_test("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload);
     run_test("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload);
     run_test("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload);
+    run_test("test_store_like_present", test_store_like_present);
+    run_test("test_store_like_absent", test_store_like_absent);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

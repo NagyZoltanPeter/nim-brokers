@@ -2534,6 +2534,40 @@ func test_proc_sugar_seq_payload() {
 	lib.Close()
 }
 
+func test_store_like_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.StoreLikeRequest(true)
+	checkEq(err, error(nil), "no err")
+	check(r.StartTime != nil, "startTime present")
+	if r.StartTime != nil {
+		checkEq(*r.StartTime, int64(1700), "startTime")
+	}
+	checkEq(len(r.Hashes), 1, "hashes len")
+	if len(r.Hashes) == 1 {
+		checkEq(len(r.Hashes[0]), 32, "hash len")
+		checkEq(r.Hashes[0][0], byte(0), "hash[0]")
+		checkEq(r.Hashes[0][31], byte(31), "hash[31]")
+	}
+	check(r.Cursor != nil, "cursor present")
+	if r.Cursor != nil {
+		checkEq(len(*r.Cursor), 32, "cursor len")
+		checkEq((*r.Cursor)[0], byte(255), "cursor[0]")
+	}
+	lib.Close()
+}
+
+func test_store_like_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.StoreLikeRequest(false)
+	checkEq(err, error(nil), "no err")
+	check(r.StartTime == nil, "startTime absent")
+	checkEq(len(r.Hashes), 0, "hashes empty")
+	check(r.Cursor == nil, "cursor absent")
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2714,6 +2748,8 @@ func main() {
 	runTest("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload)
 	runTest("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload)
 	runTest("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload)
+	runTest("test_store_like_present", test_store_like_present)
+	runTest("test_store_like_absent", test_store_like_absent)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

@@ -1206,6 +1206,24 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertTrue(r.is_ok(), r.error)
         self.assertEqual(list(r.value), ["/t/0", "/t/1", "/t/2"])
 
+    def test_store_like_present(self):
+        # Option[Epoch] (int64 alias), seq[Hash32] / Option[Key32]
+        # (array[32,byte] aliases). Field names + array mapping must survive.
+        r = self.lib.store_like_request(True)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.startTime, 1700)
+        self.assertEqual(len(r.value.hashes), 1)
+        self.assertEqual(bytes(r.value.hashes[0]), bytes(range(32)))
+        self.assertIsNotNone(r.value.cursor)
+        self.assertEqual(bytes(r.value.cursor), bytes(255 - i for i in range(32)))
+
+    def test_store_like_absent(self):
+        r = self.lib.store_like_request(False)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertIsNone(r.value.startTime)
+        self.assertEqual(len(r.value.hashes), 0)
+        self.assertIsNone(r.value.cursor)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

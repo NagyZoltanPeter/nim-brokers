@@ -61,15 +61,30 @@ proc resolveActualSym(T: NimNode): NimNode {.compileTime.} =
     nil
 
 proc extractFieldsFromSym(sym: NimNode): seq[(string, string)] {.compileTime.} =
-  ## Extract (fieldName, fieldTypeName) from a resolved type symbol.
-  let typeImpl = getTypeImpl(sym)
-  let obj =
-    if typeImpl.kind == nnkObjectTy:
-      typeImpl
-    elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
-      getTypeImpl(typeImpl[1])
-    else:
-      nil
+  ## Extract (fieldName, fieldTypeName) from a type symbol.
+  ##
+  ## Prefer the AS-WRITTEN definition (`getImpl`) so field types keep their
+  ## source spelling — `Option[Timestamp]`, `seq[WakuMessageHash]` — and the
+  ## codegen can resolve those registered alias names. `getTypeImpl` returns the
+  ## structurally-resolved object, whose `repr` leaks `Option[CompiledIntTypes]`
+  ## for an int-alias inside `Option`, and renames structurally-identical array
+  ## aliases (`Option[WakuMessageHash]` -> `Option[Curve25519Key]`). Fall back to
+  ## `getTypeImpl` when no impl AST is available.
+  var obj: NimNode = nil
+  let implNode = getImpl(sym)
+  if implNode != nil and implNode.kind == nnkTypeDef and implNode.len == 3:
+    let rhs = implNode[2]
+    if rhs.kind == nnkObjectTy:
+      obj = rhs
+  if obj.isNil:
+    let typeImpl = getTypeImpl(sym)
+    obj =
+      if typeImpl.kind == nnkObjectTy:
+        typeImpl
+      elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
+        getTypeImpl(typeImpl[1])
+      else:
+        nil
 
   if obj.isNil or obj.kind != nnkObjectTy:
     return @[]
@@ -85,9 +100,18 @@ proc extractFieldsFromSym(sym: NimNode): seq[(string, string)] {.compileTime.} =
     if fieldType.kind == nnkEmpty:
       continue
     for i in 0 ..< field.len - 2:
-      if field[i].kind == nnkEmpty:
+      # `getImpl` keeps the as-written field name, so an exported field arrives
+      # as `nnkPostfix(*, ident)` and a pragma-annotated one as `nnkPragmaExpr`;
+      # unwrap to the bare identifier. `getTypeImpl` yielded a plain sym, so this
+      # is a no-op on the fallback path.
+      var nameNode = field[i]
+      if nameNode.kind == nnkPragmaExpr and nameNode.len >= 1:
+        nameNode = nameNode[0]
+      if nameNode.kind == nnkPostfix and nameNode.len == 2:
+        nameNode = nameNode[1]
+      if nameNode.kind == nnkEmpty:
         continue
-      result.add(($field[i], repr(fieldType)))
+      result.add(($nameNode, repr(fieldType)))
 
 proc extractEnumValues(sym: NimNode): seq[(string, int)] {.compileTime.} =
   ## Walk nnkEnumTy children to get (name, ordinal) pairs.
@@ -255,18 +279,54 @@ proc validateTableKey(keySym: NimNode, fieldName, ownerName: string) {.compileTi
       keySym,
     )
 
-proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
-  ## Walk the fields of a resolved type symbol and return NimNodes for
-  ## any nested custom object types or seq[T] element types that need
-  ## recursive registration.
-  let typeImpl = getTypeImpl(sym)
-  let obj =
-    if typeImpl.kind == nnkObjectTy:
-      typeImpl
-    elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
-      getTypeImpl(typeImpl[1])
+proc collectIfCustom(node: NimNode, acc: var seq[NimNode]) {.compileTime.} =
+  ## Collect `node` (and, for containers, its element) for recursive
+  ## registration when it's a non-primitive type the codegen needs a schema
+  ## entry for: an object/enum/distinct/tuple, a primitive- or array-alias, or a
+  ## `seq[T]` / `array[N, T]` / `Option[T]` whose element is one of those.
+  if node.kind == nnkSym and not isNimPrimitive($node):
+    let impl = getTypeImpl(node)
+    case impl.kind
+    of nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy:
+      acc.add(node)
+    of nnkSym:
+      # Alias to a primitive / another named type (`ContentTopic = string`,
+      # `Epoch = int64`). Register when the resolved base differs from the name.
+      if impl.repr.strip() != $node:
+        acc.add(node)
+    of nnkBracketExpr:
+      # Alias to a container, esp. `array[N, byte]` (`WakuMessageHash`,
+      # `Curve25519Key`). Register so seq[X]/Option[X] resolve through it.
+      acc.add(node)
     else:
-      nil
+      discard
+  elif node.kind == nnkBracketExpr and node.len >= 2:
+    let head = $node[0]
+    if head == "seq" or head == "Option":
+      collectIfCustom(node[^1], acc)
+    elif head == "array" and node.len == 3:
+      collectIfCustom(node[2], acc)
+
+proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
+  ## Walk the fields of a type symbol and return NimNodes for any nested custom
+  ## types (incl. `seq`/`array`/`Option` elements) that need recursive
+  ## registration. Uses `getImpl` (as-written field types) to stay consistent
+  ## with `extractFieldsFromSym`, so the names collected here match the field
+  ## type strings the codegen later resolves.
+  var obj: NimNode = nil
+  let implNode = getImpl(sym)
+  if implNode != nil and implNode.kind == nnkTypeDef and implNode.len == 3 and
+      implNode[2].kind == nnkObjectTy:
+    obj = implNode[2]
+  if obj.isNil:
+    let typeImpl = getTypeImpl(sym)
+    obj =
+      if typeImpl.kind == nnkObjectTy:
+        typeImpl
+      elif typeImpl.kind == nnkBracketExpr and typeImpl.len >= 2:
+        getTypeImpl(typeImpl[1])
+      else:
+        nil
 
   if obj.isNil or obj.kind != nnkObjectTy:
     return @[]
@@ -282,61 +342,20 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
     if fieldType.kind == nnkEmpty:
       continue
 
-    # Direct custom object field (e.g. `address: Address`)
-    if fieldType.kind == nnkSym and not isNimPrimitive($fieldType):
-      let innerImpl = getTypeImpl(fieldType)
-      if innerImpl.kind == nnkObjectTy:
-        result.add(fieldType)
-      elif innerImpl.kind == nnkEnumTy:
-        result.add(fieldType)
-      elif innerImpl.kind == nnkDistinctTy:
-        result.add(fieldType)
-      elif innerImpl.kind == nnkTupleTy:
-        result.add(fieldType)
-      else:
-        # Alias field (`type ContentTopic = string`). `innerImpl` is
-        # `getTypeImpl(fieldType)`, which resolves through the alias chain to the
-        # underlying symbol; if its printed base differs from the field type's own
-        # name, register it so the codegen maps the field through the alias.
-        # (getTypeInst was used here before but only echoes the alias name.)
-        if innerImpl.repr.strip() != $fieldType:
-          result.add(fieldType)
-
-    # seq[T] where T is a custom type (e.g. `devices: seq[DeviceInfo]`)
-    elif fieldType.kind == nnkBracketExpr and fieldType.len >= 2 and
-        $fieldType[0] == "seq":
-      let elemSym = fieldType[1]
-      if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
-        let elemImpl = getTypeImpl(elemSym)
-        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
-          result.add(elemSym)
-        elif elemImpl.kind == nnkSym and elemImpl.repr.strip() != $elemSym:
-          result.add(elemSym) # alias element, e.g. `seq[ContentTopic]`
-
-    # array[N, T] where T is a custom type
-    elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
-        $fieldType[0] == "array":
-      let elemSym = fieldType[2]
-      if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
-        let elemImpl = getTypeImpl(elemSym)
-        if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
-          result.add(elemSym)
-
-    # Table[K, V] — validate the key, then register custom key (enum/distinct)
-    # and value types so the codegen has their schema entries.
-    elif fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
+    # Table[K, V] — validate the key first, then collect K and V.
+    if fieldType.kind == nnkBracketExpr and fieldType.len == 3 and
         $fieldType[0] == "Table":
       let ownerName = $sym
+      var nameNode = field[0]
+      if nameNode.kind == nnkPostfix and nameNode.len == 2:
+        nameNode = nameNode[1]
       let fieldName =
-        (if field[0].kind == nnkSym or field[0].kind == nnkIdent: $field[0]
-        else: "?")
+        (if nameNode.kind in {nnkSym, nnkIdent}: $nameNode else: "?")
       validateTableKey(fieldType[1], fieldName, ownerName)
-      for idx in 1 .. 2:
-        let elemSym = fieldType[idx]
-        if elemSym.kind == nnkSym and not isNimPrimitive($elemSym):
-          let elemImpl = getTypeImpl(elemSym)
-          if elemImpl.kind in {nnkObjectTy, nnkEnumTy, nnkTupleTy, nnkDistinctTy}:
-            result.add(elemSym)
+      collectIfCustom(fieldType[1], result)
+      collectIfCustom(fieldType[2], result)
+    else:
+      collectIfCustom(fieldType, result)
 
 macro autoRegisterApiType*(T: typed): untyped =
   ## Phase 2: Receives a resolved type symbol, extracts fields,
@@ -400,6 +419,21 @@ macro autoRegisterApiType*(T: typed): untyped =
       registerTypeEntry(makeAliasEntry(typeName, baseName, atkAlias))
     return result
 
+  # Array alias: `type WakuMessageHash = array[32, byte]` (also Curve25519Key,
+  # Hash32). `getTypeImpl` yields the `array[lo..hi, T]` bracket; register it as
+  # an alias whose underlying is the as-written `array[N, T]` (via `getImpl`) so
+  # the per-language mapper resolves `seq[X]` / `Option[X]` through it.
+  if typeImpl.kind == nnkBracketExpr and typeImpl.len >= 1 and
+      typeImpl[0].kind == nnkSym and $typeImpl[0] == "array":
+    let impl = getImpl(actualSym)
+    let underlying =
+      if impl != nil and impl.kind == nnkTypeDef and impl.len == 3:
+        impl[2].repr.strip()
+      else:
+        typeImpl.repr.strip()
+    registerTypeEntry(makeAliasEntry(typeName, underlying, atkAlias))
+    return result
+
   # Tuple types — register as a synthesised object so the CBOR codegen
   # modules (which iterate `gApiTypeRegistry` for `atkObject` entries)
   # pick the tuple up and emit struct definitions. Named tuples keep
@@ -453,26 +487,25 @@ macro autoRegisterApiType*(T: typed): untyped =
 
 proc scanTypeNode(ft: NimNode, result: var seq[NimNode]) {.compileTime.} =
   ## Check a single type node for external type references.
-  ## Adds ident nodes for `seq[T]`, `array[N, T]`, and plain custom types.
+  ## Adds ident nodes for `seq[T]` / `array[N, T]` / `Option[T]` / `Table[K, V]`
+  ## elements (recursively) and plain custom types.
   if ft.kind == nnkEmpty:
     return
-  # seq[T]
-  if ft.kind == nnkBracketExpr and ft.len >= 2 and $ft[0] == "seq":
-    let elemName = $ft[1]
-    if not isNimPrimitive(elemName):
-      result.add(ft[1])
+  # seq[T] / Option[T] — recurse into the element so `Option[Alias]`,
+  # `seq[Option[T]]`, `seq[seq[T]]` all surface their custom element.
+  if ft.kind == nnkBracketExpr and ft.len >= 2 and
+      ($ft[0] == "seq" or $ft[0] == "Option"):
+    scanTypeNode(ft[^1], result)
   # array[N, T]
   elif ft.kind == nnkBracketExpr and ft.len == 3 and $ft[0] == "array":
-    let elemName = $ft[2]
-    if not isNimPrimitive(elemName):
-      result.add(ft[2])
+    scanTypeNode(ft[2], result)
   # Table[K, V] — scan both key and value so enum/distinct keys and custom
   # value types (including seq[Custom]/array[N, Custom]) get registered.
   elif ft.kind == nnkBracketExpr and ft.len == 3 and $ft[0] == "Table":
     scanTypeNode(ft[1], result)
     scanTypeNode(ft[2], result)
   # Plain custom type
-  elif ft.kind == nnkIdent and not isNimPrimitive($ft):
+  elif ft.kind in {nnkIdent, nnkSym} and not isNimPrimitive($ft):
     result.add(ft)
 
 proc discoverExternalTypes*(body: NimNode): seq[NimNode] {.compileTime.} =
