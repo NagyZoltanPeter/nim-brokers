@@ -352,8 +352,8 @@ proc collectNestedTypeNodes(sym: NimNode): seq[NimNode] {.compileTime.} =
       var nameNode = field[0]
       if nameNode.kind == nnkPostfix and nameNode.len == 2:
         nameNode = nameNode[1]
-      let fieldName =
-        (if nameNode.kind in {nnkSym, nnkIdent}: $nameNode else: "?")
+      let fieldName = (if nameNode.kind in {nnkSym, nnkIdent}: $nameNode
+      else: "?")
       validateTableKey(fieldType[1], fieldName, ownerName)
       collectIfCustom(fieldType[1], result)
       collectIfCustom(fieldType[2], result)
@@ -426,8 +426,8 @@ macro autoRegisterApiType*(T: typed): untyped =
   # Hash32). `getTypeImpl` yields the `array[lo..hi, T]` bracket; register it as
   # an alias whose underlying is the as-written `array[N, T]` (via `getImpl`) so
   # the per-language mapper resolves `seq[X]` / `Option[X]` through it.
-  if typeImpl.kind == nnkBracketExpr and typeImpl.len >= 1 and
-      typeImpl[0].kind == nnkSym and $typeImpl[0] == "array":
+  if typeImpl.kind == nnkBracketExpr and typeImpl.len >= 1 and typeImpl[0].kind == nnkSym and
+      $typeImpl[0] == "array":
     let impl = getImpl(actualSym)
     let underlying =
       if impl != nil and impl.kind == nnkTypeDef and impl.len == 3:

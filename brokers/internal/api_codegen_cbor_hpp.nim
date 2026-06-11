@@ -1193,8 +1193,10 @@ proc generateCborCppHeaderFile*(
     # `void` -> generic json; a bare-primitive payload -> the simple type
     # (so `optional<bool>`, matching the unwrapped `Result<bool>` method).
     let okType =
-      if isVoidPayload(e.responseTypeName): "jsoncons::json"
-      else: payloadCppType(e.responseTypeName)
+      if isVoidPayload(e.responseTypeName):
+        "jsoncons::json"
+      else:
+        payloadCppType(e.responseTypeName)
     h.add("struct " & envName & " {\n")
     h.add("  std::optional<" & okType & "> ok;\n")
     h.add("  std::optional<std::string> err;\n")

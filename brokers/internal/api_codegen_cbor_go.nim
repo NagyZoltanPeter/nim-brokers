@@ -620,7 +620,11 @@ proc generateCborGoFile*(
     # (`(RequestId, error)`), the bare primitive (`(bool, error)`), or the
     # synthetic name for an anonymous container (`(ConnectedPeers, error)`).
     let resp = effectiveResponsePayload(e.responseTypeName)
-    let respType = if isNimPrimitive(resp): primGoHint(resp) else: resp
+    let respType =
+      if isNimPrimitive(resp):
+        primGoHint(resp)
+      else:
+        resp
     var argsStructFields = ""
     var argsAssign = ""
     var firstNonZero = false

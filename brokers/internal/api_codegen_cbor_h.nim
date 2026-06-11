@@ -52,7 +52,10 @@ proc generateCborCHeaderFile*(
   # (resolved at the library's compile time, not knowable here) — omit the
   # literal from the doc comment in that case.
   let versionNote =
-    if version.len > 0: " (\"" & version & "\")" else: " (resolved at build time)"
+    if version.len > 0:
+      " (\"" & version & "\")"
+    else:
+      " (resolved at build time)"
   h.add(
     "/* Returns a NUL-terminated semver string for this library build" & versionNote &
       ".\n" & " * The returned pointer is owned by the library — do NOT free. */\n"

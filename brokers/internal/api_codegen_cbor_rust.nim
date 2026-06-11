@@ -758,7 +758,11 @@ proc generateCborRustFile*(
     # (`Result<RequestId>`), the bare primitive (`Result<bool>`), or the
     # synthetic name for an anonymous container (`Result<ConnectedPeers>`).
     let resp = effectiveResponsePayload(e.responseTypeName)
-    let respRust = if isNimPrimitive(resp): primRustHint(resp) else: resp
+    let respRust =
+      if isNimPrimitive(resp):
+        primRustHint(resp)
+      else:
+        resp
     result.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & respRust & "> {\n"
     )

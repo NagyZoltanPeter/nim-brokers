@@ -1330,16 +1330,11 @@ proc setupProviders(ctx: BrokerContext) =
         k[i] = byte(255 - i)
       if present:
         return ok(
-          StoreLikeRequest(
-            startTime: some(Epoch(1700)), hashes: @[h], cursor: some(k)
-          )
+          StoreLikeRequest(startTime: some(Epoch(1700)), hashes: @[h], cursor: some(k))
         )
       else:
-        return ok(
-          StoreLikeRequest(
-            startTime: none(Epoch), hashes: @[], cursor: none(Key32)
-          )
-        ),
+        return
+          ok(StoreLikeRequest(startTime: none(Epoch), hashes: @[], cursor: none(Key32))),
   )
 
 # ---------------------------------------------------------------------------
