@@ -1224,6 +1224,13 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertEqual(len(r.value.hashes), 0)
         self.assertIsNone(r.value.cursor)
 
+    def test_proc_sugar_object_payload(self):
+        # proc-sugar returning a standalone object (GetRow -> RowData).
+        r = self.lib.get_row("abc")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.id, 3)
+        self.assertEqual(r.value.label, "row:abc")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

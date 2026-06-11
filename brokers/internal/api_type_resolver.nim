@@ -523,6 +523,24 @@ proc discoverExternalTypes*(body: NimNode): seq[NimNode] {.compileTime.} =
   ## - `seq[T]` and custom types in proc signature parameters
   var seen: seq[string] = @[]
 
+  # Types DEFINED in this body (a coupled broker's own `type X = object`). The
+  # return-type scan must skip them: the broker's own type is registered by
+  # registerCborObjectType, and emitting an autoRegisterApiType for it here would
+  # reference the symbol before it is declared in the expansion.
+  var localTypes: seq[string] = @[]
+  for stmt in body:
+    if stmt.kind == nnkTypeSection:
+      for def in stmt:
+        if def.kind != nnkTypeDef:
+          continue
+        var nameNode = def[0]
+        if nameNode.kind == nnkPragmaExpr and nameNode.len >= 1:
+          nameNode = nameNode[0]
+        if nameNode.kind == nnkPostfix and nameNode.len == 2:
+          nameNode = nameNode[1]
+        if nameNode.kind in {nnkIdent, nnkSym}:
+          localTypes.add($nameNode)
+
   for stmt in body:
     if stmt.kind == nnkTypeSection:
       for def in stmt:
@@ -546,8 +564,22 @@ proc discoverExternalTypes*(body: NimNode): seq[NimNode] {.compileTime.} =
           if not isNimPrimitive(aliasTarget):
             result.add(rhs)
     elif stmt.kind == nnkProcDef:
-      # Scan proc signature parameters for external types
       let params = stmt.params
+      # params[0] is the RETURN type. For a proc-sugar broker the response
+      # payload lives there (`Future[Result[StoreQueryResponse, string]]`), so it
+      # must be scanned too — otherwise an object returned only via proc-sugar
+      # never registers. Unwrap Future[...] then Result[T, E] and scan T.
+      if params.len > 0:
+        var ret = params[0]
+        if ret.kind == nnkBracketExpr and ret.len >= 2 and $ret[0] == "Future":
+          ret = ret[1]
+        if ret.kind == nnkBracketExpr and ret.len >= 2 and $ret[0] == "Result":
+          let payload = ret[1]
+          # Skip the broker's own coupled type (registered elsewhere); scan only
+          # an external payload (the proc-sugar case).
+          if not (payload.kind in {nnkIdent, nnkSym} and $payload in localTypes):
+            scanTypeNode(payload, result)
+      # Scan proc signature parameters for external types.
       for i in 1 ..< params.len:
         let paramDef = params[i]
         if paramDef.kind == nnkIdentDefs:

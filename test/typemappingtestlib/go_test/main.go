@@ -2568,6 +2568,16 @@ func test_store_like_absent() {
 	lib.Close()
 }
 
+func test_proc_sugar_object_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.GetRow("abc") // GetRow == RowData
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Id, int32(3), "id")
+	checkEq(r.Label, "row:abc", "label")
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2750,6 +2760,7 @@ func main() {
 	runTest("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload)
 	runTest("test_store_like_present", test_store_like_present)
 	runTest("test_store_like_absent", test_store_like_absent)
+	runTest("test_proc_sugar_object_payload", test_proc_sugar_object_payload)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

@@ -621,6 +621,12 @@ proc generateCborPyFile*(
   # Distinct / alias — Python alias of the underlying primitive plus
   # passthrough decode/encode helpers (so callers can freely use the
   # alias name in type hints).
+  # The `Name = <pyType>` assignment is deferred until AFTER the object classes:
+  # for a proc-sugar broker returning an object (`GetRow = RowData`) the RHS is a
+  # class defined below, so a runtime assignment here would `NameError`. The
+  # decode/encode helpers stay (their annotations are lazy via
+  # `from __future__ import annotations`, and their bodies forward-ref fine).
+  var aliasAssigns: seq[(string, string)] = @[]
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
     let pyU = nimTypeToPyHint(underlying)
@@ -630,7 +636,7 @@ proc generateCborPyFile*(
           "' which has no Python mapping\n\n"
       )
       continue
-    py.add(name & " = " & pyU & "\n")
+    aliasAssigns.add((name, pyU))
     py.add("def _decode_" & name & "(data: Any) -> " & pyU & ":\n")
     py.add("    return " & pyDecodeExpr(underlying, "data") & "\n\n")
     py.add("def _encode_" & name & "(v: Any) -> " & pyU & ":\n")
@@ -656,6 +662,13 @@ proc generateCborPyFile*(
       anyField = true
     if not anyField:
       py.add("    pass\n")
+    py.add("\n")
+
+  # Deferred alias assignments (`GetRow = RowData`, `ContentTopic = str`, …),
+  # now that any object RHS class is defined above.
+  for (name, pyU) in aliasAssigns:
+    py.add(name & " = " & pyU & "\n")
+  if aliasAssigns.len > 0:
     py.add("\n")
 
   # Per-object _decode and _encode helpers.

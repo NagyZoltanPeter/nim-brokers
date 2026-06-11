@@ -660,6 +660,17 @@ RequestBroker(API):
     prefix: ContentTopic, n: int32
   ): Future[Result[seq[ContentTopic], string]] {.async.}
 
+## RowData — a standalone object returned ONLY via a proc-sugar broker (like
+## logos StoreQueryResponse behind `proc storeQuery(): Result[StoreQueryResponse]`).
+## Exercises return-type scanning (register the response object) + aliasing the
+## verb-named broker to it.
+type RowData* = object
+  id*: int32
+  label*: string
+
+RequestBroker(API):
+  proc getRow(key: string): Future[Result[RowData, string]] {.async.}
+
 ## StoreLike — mirrors logos StoreQueryRequest's previously-unmapped fields:
 ## Option[alias-of-int64], seq[array[N,byte] alias], Option[array[N,byte] alias].
 RequestBroker(API):
@@ -1278,6 +1289,12 @@ proc setupProviders(ctx: BrokerContext) =
       for i in 0 ..< int(n):
         topics.add(prefix & "/" & $i)
       return ok(topics),
+  )
+
+  discard GetRow.setProvider(
+    ctx,
+    proc(key: string): Future[Result[RowData, string]] {.closure, async.} =
+      return ok(RowData(id: int32(key.len), label: "row:" & key)),
   )
 
   discard StoreLikeRequest.setProvider(

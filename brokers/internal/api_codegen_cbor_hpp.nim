@@ -657,10 +657,21 @@ proc generateCborCppHeaderFile*(
       h.add("  " & v.name & " = " & $v.ordinal & ",\n")
     h.add("};\n\n")
 
+  # Object forward declarations FIRST, so a `using X = SomeObject` alias (a
+  # proc-sugar broker returning an object) and cross-references like
+  # `std::vector<Tag>` compile regardless of registry order.
+  if objectNames.len > 0:
+    h.add("// ---- Object payload structs ----\n\n")
+    for name in objectNames:
+      h.add("struct " & name & ";\n")
+    h.add("\n")
+
   # Distinct / alias — `using` aliases of the underlying mapped type. Uses the
   # full mapper (not just primCppType) so a container payload like
   # `proc connectedPeers(): Result[seq[string]]` emits
-  # `using ConnectedPeers = std::vector<std::string>;`, not just primitives.
+  # `using ConnectedPeers = std::vector<std::string>;`, and an object payload
+  # `proc getRow(): Result[RowData]` emits `using GetRow = RowData;` (RowData is
+  # forward-declared just above).
   if aliasNames.len > 0:
     h.add("// ---- Distinct / alias types ----\n\n")
   for name in aliasNames:
@@ -674,15 +685,6 @@ proc generateCborCppHeaderFile*(
       continue
     h.add("using " & name & " = " & cpp & ";\n")
   if aliasNames.len > 0:
-    h.add("\n")
-
-  # Object structs — emit forward declarations first so cross-references
-  # (e.g. `std::vector<Tag>` inside another struct) compile regardless
-  # of registry order.
-  if objectNames.len > 0:
-    h.add("// ---- Object payload structs ----\n\n")
-    for name in objectNames:
-      h.add("struct " & name & ";\n")
     h.add("\n")
 
   # Captured (typeName, [fieldName...]) for global-scope JSONCONS macros.

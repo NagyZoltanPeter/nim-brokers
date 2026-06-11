@@ -2728,6 +2728,19 @@ static void test_library_version_from_const() {
     CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
 }
 
+// Proc-sugar broker returning a standalone OBJECT (like logos
+// `proc storeQuery(): Result[StoreQueryResponse]`). The response object must
+// register (return-type scan) and the broker alias to it (using GetRow = RowData).
+static void test_proc_sugar_object_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.getRow("abc");
+    CHECK(r.isOk());
+    CHECK_EQ(r->id, 3);  // key.len
+    CHECK_EQ(r->label, std::string("row:abc"));
+    lib.shutdown();
+}
+
 // Mirrors logos StoreQueryRequest: Option[alias-of-int64], seq[array[N,byte]
 // alias], Option[array[N,byte] alias]. Exercises the as-written field-capture
 // fix (no Option[CompiledIntTypes] / WakuMessageHash->Curve25519Key rename) and
@@ -2966,6 +2979,7 @@ int main() {
     RUN(test_proc_sugar_seq_payload);
     RUN(test_store_like_present);
     RUN(test_store_like_absent);
+    RUN(test_proc_sugar_object_payload);
     RUN(test_library_version_from_const);
 
     printf("\n----------------------------------------------------------------------\n");

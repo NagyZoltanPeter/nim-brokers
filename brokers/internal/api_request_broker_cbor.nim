@@ -104,7 +104,15 @@ proc registerCborPrimitiveType*(
     # non-primitive (object / seq / unmapped) stays TODO-stubbed — no regression.
     # `string` is allowed (native string in every wrapper); `cstring` is excluded
     # (unsafe to marshal across the FFI/CBOR boundary).
-    if isNimPrimitive(base) or isAliasOrDistinctRegistered(base):
+    #
+    # `isTypeRegistered(base)` is the third arm: a proc-sugar broker returning a
+    # registered OBJECT / enum (`proc storeQuery(): Result[StoreQueryResponse]`).
+    # The response object is registered in the typed phase (now that the return
+    # type is scanned), so alias the broker name to it — codegen emits
+    # `using StoreQuery = StoreQueryResponse;` and isScalarPayload (full mapper)
+    # accepts it.
+    if isNimPrimitive(base) or isAliasOrDistinctRegistered(base) or
+        isTypeRegistered(base):
       registerTypeEntry(makeAliasEntry(typeName, base, atkDistinct))
   elif parsed.objectDef.kind == nnkDistinctTy and parsed.objectDef.len == 1 and
       parsed.objectDef[0].kind == nnkBracketExpr:
