@@ -43,11 +43,14 @@ proc resolveActualSym(T: NimNode): NimNode {.compileTime.} =
   let impl = getTypeImpl(T)
   case impl.kind
   of nnkBracketExpr:
-    # typedesc[X] -> return X
-    if impl.len >= 2:
+    # `typedesc[X]` (from a typed parameter) -> return X. But a bracket can also
+    # be an array/seq/Option type the symbol resolves to (`type Hash = array[32,
+    # byte]`): its `[1]` is a range/element, NOT a type symbol — `T` itself is the
+    # symbol to register, so don't unwrap.
+    if impl.len >= 2 and impl[0].kind == nnkSym and $impl[0] == "typeDesc":
       impl[1]
     else:
-      nil
+      T
   of nnkObjectTy:
     # Already resolved; T itself is the symbol
     T
