@@ -1079,5 +1079,113 @@ class TestTableTypes(unittest.TestCase):
         self.lib.off_map_event(h)
 
 
+class TestAliasAndByteGaps(unittest.TestCase):
+    """Pure-alias (ContentTopic = string) in every direction, plus the
+    seq[byte]/Option[seq[byte]] event + param cells. These lock the
+    type-resolver alias fix and the seq[byte] wire mapping against
+    regression across all wrappers."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    # ----- pure alias: param (in) + field (out) + seq[alias] (out) -----
+
+    def test_alias_field_request(self):
+        r = self.lib.alias_field_request("/waku/2/default", 3)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.topic, "/waku/2/default")
+        self.assertEqual(
+            list(r.value.topics),
+            ["/waku/2/default/0", "/waku/2/default/1", "/waku/2/default/2"],
+        )
+
+    def test_alias_field_request_empty_seq(self):
+        r = self.lib.alias_field_request("topic", 0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.topic, "topic")
+        self.assertEqual(list(r.value.topics), [])
+
+    # ----- pure alias in an event payload -----
+
+    def test_alias_event(self):
+        received: list[tuple] = []
+        evt = threading.Event()
+
+        def cb(_lib, topic, topics):
+            received.append((topic, list(topics)))
+            evt.set()
+
+        h = self.lib.on_alias_event(cb)
+        self.lib.trigger_alias_event_request("/t", 2)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "/t")
+        self.assertEqual(received[0][1], ["/t/0", "/t/1"])
+        self.lib.off_alias_event(h)
+
+    # ----- top-level seq[byte] in an event payload -----
+
+    def test_byte_seq_event(self):
+        received: list[bytes] = []
+        evt = threading.Event()
+
+        def cb(_lib, data):
+            received.append(bytes(data))
+            evt.set()
+
+        h = self.lib.on_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(5, True)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(received[0], bytes([0, 1, 2, 3, 4]))
+        self.lib.off_byte_seq_event(h)
+
+    # ----- Option[seq[byte]] in an event payload -----
+
+    def test_opt_byte_seq_event_present(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, True)
+        self.assertTrue(evt.wait(2.0))
+        v = received[0]
+        self.assertIsNotNone(v)
+        self.assertEqual(bytes(v) if isinstance(v, list) else v, bytes([1, 2, 3, 4]))
+        self.lib.off_opt_byte_seq_event(h)
+
+    def test_opt_byte_seq_event_absent(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, False)
+        self.assertTrue(evt.wait(2.0))
+        self.assertIsNone(received[0])
+        self.lib.off_opt_byte_seq_event(h)
+
+    # ----- Option[seq[byte]] as an input param -----
+
+    def test_opt_byte_param_present(self):
+        r = self.lib.opt_byte_param_request(bytes([9, 8, 7]))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 3)
+
+    def test_opt_byte_param_absent(self):
+        r = self.lib.opt_byte_param_request(None)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, -1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

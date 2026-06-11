@@ -2572,6 +2572,137 @@ static void test_map_event() {
 }
 
 // ============================================================================
+// TestAliasAndByteGaps — pure-alias (ContentTopic = string) in every
+// direction, plus the seq[byte]/Option[seq[byte]] event + param cells.
+// ============================================================================
+
+// Pure alias as INPUT param + result field + seq[alias] result field.
+static void test_alias_field_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.aliasFieldRequest("/waku/2/default", 3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->topic, std::string("/waku/2/default"));
+    CHECK_EQ(r->topics.size(), 3u);
+    CHECK_EQ(r->topics[0], std::string("/waku/2/default/0"));
+    CHECK_EQ(r->topics[2], std::string("/waku/2/default/2"));
+    lib.shutdown();
+}
+
+static void test_alias_field_request_empty_seq() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.aliasFieldRequest("topic", 0);
+    CHECK(r.isOk());
+    CHECK_EQ(r->topic, std::string("topic"));
+    CHECK_EQ(r->topics.size(), 0u);
+    lib.shutdown();
+}
+
+// Pure alias (+ seq[alias]) in an event payload.
+static void test_alias_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    struct Capture { std::string topic; std::vector<std::string> topics; };
+    SafeList<Capture> received;
+    auto h = lib.onAliasEvent(
+        [&received](Typemappingtestlib&, std::string topic,
+                    std::span<const std::string> topics) {
+            received.push(Capture{topic, {topics.begin(), topics.end()}});
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerAliasEventRequest("/t", 2);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto snap = received.at(0);
+    CHECK_EQ(snap.topic, std::string("/t"));
+    CHECK_EQ(snap.topics.size(), 2u);
+    CHECK_EQ(snap.topics[0], std::string("/t/0"));
+    CHECK_EQ(snap.topics[1], std::string("/t/1"));
+    lib.offAliasEvent(h);
+    lib.shutdown();
+}
+
+// Top-level seq[byte] in an event payload.
+static void test_byte_seq_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::vector<uint8_t>> received;
+    auto h = lib.onByteSeqEvent(
+        [&received](Typemappingtestlib&, std::span<const uint8_t> data) {
+            received.push({data.begin(), data.end()});
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(5, true);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto d = received.at(0);
+    CHECK_EQ(d.size(), 5u);
+    CHECK_EQ(d[0], 0u);
+    CHECK_EQ(d[4], 4u);
+    lib.offByteSeqEvent(h);
+    lib.shutdown();
+}
+
+// Option[seq[byte]] in an event payload — present and absent.
+static void test_opt_byte_seq_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, true);  // present -> some([1,2,3,4])
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto present = received.at(0);
+    CHECK(present.has_value());
+    CHECK_EQ(present->size(), 4u);
+    CHECK_EQ((*present)[0], 1u);
+    CHECK_EQ((*present)[3], 4u);
+    lib.offOptByteSeqEvent(h);
+    lib.shutdown();
+}
+
+static void test_opt_byte_seq_event_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, false);  // absent -> none
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    CHECK(!received.at(0).has_value());
+    lib.offOptByteSeqEvent(h);
+    lib.shutdown();
+}
+
+// Option[seq[byte]] as an INPUT param — present and absent.
+static void test_opt_byte_param_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optByteParamRequest(Bytes{9, 8, 7});
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 3);
+    lib.shutdown();
+}
+
+static void test_opt_byte_param_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optByteParamRequest(std::nullopt);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, -1);
+    lib.shutdown();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -2749,6 +2880,16 @@ int main() {
     RUN(test_map_result_all_key_flavors);
     RUN(test_map_param_roundtrip);
     RUN(test_map_event);
+
+    printf("\n--- TestAliasAndByteGaps ---\n");
+    RUN(test_alias_field_request);
+    RUN(test_alias_field_request_empty_seq);
+    RUN(test_alias_event);
+    RUN(test_byte_seq_event);
+    RUN(test_opt_byte_seq_event);
+    RUN(test_opt_byte_seq_event_absent);
+    RUN(test_opt_byte_param_present);
+    RUN(test_opt_byte_param_absent);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

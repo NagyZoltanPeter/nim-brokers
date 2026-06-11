@@ -107,11 +107,18 @@ confirmed `getTypeImpl` resolves fully through the chain (`ContentTopic`→`stri
 - `collectNestedTypeNodes` — register alias-typed fields (direct and `seq[alias]`
   elements) via the `getTypeImpl` base comparison instead of `getTypeInst`.
 
-**Verified:** added a throwaway `type TopicName = string` with `topic: TopicName`
-+ `topics: seq[TopicName]` to `test/typemappingtestlib`; the generated
-`typemappingtestlib.hpp` now emits `using TopicName = std::string;`,
-`std::string topic`, `std::vector<std::string> topics`, **0 "not yet mappable"**.
-All four wrappers benefit (shared registry resolution). Test case reverted.
+**Verified + permanent regression coverage:** `test/typemappingtestlib` now
+carries a `type ContentTopic = string` pure alias exercised in **every
+direction** — request param (in), result field (out), `seq[alias]` result field
+(out), and event payload field (out) — via `AliasFieldRequest` / `AliasEvent` /
+`TriggerAliasEventRequest`, plus matching assertions in all four language test
+suites (`TestAliasAndByteGaps`). The generated header emits `using ContentTopic
+= std::string;`, `std::string topic`, `std::vector<std::string> topics`, **0
+"not yet mappable"**. Reverting this fix now drops those methods (7 TODOs) and
+**hard-fails** the C++/Rust/Go builds (`no member named 'aliasFieldRequest'`…)
+and Python at runtime — i.e. the fix is locked by the cross-lang tests, not a
+throwaway probe. Suites: C++ 141/141 (orc+refc), Python 94/94, Rust 141/141,
+Go 141/141.
 
 **Still open within this item:** `Option[uint64]` is discovered as
 `Option[CompiledIntTypes]` (generic int typeclass not concretized) — separate
@@ -155,6 +162,13 @@ round-trip suites pass: **C++ 133/133 under both `--mm:orc` and `--mm:refc`**,
 Python 86/86, Rust 133/133, Go 133/133. The hand-written C++ test now constructs
 `Bytes payload{...}` (was `jsoncons::byte_string`); the result-side accessors
 (`.size()`, `[]`) were already vector-compatible and needed no change.
+
+**Coverage gaps later closed** (same `TestAliasAndByteGaps` group, all four
+suites, now 141/94/141/141): a top-level `seq[byte]` **event** field
+(`ByteSeqEvent`), an `Option[seq[byte]]` **event** field (`OptByteSeqEvent`,
+present + absent), and an `Option[seq[byte]]` **input param**
+(`OptByteParamRequest` → `std::optional<Bytes>` / `Option<Vec<u8>>` / `*[]byte`).
+The result-field direction was already covered by `OptSeqRequest`.
 
 ---
 

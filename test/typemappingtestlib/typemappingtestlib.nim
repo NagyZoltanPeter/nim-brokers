@@ -66,6 +66,15 @@ type Slot* = object
 ## ConstArrayLen — exercises const-defined array size in FFI codegen.
 const ConstArrayLen* = 6
 
+## ContentTopic — a PURE primitive alias (`type X = string`, NOT distinct).
+## This is the exact shape the type-resolver alias fix targets: the
+## wrapper type discovery must follow the alias to `string` so a field /
+## param / seq[alias] typed as ContentTopic maps to std::string /
+## std::vector<std::string> (and the Python/Rust/Go equivalents) instead
+## of emitting a "not yet mappable" TODO and dropping the whole method.
+## Mirrors logos-delivery's `ContentTopic = string` / `PubsubTopic = string`.
+type ContentTopic* = string
+
 # ---------------------------------------------------------------------------
 # Request Brokers — original
 # ---------------------------------------------------------------------------
@@ -542,6 +551,77 @@ RequestBroker(API):
 EventBroker(API):
   type MapEvent* = object
     counts*: Table[string, int32]
+
+# ---------------------------------------------------------------------------
+# Pure-alias coverage (type-resolver alias fix). ContentTopic = string is
+# exercised in EVERY direction: request param (in), result field (out),
+# seq[alias] result field (out), and event payload field (out). Without the
+# alias fix each of these emits a "not yet mappable" TODO and the owning
+# method/event is dropped from all four wrappers — so reverting the fix
+# breaks these round-trips in C++/Python/Rust/Go.
+# ---------------------------------------------------------------------------
+
+## AliasFieldRequest — pure alias as INPUT param + as result field + as
+## seq[alias] result field. Echoes the topic and fabricates n derived topics.
+RequestBroker(API):
+  type AliasFieldRequest* = object
+    topic*: ContentTopic
+    topics*: seq[ContentTopic]
+
+  proc signature*(
+    topic: ContentTopic, n: int32
+  ): Future[Result[AliasFieldRequest, string]] {.async.}
+
+## AliasEvent — pure alias (+ seq[alias]) in an event payload.
+EventBroker(API):
+  type AliasEvent* = object
+    topic*: ContentTopic
+    topics*: seq[ContentTopic]
+
+## TriggerAliasEventRequest — fires AliasEvent with a fabricated payload.
+RequestBroker(API):
+  type TriggerAliasEventRequest* = object
+    fired*: int32
+
+  proc signature*(
+    topic: ContentTopic, n: int32
+  ): Future[Result[TriggerAliasEventRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# seq[byte] / Option[seq[byte]] coverage gaps: a TOP-LEVEL seq[byte] event
+# field, an Option[seq[byte]] event field, and an Option[seq[byte]] INPUT
+# param (the result-field direction is already covered by OptSeqRequest).
+# ---------------------------------------------------------------------------
+
+## ByteSeqEvent — a direct (top-level) seq[byte] event payload field.
+EventBroker(API):
+  type ByteSeqEvent* = object
+    data*: seq[byte]
+
+## OptByteSeqEvent — Option[seq[byte]] in an event payload.
+EventBroker(API):
+  type OptByteSeqEvent* = object
+    value*: Option[seq[byte]]
+
+## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]) and
+## OptByteSeqEvent(some([1,2,3,4]) when present else none).
+RequestBroker(API):
+  type TriggerByteEventsRequest* = object
+    fired*: int32
+
+  proc signature*(
+    size: int32, present: bool
+  ): Future[Result[TriggerByteEventsRequest, string]] {.async.}
+
+## OptByteParamRequest — Option[seq[byte]] as an INPUT param. Returns
+## length = -1 when absent, else the byte count.
+RequestBroker(API):
+  type OptByteParamRequest* = object
+    length*: int32
+
+  proc signature*(
+    value: Option[seq[byte]]
+  ): Future[Result[OptByteParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Event Brokers — original
@@ -1068,6 +1148,64 @@ proc setupProviders(ctx: BrokerContext) =
       # wrapper — including the string-key-only ones — can verify MapEvent.
       await MapEvent.emit(gProviderCtx, MapEvent(counts: scores))
       return ok(MapParamRequest(total: total, joined: keys.join("|"))),
+  )
+
+  # ----- Pure-alias (ContentTopic = string) providers -----
+
+  discard AliasFieldRequest.setProvider(
+    ctx,
+    proc(
+        topic: ContentTopic, n: int32
+    ): Future[Result[AliasFieldRequest, string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(topic & "/" & $i)
+      return ok(AliasFieldRequest(topic: topic, topics: topics)),
+  )
+
+  discard TriggerAliasEventRequest.setProvider(
+    ctx,
+    proc(
+        topic: ContentTopic, n: int32
+    ): Future[Result[TriggerAliasEventRequest, string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(topic & "/" & $i)
+      await AliasEvent.emit(gProviderCtx, AliasEvent(topic: topic, topics: topics))
+      return ok(TriggerAliasEventRequest(fired: n)),
+  )
+
+  # ----- seq[byte] / Option[seq[byte]] event + param providers -----
+
+  discard TriggerByteEventsRequest.setProvider(
+    ctx,
+    proc(
+        size: int32, present: bool
+    ): Future[Result[TriggerByteEventsRequest, string]] {.closure, async.} =
+      var data = newSeq[byte](int(size))
+      for i in 0 ..< int(size):
+        data[i] = byte(i mod 256)
+      await ByteSeqEvent.emit(gProviderCtx, ByteSeqEvent(data: data))
+      let optVal =
+        if present:
+          some(@[byte 1, 2, 3, 4])
+        else:
+          none(seq[byte])
+      await OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
+      return ok(TriggerByteEventsRequest(fired: 2)),
+  )
+
+  discard OptByteParamRequest.setProvider(
+    ctx,
+    proc(
+        value: Option[seq[byte]]
+    ): Future[Result[OptByteParamRequest, string]] {.closure, async.} =
+      let length =
+        if value.isSome():
+          int32(value.get().len)
+        else:
+          -1'i32
+      return ok(OptByteParamRequest(length: length)),
   )
 
 # ---------------------------------------------------------------------------

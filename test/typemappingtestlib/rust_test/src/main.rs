@@ -2881,6 +2881,135 @@ fn test_map_event() {
     lib.shutdown();
 }
 
+// ----- TestAliasAndByteGaps: pure-alias every direction + seq[byte]/
+//       Option[seq[byte]] event + param cells -----
+
+fn test_alias_field_request() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.alias_field_request("/waku/2/default".to_string(), 3);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.topic, &"/waku/2/default".to_string());
+        check_eq!(v.topics.len(), 3usize);
+        check_eq!(&v.topics[0], &"/waku/2/default/0".to_string());
+        check_eq!(&v.topics[2], &"/waku/2/default/2".to_string());
+    }
+    lib.shutdown();
+}
+
+fn test_alias_field_request_empty_seq() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.alias_field_request("topic".to_string(), 0);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(&v.topic, &"topic".to_string());
+        check_eq!(v.topics.len(), 0usize);
+    }
+    lib.shutdown();
+}
+
+fn test_alias_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<(String, Vec<String>)> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_alias_event(move |topic: String, topics: Vec<String>| {
+        list_push(&cb, (topic, topics))
+    });
+    check_ne!(h, 0u64);
+    let _ = lib.trigger_alias_event_request("/t".to_string(), 2);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    check_eq!(list_size(&evts), 1usize);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        check_eq!(&snap[0].0, &"/t".to_string());
+        check_eq!(snap[0].1.len(), 2usize);
+        check_eq!(&snap[0].1[0], &"/t/0".to_string());
+        check_eq!(&snap[0].1[1], &"/t/1".to_string());
+    }
+    lib.off_alias_event(h);
+    lib.shutdown();
+}
+
+fn test_byte_seq_event() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Vec<u8>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_byte_seq_event(move |data: Vec<u8>| list_push(&cb, data));
+    check_ne!(h, 0u64);
+    let _ = lib.trigger_byte_events_request(5, true);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        check_eq!(&snap[0], &vec![0u8, 1, 2, 3, 4]);
+    }
+    lib.off_byte_seq_event(h);
+    lib.shutdown();
+}
+
+fn test_opt_byte_seq_event_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Option<Vec<u8>>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_opt_byte_seq_event(move |value: Option<Vec<u8>>| list_push(&cb, value));
+    check_ne!(h, 0u64);
+    let _ = lib.trigger_byte_events_request(0, true);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        check_eq!(snap[0].clone(), Some(vec![1u8, 2, 3, 4]));
+    }
+    lib.off_opt_byte_seq_event(h);
+    lib.shutdown();
+}
+
+fn test_opt_byte_seq_event_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let evts: SafeList<Option<Vec<u8>>> = list_new();
+    let cb = evts.clone();
+    let h = lib.on_opt_byte_seq_event(move |value: Option<Vec<u8>>| list_push(&cb, value));
+    check_ne!(h, 0u64);
+    let _ = lib.trigger_byte_events_request(0, false);
+    let w = evts.clone();
+    wait_for_default(|| list_size(&w) >= 1);
+    let snap = list_snapshot(&evts);
+    if !snap.is_empty() {
+        check_eq!(snap[0].clone(), None::<Vec<u8>>);
+    }
+    lib.off_opt_byte_seq_event(h);
+    lib.shutdown();
+}
+
+fn test_opt_byte_param_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_byte_param_request(Some(vec![9u8, 8, 7]));
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 3i32);
+    }
+    lib.shutdown();
+}
+
+fn test_opt_byte_param_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_byte_param_request(None::<Vec<u8>>);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, -1i32);
+    }
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -3054,6 +3183,16 @@ fn main() {
     run_test("test_map_result_all_key_flavors", test_map_result_all_key_flavors);
     run_test("test_map_param_roundtrip", test_map_param_roundtrip);
     run_test("test_map_event", test_map_event);
+
+    println!("\n--- TestAliasAndByteGaps ---");
+    run_test("test_alias_field_request", test_alias_field_request);
+    run_test("test_alias_field_request_empty_seq", test_alias_field_request_empty_seq);
+    run_test("test_alias_event", test_alias_event);
+    run_test("test_byte_seq_event", test_byte_seq_event);
+    run_test("test_opt_byte_seq_event_present", test_opt_byte_seq_event_present);
+    run_test("test_opt_byte_seq_event_absent", test_opt_byte_seq_event_absent);
+    run_test("test_opt_byte_param_present", test_opt_byte_param_present);
+    run_test("test_opt_byte_param_absent", test_opt_byte_param_absent);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);
