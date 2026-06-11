@@ -148,9 +148,12 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
-      # `distinct seq[byte]` → `List[int]` rather than `""`).
-      return nimTypeToPyHint(resolveUnderlyingType(t))
+      # Reference the emitted alias BY NAME so fields/params keep the meaningful
+      # type (`ContentTopic`, `Timestamp`) instead of flattening to the
+      # underlying; "" when the underlying doesn't map.
+      if nimTypeToPyHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =

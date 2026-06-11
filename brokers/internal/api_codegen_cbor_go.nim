@@ -125,9 +125,12 @@ proc nimTypeToGoCborHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
-      # `distinct seq[byte]` → `[]byte` rather than `""`).
-      return nimTypeToGoCborHint(resolveUnderlyingType(t))
+      # Reference the emitted `type <name> = ...` alias BY NAME so fields/params
+      # keep the meaningful type (`ContentTopic`, `Timestamp`) instead of
+      # flattening to the underlying; "" when it doesn't map.
+      if nimTypeToGoCborHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc isGoCborMappable*(nimType: string): bool {.compileTime.} =

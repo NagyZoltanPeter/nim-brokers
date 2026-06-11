@@ -145,10 +145,15 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse through the outer mapper (not just `primCppType`) so an
-      # alias / distinct over a compound Nim type like `seq[byte]` maps to
-      # `std::vector<uint8_t>` rather than falling through to "".
-      return nimTypeToCppType(resolveUnderlyingType(t))
+      # The alias is emitted as `using <name> = <mapped>;`, so reference it BY
+      # NAME — a field/param keeps the meaningful type (`ContentTopic timestamp`,
+      # `Timestamp timestamp`) instead of being flattened to the primitive —
+      # provided the underlying actually maps; else "" so the caller emits a TODO.
+      # (The alias *definition* itself passes the resolved underlying, not the
+      # name, so `using ContentTopic = std::string;` is unaffected.)
+      if nimTypeToCppType(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc isCppMappable*(nimType: string): bool {.compileTime.} =
@@ -421,10 +426,11 @@ proc emitCppMapStructTraits*(
       continue
     if cppTableNeedsKeyConv(f.nimType):
       let kt = cppTableKeyType(f.nimType)
-      # Enum key types live in the lib namespace; qualify them for use here
-      # inside `namespace jsoncons`. Primitive keys (int*/char) stay bare.
+      # Registered key types (enum, and now alias/distinct like `JobId`) live in
+      # the lib namespace; qualify them for use here inside `namespace jsoncons`.
+      # Primitive keys (int*/char → int32_t/char, not registered) stay bare.
       let ktQ =
-        if isTypeRegistered(kt) and lookupTypeEntry(kt).kind == atkEnum:
+        if isTypeRegistered(kt):
           libName & "::" & kt
         else:
           kt

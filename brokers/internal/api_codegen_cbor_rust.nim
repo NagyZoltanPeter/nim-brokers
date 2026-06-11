@@ -139,9 +139,12 @@ proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper so distinct/alias over compound types
-      # (e.g. `distinct seq[byte]`) maps to `Vec<u8>` rather than the "" fallback.
-      return nimTypeToRustHint(resolveUnderlyingType(t))
+      # Reference the emitted `pub type <name> = ...` alias BY NAME so
+      # fields/params keep the meaningful type (`ContentTopic`, `Timestamp`)
+      # instead of flattening to the underlying; "" when it doesn't map.
+      if nimTypeToRustHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
