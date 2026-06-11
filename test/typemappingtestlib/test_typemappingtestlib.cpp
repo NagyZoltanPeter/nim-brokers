@@ -731,7 +731,7 @@ static void test_seq_byte_empty() {
     lib.createContext();
     auto r = lib.byteSeqRequest(0);
     CHECK(r.isOk());
-    // `seq[byte]` maps to jsoncons::byte_string (no `.empty()`; use size()).
+    // `seq[byte]` maps to the public `Bytes` (std::vector<uint8_t>) wrapper.
     CHECK_EQ(r->data.size(), static_cast<size_t>(0));
     lib.shutdown();
 }
@@ -1347,13 +1347,14 @@ static void test_obj_as_param() {
     lib.shutdown();
 }
 
-// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to
-// jsoncons::byte_string, which jsoncons encodes/decodes as a CBOR byte
-// string (major type 2) — the form the Nim provider expects.
+// Inbound `seq[byte]` byte-string probe. `seq[byte]` maps to the public
+// `Bytes` (std::vector<uint8_t>) wrapper, whose json_type_traits force a
+// CBOR byte string (major type 2) on the wire — the form the Nim provider
+// expects.
 static void test_bytes_echo_request_roundtrip() {
     Typemappingtestlib lib;
     lib.createContext();
-    jsoncons::byte_string payload{10, 20, 30, 40, 50};
+    Bytes payload{10, 20, 30, 40, 50};
     auto r = lib.bytesEchoRequest(payload);
     CHECK(r.isOk());
     CHECK_EQ(r->length, 5);
@@ -1365,7 +1366,7 @@ static void test_bytes_echo_request_roundtrip() {
 static void test_bytes_echo_request_empty() {
     Typemappingtestlib lib;
     lib.createContext();
-    jsoncons::byte_string payload;
+    Bytes payload;
     auto r = lib.bytesEchoRequest(payload);
     CHECK(r.isOk());
     CHECK_EQ(r->length, 0);
@@ -2571,6 +2572,235 @@ static void test_map_event() {
 }
 
 // ============================================================================
+// TestAliasAndByteGaps — pure-alias (ContentTopic = string) in every
+// direction, plus the seq[byte]/Option[seq[byte]] event + param cells.
+// ============================================================================
+
+// Pure alias as INPUT param + result field + seq[alias] result field.
+static void test_alias_field_request() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.aliasFieldRequest("/waku/2/default", 3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->topic, std::string("/waku/2/default"));
+    CHECK_EQ(r->topics.size(), 3u);
+    CHECK_EQ(r->topics[0], std::string("/waku/2/default/0"));
+    CHECK_EQ(r->topics[2], std::string("/waku/2/default/2"));
+    lib.shutdown();
+}
+
+static void test_alias_field_request_empty_seq() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.aliasFieldRequest("topic", 0);
+    CHECK(r.isOk());
+    CHECK_EQ(r->topic, std::string("topic"));
+    CHECK_EQ(r->topics.size(), 0u);
+    lib.shutdown();
+}
+
+// Pure alias (+ seq[alias]) in an event payload.
+static void test_alias_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    struct Capture { std::string topic; std::vector<std::string> topics; };
+    SafeList<Capture> received;
+    auto h = lib.onAliasEvent(
+        [&received](Typemappingtestlib&, std::string topic,
+                    std::span<const std::string> topics) {
+            received.push(Capture{topic, {topics.begin(), topics.end()}});
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerAliasEventRequest("/t", 2);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto snap = received.at(0);
+    CHECK_EQ(snap.topic, std::string("/t"));
+    CHECK_EQ(snap.topics.size(), 2u);
+    CHECK_EQ(snap.topics[0], std::string("/t/0"));
+    CHECK_EQ(snap.topics[1], std::string("/t/1"));
+    lib.offAliasEvent(h);
+    lib.shutdown();
+}
+
+// Top-level seq[byte] in an event payload.
+static void test_byte_seq_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::vector<uint8_t>> received;
+    auto h = lib.onByteSeqEvent(
+        [&received](Typemappingtestlib&, std::span<const uint8_t> data) {
+            received.push({data.begin(), data.end()});
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(5, true);
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto d = received.at(0);
+    CHECK_EQ(d.size(), 5u);
+    CHECK_EQ(d[0], 0u);
+    CHECK_EQ(d[4], 4u);
+    lib.offByteSeqEvent(h);
+    lib.shutdown();
+}
+
+// Option[seq[byte]] in an event payload — present and absent.
+static void test_opt_byte_seq_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, true);  // present -> some([1,2,3,4])
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto present = received.at(0);
+    CHECK(present.has_value());
+    CHECK_EQ(present->size(), 4u);
+    CHECK_EQ((*present)[0], 1u);
+    CHECK_EQ((*present)[3], 4u);
+    lib.offOptByteSeqEvent(h);
+    lib.shutdown();
+}
+
+static void test_opt_byte_seq_event_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, false);  // absent -> none
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    CHECK(!received.at(0).has_value());
+    lib.offOptByteSeqEvent(h);
+    lib.shutdown();
+}
+
+// Option[seq[byte]] as an INPUT param — present and absent.
+static void test_opt_byte_param_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optByteParamRequest(Bytes{9, 8, 7});
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, 3);
+    lib.shutdown();
+}
+
+static void test_opt_byte_param_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.optByteParamRequest(std::nullopt);
+    CHECK(r.isOk());
+    CHECK_EQ(r->length, -1);
+    lib.shutdown();
+}
+
+// Proc-sugar broker whose payload is a pure ALIAS (ContentTopic = string).
+static void test_proc_sugar_alias_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.echoTopic("/waku/2/x");
+    CHECK(r.isOk());
+    CHECK_EQ(*r, std::string("/waku/2/x/echo"));  // EchoTopic == std::string
+    lib.shutdown();
+}
+
+// Proc-sugar broker whose payload is a DISTINCT (JobId = distinct int32).
+static void test_proc_sugar_distinct_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.nextJob(5);
+    CHECK(r.isOk());
+    CHECK_EQ(*r, 6);  // NextJob == int32_t
+    lib.shutdown();
+}
+
+// registerBrokerLibrary `version:` given a const identifier (a strdefine)
+// instead of a literal — the generated _version() resolves it at compile time.
+static void test_library_version_from_const() {
+    CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
+}
+
+// Proc-sugar broker returning a BARE PRIMITIVE — the method must surface the
+// simple type (Result<bool> / Result<int32_t>), not a synthetic Result<IsReady>.
+static void test_proc_sugar_bare_primitive() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto rb = lib.isReady();
+    CHECK(rb.isOk());
+    CHECK_EQ(*rb, true);
+    auto ri = lib.doubleIt(21);
+    CHECK(ri.isOk());
+    CHECK_EQ(*ri, 42);
+    lib.shutdown();
+}
+
+// Proc-sugar broker returning a standalone OBJECT (like logos
+// `proc storeQuery(): Result[StoreQueryResponse]`). The response object must
+// register (return-type scan) and the broker alias to it (using GetRow = RowData).
+static void test_proc_sugar_object_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.getRow("abc");
+    CHECK(r.isOk());
+    CHECK_EQ(r->id, 3);  // key.len
+    CHECK_EQ(r->label, std::string("row:abc"));
+    lib.shutdown();
+}
+
+// Mirrors logos StoreQueryRequest: Option[alias-of-int64], seq[array[N,byte]
+// alias], Option[array[N,byte] alias]. Exercises the as-written field-capture
+// fix (no Option[CompiledIntTypes] / WakuMessageHash->Curve25519Key rename) and
+// array-alias registration + wire round-trip.
+static void test_store_like_present() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.storeLikeRequest(true);
+    CHECK(r.isOk());
+    CHECK(r->startTime.has_value());
+    CHECK_EQ(*r->startTime, 1700);
+    CHECK_EQ(r->hashes.size(), 1u);
+    CHECK_EQ(r->hashes[0].size(), 32u);
+    CHECK_EQ(r->hashes[0][0], 0u);
+    CHECK_EQ(r->hashes[0][31], 31u);
+    CHECK(r->cursor.has_value());
+    CHECK_EQ(r->cursor->size(), 32u);
+    CHECK_EQ((*r->cursor)[0], 255u);
+    CHECK_EQ((*r->cursor)[31], 224u);
+    lib.shutdown();
+}
+
+static void test_store_like_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.storeLikeRequest(false);
+    CHECK(r.isOk());
+    CHECK(!r->startTime.has_value());
+    CHECK_EQ(r->hashes.size(), 0u);
+    CHECK(!r->cursor.has_value());
+    lib.shutdown();
+}
+
+// Proc-sugar broker whose payload is a CONTAINER (seq[ContentTopic]).
+static void test_proc_sugar_seq_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.listTopics("/t", 3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->size(), 3u);  // ListTopics == std::vector<std::string>
+    CHECK_EQ((*r)[0], std::string("/t/0"));
+    CHECK_EQ((*r)[2], std::string("/t/2"));
+    lib.shutdown();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -2748,6 +2978,24 @@ int main() {
     RUN(test_map_result_all_key_flavors);
     RUN(test_map_param_roundtrip);
     RUN(test_map_event);
+
+    printf("\n--- TestAliasAndByteGaps ---\n");
+    RUN(test_alias_field_request);
+    RUN(test_alias_field_request_empty_seq);
+    RUN(test_alias_event);
+    RUN(test_byte_seq_event);
+    RUN(test_opt_byte_seq_event);
+    RUN(test_opt_byte_seq_event_absent);
+    RUN(test_opt_byte_param_present);
+    RUN(test_opt_byte_param_absent);
+    RUN(test_proc_sugar_alias_payload);
+    RUN(test_proc_sugar_distinct_payload);
+    RUN(test_proc_sugar_seq_payload);
+    RUN(test_store_like_present);
+    RUN(test_store_like_absent);
+    RUN(test_proc_sugar_object_payload);
+    RUN(test_proc_sugar_bare_primitive);
+    RUN(test_library_version_from_const);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

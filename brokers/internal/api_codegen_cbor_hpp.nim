@@ -101,14 +101,17 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
       else:
         ""
   if lower == "seq[byte]":
-    # `jsoncons::byte_string` is jsoncons' own byte-string container. It
-    # satisfies `is_basic_byte_string`, so jsoncons encodes/decodes it as
-    # a CBOR byte string (major type 2) — what the Nim cbor_serialization
-    # decoder expects for `seq[byte]`. A plain `std::vector<uint8_t>` would
-    # ride the wire as a CBOR array (major type 4) and be rejected on
-    # INBOUND request params. `byte_string` is container-like (data/size/
-    # begin/end/operator[]/push_back).
-    return "jsoncons::byte_string"
+    # `Bytes` is a per-library wrapper over `std::vector<uint8_t>` (idiomatic,
+    # dependency-free, supports .size()/[]/begin()/end()) that carries a
+    # `json_type_traits` specialisation forcing CBOR byte-string (major type 2)
+    # on the wire — what the Nim cbor_serialization decoder expects for
+    # `seq[byte]`. A bare `std::vector<uint8_t>` would ride as a CBOR array
+    # (major type 4) and be rejected on INBOUND params. Because the traits
+    # attach to the TYPE (not per field), `std::optional<Bytes>`,
+    # `std::vector<Bytes>`, and nested structs compose automatically.
+    # The type + traits are emitted once per library (see emitBytesType /
+    # emitBytesTraits in generateCborCppHeaderFile).
+    return "Bytes"
   if lower.startsWith("seq[") and lower.endsWith("]"):
     let inner = nimTypeToCppType(unwrapBracket(t, "seq"))
     return
@@ -142,10 +145,15 @@ proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse through the outer mapper (not just `primCppType`) so an
-      # alias / distinct over a compound Nim type like `seq[byte]` maps to
-      # `std::vector<uint8_t>` rather than falling through to "".
-      return nimTypeToCppType(resolveUnderlyingType(t))
+      # The alias is emitted as `using <name> = <mapped>;`, so reference it BY
+      # NAME — a field/param keeps the meaningful type (`ContentTopic timestamp`,
+      # `Timestamp timestamp`) instead of being flattened to the primitive —
+      # provided the underlying actually maps; else "" so the caller emits a TODO.
+      # (The alias *definition* itself passes the resolved underlying, not the
+      # name, so `using ContentTopic = std::string;` is unaffected.)
+      if nimTypeToCppType(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc isCppMappable*(nimType: string): bool {.compileTime.} =
@@ -273,10 +281,10 @@ proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse through the outer mapper (not just `primCppType`) so an
-      # alias / distinct over a compound Nim type like `seq[byte]` maps to
-      # `std::vector<uint8_t>` rather than falling through to "".
-      return nimTypeToCppType(resolveUnderlyingType(t))
+      # Deliver the unpacked callback arg by its alias NAME (`ChannelId channelId`,
+      # `Timestamp timestamp`) — `nimTypeToCppType` already yields the emitted
+      # alias name, matching the struct field type and the Rust/Go callbacks.
+      return nimTypeToCppType(t)
   ""
 
 proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
@@ -418,10 +426,11 @@ proc emitCppMapStructTraits*(
       continue
     if cppTableNeedsKeyConv(f.nimType):
       let kt = cppTableKeyType(f.nimType)
-      # Enum key types live in the lib namespace; qualify them for use here
-      # inside `namespace jsoncons`. Primitive keys (int*/char) stay bare.
+      # Registered key types (enum, and now alias/distinct like `JobId`) live in
+      # the lib namespace; qualify them for use here inside `namespace jsoncons`.
+      # Primitive keys (int*/char → int32_t/char, not registered) stay bare.
       let ktQ =
-        if isTypeRegistered(kt) and lookupTypeEntry(kt).kind == atkEnum:
+        if isTypeRegistered(kt):
           libName & "::" & kt
         else:
           kt
@@ -604,6 +613,23 @@ proc generateCborCppHeaderFile*(
   h.add("    const std::string& error() const { return error_; }\n")
   h.add("};\n\n")
 
+  # ---- Bytes ----
+  # Idiomatic byte vector for `seq[byte]`. Derives std::vector<uint8_t> so the
+  # public surface is dependency-free (.size()/[]/begin()/end()/push_back),
+  # while a json_type_traits specialisation (emitted after this namespace)
+  # forces a CBOR byte string (major type 2) on the wire. Setting
+  # is_json_type_traits_declared<Bytes> there disables jsoncons' built-in
+  # byte-container paths (which would encode std::vector<uint8_t> as a CBOR
+  # array), so the custom traits drive both encode and decode and compose
+  # through std::optional<Bytes>, std::vector<Bytes>, and nested structs.
+  h.add("struct Bytes : std::vector<uint8_t> {\n")
+  h.add("  using std::vector<uint8_t>::vector;\n")
+  h.add("  Bytes() = default;\n")
+  h.add(
+    "  explicit Bytes(std::vector<uint8_t> v) : std::vector<uint8_t>(std::move(v)) {}\n"
+  )
+  h.add("};\n\n")
+
   # ---- All registered enums + distinct/alias aliases + structs ----
   # We walk gApiTypeRegistry directly so types referenced from fields
   # (e.g. `seq[Tag]` inside an object) get emitted, not just the
@@ -637,29 +663,45 @@ proc generateCborCppHeaderFile*(
       h.add("  " & v.name & " = " & $v.ordinal & ",\n")
     h.add("};\n\n")
 
-  # Distinct / alias — plain `using` aliases of the underlying primitive.
-  if aliasNames.len > 0:
-    h.add("// ---- Distinct / alias types ----\n\n")
-  for name in aliasNames:
-    let underlying = resolveUnderlyingType(name)
-    let prim = primCppType(underlying)
-    if prim.len == 0:
-      h.add(
-        "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no C++ primitive mapping\n\n"
-      )
-      continue
-    h.add("using " & name & " = " & prim & ";\n")
-  if aliasNames.len > 0:
-    h.add("\n")
-
-  # Object structs — emit forward declarations first so cross-references
-  # (e.g. `std::vector<Tag>` inside another struct) compile regardless
-  # of registry order.
+  # Object forward declarations FIRST, so a `using X = SomeObject` alias (a
+  # proc-sugar broker returning an object) and cross-references like
+  # `std::vector<Tag>` compile regardless of registry order.
   if objectNames.len > 0:
     h.add("// ---- Object payload structs ----\n\n")
     for name in objectNames:
       h.add("struct " & name & ";\n")
+    h.add("\n")
+
+  # Distinct / alias — `using` aliases of the underlying mapped type. Uses the
+  # full mapper (not just primCppType) so a container payload like
+  # `proc connectedPeers(): Result[seq[string]]` emits
+  # `using ConnectedPeers = std::vector<std::string>;`, and an object payload
+  # `proc getRow(): Result[RowData]` emits `using GetRow = RowData;` (RowData is
+  # forward-declared just above).
+  # Response-payload type names — a synthetic proc-sugar alias (`Send`,
+  # `StartDiscv5`, `GetRow`) is unwrapped to its real payload everywhere it is
+  # used, so its `using <Verb> = ...;` alias is dead — skip it. An anonymous
+  # container alias (`ConnectedPeers = seq[string]`) stays (it is the only handle
+  # for that type); a field-used alias (`ContentTopic`) is never a response name.
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
+  if aliasNames.len > 0:
+    h.add("// ---- Distinct / alias types ----\n\n")
+  for name in aliasNames:
+    if name in responseNames and effectiveResponsePayload(name) != name:
+      continue
+    let underlying = resolveUnderlyingType(name)
+    let cpp = nimTypeToCppType(underlying)
+    if cpp.len == 0:
+      h.add(
+        "// TODO: alias '" & name & "' resolves to '" & underlying &
+          "' which has no C++ mapping\n\n"
+      )
+      continue
+    h.add("using " & name & " = " & cpp & ";\n")
+  if aliasNames.len > 0:
     h.add("\n")
 
   # Captured (typeName, [fieldName...]) for global-scope JSONCONS macros.
@@ -702,10 +744,13 @@ proc generateCborCppHeaderFile*(
   # The CBOR wire value is a bare scalar; the C++ surface uses the `using X
   # = <prim>` alias directly (no struct). Such a type is an emittable
   # request response / event payload even though it has no object fields.
+  # Uses the full mapper (not just primCppType) so a non-object payload that
+  # resolves to a container (`seq[string]` -> std::vector<std::string>) is
+  # emittable too, not only bare primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primCppType(resolveUnderlyingType(name)).len > 0
+      nimTypeToCppType(resolveUnderlyingType(name)).len > 0
 
   # A "void payload" is a zero-field broker type — `type X = void` (lowered
   # to an empty object). It has no value; the request envelope carries only
@@ -721,9 +766,16 @@ proc generateCborCppHeaderFile*(
     name in emittablePayloads or isScalarPayload(name)
 
   # The C++ type used in the request/event payload slot: `void` surfaces a
-  # `Result<void>`, scalar/object payloads use their own type.
+  # `Result<void>`; a bare-primitive proc-sugar payload surfaces the simple type
+  # directly (`Result<bool>`, not `Result<StartDiscv5>`); other scalar/object
+  # payloads use their own (named) type.
   proc payloadCppType(name: string): string {.compileTime.} =
-    if isVoidPayload(name): "void" else: name
+    if isVoidPayload(name):
+      return "void"
+    let eff = effectiveResponsePayload(name)
+    if isNimPrimitive(eff):
+      return primCppType(eff)
+    eff
 
   # Effective callback/struct fields for a payload type: an object's real
   # fields, or a single synthetic `value` field for a scalar payload.
@@ -1144,8 +1196,13 @@ proc generateCborCppHeaderFile*(
     # A `void` payload has no struct jsoncons can (de)serialise — the `ok`
     # slot holds the generic `jsoncons::json` so the empty `{}` map sent on
     # the wire still round-trips and `has_value()` reports success.
+    # `void` -> generic json; a bare-primitive payload -> the simple type
+    # (so `optional<bool>`, matching the unwrapped `Result<bool>` method).
     let okType =
-      if isVoidPayload(e.responseTypeName): "jsoncons::json" else: e.responseTypeName
+      if isVoidPayload(e.responseTypeName):
+        "jsoncons::json"
+      else:
+        payloadCppType(e.responseTypeName)
     h.add("struct " & envName & " {\n")
     h.add("  std::optional<" & okType & "> ok;\n")
     h.add("  std::optional<std::string> err;\n")
@@ -1168,6 +1225,41 @@ proc generateCborCppHeaderFile*(
   # Section 4: JSONCONS macros (global scope)
   # ==================================================================
   h.add("} // namespace " & libName & "\n\n")
+
+  # ---- Bytes json_type_traits ----
+  # Forces CBOR byte-string (major type 2) for the public `Bytes` vector and
+  # decodes a byte string back into it. Specialising is_json_type_traits_declared
+  # is what disables jsoncons' built-in byte-container conv/encode paths (which
+  # would otherwise encode std::vector<uint8_t> as a CBOR array): both the
+  # json_conv_traits container partial-spec and the encode_traits container
+  # specialisations are gated on !is_json_type_traits_declared, so this routes
+  # all encode/decode through the traits below.
+  block:
+    let q = libName & "::Bytes"
+    h.add("namespace jsoncons {\n")
+    h.add(
+      "template <> struct is_json_type_traits_declared<" & q &
+        "> : public std::true_type {};\n"
+    )
+    h.add("template <typename Json>\n")
+    h.add("struct json_type_traits<Json, " & q & "> {\n")
+    h.add("  using allocator_type = typename Json::allocator_type;\n")
+    h.add("  static bool is(const Json& j) noexcept { return j.is_byte_string(); }\n")
+    h.add("  static " & q & " as(const Json& j) {\n")
+    h.add("    auto bsv = j.as_byte_string_view();\n")
+    h.add("    return " & q & "(bsv.begin(), bsv.end());\n")
+    h.add("  }\n")
+    h.add(
+      "  static Json to_json(const " & q &
+        "& v, const allocator_type& alloc = allocator_type()) {\n"
+    )
+    h.add(
+      "    return jsoncons::make_obj_using_allocator<Json>(\n" &
+        "        alloc, jsoncons::byte_string_arg, v, jsoncons::semantic_tag::none);\n"
+    )
+    h.add("  }\n")
+    h.add("};\n")
+    h.add("} // namespace jsoncons\n\n")
 
   if enumNames.len > 0:
     h.add(

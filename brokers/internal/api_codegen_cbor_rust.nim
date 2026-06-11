@@ -139,9 +139,12 @@ proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper so distinct/alias over compound types
-      # (e.g. `distinct seq[byte]`) maps to `Vec<u8>` rather than the "" fallback.
-      return nimTypeToRustHint(resolveUnderlyingType(t))
+      # Reference the emitted `pub type <name> = ...` alias BY NAME so
+      # fields/params keep the meaningful type (`ContentTopic`, `Timestamp`)
+      # instead of flattening to the underlying; "" when it doesn't map.
+      if nimTypeToRustHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
@@ -412,10 +415,12 @@ proc generateCborRustFile*(
   # Its CBOR wire value is a bare scalar; the Rust surface uses the
   # `pub type X = <prim>` alias directly. Such a type is an emittable
   # request response / event payload despite having no object fields.
+  # Full mapper (not just primRustHint) so a container payload (`seq[string]`
+  # -> Vec<String>) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primRustHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToRustHint(resolveUnderlyingType(name)).len > 0
 
   proc isEmittablePayload(name: string): bool {.compileTime.} =
     name in objectNames or isScalarPayload(name)
@@ -473,14 +478,22 @@ proc generateCborRustFile*(
     )
     rs.add("}\n\n")
 
-  # Distinct / alias.
+  # Distinct / alias. A bare-primitive response payload is unwrapped to the
+  # simple type, so its synthetic `pub type Verb = bool;` alias is dead — skip it
+  # (a field-used alias like `ContentTopic` is never a response name, so it stays).
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
   for name in aliasNames:
+    if name in responseNames and effectiveResponsePayload(name) != name:
+      continue
     let underlying = resolveUnderlyingType(name)
-    let pyU = primRustHint(underlying)
+    let pyU = nimTypeToRustHint(underlying)
     if pyU.len == 0:
       rs.add(
         "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no Rust primitive mapping\n\n"
+          "' which has no Rust mapping\n\n"
       )
       continue
     rs.add("pub type " & name & " = " & pyU & ";\n\n")
@@ -744,9 +757,17 @@ proc generateCborRustFile*(
         argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
         argsStructInit.add("            " & n & ",\n")
       argsStructDecl.add("        }\n")
+    # A synthetic proc-sugar payload surfaces its real type: the named alias
+    # (`Result<RequestId>`), the bare primitive (`Result<bool>`), or the
+    # synthetic name for an anonymous container (`Result<ConnectedPeers>`).
+    let resp = effectiveResponsePayload(e.responseTypeName)
+    let respRust =
+      if isNimPrimitive(resp):
+        primRustHint(resp)
+      else:
+        resp
     result.add(
-      "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
-        "> {\n"
+      "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & respRust & "> {\n"
     )
     if e.argFields.len > 0:
       result.add(argsStructDecl)
@@ -768,7 +789,7 @@ proc generateCborRustFile*(
     result.add("        }\n")
     result.add("        #[derive(Deserialize)]\n")
     result.add(
-      "        struct __Env { #[serde(default)] ok: Option<" & e.responseTypeName &
+      "        struct __Env { #[serde(default)] ok: Option<" & respRust &
         ">, #[serde(default)] err: Option<String> }\n"
     )
     result.add(

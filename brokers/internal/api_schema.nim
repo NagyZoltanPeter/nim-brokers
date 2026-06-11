@@ -136,6 +136,28 @@ proc resolveUnderlyingType*(name: string): string {.compileTime.} =
     inc depth
   current
 
+proc effectiveResponsePayload*(name: string): string {.compileTime.} =
+  ## The Nim type a request RESPONSE should actually surface. A proc-sugar broker
+  ## registers its verb name as a `distinct` alias of the payload (`Send =
+  ## distinct RequestId`, `StartDiscv5 = distinct bool`, `ConnectedPeers =
+  ## distinct seq[string]`). That synthetic name is noise — unwrap it to the
+  ## meaningful payload:
+  ##   - a registered named type (alias / distinct / object / enum): the payload
+  ##     the user wrote — `RequestId`, `RowData`, `StoreQueryResponse`. So
+  ##     `send(): Result[RequestId]` surfaces `Result<RequestId>`, reusing the
+  ##     emitted `RequestId` alias instead of a duplicate `Send` one.
+  ##   - a bare Nim primitive: `bool`, `int32` — `Result<bool>`.
+  ##   - an ANONYMOUS container (`seq[string]`, not a registered name): keep the
+  ##     synthetic name (`ConnectedPeers`), the only handle for that type.
+  ## Returns `name` unchanged when there is nothing better to use. Applied only to
+  ## response-type names — field aliases (`ContentTopic`) keep their own alias.
+  if isTypeRegistered(name):
+    let e = lookupTypeEntry(name)
+    if e.kind in {atkAlias, atkDistinct} and
+        (isTypeRegistered(e.underlyingType) or isNimPrimitive(e.underlyingType)):
+      return e.underlyingType
+  name
+
 # ---------------------------------------------------------------------------
 # Type node inspection helpers
 # ---------------------------------------------------------------------------

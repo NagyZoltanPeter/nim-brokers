@@ -66,6 +66,28 @@ type Slot* = object
 ## ConstArrayLen — exercises const-defined array size in FFI codegen.
 const ConstArrayLen* = 6
 
+## Epoch — pure alias of int64 (NOT distinct), mirroring logos `Timestamp =
+## int64`. Exercises `Option[Epoch]`: the field-capture fix must keep the
+## written name (was leaking `Option[CompiledIntTypes]`).
+type Epoch* = int64
+
+## Hash32 / Key32 — two STRUCTURALLY IDENTICAL `array[32, byte]` aliases,
+## mirroring logos `WakuMessageHash` / `Curve25519Key`. Used in `seq[Hash32]`
+## and `Option[Key32]`: the field capture must keep each written name (was
+## renaming `Option[WakuMessageHash]` -> `Option[Curve25519Key]`), and the
+## resolver must register the array alias so it maps to bytes.
+type Hash32* = array[32, byte]
+type Key32* = array[32, byte]
+
+## ContentTopic — a PURE primitive alias (`type X = string`, NOT distinct).
+## This is the exact shape the type-resolver alias fix targets: the
+## wrapper type discovery must follow the alias to `string` so a field /
+## param / seq[alias] typed as ContentTopic maps to std::string /
+## std::vector<std::string> (and the Python/Rust/Go equivalents) instead
+## of emitting a "not yet mappable" TODO and dropping the whole method.
+## Mirrors logos-delivery's `ContentTopic = string` / `PubsubTopic = string`.
+type ContentTopic* = string
+
 # ---------------------------------------------------------------------------
 # Request Brokers — original
 # ---------------------------------------------------------------------------
@@ -542,6 +564,132 @@ RequestBroker(API):
 EventBroker(API):
   type MapEvent* = object
     counts*: Table[string, int32]
+
+# ---------------------------------------------------------------------------
+# Pure-alias coverage (type-resolver alias fix). ContentTopic = string is
+# exercised in EVERY direction: request param (in), result field (out),
+# seq[alias] result field (out), and event payload field (out). Without the
+# alias fix each of these emits a "not yet mappable" TODO and the owning
+# method/event is dropped from all four wrappers — so reverting the fix
+# breaks these round-trips in C++/Python/Rust/Go.
+# ---------------------------------------------------------------------------
+
+## AliasFieldRequest — pure alias as INPUT param + as result field + as
+## seq[alias] result field. Echoes the topic and fabricates n derived topics.
+RequestBroker(API):
+  type AliasFieldRequest* = object
+    topic*: ContentTopic
+    topics*: seq[ContentTopic]
+
+  proc signature*(
+    topic: ContentTopic, n: int32
+  ): Future[Result[AliasFieldRequest, string]] {.async.}
+
+## AliasEvent — pure alias (+ seq[alias]) in an event payload.
+EventBroker(API):
+  type AliasEvent* = object
+    topic*: ContentTopic
+    topics*: seq[ContentTopic]
+
+## TriggerAliasEventRequest — fires AliasEvent with a fabricated payload.
+RequestBroker(API):
+  type TriggerAliasEventRequest* = object
+    fired*: int32
+
+  proc signature*(
+    topic: ContentTopic, n: int32
+  ): Future[Result[TriggerAliasEventRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# seq[byte] / Option[seq[byte]] coverage gaps: a TOP-LEVEL seq[byte] event
+# field, an Option[seq[byte]] event field, and an Option[seq[byte]] INPUT
+# param (the result-field direction is already covered by OptSeqRequest).
+# ---------------------------------------------------------------------------
+
+## ByteSeqEvent — a direct (top-level) seq[byte] event payload field.
+EventBroker(API):
+  type ByteSeqEvent* = object
+    data*: seq[byte]
+
+## OptByteSeqEvent — Option[seq[byte]] in an event payload.
+EventBroker(API):
+  type OptByteSeqEvent* = object
+    value*: Option[seq[byte]]
+
+## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]) and
+## OptByteSeqEvent(some([1,2,3,4]) when present else none).
+RequestBroker(API):
+  type TriggerByteEventsRequest* = object
+    fired*: int32
+
+  proc signature*(
+    size: int32, present: bool
+  ): Future[Result[TriggerByteEventsRequest, string]] {.async.}
+
+## OptByteParamRequest — Option[seq[byte]] as an INPUT param. Returns
+## length = -1 when absent, else the byte count.
+RequestBroker(API):
+  type OptByteParamRequest* = object
+    length*: int32
+
+  proc signature*(
+    value: Option[seq[byte]]
+  ): Future[Result[OptByteParamRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# Proc-sugar scalar payloads: a verb-named RequestBroker (no `type` decl)
+# whose response payload is a registered alias / distinct that resolves to a
+# primitive. Mirrors logos-delivery's `proc send(): Result[RequestId]` /
+# `proc defaultPubsubTopic(): Result[PubsubTopic]`. Without the registration
+# relaxation these drop as "return type ... not emittable".
+# ---------------------------------------------------------------------------
+
+## EchoTopic — proc-sugar, payload is a pure ALIAS (ContentTopic = string).
+RequestBroker(API):
+  proc echoTopic(topic: ContentTopic): Future[Result[ContentTopic, string]] {.async.}
+
+## NextJob — proc-sugar, payload is a DISTINCT (JobId = distinct int32).
+RequestBroker(API):
+  proc nextJob(jobId: JobId): Future[Result[JobId, string]] {.async.}
+
+## ListTopics — proc-sugar, payload is a CONTAINER (seq[ContentTopic], i.e.
+## seq of a registered alias). Mirrors logos-delivery's
+## `proc connectedPeers(): Result[seq[string]]` / `listenAddresses`. Case (b).
+RequestBroker(API):
+  proc listTopics(
+    prefix: ContentTopic, n: int32
+  ): Future[Result[seq[ContentTopic], string]] {.async.}
+
+## RowData — a standalone object returned ONLY via a proc-sugar broker (like
+## logos StoreQueryResponse behind `proc storeQuery(): Result[StoreQueryResponse]`).
+## Exercises return-type scanning (register the response object) + aliasing the
+## verb-named broker to it.
+type RowData* = object
+  id*: int32
+  label*: string
+
+RequestBroker(API):
+  proc getRow(key: string): Future[Result[RowData, string]] {.async.}
+
+## Bare-primitive proc-sugar payloads (like logos `proc startDiscv5():
+## Result[bool]` / `proc peerExchangeRequest(): Result[int]`). The verb-named
+## broker must NOT wrap the primitive in a synthetic alias — the method is
+## `Result<bool>` / `Result<int32_t>`, not `Result<IsReady>` / `Result<DoubleIt>`.
+RequestBroker(API):
+  proc isReady(): Future[Result[bool, string]] {.async.}
+
+RequestBroker(API):
+  proc doubleIt(n: int32): Future[Result[int32, string]] {.async.}
+
+## StoreLike — mirrors logos StoreQueryRequest's previously-unmapped fields:
+## Option[alias-of-int64], seq[array[N,byte] alias], Option[array[N,byte] alias].
+RequestBroker(API):
+  type StoreLikeRequest* = object
+    startTime*: Option[Epoch]
+    hashes*: seq[Hash32]
+    cursor*: Option[Key32]
+
+  proc signature*(present: bool): Future[Result[StoreLikeRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Event Brokers — original
@@ -1070,15 +1218,140 @@ proc setupProviders(ctx: BrokerContext) =
       return ok(MapParamRequest(total: total, joined: keys.join("|"))),
   )
 
+  # ----- Pure-alias (ContentTopic = string) providers -----
+
+  discard AliasFieldRequest.setProvider(
+    ctx,
+    proc(
+        topic: ContentTopic, n: int32
+    ): Future[Result[AliasFieldRequest, string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(topic & "/" & $i)
+      return ok(AliasFieldRequest(topic: topic, topics: topics)),
+  )
+
+  discard TriggerAliasEventRequest.setProvider(
+    ctx,
+    proc(
+        topic: ContentTopic, n: int32
+    ): Future[Result[TriggerAliasEventRequest, string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(topic & "/" & $i)
+      await AliasEvent.emit(gProviderCtx, AliasEvent(topic: topic, topics: topics))
+      return ok(TriggerAliasEventRequest(fired: n)),
+  )
+
+  # ----- seq[byte] / Option[seq[byte]] event + param providers -----
+
+  discard TriggerByteEventsRequest.setProvider(
+    ctx,
+    proc(
+        size: int32, present: bool
+    ): Future[Result[TriggerByteEventsRequest, string]] {.closure, async.} =
+      var data = newSeq[byte](int(size))
+      for i in 0 ..< int(size):
+        data[i] = byte(i mod 256)
+      await ByteSeqEvent.emit(gProviderCtx, ByteSeqEvent(data: data))
+      let optVal =
+        if present:
+          some(@[byte 1, 2, 3, 4])
+        else:
+          none(seq[byte])
+      await OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
+      return ok(TriggerByteEventsRequest(fired: 2)),
+  )
+
+  discard OptByteParamRequest.setProvider(
+    ctx,
+    proc(
+        value: Option[seq[byte]]
+    ): Future[Result[OptByteParamRequest, string]] {.closure, async.} =
+      let length =
+        if value.isSome():
+          int32(value.get().len)
+        else:
+          -1'i32
+      return ok(OptByteParamRequest(length: length)),
+  )
+
+  # ----- proc-sugar scalar payload providers (alias / distinct) -----
+
+  discard EchoTopic.setProvider(
+    ctx,
+    proc(topic: ContentTopic): Future[Result[ContentTopic, string]] {.closure, async.} =
+      return ok(ContentTopic(topic & "/echo")),
+  )
+
+  discard NextJob.setProvider(
+    ctx,
+    proc(jobId: JobId): Future[Result[JobId, string]] {.closure, async.} =
+      return ok(JobId(int32(jobId) + 1'i32)),
+  )
+
+  discard ListTopics.setProvider(
+    ctx,
+    proc(
+        prefix: ContentTopic, n: int32
+    ): Future[Result[seq[ContentTopic], string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(prefix & "/" & $i)
+      return ok(topics),
+  )
+
+  discard GetRow.setProvider(
+    ctx,
+    proc(key: string): Future[Result[RowData, string]] {.closure, async.} =
+      return ok(RowData(id: int32(key.len), label: "row:" & key)),
+  )
+
+  discard IsReady.setProvider(
+    ctx,
+    proc(): Future[Result[bool, string]] {.closure, async.} =
+      return ok(true),
+  )
+
+  discard DoubleIt.setProvider(
+    ctx,
+    proc(n: int32): Future[Result[int32, string]] {.closure, async.} =
+      return ok(n * 2'i32),
+  )
+
+  discard StoreLikeRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[StoreLikeRequest, string]] {.closure, async.} =
+      var h: Hash32
+      for i in 0 .. 31:
+        h[i] = byte(i)
+      var k: Key32
+      for i in 0 .. 31:
+        k[i] = byte(255 - i)
+      if present:
+        return ok(
+          StoreLikeRequest(startTime: some(Epoch(1700)), hashes: @[h], cursor: some(k))
+        )
+      else:
+        return
+          ok(StoreLikeRequest(startTime: none(Epoch), hashes: @[], cursor: none(Key32))),
+  )
+
 # ---------------------------------------------------------------------------
 # Library registration
 # ---------------------------------------------------------------------------
+
+# Exercises the const-identifier form of `version:` (a `{.strdefine.}` so the
+# value can also be injected at build time, e.g. `-d:typemapLibVersion=...`).
+# The generated `<lib>_version()` resolves it at compile time of THIS module;
+# the cross-language `version()` tests assert it round-trips as "0.1.0".
+const typemapLibVersion* {.strdefine.} = "0.1.0"
 
 registerBrokerLibrary:
   name:
     "typemappingtestlib"
   version:
-    "0.1.0"
+    typemapLibVersion
   initializeRequest:
     InitializeRequest
   shutdownRequest:
