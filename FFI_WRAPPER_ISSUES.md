@@ -6,7 +6,7 @@ Add new findings here before fixing.
 
 Work branch: **`fix/ffi-wrapper-type-mapping`** (uncommitted).
 
-Status: **#1 fixed · #3 fixed+verified · #4 fixed+verified · #2 deferred**
+Status: **#1 · #2 · #3 · #4 all fixed+verified**
 
 ---
 
@@ -36,7 +36,32 @@ once this lands + re-pins, `-d:BrokerFfiApiOutDir:<dir>` can replace the move.)
 
 ---
 
-## 2. `registerBrokerLibrary` `version:` accepts only a string literal  — ⏸ DEFERRED
+## 2. `registerBrokerLibrary` `version:` accepts only a string literal  — ✅ FIXED
+
+**Done:** `version:` now accepts a string literal **or** a const identifier (e.g. a
+`{.strdefine.}` `git_version`). The earlier "needs restructuring" worry was
+overstated — the version is only used in two places, and neither needs the value
+baked at macro time once the proc references the const:
+- The generated `<lib>_version()` proc now binds the version **expression**
+  (`config.versionExpr`) to a `string` const and returns `.cstring`, so an ident
+  resolves at the *generated code's* compile time, in the caller's module
+  (`git_version` is in scope there). For a literal it's identical to before.
+- The C header only embedded the literal in a **doc comment**; that now reads
+  "(resolved at build time)" when an ident was given. The `.h`/`.hpp`/py/rust/go
+  wrappers expose the version solely through the runtime `<lib>_version()` call,
+  so they need no change.
+
+**Verified:** `typemappingtestlib` now uses `version: typemapLibVersion`
+(a `{.strdefine.}` const) and a C++ `version()` assertion confirms it round-trips
+as "0.1.0"; reverting the fix makes the macro reject the const and the lib fails
+to compile. logos-delivery wires `version: git_version` (Makefile injects
+`-d:git_version="$(git describe …)"`).
+
+---
+
+### Original analysis (kept for context)
+
+## 2-orig. `registerBrokerLibrary` `version:` accepts only a string literal  — was ⏸ DEFERRED
 
 `brokers/api_library.nim:85-92` — the `version` branch checks `v.kind == nnkStrLit`
 and otherwise errors `version must be a string literal`. A string **const**

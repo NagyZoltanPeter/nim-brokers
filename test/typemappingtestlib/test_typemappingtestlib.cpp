@@ -2722,6 +2722,12 @@ static void test_proc_sugar_distinct_payload() {
     lib.shutdown();
 }
 
+// registerBrokerLibrary `version:` given a const identifier (a strdefine)
+// instead of a literal — the generated _version() resolves it at compile time.
+static void test_library_version_from_const() {
+    CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
+}
+
 // Proc-sugar broker whose payload is a CONTAINER (seq[ContentTopic]).
 static void test_proc_sugar_seq_payload() {
     Typemappingtestlib lib;
@@ -2925,6 +2931,7 @@ int main() {
     RUN(test_proc_sugar_alias_payload);
     RUN(test_proc_sugar_distinct_payload);
     RUN(test_proc_sugar_seq_payload);
+    RUN(test_library_version_from_const);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

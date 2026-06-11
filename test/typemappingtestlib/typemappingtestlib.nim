@@ -1261,11 +1261,17 @@ proc setupProviders(ctx: BrokerContext) =
 # Library registration
 # ---------------------------------------------------------------------------
 
+# Exercises the const-identifier form of `version:` (a `{.strdefine.}` so the
+# value can also be injected at build time, e.g. `-d:typemapLibVersion=...`).
+# The generated `<lib>_version()` resolves it at compile time of THIS module;
+# the cross-language `version()` tests assert it round-trips as "0.1.0".
+const typemapLibVersion* {.strdefine.} = "0.1.0"
+
 registerBrokerLibrary:
   name:
     "typemappingtestlib"
   version:
-    "0.1.0"
+    typemapLibVersion
   initializeRequest:
     InitializeRequest
   shutdownRequest:
