@@ -281,10 +281,10 @@ proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse through the outer mapper (not just `primCppType`) so an
-      # alias / distinct over a compound Nim type like `seq[byte]` maps to
-      # `std::vector<uint8_t>` rather than falling through to "".
-      return nimTypeToCppType(resolveUnderlyingType(t))
+      # Deliver the unpacked callback arg by its alias NAME (`ChannelId channelId`,
+      # `Timestamp timestamp`) — `nimTypeToCppType` already yields the emitted
+      # alias name, matching the struct field type and the Rust/Go callbacks.
+      return nimTypeToCppType(t)
   ""
 
 proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
