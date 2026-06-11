@@ -2702,6 +2702,26 @@ static void test_opt_byte_param_absent() {
     lib.shutdown();
 }
 
+// Proc-sugar broker whose payload is a pure ALIAS (ContentTopic = string).
+static void test_proc_sugar_alias_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.echoTopic("/waku/2/x");
+    CHECK(r.isOk());
+    CHECK_EQ(*r, std::string("/waku/2/x/echo"));  // EchoTopic == std::string
+    lib.shutdown();
+}
+
+// Proc-sugar broker whose payload is a DISTINCT (JobId = distinct int32).
+static void test_proc_sugar_distinct_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.nextJob(5);
+    CHECK(r.isOk());
+    CHECK_EQ(*r, 6);  // NextJob == int32_t
+    lib.shutdown();
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -2890,6 +2910,8 @@ int main() {
     RUN(test_opt_byte_seq_event_absent);
     RUN(test_opt_byte_param_present);
     RUN(test_opt_byte_param_absent);
+    RUN(test_proc_sugar_alias_payload);
+    RUN(test_proc_sugar_distinct_payload);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

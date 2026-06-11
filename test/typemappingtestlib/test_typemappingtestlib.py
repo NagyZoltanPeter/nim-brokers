@@ -1186,6 +1186,20 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertTrue(r.is_ok())
         self.assertEqual(r.value.length, -1)
 
+    # ----- proc-sugar scalar payloads (alias / distinct) -----
+
+    def test_proc_sugar_alias_payload(self):
+        # ContentTopic = string; proc-sugar payload exposed as bare str.
+        r = self.lib.echo_topic("/waku/2/x")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value, "/waku/2/x/echo")
+
+    def test_proc_sugar_distinct_payload(self):
+        # JobId = distinct int32; proc-sugar payload exposed as bare int.
+        r = self.lib.next_job(5)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value, 6)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

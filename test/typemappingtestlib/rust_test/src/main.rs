@@ -3010,6 +3010,28 @@ fn test_opt_byte_param_absent() {
     lib.shutdown();
 }
 
+fn test_proc_sugar_alias_payload() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.echo_topic("/waku/2/x".to_string());
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.clone(), "/waku/2/x/echo".to_string()); // EchoTopic == String
+    }
+    lib.shutdown();
+}
+
+fn test_proc_sugar_distinct_payload() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.next_job(5);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(*v, 6i32); // NextJob == i32
+    }
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -3193,6 +3215,8 @@ fn main() {
     run_test("test_opt_byte_seq_event_absent", test_opt_byte_seq_event_absent);
     run_test("test_opt_byte_param_present", test_opt_byte_param_present);
     run_test("test_opt_byte_param_absent", test_opt_byte_param_absent);
+    run_test("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload);
+    run_test("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

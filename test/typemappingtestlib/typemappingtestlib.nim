@@ -624,6 +624,22 @@ RequestBroker(API):
   ): Future[Result[OptByteParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
+# Proc-sugar scalar payloads: a verb-named RequestBroker (no `type` decl)
+# whose response payload is a registered alias / distinct that resolves to a
+# primitive. Mirrors logos-delivery's `proc send(): Result[RequestId]` /
+# `proc defaultPubsubTopic(): Result[PubsubTopic]`. Without the registration
+# relaxation these drop as "return type ... not emittable".
+# ---------------------------------------------------------------------------
+
+## EchoTopic — proc-sugar, payload is a pure ALIAS (ContentTopic = string).
+RequestBroker(API):
+  proc echoTopic(topic: ContentTopic): Future[Result[ContentTopic, string]] {.async.}
+
+## NextJob — proc-sugar, payload is a DISTINCT (JobId = distinct int32).
+RequestBroker(API):
+  proc nextJob(jobId: JobId): Future[Result[JobId, string]] {.async.}
+
+# ---------------------------------------------------------------------------
 # Event Brokers — original
 # ---------------------------------------------------------------------------
 
@@ -1206,6 +1222,20 @@ proc setupProviders(ctx: BrokerContext) =
         else:
           -1'i32
       return ok(OptByteParamRequest(length: length)),
+  )
+
+  # ----- proc-sugar scalar payload providers (alias / distinct) -----
+
+  discard EchoTopic.setProvider(
+    ctx,
+    proc(topic: ContentTopic): Future[Result[ContentTopic, string]] {.closure, async.} =
+      return ok(ContentTopic(topic & "/echo")),
+  )
+
+  discard NextJob.setProvider(
+    ctx,
+    proc(jobId: JobId): Future[Result[JobId, string]] {.closure, async.} =
+      return ok(JobId(int32(jobId) + 1'i32)),
   )
 
 # ---------------------------------------------------------------------------

@@ -2503,6 +2503,24 @@ func test_opt_byte_param_absent() {
 	lib.Close()
 }
 
+func test_proc_sugar_alias_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.EchoTopic("/waku/2/x") // EchoTopic == string
+	checkEq(err, error(nil), "no err")
+	checkEq(string(r), "/waku/2/x/echo", "echo topic")
+	lib.Close()
+}
+
+func test_proc_sugar_distinct_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.NextJob(5) // NextJob == int32
+	checkEq(err, error(nil), "no err")
+	checkEq(int32(r), int32(6), "next job")
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2680,6 +2698,8 @@ func main() {
 	runTest("test_opt_byte_seq_event_absent", test_opt_byte_seq_event_absent)
 	runTest("test_opt_byte_param_present", test_opt_byte_param_present)
 	runTest("test_opt_byte_param_absent", test_opt_byte_param_absent)
+	runTest("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload)
+	runTest("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)
