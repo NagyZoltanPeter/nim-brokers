@@ -136,6 +136,20 @@ proc resolveUnderlyingType*(name: string): string {.compileTime.} =
     inc depth
   current
 
+proc barePrimitivePayload*(name: string): string {.compileTime.} =
+  ## For a registered alias/distinct whose IMMEDIATE underlying is a Nim
+  ## primitive, return that primitive's name; else "". A proc-sugar broker over a
+  ## bare primitive (`proc startDiscv5(): Result[bool]`) registers its verb name
+  ## as `distinct bool`; the codegen uses this to unwrap that synthetic name to
+  ## the simple type, so the method is `Result<bool>` not `Result<StartDiscv5>`.
+  ## Applied only to response-type names (never field types — a named alias like
+  ## `ContentTopic = string` keeps its alias because it is referenced by fields).
+  if isTypeRegistered(name):
+    let e = lookupTypeEntry(name)
+    if e.kind in {atkAlias, atkDistinct} and isNimPrimitive(e.underlyingType):
+      return e.underlyingType
+  ""
+
 # ---------------------------------------------------------------------------
 # Type node inspection helpers
 # ---------------------------------------------------------------------------

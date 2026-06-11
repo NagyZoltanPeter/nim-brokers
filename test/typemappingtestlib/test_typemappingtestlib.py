@@ -1231,6 +1231,15 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertEqual(r.value.id, 3)
         self.assertEqual(r.value.label, "row:abc")
 
+    def test_proc_sugar_bare_primitive(self):
+        # proc-sugar returning a bare primitive -> the simple value, no wrapper.
+        rb = self.lib.is_ready()
+        self.assertTrue(rb.is_ok(), rb.error)
+        self.assertEqual(rb.value, True)
+        ri = self.lib.double_it(21)
+        self.assertTrue(ri.is_ok(), ri.error)
+        self.assertEqual(ri.value, 42)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -427,7 +427,16 @@ proc generateCborGoFile*(
         g.add("\t" & name & "_" & v.name & " " & name & " = " & $v.ordinal & "\n")
     g.add(")\n\n")
 
+  # A bare-primitive response payload is unwrapped to the simple type, so its
+  # synthetic `type Verb = bool` alias is dead — skip it. Field-used aliases
+  # (`ContentTopic`) are never response names, so they stay.
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
   for name in aliasNames:
+    if name in responseNames and barePrimitivePayload(name).len > 0:
+      continue
     let underlying = resolveUnderlyingType(name)
     let goU = nimTypeToGoCborHint(underlying)
     if goU.len == 0:
@@ -607,7 +616,11 @@ proc generateCborGoFile*(
   # Factored emitters reused by the main Lib and each sub-interface struct.
   proc emitGoReqMethod(e: CborRequestEntry, recv: string): string {.compileTime.} =
     let methodName = snakeToPascal(e.apiName)
-    let respType = e.responseTypeName
+    # A bare-primitive proc-sugar payload surfaces the simple type directly
+    # (`(bool, error)`, not `(IsReady, error)`).
+    let respPrim = barePrimitivePayload(e.responseTypeName)
+    let respType =
+      if respPrim.len > 0: primGoHint(respPrim) else: e.responseTypeName
     var argsStructFields = ""
     var argsAssign = ""
     var firstNonZero = false

@@ -671,6 +671,16 @@ type RowData* = object
 RequestBroker(API):
   proc getRow(key: string): Future[Result[RowData, string]] {.async.}
 
+## Bare-primitive proc-sugar payloads (like logos `proc startDiscv5():
+## Result[bool]` / `proc peerExchangeRequest(): Result[int]`). The verb-named
+## broker must NOT wrap the primitive in a synthetic alias — the method is
+## `Result<bool>` / `Result<int32_t>`, not `Result<IsReady>` / `Result<DoubleIt>`.
+RequestBroker(API):
+  proc isReady(): Future[Result[bool, string]] {.async.}
+
+RequestBroker(API):
+  proc doubleIt(n: int32): Future[Result[int32, string]] {.async.}
+
 ## StoreLike — mirrors logos StoreQueryRequest's previously-unmapped fields:
 ## Option[alias-of-int64], seq[array[N,byte] alias], Option[array[N,byte] alias].
 RequestBroker(API):
@@ -1295,6 +1305,18 @@ proc setupProviders(ctx: BrokerContext) =
     ctx,
     proc(key: string): Future[Result[RowData, string]] {.closure, async.} =
       return ok(RowData(id: int32(key.len), label: "row:" & key)),
+  )
+
+  discard IsReady.setProvider(
+    ctx,
+    proc(): Future[Result[bool, string]] {.closure, async.} =
+      return ok(true),
+  )
+
+  discard DoubleIt.setProvider(
+    ctx,
+    proc(n: int32): Future[Result[int32, string]] {.closure, async.} =
+      return ok(n * 2'i32),
   )
 
   discard StoreLikeRequest.setProvider(

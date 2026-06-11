@@ -3086,6 +3086,22 @@ fn test_proc_sugar_object_payload() {
     lib.shutdown();
 }
 
+fn test_proc_sugar_bare_primitive() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let rb = lib.is_ready(); // Result<bool>, not Result<IsReady>
+    check!(rb.is_ok());
+    if let Some(v) = rb.value() {
+        check_eq!(*v, true);
+    }
+    let ri = lib.double_it(21); // Result<i32>
+    check!(ri.is_ok());
+    if let Some(v) = ri.value() {
+        check_eq!(*v, 42i32);
+    }
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -3275,6 +3291,7 @@ fn main() {
     run_test("test_store_like_present", test_store_like_present);
     run_test("test_store_like_absent", test_store_like_absent);
     run_test("test_proc_sugar_object_payload", test_proc_sugar_object_payload);
+    run_test("test_proc_sugar_bare_primitive", test_proc_sugar_bare_primitive);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

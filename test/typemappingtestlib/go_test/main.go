@@ -2578,6 +2578,18 @@ func test_proc_sugar_object_payload() {
 	lib.Close()
 }
 
+func test_proc_sugar_bare_primitive() {
+	lib := newLib()
+	lib.CreateContext()
+	rb, err := lib.IsReady() // (bool, error), not (IsReady, error)
+	checkEq(err, error(nil), "isReady no err")
+	checkEq(rb, true, "isReady")
+	ri, err2 := lib.DoubleIt(21) // (int32, error)
+	checkEq(err2, error(nil), "doubleIt no err")
+	checkEq(ri, int32(42), "doubleIt")
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2761,6 +2773,7 @@ func main() {
 	runTest("test_store_like_present", test_store_like_present)
 	runTest("test_store_like_absent", test_store_like_absent)
 	runTest("test_proc_sugar_object_payload", test_proc_sugar_object_payload)
+	runTest("test_proc_sugar_bare_primitive", test_proc_sugar_bare_primitive)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

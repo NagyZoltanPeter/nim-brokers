@@ -72,6 +72,7 @@ func runExtras() {
 	runTest("test_scan_request_reverse", test_scan_request_reverse)
 }
 
-// intResultValue extracts the scalar from an IntResultRequest, which
-// is the bare `int32` type alias.
-func intResultValue(r typemappingtestlib.IntResultRequest) int32 { return int32(r) }
+// intResultValue passes through the IntResultRequest scalar. The bare-primitive
+// response payload is now surfaced as the simple `int32` directly (no synthetic
+// `IntResultRequest` alias), so this just returns its argument.
+func intResultValue(r int32) int32 { return r }

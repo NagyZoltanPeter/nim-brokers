@@ -2728,6 +2728,20 @@ static void test_library_version_from_const() {
     CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
 }
 
+// Proc-sugar broker returning a BARE PRIMITIVE — the method must surface the
+// simple type (Result<bool> / Result<int32_t>), not a synthetic Result<IsReady>.
+static void test_proc_sugar_bare_primitive() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto rb = lib.isReady();
+    CHECK(rb.isOk());
+    CHECK_EQ(*rb, true);
+    auto ri = lib.doubleIt(21);
+    CHECK(ri.isOk());
+    CHECK_EQ(*ri, 42);
+    lib.shutdown();
+}
+
 // Proc-sugar broker returning a standalone OBJECT (like logos
 // `proc storeQuery(): Result[StoreQueryResponse]`). The response object must
 // register (return-type scan) and the broker alias to it (using GetRow = RowData).
@@ -2980,6 +2994,7 @@ int main() {
     RUN(test_store_like_present);
     RUN(test_store_like_absent);
     RUN(test_proc_sugar_object_payload);
+    RUN(test_proc_sugar_bare_primitive);
     RUN(test_library_version_from_const);
 
     printf("\n----------------------------------------------------------------------\n");

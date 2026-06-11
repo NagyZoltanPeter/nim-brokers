@@ -665,10 +665,21 @@ proc generateCborPyFile*(
     py.add("\n")
 
   # Deferred alias assignments (`GetRow = RowData`, `ContentTopic = str`, …),
-  # now that any object RHS class is defined above.
+  # now that any object RHS class is defined above. A bare-primitive response
+  # payload is decoded as the simple type (its `_decode_<Verb>` helper still
+  # exists), so its synthetic `Verb = bool` alias is dead — skip it; a field-used
+  # alias (`ContentTopic`) is never a response name, so it stays.
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
+  var emittedAssign = false
   for (name, pyU) in aliasAssigns:
+    if name in responseNames and barePrimitivePayload(name).len > 0:
+      continue
     py.add(name & " = " & pyU & "\n")
-  if aliasAssigns.len > 0:
+    emittedAssign = true
+  if emittedAssign:
     py.add("\n")
 
   # Per-object _decode and _encode helpers.

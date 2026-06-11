@@ -475,8 +475,16 @@ proc generateCborRustFile*(
     )
     rs.add("}\n\n")
 
-  # Distinct / alias.
+  # Distinct / alias. A bare-primitive response payload is unwrapped to the
+  # simple type, so its synthetic `pub type Verb = bool;` alias is dead — skip it
+  # (a field-used alias like `ContentTopic` is never a response name, so it stays).
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
   for name in aliasNames:
+    if name in responseNames and barePrimitivePayload(name).len > 0:
+      continue
     let underlying = resolveUnderlyingType(name)
     let pyU = nimTypeToRustHint(underlying)
     if pyU.len == 0:
@@ -746,9 +754,13 @@ proc generateCborRustFile*(
         argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
         argsStructInit.add("            " & n & ",\n")
       argsStructDecl.add("        }\n")
+    # A bare-primitive proc-sugar payload surfaces the simple type directly
+    # (`Result<bool>`, not `Result<IsReady>`).
+    let respPrim = barePrimitivePayload(e.responseTypeName)
+    let respRust =
+      if respPrim.len > 0: primRustHint(respPrim) else: e.responseTypeName
     result.add(
-      "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & e.responseTypeName &
-        "> {\n"
+      "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & respRust & "> {\n"
     )
     if e.argFields.len > 0:
       result.add(argsStructDecl)
@@ -770,7 +782,7 @@ proc generateCborRustFile*(
     result.add("        }\n")
     result.add("        #[derive(Deserialize)]\n")
     result.add(
-      "        struct __Env { #[serde(default)] ok: Option<" & e.responseTypeName &
+      "        struct __Env { #[serde(default)] ok: Option<" & respRust &
         ">, #[serde(default)] err: Option<String> }\n"
     )
     result.add(
