@@ -2722,6 +2722,18 @@ static void test_proc_sugar_distinct_payload() {
     lib.shutdown();
 }
 
+// Proc-sugar broker whose payload is a CONTAINER (seq[ContentTopic]).
+static void test_proc_sugar_seq_payload() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto r = lib.listTopics("/t", 3);
+    CHECK(r.isOk());
+    CHECK_EQ(r->size(), 3u);  // ListTopics == std::vector<std::string>
+    CHECK_EQ((*r)[0], std::string("/t/0"));
+    CHECK_EQ((*r)[2], std::string("/t/2"));
+    lib.shutdown();
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -2912,6 +2924,7 @@ int main() {
     RUN(test_opt_byte_param_absent);
     RUN(test_proc_sugar_alias_payload);
     RUN(test_proc_sugar_distinct_payload);
+    RUN(test_proc_sugar_seq_payload);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);

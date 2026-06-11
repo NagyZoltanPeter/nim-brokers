@@ -657,19 +657,22 @@ proc generateCborCppHeaderFile*(
       h.add("  " & v.name & " = " & $v.ordinal & ",\n")
     h.add("};\n\n")
 
-  # Distinct / alias — plain `using` aliases of the underlying primitive.
+  # Distinct / alias — `using` aliases of the underlying mapped type. Uses the
+  # full mapper (not just primCppType) so a container payload like
+  # `proc connectedPeers(): Result[seq[string]]` emits
+  # `using ConnectedPeers = std::vector<std::string>;`, not just primitives.
   if aliasNames.len > 0:
     h.add("// ---- Distinct / alias types ----\n\n")
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
-    let prim = primCppType(underlying)
-    if prim.len == 0:
+    let cpp = nimTypeToCppType(underlying)
+    if cpp.len == 0:
       h.add(
         "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no C++ primitive mapping\n\n"
+          "' which has no C++ mapping\n\n"
       )
       continue
-    h.add("using " & name & " = " & prim & ";\n")
+    h.add("using " & name & " = " & cpp & ";\n")
   if aliasNames.len > 0:
     h.add("\n")
 
@@ -722,10 +725,13 @@ proc generateCborCppHeaderFile*(
   # The CBOR wire value is a bare scalar; the C++ surface uses the `using X
   # = <prim>` alias directly (no struct). Such a type is an emittable
   # request response / event payload even though it has no object fields.
+  # Uses the full mapper (not just primCppType) so a non-object payload that
+  # resolves to a container (`seq[string]` -> std::vector<std::string>) is
+  # emittable too, not only bare primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primCppType(resolveUnderlyingType(name)).len > 0
+      nimTypeToCppType(resolveUnderlyingType(name)).len > 0
 
   # A "void payload" is a zero-field broker type — `type X = void` (lowered
   # to an empty object). It has no value; the request envelope carries only

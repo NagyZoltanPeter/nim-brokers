@@ -639,6 +639,14 @@ RequestBroker(API):
 RequestBroker(API):
   proc nextJob(jobId: JobId): Future[Result[JobId, string]] {.async.}
 
+## ListTopics — proc-sugar, payload is a CONTAINER (seq[ContentTopic], i.e.
+## seq of a registered alias). Mirrors logos-delivery's
+## `proc connectedPeers(): Result[seq[string]]` / `listenAddresses`. Case (b).
+RequestBroker(API):
+  proc listTopics(
+    prefix: ContentTopic, n: int32
+  ): Future[Result[seq[ContentTopic], string]] {.async.}
+
 # ---------------------------------------------------------------------------
 # Event Brokers — original
 # ---------------------------------------------------------------------------
@@ -1236,6 +1244,17 @@ proc setupProviders(ctx: BrokerContext) =
     ctx,
     proc(jobId: JobId): Future[Result[JobId, string]] {.closure, async.} =
       return ok(JobId(int32(jobId) + 1'i32)),
+  )
+
+  discard ListTopics.setProvider(
+    ctx,
+    proc(
+        prefix: ContentTopic, n: int32
+    ): Future[Result[seq[ContentTopic], string]] {.closure, async.} =
+      var topics: seq[ContentTopic] = @[]
+      for i in 0 ..< int(n):
+        topics.add(prefix & "/" & $i)
+      return ok(topics),
   )
 
 # ---------------------------------------------------------------------------

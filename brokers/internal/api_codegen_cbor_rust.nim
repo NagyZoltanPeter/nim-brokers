@@ -412,10 +412,12 @@ proc generateCborRustFile*(
   # Its CBOR wire value is a bare scalar; the Rust surface uses the
   # `pub type X = <prim>` alias directly. Such a type is an emittable
   # request response / event payload despite having no object fields.
+  # Full mapper (not just primRustHint) so a container payload (`seq[string]`
+  # -> Vec<String>) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primRustHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToRustHint(resolveUnderlyingType(name)).len > 0
 
   proc isEmittablePayload(name: string): bool {.compileTime.} =
     name in objectNames or isScalarPayload(name)
@@ -476,11 +478,11 @@ proc generateCborRustFile*(
   # Distinct / alias.
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
-    let pyU = primRustHint(underlying)
+    let pyU = nimTypeToRustHint(underlying)
     if pyU.len == 0:
       rs.add(
         "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no Rust primitive mapping\n\n"
+          "' which has no Rust mapping\n\n"
       )
       continue
     rs.add("pub type " & name & " = " & pyU & ";\n\n")

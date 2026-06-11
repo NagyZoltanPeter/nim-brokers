@@ -2521,6 +2521,19 @@ func test_proc_sugar_distinct_payload() {
 	lib.Close()
 }
 
+func test_proc_sugar_seq_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.ListTopics("/t", 3) // ListTopics == []string
+	checkEq(err, error(nil), "no err")
+	checkEq(len(r), 3, "len")
+	if len(r) == 3 {
+		checkEq(r[0], "/t/0", "[0]")
+		checkEq(r[2], "/t/2", "[2]")
+	}
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2700,6 +2713,7 @@ func main() {
 	runTest("test_opt_byte_param_absent", test_opt_byte_param_absent)
 	runTest("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload)
 	runTest("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload)
+	runTest("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

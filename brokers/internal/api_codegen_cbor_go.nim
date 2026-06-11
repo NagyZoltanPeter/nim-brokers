@@ -406,10 +406,12 @@ proc generateCborGoFile*(
   # Its CBOR wire value is a bare scalar; the Go surface uses the
   # `type X = <prim>` alias directly. Such a type has no object fields, so
   # the event handler delivers the bare value rather than unpacked fields.
+  # Full mapper (not just primGoHint) so a container payload (`seq[string]`
+  # -> []string) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primGoHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToGoCborHint(resolveUnderlyingType(name)).len > 0
 
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     g.add("// -------- Generated payload types --------\n\n")
@@ -427,11 +429,11 @@ proc generateCborGoFile*(
 
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
-    let goU = primGoHint(underlying)
+    let goU = nimTypeToGoCborHint(underlying)
     if goU.len == 0:
       g.add(
         "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' (no Go primitive)\n\n"
+          "' (no Go mapping)\n\n"
       )
       continue
     g.add("type " & name & " = " & goU & "\n\n")

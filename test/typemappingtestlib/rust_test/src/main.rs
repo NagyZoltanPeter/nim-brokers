@@ -3032,6 +3032,21 @@ fn test_proc_sugar_distinct_payload() {
     lib.shutdown();
 }
 
+fn test_proc_sugar_seq_payload() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.list_topics("/t".to_string(), 3);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        // ListTopics == Vec<String>
+        check_eq!(
+            v.clone(),
+            vec!["/t/0".to_string(), "/t/1".to_string(), "/t/2".to_string()]
+        );
+    }
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
@@ -3217,6 +3232,7 @@ fn main() {
     run_test("test_opt_byte_param_absent", test_opt_byte_param_absent);
     run_test("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload);
     run_test("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload);
+    run_test("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload);
 
     let total = G_TOTAL.load(Ordering::SeqCst);
     let failed = G_FAILED.load(Ordering::SeqCst);

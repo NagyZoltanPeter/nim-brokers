@@ -581,10 +581,12 @@ proc generateCborPyFile*(
   # Its CBOR wire value is a bare scalar; the Python surface uses the
   # `X = <prim>` alias directly. Such a type is an emittable request
   # response / event payload despite having no object fields.
+  # Full mapper (not just primPyHint) so a container payload (`seq[string]`
+  # -> list[str]) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primPyHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToPyHint(resolveUnderlyingType(name)).len > 0
 
   proc isEmittablePayload(name: string): bool {.compileTime.} =
     name in objectNames or isScalarPayload(name)
@@ -621,11 +623,11 @@ proc generateCborPyFile*(
   # alias name in type hints).
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
-    let pyU = primPyHint(underlying)
+    let pyU = nimTypeToPyHint(underlying)
     if pyU.len == 0:
       py.add(
         "# TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no Python primitive mapping\n\n"
+          "' which has no Python mapping\n\n"
       )
       continue
     py.add(name & " = " & pyU & "\n")

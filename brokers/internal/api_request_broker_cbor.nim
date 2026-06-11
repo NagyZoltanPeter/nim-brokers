@@ -106,6 +106,17 @@ proc registerCborPrimitiveType*(
     # (unsafe to marshal across the FFI/CBOR boundary).
     if isNimPrimitive(base) or isAliasOrDistinctRegistered(base):
       registerTypeEntry(makeAliasEntry(typeName, base, atkDistinct))
+  elif parsed.objectDef.kind == nnkDistinctTy and parsed.objectDef.len == 1 and
+      parsed.objectDef[0].kind == nnkBracketExpr:
+    # Container payload — proc-sugar `proc connectedPeers(): Result[seq[string]]`
+    # (`seq[T]`, `array[N, T]`, …). Store the bracket type verbatim as the
+    # underlying; the per-language mapper resolves `seq[string]` /
+    # `seq[ContentTopic]` to `std::vector<...>` / `list[...]` / `Vec<...>` /
+    # `[]...` at codegen. A container whose element doesn't map stays
+    # TODO-stubbed (the mapper returns "").
+    registerTypeEntry(
+      makeAliasEntry(typeName, parsed.objectDef[0].repr.strip(), atkDistinct)
+    )
 
 # ---------------------------------------------------------------------------
 # Adapter proc type — exposed so registerBrokerLibrary (CBOR mode) can

@@ -1200,6 +1200,12 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertTrue(r.is_ok(), r.error)
         self.assertEqual(r.value, 6)
 
+    def test_proc_sugar_seq_payload(self):
+        # seq[ContentTopic] proc-sugar payload exposed as list[str].
+        r = self.lib.list_topics("/t", 3)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(list(r.value), ["/t/0", "/t/1", "/t/2"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
