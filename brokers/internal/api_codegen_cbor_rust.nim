@@ -483,7 +483,7 @@ proc generateCborRustFile*(
     if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
       responseNames.add(e.responseTypeName)
   for name in aliasNames:
-    if name in responseNames and barePrimitivePayload(name).len > 0:
+    if name in responseNames and effectiveResponsePayload(name) != name:
       continue
     let underlying = resolveUnderlyingType(name)
     let pyU = nimTypeToRustHint(underlying)
@@ -754,11 +754,11 @@ proc generateCborRustFile*(
         argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
         argsStructInit.add("            " & n & ",\n")
       argsStructDecl.add("        }\n")
-    # A bare-primitive proc-sugar payload surfaces the simple type directly
-    # (`Result<bool>`, not `Result<IsReady>`).
-    let respPrim = barePrimitivePayload(e.responseTypeName)
-    let respRust =
-      if respPrim.len > 0: primRustHint(respPrim) else: e.responseTypeName
+    # A synthetic proc-sugar payload surfaces its real type: the named alias
+    # (`Result<RequestId>`), the bare primitive (`Result<bool>`), or the
+    # synthetic name for an anonymous container (`Result<ConnectedPeers>`).
+    let resp = effectiveResponsePayload(e.responseTypeName)
+    let respRust = if isNimPrimitive(resp): primRustHint(resp) else: resp
     result.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & respRust & "> {\n"
     )

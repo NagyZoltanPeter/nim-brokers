@@ -435,7 +435,7 @@ proc generateCborGoFile*(
     if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
       responseNames.add(e.responseTypeName)
   for name in aliasNames:
-    if name in responseNames and barePrimitivePayload(name).len > 0:
+    if name in responseNames and effectiveResponsePayload(name) != name:
       continue
     let underlying = resolveUnderlyingType(name)
     let goU = nimTypeToGoCborHint(underlying)
@@ -616,11 +616,11 @@ proc generateCborGoFile*(
   # Factored emitters reused by the main Lib and each sub-interface struct.
   proc emitGoReqMethod(e: CborRequestEntry, recv: string): string {.compileTime.} =
     let methodName = snakeToPascal(e.apiName)
-    # A bare-primitive proc-sugar payload surfaces the simple type directly
-    # (`(bool, error)`, not `(IsReady, error)`).
-    let respPrim = barePrimitivePayload(e.responseTypeName)
-    let respType =
-      if respPrim.len > 0: primGoHint(respPrim) else: e.responseTypeName
+    # A synthetic proc-sugar payload surfaces its real type: the named alias
+    # (`(RequestId, error)`), the bare primitive (`(bool, error)`), or the
+    # synthetic name for an anonymous container (`(ConnectedPeers, error)`).
+    let resp = effectiveResponsePayload(e.responseTypeName)
+    let respType = if isNimPrimitive(resp): primGoHint(resp) else: resp
     var argsStructFields = ""
     var argsAssign = ""
     var firstNonZero = false

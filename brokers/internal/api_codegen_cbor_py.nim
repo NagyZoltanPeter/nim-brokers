@@ -675,7 +675,7 @@ proc generateCborPyFile*(
       responseNames.add(e.responseTypeName)
   var emittedAssign = false
   for (name, pyU) in aliasAssigns:
-    if name in responseNames and barePrimitivePayload(name).len > 0:
+    if name in responseNames and effectiveResponsePayload(name) != name:
       continue
     py.add(name & " = " & pyU & "\n")
     emittedAssign = true

@@ -672,11 +672,11 @@ proc generateCborCppHeaderFile*(
   # `using ConnectedPeers = std::vector<std::string>;`, and an object payload
   # `proc getRow(): Result[RowData]` emits `using GetRow = RowData;` (RowData is
   # forward-declared just above).
-  # Response-payload type names — a bare-primitive one (a verb-named proc-sugar
-  # broker over `Result[bool]`) is unwrapped to the simple type everywhere it is
-  # used, so its `using <Verb> = bool;` alias is dead — skip it. A named alias
-  # used by fields (`ContentTopic = string`) is never a response name here, so it
-  # keeps its `using`.
+  # Response-payload type names — a synthetic proc-sugar alias (`Send`,
+  # `StartDiscv5`, `GetRow`) is unwrapped to its real payload everywhere it is
+  # used, so its `using <Verb> = ...;` alias is dead — skip it. An anonymous
+  # container alias (`ConnectedPeers = seq[string]`) stays (it is the only handle
+  # for that type); a field-used alias (`ContentTopic`) is never a response name.
   var responseNames: seq[string] = @[]
   for e in requestEntries:
     if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
@@ -684,7 +684,7 @@ proc generateCborCppHeaderFile*(
   if aliasNames.len > 0:
     h.add("// ---- Distinct / alias types ----\n\n")
   for name in aliasNames:
-    if name in responseNames and barePrimitivePayload(name).len > 0:
+    if name in responseNames and effectiveResponsePayload(name) != name:
       continue
     let underlying = resolveUnderlyingType(name)
     let cpp = nimTypeToCppType(underlying)
@@ -766,10 +766,10 @@ proc generateCborCppHeaderFile*(
   proc payloadCppType(name: string): string {.compileTime.} =
     if isVoidPayload(name):
       return "void"
-    let prim = barePrimitivePayload(name)
-    if prim.len > 0:
-      return primCppType(prim)
-    name
+    let eff = effectiveResponsePayload(name)
+    if isNimPrimitive(eff):
+      return primCppType(eff)
+    eff
 
   # Effective callback/struct fields for a payload type: an object's real
   # fields, or a single synthetic `value` field for a scalar payload.
