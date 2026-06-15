@@ -1079,5 +1079,167 @@ class TestTableTypes(unittest.TestCase):
         self.lib.off_map_event(h)
 
 
+class TestAliasAndByteGaps(unittest.TestCase):
+    """Pure-alias (ContentTopic = string) in every direction, plus the
+    seq[byte]/Option[seq[byte]] event + param cells. These lock the
+    type-resolver alias fix and the seq[byte] wire mapping against
+    regression across all wrappers."""
+
+    def setUp(self):
+        self.lib = _make_lib()
+
+    def tearDown(self):
+        self.lib.shutdown()
+
+    # ----- pure alias: param (in) + field (out) + seq[alias] (out) -----
+
+    def test_alias_field_request(self):
+        r = self.lib.alias_field_request("/waku/2/default", 3)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.topic, "/waku/2/default")
+        self.assertEqual(
+            list(r.value.topics),
+            ["/waku/2/default/0", "/waku/2/default/1", "/waku/2/default/2"],
+        )
+
+    def test_alias_field_request_empty_seq(self):
+        r = self.lib.alias_field_request("topic", 0)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.topic, "topic")
+        self.assertEqual(list(r.value.topics), [])
+
+    # ----- pure alias in an event payload -----
+
+    def test_alias_event(self):
+        received: list[tuple] = []
+        evt = threading.Event()
+
+        def cb(_lib, topic, topics):
+            received.append((topic, list(topics)))
+            evt.set()
+
+        h = self.lib.on_alias_event(cb)
+        self.lib.trigger_alias_event_request("/t", 2)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "/t")
+        self.assertEqual(received[0][1], ["/t/0", "/t/1"])
+        self.lib.off_alias_event(h)
+
+    # ----- top-level seq[byte] in an event payload -----
+
+    def test_byte_seq_event(self):
+        received: list[bytes] = []
+        evt = threading.Event()
+
+        def cb(_lib, data):
+            received.append(bytes(data))
+            evt.set()
+
+        h = self.lib.on_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(5, True)
+        self.assertTrue(evt.wait(2.0))
+        self.assertEqual(received[0], bytes([0, 1, 2, 3, 4]))
+        self.lib.off_byte_seq_event(h)
+
+    # ----- Option[seq[byte]] in an event payload -----
+
+    def test_opt_byte_seq_event_present(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, True)
+        self.assertTrue(evt.wait(2.0))
+        v = received[0]
+        self.assertIsNotNone(v)
+        self.assertEqual(bytes(v) if isinstance(v, list) else v, bytes([1, 2, 3, 4]))
+        self.lib.off_opt_byte_seq_event(h)
+
+    def test_opt_byte_seq_event_absent(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, False)
+        self.assertTrue(evt.wait(2.0))
+        self.assertIsNone(received[0])
+        self.lib.off_opt_byte_seq_event(h)
+
+    # ----- Option[seq[byte]] as an input param -----
+
+    def test_opt_byte_param_present(self):
+        r = self.lib.opt_byte_param_request(bytes([9, 8, 7]))
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, 3)
+
+    def test_opt_byte_param_absent(self):
+        r = self.lib.opt_byte_param_request(None)
+        self.assertTrue(r.is_ok())
+        self.assertEqual(r.value.length, -1)
+
+    # ----- proc-sugar scalar payloads (alias / distinct) -----
+
+    def test_proc_sugar_alias_payload(self):
+        # ContentTopic = string; proc-sugar payload exposed as bare str.
+        r = self.lib.echo_topic("/waku/2/x")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value, "/waku/2/x/echo")
+
+    def test_proc_sugar_distinct_payload(self):
+        # JobId = distinct int32; proc-sugar payload exposed as bare int.
+        r = self.lib.next_job(5)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value, 6)
+
+    def test_proc_sugar_seq_payload(self):
+        # seq[ContentTopic] proc-sugar payload exposed as list[str].
+        r = self.lib.list_topics("/t", 3)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(list(r.value), ["/t/0", "/t/1", "/t/2"])
+
+    def test_store_like_present(self):
+        # Option[Epoch] (int64 alias), seq[Hash32] / Option[Key32]
+        # (array[32,byte] aliases). Field names + array mapping must survive.
+        r = self.lib.store_like_request(True)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.startTime, 1700)
+        self.assertEqual(len(r.value.hashes), 1)
+        self.assertEqual(bytes(r.value.hashes[0]), bytes(range(32)))
+        self.assertIsNotNone(r.value.cursor)
+        self.assertEqual(bytes(r.value.cursor), bytes(255 - i for i in range(32)))
+
+    def test_store_like_absent(self):
+        r = self.lib.store_like_request(False)
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertIsNone(r.value.startTime)
+        self.assertEqual(len(r.value.hashes), 0)
+        self.assertIsNone(r.value.cursor)
+
+    def test_proc_sugar_object_payload(self):
+        # proc-sugar returning a standalone object (GetRow -> RowData).
+        r = self.lib.get_row("abc")
+        self.assertTrue(r.is_ok(), r.error)
+        self.assertEqual(r.value.id, 3)
+        self.assertEqual(r.value.label, "row:abc")
+
+    def test_proc_sugar_bare_primitive(self):
+        # proc-sugar returning a bare primitive -> the simple value, no wrapper.
+        rb = self.lib.is_ready()
+        self.assertTrue(rb.is_ok(), rb.error)
+        self.assertEqual(rb.value, True)
+        ri = self.lib.double_it(21)
+        self.assertTrue(ri.is_ok(), ri.error)
+        self.assertEqual(ri.value, 42)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

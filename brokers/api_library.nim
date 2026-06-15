@@ -49,6 +49,12 @@ export mt_broker_common
 
 export results, chronos, chronicles, broker_context, api_common
 
+# Optional override for where the generated FFI artifacts (headers, wrappers,
+# cmake, cddl) are written. Set with `-d:BrokerFfiApiOutDir:<dir>`. Empty (the
+# default) makes `detectOutputDir` fall back to the project path. Declared here
+# as a `{.strdefine.}` so the `when defined(...)` use below resolves to a value.
+const BrokerFfiApiOutDir* {.strdefine.} = ""
+
 # ---------------------------------------------------------------------------
 # Macro helpers
 # ---------------------------------------------------------------------------
@@ -58,6 +64,7 @@ proc parseLibraryConfig(
 ): tuple[
   name: string,
   version: string,
+  versionExpr: NimNode,
   initializeRequest: NimNode,
   shutdownRequest: NimNode,
   refType: NimNode,
@@ -65,6 +72,9 @@ proc parseLibraryConfig(
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
+  # AST emitted into the generated `<lib>_version()` proc: a string literal, or
+  # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
+  var versionExpr: NimNode = newLit("0.1.0")
   var initializeReq: NimNode = nil
   var shutdownReq: NimNode = nil
   var refTy: NimNode = nil
@@ -86,10 +96,20 @@ proc parseLibraryConfig(
         var v = value
         if v.kind == nnkStmtList and v.len == 1:
           v = v[0]
-        if v.kind == nnkStrLit:
+        case v.kind
+        of nnkStrLit:
           version = v.strVal
+          versionExpr = v
+        of nnkIdent, nnkSym:
+          # A const reference (e.g. a `{.strdefine.}` `git_version`). The value
+          # isn't knowable here (untyped macro, caller scope), so we don't bake a
+          # literal — the generated `<lib>_version()` proc references the const
+          # directly and it resolves when the generated code compiles in the
+          # caller's module. `version` stays "" so the header comment omits it.
+          version = ""
+          versionExpr = v
         else:
-          error("version must be a string literal", v)
+          error("version must be a string literal or a string const identifier", v)
       of "initializerequest":
         if value.kind == nnkStmtList and value.len == 1:
           initializeReq = value[0]
@@ -144,6 +164,7 @@ proc parseLibraryConfig(
   (
     name: name,
     version: version,
+    versionExpr: versionExpr,
     initializeRequest: initializeReq,
     shutdownRequest: shutdownReq,
     refType: refTy,
@@ -171,6 +192,7 @@ proc registerBrokerLibraryCborImpl(
     tuple[
       name: string,
       version: string,
+      versionExpr: NimNode,
       initializeRequest: NimNode,
       shutdownRequest: NimNode,
       refType: NimNode,
@@ -203,6 +225,7 @@ proc registerBrokerLibraryCborImpl(
       tuple[
         name: string,
         version: string,
+        versionExpr: NimNode,
         initializeRequest: NimNode,
         shutdownRequest: NimNode,
         refType: NimNode,
@@ -549,14 +572,19 @@ proc registerBrokerLibraryCborImpl(
   let cborVersionFuncNameLit = newLit(cborVersionFuncName)
   let cborVersionFuncIdent = ident(cborVersionFuncName)
   let cborVersionConstIdent = ident("g" & libName & "VersionStr")
-  let cborVersionStrLit = newLit(config.version)
+  # `versionExpr` is either a string literal or a const identifier the caller
+  # defines (e.g. a `{.strdefine.}` `git_version`). Binding it to a `string`
+  # const and converting in the proc works for both — a const ident can't be a
+  # compile-time `cstring` initialiser, but a global string const's `.cstring`
+  # is stable for the program lifetime.
+  let cborVersionExpr = config.versionExpr
   result.add(
     quote do:
-      const `cborVersionConstIdent`: cstring = `cborVersionStrLit`
+      const `cborVersionConstIdent`: string = `cborVersionExpr`
       proc `cborVersionFuncIdent`*(): cstring {.
           exportc: `cborVersionFuncNameLit`, cdecl, dynlib
       .} =
-        `cborVersionConstIdent`
+        `cborVersionConstIdent`.cstring
 
   )
 
