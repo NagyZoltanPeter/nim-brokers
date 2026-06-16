@@ -45,8 +45,9 @@ suite "Outbound FFI events drop under overload (production 256->1024 ring)":
       else:
         inc dropped
 
-    echo "[Scenario A] seed=", ProdSeedCap, " ceiling=", ProdCeiling,
-      " emitted=", Burst, " accepted=", accepted, " DROPPED=", dropped
+    echo "[Scenario A] seed=",
+      ProdSeedCap, " ceiling=", ProdCeiling, " emitted=", Burst, " accepted=", accepted,
+      " DROPPED=", dropped
 
     # The ring accepts exactly the ceiling, then drops the rest.
     check accepted == ProdCeiling
@@ -73,8 +74,14 @@ suite "Outbound FFI events drop under overload (production 256->1024 ring)":
         if tryDequeue(addr c.ring, dst):
           inc drained
 
-    echo "[Scenario B] emitted=", Rounds * EmitPerRound, " accepted=", accepted,
-      " DROPPED=", dropped, " drained=", drained
+    echo "[Scenario B] emitted=",
+      Rounds * EmitPerRound,
+      " accepted=",
+      accepted,
+      " DROPPED=",
+      dropped,
+      " drained=",
+      drained
 
     # Once the backlog reaches 1024 the slow consumer can't keep up and the
     # producer's surplus is dropped — proving overload loses outbound events.
@@ -83,3 +90,47 @@ suite "Outbound FFI events drop under overload (production 256->1024 ring)":
     check accepted + dropped == Rounds * EmitPerRound
 
     drainAndFree(c)
+
+suite "Event-drop warn throttle (first + geometric-count + periodic)":
+  # `recordDrop` is the pure throttle that the generated emit handler calls on
+  # the drop path. Time is injected (`nowMonoMs` arg) so these are fully
+  # deterministic — no real clock, no sleeps.
+
+  test "first drop always logs; then suppressed until the count threshold":
+    var acct = initCborEventDropAccount()
+    var total, since: int64
+    # The very first drop logs, regardless of count/time.
+    check recordDrop(acct, 0, total, since)
+    check total == 1
+    check since == 1
+    # The next 9 (threshold is 10) are suppressed.
+    for _ in 0 ..< 9:
+      check not recordDrop(acct, 0, total, since)
+    # The 10th-since-last-line crosses the threshold and logs.
+    check recordDrop(acct, 0, total, since)
+    check total == 11
+    check since == 10
+
+  test "count threshold grows geometrically (10 -> 100)":
+    var acct = initCborEventDropAccount()
+    var total, since: int64
+    check recordDrop(acct, 0, total, since) # first @ total=1
+    for _ in 0 ..< 9:
+      check not recordDrop(acct, 0, total, since)
+    check recordDrop(acct, 0, total, since) # +10 -> logs, threshold -> 100
+    check since == 10
+    # Now 99 are suppressed and only the 100th-since logs.
+    for _ in 0 ..< 99:
+      check not recordDrop(acct, 0, total, since)
+    check recordDrop(acct, 0, total, since)
+    check since == 100
+    check total == 111
+
+  test "periodic floor logs on elapsed time even below the count threshold":
+    var acct = initCborEventDropAccount()
+    var total, since: int64
+    check recordDrop(acct, 1000, total, since) # first @ t=1s
+    check not recordDrop(acct, 1500, total, since) # +0.5s, below count & period
+    # >= 5s since the last line -> periodic log though count is only 2.
+    check recordDrop(acct, 6000, total, since)
+    check since == 2

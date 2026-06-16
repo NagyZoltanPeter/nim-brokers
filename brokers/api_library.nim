@@ -866,6 +866,19 @@ proc registerBrokerLibraryCborImpl(
               # The buffer never entered the ring so we own it.
               if not payloadBuf.isNil:
                 deallocShared(payloadBuf)
+              # Throttled warn: the first drop, then a geometric count backoff
+              # plus a periodic floor (see `recordDrop`). `dropAccount` is only
+              # ever touched on this processing thread, so no lock is needed.
+              var totalDropped, droppedSinceLog: int64
+              if recordDrop(
+                courier.dropAccount, monoNowMs(), totalDropped, droppedSinceLog
+              ):
+                {.cast(gcsafe).}:
+                  warn "FFI event courier ring full — delivery thread stalled or blocked; dropping outbound events",
+                    event = `eventNameLit`,
+                    ringCap = courier.ringCap(),
+                    totalDropped = totalDropped,
+                    droppedSinceLastLog = droppedSinceLog
               return
             if not sig.isNil:
               fireBrokerSignal(sig)

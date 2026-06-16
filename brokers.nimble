@@ -1298,6 +1298,19 @@ task runTorpedoExamplePy,
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
 
+task demoEventDrop,
+  "Demo: drive the REAL threaded FFI route until the courier drops events + logs them":
+  # Build benchlib (the EventBroker(API) lib) so its generated emit handler —
+  # the actual production drop-warn call site — runs on a real processing
+  # thread, draining to a real delivery thread.
+  exec "nim c --hints:off -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build"
+  exec "cmake --build test/ffibench/cmake-build --target stress_event_drop_overload"
+  exec "test/ffibench/build/stress_event_drop_overload"
+
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")
 

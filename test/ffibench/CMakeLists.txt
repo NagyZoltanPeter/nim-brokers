@@ -82,6 +82,8 @@ add_ffibench_target(stress_event_no_nim stress_event_no_nim.cpp)
 # Part D-5 — shutdown drain + slow-callback provider-non-blocking proof.
 add_ffibench_target(stress_event_shutdown stress_event_shutdown.cpp)
 add_ffibench_target(stress_event_slow_callback stress_event_slow_callback.cpp)
+# Drop-logging demo — stalled consumer + flood, fires the courier drop warn.
+add_ffibench_target(stress_event_drop_overload stress_event_drop_overload.cpp)
 # Part D-6 — event-dispatch microbenchmark driver.
 add_ffibench_target(bench_event_driver bench_event_driver.cpp)
 # Round-2 closure — FFI perftest from C++ (matches perf_test_multi_thread_*).
