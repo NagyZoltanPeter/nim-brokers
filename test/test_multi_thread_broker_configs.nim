@@ -97,10 +97,10 @@ suite "Multi-thread broker config showcase":
         discard seen.fetchAdd(1)
     )
     check handle.isOk()
-    await ScalarTick.emit(ScalarTick(n: 42))
+    ScalarTick.emit(ScalarTick(n: 42))
     await sleepAsync(chronos.milliseconds(10))
     check seen.load() == 1
-    ScalarTick.dropAllListeners()
+    await ScalarTick.dropAllListeners()
 
   asyncTest "EventBroker(mt) — fastBurst preset + payload override":
     var seen: Atomic[int]
@@ -110,10 +110,10 @@ suite "Multi-thread broker config showcase":
         discard seen.fetchAdd(1)
     )
     check handle.isOk()
-    await FastEvt.emit(FastEvt(note: "hello"))
+    FastEvt.emit(FastEvt(note: "hello"))
     await sleepAsync(chronos.milliseconds(10))
     check seen.load() == 1
-    FastEvt.dropAllListeners()
+    await FastEvt.dropAllListeners()
 
   asyncTest "EventBroker(mt) — largePayload preset (seq[byte])":
     var seen: Atomic[int]
@@ -124,10 +124,10 @@ suite "Multi-thread broker config showcase":
     )
     check handle.isOk()
     let payload = newSeq[byte](32 * 1024) # well under 64 KB cap
-    await BlobEvt.emit(BlobEvt(blob: payload))
+    BlobEvt.emit(BlobEvt(blob: payload))
     await sleepAsync(chronos.milliseconds(10))
     check seen.load() == 1
-    BlobEvt.dropAllListeners()
+    await BlobEvt.dropAllListeners()
 
   asyncTest "EventBroker(mt) — explicit tiny manual config":
     var seen: Atomic[int]
@@ -137,10 +137,10 @@ suite "Multi-thread broker config showcase":
         discard seen.fetchAdd(1)
     )
     check handle.isOk()
-    await WeeEvt.emit(WeeEvt(flag: true))
+    WeeEvt.emit(WeeEvt(flag: true))
     await sleepAsync(chronos.milliseconds(10))
     check seen.load() == 1
-    WeeEvt.dropAllListeners()
+    await WeeEvt.dropAllListeners()
 
   asyncTest "EventBroker(mt) — tinyFootprint preset":
     var seen: Atomic[int]
@@ -150,10 +150,10 @@ suite "Multi-thread broker config showcase":
         discard seen.fetchAdd(1)
     )
     check handle.isOk()
-    await EmbeddedEvt.emit(EmbeddedEvt(on: true))
+    EmbeddedEvt.emit(EmbeddedEvt(on: true))
     await sleepAsync(chronos.milliseconds(10))
     check seen.load() == 1
-    EmbeddedEvt.dropAllListeners()
+    await EmbeddedEvt.dropAllListeners()
 
   asyncTest "RequestBroker(mt) — scalar default":
     let setRes = ScalarRes.setProvider(

@@ -32,16 +32,16 @@ var gReceived: Atomic[int]
 gReceived.store(0)
 
 proc emitter() {.thread.} =
-  waitFor Evt.emit(Evt(value: 1))
+  Evt.emit(Evt(value: 1))
   when probeMode == "gcCollect" or probeMode == "gcCollectAll":
     GC_fullCollect()
 
 proc emitterCtx(ctx: BrokerContext) {.thread.} =
   setThreadBrokerContext(ctx)
-  waitFor Evt.emit(Evt(value: 1))
+  Evt.emit(Evt(value: 1))
 
 proc emitterKeepAlive(stopFlag: ptr Atomic[bool]) {.thread.} =
-  waitFor Evt.emit(Evt(value: 1))
+  Evt.emit(Evt(value: 1))
   while not stopFlag[].load():
     sleep(5)
 
@@ -70,7 +70,7 @@ proc run() {.async.} =
       ph2[i].createThread(emitterKeepAlive, addr stop)
     while gReceived.load() < threads.len + ph2.len:
       await sleepAsync(milliseconds(1))
-    Evt.dropAllListeners()
+    await Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
     stop.store(true)
     for i in 0 ..< threads.len:
@@ -86,7 +86,7 @@ proc run() {.async.} =
     while gReceived.load() < 1:
       await sleepAsync(milliseconds(1))
     for round in 0 ..< 8:
-      Evt.dropAllListeners()
+      await Evt.dropAllListeners()
       await sleepAsync(milliseconds(20))
       registerListener()
     let baseline = gReceived.load()
@@ -96,7 +96,7 @@ proc run() {.async.} =
     t4.createThread(emitterKeepAlive, addr stop)
     while gReceived.load() < baseline + 3:
       await sleepAsync(milliseconds(1))
-    Evt.dropAllListeners()
+    await Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
     stop.store(true)
     t1.joinThread()
@@ -104,7 +104,7 @@ proc run() {.async.} =
     t3.joinThread()
     t4.joinThread()
   elif probeMode == "freshCtx":
-    Evt.dropAllListeners() # drop the default-ctx listener; we'll use fresh ctxs.
+    await Evt.dropAllListeners() # drop the default-ctx listener; we'll use fresh ctxs.
     for round in 0 ..< 8:
       let ctx = NewBrokerContext()
       registerListener(ctx)
@@ -114,7 +114,7 @@ proc run() {.async.} =
       while gReceived.load() < target:
         await sleepAsync(milliseconds(1))
       t1.joinThread()
-      Evt.dropAllListeners(ctx)
+      await Evt.dropAllListeners(ctx)
       await sleepAsync(milliseconds(20))
     # Phase 2 — fresh ctx + three concurrent emitters.
     let ctx2 = NewBrokerContext()
@@ -129,7 +129,7 @@ proc run() {.async.} =
     t2.joinThread()
     t3.joinThread()
     t4.joinThread()
-    Evt.dropAllListeners(ctx2)
+    await Evt.dropAllListeners(ctx2)
     await sleepAsync(milliseconds(50))
   else:
     # Phase 1 — emitters in/out, optionally drop+relisten between rounds.
@@ -146,7 +146,7 @@ proc run() {.async.} =
         registerListener()
       elif probeMode == "relisten" or probeMode == "gcCollect" or
           probeMode == "gcCollectAll":
-        Evt.dropAllListeners()
+        await Evt.dropAllListeners()
         await sleepAsync(milliseconds(20))
         when probeMode == "gcCollectAll":
           GC_fullCollect()
@@ -162,7 +162,7 @@ proc run() {.async.} =
     t2.joinThread()
     t3.joinThread()
     t4.joinThread()
-    Evt.dropAllListeners()
+    await Evt.dropAllListeners()
     await sleepAsync(milliseconds(50))
 
   echo "PROBE OK mode=", probeMode, " received=", gReceived.load()

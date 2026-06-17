@@ -784,7 +784,7 @@ proc setupProviders(ctx: BrokerContext) =
     ctx,
     proc(): Future[Result[CounterRequest, string]] {.closure, async.} =
       inc gCounter
-      await CounterChanged.emit(gProviderCtx, CounterChanged(value: gCounter))
+      CounterChanged.emit(gProviderCtx, CounterChanged(value: gCounter))
       return ok(CounterRequest(value: gCounter)),
   )
 
@@ -812,7 +812,7 @@ proc setupProviders(ctx: BrokerContext) =
     proc(
         flag: bool, i32: int32, i64: int64, f64: float64
     ): Future[Result[PrimScalarRequest, string]] {.closure, async.} =
-      await PrimScalarEvent.emit(
+      PrimScalarEvent.emit(
         gProviderCtx, PrimScalarEvent(flag: flag, i32: i32, i64: i64, f64: f64)
       )
       return ok(PrimScalarRequest(flag: flag, i32: i32, i64: i64, f64: f64)),
@@ -824,7 +824,7 @@ proc setupProviders(ctx: BrokerContext) =
         priority: Priority, jobId: JobId
     ): Future[Result[TypedScalarRequest, string]] {.closure, async.} =
       let nextId = JobId(int32(jobId) + 1'i32)
-      await TypedScalarEvent.emit(
+      TypedScalarEvent.emit(
         gProviderCtx,
         TypedScalarEvent(
           priority: priority, jobId: jobId, ts: Timestamp(int64(int32(jobId)) * 10'i64)
@@ -840,7 +840,7 @@ proc setupProviders(ctx: BrokerContext) =
     proc(label: string): Future[Result[VoidActionRequest, string]] {.closure, async.} =
       if label.len == 0:
         return err("empty label")
-      await VoidPing.emit(gProviderCtx, VoidPing())
+      VoidPing.emit(gProviderCtx, VoidPing())
       return ok(VoidActionRequest()),
   )
 
@@ -849,7 +849,7 @@ proc setupProviders(ctx: BrokerContext) =
   discard IntResultRequest.setProvider(
     ctx,
     proc(value: int32): Future[Result[IntResultRequest, string]] {.closure, async.} =
-      await SimpleIntEvent.emit(gProviderCtx, SimpleIntEvent(int64(value) * 10'i64))
+      SimpleIntEvent.emit(gProviderCtx, SimpleIntEvent(int64(value) * 10'i64))
       return ok(IntResultRequest(value * 2'i32)),
   )
 
@@ -872,7 +872,7 @@ proc setupProviders(ctx: BrokerContext) =
       var items: seq[string] = @[]
       for i in 0 ..< int(n):
         items.add(prefix & "-" & $i)
-      await StringSeqEvent.emit(gProviderCtx, StringSeqEvent(items: items))
+      StringSeqEvent.emit(gProviderCtx, StringSeqEvent(items: items))
       return ok(StringSeqRequest(items: items)),
   )
 
@@ -882,7 +882,7 @@ proc setupProviders(ctx: BrokerContext) =
       var values: seq[int64] = @[]
       for i in 0 ..< int(n):
         values.add(int64(i) * 10'i64)
-      await PrimSeqEvent.emit(gProviderCtx, PrimSeqEvent(values: values))
+      PrimSeqEvent.emit(gProviderCtx, PrimSeqEvent(values: values))
       return ok(PrimSeqRequest(values: values)),
   )
 
@@ -890,7 +890,7 @@ proc setupProviders(ctx: BrokerContext) =
     ctx,
     proc(seed: int32): Future[Result[FixedArrayRequest, string]] {.closure, async.} =
       let vals: array[4, int32] = [seed, seed * 2'i32, seed * 3'i32, seed * 4'i32]
-      await FixedArrayEvent.emit(gProviderCtx, FixedArrayEvent(values: vals))
+      FixedArrayEvent.emit(gProviderCtx, FixedArrayEvent(values: vals))
       return ok(FixedArrayRequest(values: vals, ts: Timestamp(int64(seed)))),
   )
 
@@ -900,7 +900,7 @@ proc setupProviders(ctx: BrokerContext) =
       var vals: array[ConstArrayLen, int32]
       for i in 0 ..< ConstArrayLen:
         vals[i] = seed * int32(i + 1)
-      await ConstArrayEvent.emit(gProviderCtx, ConstArrayEvent(values: vals))
+      ConstArrayEvent.emit(gProviderCtx, ConstArrayEvent(values: vals))
       return ok(ConstArrayRequest(values: vals)),
   )
 
@@ -910,7 +910,7 @@ proc setupProviders(ctx: BrokerContext) =
       var tags: seq[Tag] = @[]
       for i in 0 ..< int(n):
         tags.add(Tag(key: "key-" & $i, value: "val-" & $i))
-      await TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
+      TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
       return ok(ObjSeqResultRequest(tags: tags)),
   )
 
@@ -921,7 +921,7 @@ proc setupProviders(ctx: BrokerContext) =
       var tags: seq[Tag] = @[]
       for i in 0 ..< int(n):
         tags.add(Tag(key: "tag-key-" & $i, value: "tag-val-" & $i))
-      await TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
+      TagSeqEvent.emit(gProviderCtx, TagSeqEvent(tags: tags))
       return ok(TagSeqRequest(count: int32(tags.len))),
   )
 
@@ -1087,7 +1087,7 @@ proc setupProviders(ctx: BrokerContext) =
         for j in 0 .. i:
           bs.add(byte((i + j) and 0xFF))
         items.add(Inner(id: i, tag: "evt-" & $i, bytes: bs))
-      await InnersUpdatedEvent.emit(gProviderCtx, InnersUpdatedEvent(items: items))
+      InnersUpdatedEvent.emit(gProviderCtx, InnersUpdatedEvent(items: items))
       return ok(TriggerInnersUpdatedRequest(fired: count)),
   )
 
@@ -1135,7 +1135,7 @@ proc setupProviders(ctx: BrokerContext) =
         Slot(idx: base + 2, name: ""),
         Slot(idx: base + 3, name: "delta with spaces"),
       ]
-      await FixedObjArrayEvent.emit(gProviderCtx, FixedObjArrayEvent(slots: slots))
+      FixedObjArrayEvent.emit(gProviderCtx, FixedObjArrayEvent(slots: slots))
       return ok(TriggerFixedObjArrayRequest(fired: 4)),
   )
 
@@ -1173,7 +1173,7 @@ proc setupProviders(ctx: BrokerContext) =
       var words: array[4, string]
       for i in 0 .. 3:
         words[i] = prefix & "-" & $i
-      await StrArrayEvent.emit(gProviderCtx, StrArrayEvent(words: words))
+      StrArrayEvent.emit(gProviderCtx, StrArrayEvent(words: words))
       return ok(TriggerStrArrayRequest(fired: 4)),
   )
 
@@ -1214,7 +1214,7 @@ proc setupProviders(ctx: BrokerContext) =
       keys.sort()
       # Echo the received map back through a (string-keyed) event so every
       # wrapper — including the string-key-only ones — can verify MapEvent.
-      await MapEvent.emit(gProviderCtx, MapEvent(counts: scores))
+      MapEvent.emit(gProviderCtx, MapEvent(counts: scores))
       return ok(MapParamRequest(total: total, joined: keys.join("|"))),
   )
 
@@ -1239,7 +1239,7 @@ proc setupProviders(ctx: BrokerContext) =
       var topics: seq[ContentTopic] = @[]
       for i in 0 ..< int(n):
         topics.add(topic & "/" & $i)
-      await AliasEvent.emit(gProviderCtx, AliasEvent(topic: topic, topics: topics))
+      AliasEvent.emit(gProviderCtx, AliasEvent(topic: topic, topics: topics))
       return ok(TriggerAliasEventRequest(fired: n)),
   )
 
@@ -1253,13 +1253,13 @@ proc setupProviders(ctx: BrokerContext) =
       var data = newSeq[byte](int(size))
       for i in 0 ..< int(size):
         data[i] = byte(i mod 256)
-      await ByteSeqEvent.emit(gProviderCtx, ByteSeqEvent(data: data))
+      ByteSeqEvent.emit(gProviderCtx, ByteSeqEvent(data: data))
       let optVal =
         if present:
           some(@[byte 1, 2, 3, 4])
         else:
           none(seq[byte])
-      await OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
+      OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
       return ok(TriggerByteEventsRequest(fired: 2)),
   )
 

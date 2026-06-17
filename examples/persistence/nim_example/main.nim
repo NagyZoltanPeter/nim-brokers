@@ -44,7 +44,7 @@ proc roundtrip(b: IBackend, key, val: string): Future[string] {.async: (raises: 
     await noCancel(sleepAsync(1.milliseconds))
   doAssert received, "read event timed out"
 
-  b.dropListener(ReadCompleted, hRes.get())
+  await b.dropListener(ReadCompleted, hRes.get())
   doAssert gotFound, "expected key to be found"
   gotValue
 
@@ -93,7 +93,7 @@ proc scenarioMixedOneContext() {.async: (raises: []).} =
   while createdCount < 2 and Moment.now() < deadline:
     await noCancel(sleepAsync(1.milliseconds))
   doAssert createdCount == 2, "BackendCreated events"
-  p.dropListener(BackendCreated, chRes.get())
+  await p.dropListener(BackendCreated, chRes.get())
 
   # Both sub-instances share the parent classCtx but differ in instanceCtx.
   doAssert (uint32(bf.brokerCtx) and 0xFFFF'u32) == (uint32(p.brokerCtx) and 0xFFFF'u32)
@@ -166,7 +166,7 @@ proc scenarioConcurrentLoad() {.async: (raises: []).} =
       if results.len > before and results[^1][0] == key and results[^1][1] == val:
         inc local
 
-    be.dropListener(ReadCompleted, hRes.get())
+    await be.dropListener(ReadCompleted, hRes.get())
     local
 
   let fileTask = runBackend(bf, "fileLib", N)

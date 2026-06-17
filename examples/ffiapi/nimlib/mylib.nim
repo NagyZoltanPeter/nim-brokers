@@ -262,7 +262,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
             online: true,
           )
         )
-        await DeviceDiscovered.emit(
+        DeviceDiscovered.emit(
           gProviderCtx,
           DeviceDiscovered(
             deviceId: id,
@@ -276,7 +276,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       let batchIds = addedDevices.mapIt(it.deviceId)
       let batchCaps: array[4, int32] =
         [int32(addedDevices.len), int32(gNextDeviceId - 1), 0'i32, 0'i32]
-      await DeviceBatch.emit(
+      DeviceBatch.emit(
         gProviderCtx,
         DeviceBatch(labels: batchLabels, deviceIds: batchIds, capabilities: batchCaps),
       )
@@ -296,7 +296,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
           let dev = gDevices[i]
           gDevices.del(i)
           # Emit status change (offline)
-          await DeviceStatusChanged.emit(
+          DeviceStatusChanged.emit(
             gProviderCtx,
             DeviceStatusChanged(
               deviceId: dev.id, name: dev.name, online: false, timestampMs: nowMs()
@@ -371,7 +371,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       let sid = SensorId(gNextSensorId)
       inc gNextSensorId
       # Emit a sensor alert (online status)
-      await SensorAlert.emit(
+      SensorAlert.emit(
         gProviderCtx,
         SensorAlert(
           sensorId: sid,
