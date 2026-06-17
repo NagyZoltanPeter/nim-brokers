@@ -1,5 +1,5 @@
 ## BrokerImplement — derived implementation of a BrokerInterface
-## (doc/HIERARCHICAL_BROKERS_PLAN.md, phase P4).
+## (doc/design/HIERARCHICAL_BROKERS_PLAN.md, phase P4).
 ##
 ##   type MyServiceImpl = ref object of IMyService
 ##     db: Database

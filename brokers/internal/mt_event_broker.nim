@@ -705,7 +705,7 @@ proc generateMtEventBroker*(
   # │ FFI teardown + the Part D-3 dropAll hook correct even when the     │
   # │ returned Future is discarded/unpolled. Adding an await here        │
   # │ reintroduces the SubsRegistry-orphan regression.                   │
-  # │ See doc/DROP_ASYNC_EMIT_SYNC_PLAN.md §Risks (R2).                   │
+  # │ See doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md §Risks (R2).            │
   # └──────────────────────────────────────────────────────────────────┘
   result.add(
     quote do:

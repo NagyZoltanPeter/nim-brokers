@@ -1,5 +1,5 @@
 ## BrokerInterface — an abstract, OOP-style facade over a group of Event /
-## Request brokers (see doc/HIERARCHICAL_BROKERS_PLAN.md, phase P3).
+## Request brokers (see doc/design/HIERARCHICAL_BROKERS_PLAN.md, phase P3).
 ##
 ## A `BrokerInterface` block declares the *contract*: the events it can emit
 ## and the requests it answers. It generates:

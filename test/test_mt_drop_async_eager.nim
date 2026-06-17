@@ -1,5 +1,5 @@
 ## Tripwire for the "drop* async all-round" change (see
-## doc/DROP_ASYNC_EMIT_SYNC_PLAN.md §R2 / §1e).
+## doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md §R2 / §1e).
 ##
 ## The MT dropListener/dropAllListeners overloads are async only for
 ## cross-lane shape parity; their impl bodies MUST stay suspension-free so

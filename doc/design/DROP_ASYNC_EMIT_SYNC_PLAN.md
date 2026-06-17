@@ -63,8 +63,8 @@ synchronous (await-free) — wrap as `{.async: (raises: []).}` returning
 `Future[void]`.
 
 ### 1a. `brokers/internal/mt_event_broker.nim`
-- **Impl procs** `dropListenerImpl` ([~:707](../brokers/internal/mt_event_broker.nim))
-  and `dropAllListenersImpl` ([~:753](../brokers/internal/mt_event_broker.nim)):
+- **Impl procs** `dropListenerImpl` ([~:707](../../brokers/internal/mt_event_broker.nim))
+  and `dropAllListenersImpl` ([~:753](../../brokers/internal/mt_event_broker.nim)):
   keep **sync** (plain `proc`). Prepend a loud guard comment:
   ```
   # ── NO async / NO await in this body. ──────────────────────────────
@@ -73,12 +73,12 @@ synchronous (await-free) — wrap as `{.async: (raises: []).}` returning
   # eagerly, which is what keeps FFI teardown + the Part D-3 dropAll
   # hook correct even when the returned Future is discarded/unpolled.
   # Adding an await here reintroduces the SubsRegistry-orphan regression
-  # (see doc/DROP_ASYNC_EMIT_SYNC_PLAN.md §Risks).
+  # (see doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md §Risks).
   ```
 - **Public overloads** `dropListener*` / `dropAllListeners*`
-  ([~:806-820](../brokers/internal/mt_event_broker.nim)): change from sync to
+  ([~:806-820](../../brokers/internal/mt_event_broker.nim)): change from sync to
   `{.async: (raises: []).}` returning `Future[void]`, body `await <impl>(…)`
-  (mirrors the single-thread shape at [event_broker.nim:365](../brokers/event_broker.nim)).
+  (mirrors the single-thread shape at [event_broker.nim:365](../../brokers/event_broker.nim)).
 - The Part D-3 hook fire stays **inside the sync impl**, after listener
   clearing — unchanged. (It therefore still runs eagerly.)
 - `setDropAll<Event>Hook` stays sync — unchanged.
@@ -136,19 +136,19 @@ work synchronous (`emitImpl` is already await-free) — make `emitImpl` a plain
 the cross-thread cell is still enqueued before return.
 
 ### 2a. `brokers/internal/mt_event_broker.nim`
-- **`emitImpl`** ([~:487](../brokers/internal/mt_event_broker.nim)): drop
+- **`emitImpl`** ([~:487](../../brokers/internal/mt_event_broker.nim)): drop
   `{.async: (raises: []).}`; make it `proc … {.gcsafe, raises: [].}`. Body is
   unchanged (lock, same-thread `asyncSpawn fut` for listener tasks, cross-thread
   marshal/spill/enqueue/`fireBrokerSignal`). **Verify** `gcsafe`/`raises: []`
   holds for a plain proc — `withLock`, chronicles `error`/`warn`, `asyncSpawn`,
   `marshal*`, `allocShared0`. This is the main compile risk of Phase 2.
-- **Public `emit*`** ([~:601-610](../brokers/internal/mt_event_broker.nim)):
+- **Public `emit*`** ([~:601-610](../../brokers/internal/mt_event_broker.nim)):
   change from `{.async.}` `await emitImpl(…)` to sync `proc emit*(…) =`
-  `emitImpl(…)` (mirrors [event_broker.nim:471](../brokers/event_broker.nim)).
-- **Inline-ctor `emit` overloads** ([~:614-690](../brokers/internal/mt_event_broker.nim)):
+  `emitImpl(…)` (mirrors [event_broker.nim:471](../../brokers/event_broker.nim)).
+- **Inline-ctor `emit` overloads** ([~:614-690](../../brokers/internal/mt_event_broker.nim)):
   remove the `asyncPragma` and the `await` wrapper on `emitCtorCall*`; emit a
   plain proc calling `emitImpl(ctx, <ctorExpr>)` directly (mirror single-thread
-  [event_broker.nim:484+](../brokers/event_broker.nim)).
+  [event_broker.nim:484+](../../brokers/event_broker.nim)).
 - Same-thread path requires a running loop for `asyncSpawn` — already true (emit
   runs on the event loop). Document; no new constraint vs single-thread.
 
