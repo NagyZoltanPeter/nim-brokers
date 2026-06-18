@@ -184,17 +184,7 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
           "' (request type " & typeName & ") declared in " & ifaceStr
       )
 
-  # Per-class context allocation state.
-  let classCtxVar = ident(implStr & "BrokerClassCtx")
-  let instCounter = ident(implStr & "BrokerInstCounter")
   let setupName = ident(implStr & "SetupProviders")
-  result.add(
-    quote do:
-      # classCtx allocated once at module init (immutable -> race-free and
-      # gcsafe to read); per-instance instanceCtx from an atomic counter.
-      let `classCtxVar` = newClassCtx()
-      var `instCounter` {.global.}: Atomic[uint16]
-  )
 
   # setupProviders — register a per-instance provider closure per request that
   # dispatches to the raw `<verb>Impl` body (capturing `self`). This is the only
@@ -336,10 +326,16 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     copyLineInfoRec(cucNode, ctorInfoSrc)
   result.add(cucNode)
 
-  # create() — allocate a fresh per-instance ctx, then decorate.
-  let cucCall =
-    "T.createUnderContext(makeBrokerContext(" & $classCtxVar & ", " & $instCounter &
-    ".fetchAdd(1'u16, moRelaxed) + 1'u16)" & fwdArgs & ")"
+  # create() — allocate a per-instance ctx UNDER the ambient global scope, then
+  # decorate. The classCtx is adopted from the current `globalBrokerContext()`
+  # (read at call time), so a create'd instance lives in the same global scope
+  # as the bare brokers / the locked test context — intentionally connecting
+  # decoupled instances and bare brokers under one classCtx. The instanceCtx
+  # comes from `newInstanceCtx`'s PROCESS-GLOBAL counter, so it stays unique
+  # across all impl classes that share a classCtx (a per-class counter would
+  # collide once the classCtx is shared). For an explicit/foreign scope, call
+  # `createUnderContext(ctx, …)` directly.
+  let cucCall = "T.createUnderContext(newInstanceCtx(globalBrokerContext())" & fwdArgs & ")"
   var createSrc =
     "proc create*(T: typedesc[" & implStr & "]" & ctorParamDecls & "): " & wrapRet &
     " " & wrapPrag & " =\n"

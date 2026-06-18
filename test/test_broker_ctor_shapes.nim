@@ -88,3 +88,23 @@ suite "BrokerImplement: ctor result-shape mirroring":
     let g = (waitFor GAsyncResult.createUnderContext(ctx, prefix = "u:")).get()
     check g.brokerCtx == ctx
     check (waitFor Greet.request(ctx, "x")).value == "u:x"
+
+  test "create adopts the ambient global classCtx; instances stay distinct":
+    # Outside any lock the ambient global is the default scope.
+    let d = GSyncBare.create(prefix = "d:")
+    check d.brokerCtx.classCtx == DefaultBrokerContext.classCtx
+    check d.brokerCtx.instanceCtx != 0'u16 # got a fresh per-instance high16
+
+    proc underLock() {.async.} =
+      lockNewGlobalBrokerContext:
+        let g = globalBrokerContext()
+        let a = (await GAsyncResult.create(prefix = "a:")).get()
+        let b = (await GAsyncResult.create(prefix = "b:")).get()
+        # Both adopt the locked scope's classCtx (the shared "global" half) ...
+        check a.brokerCtx.classCtx == g.classCtx
+        check b.brokerCtx.classCtx == g.classCtx
+        # ... yet stay isolated via distinct process-global instanceCtx.
+        check a.brokerCtx != b.brokerCtx
+        check a.brokerCtx.instanceCtx != b.brokerCtx.instanceCtx
+
+    waitFor underLock()
