@@ -238,6 +238,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Inline object types get extra `emit` overloads that accept fields directly (e.g. `TypeName.emit(field1 = val1, field2 = val2)`).
 - `dropListener` removes a listener from the table. Already-spawned in-flight futures for the current emit cycle will still complete (snapshot was taken before drop).
 - `dropAllListeners` clears all listeners for a context. Same in-flight behavior as `dropListener`.
+- **Uniform call shape across lanes** (single-thread / `(mt)` / `(API)`): `emit` is always sync `void` (fire-and-forget — never `await`/`waitFor` it), and `dropListener` / `dropAllListeners` are always async `Future[void]` (`await` them, or `discard`/`waitFor` in sync/`{.thread.}` contexts). The MT/API drop bodies are suspension-free, so a discarded Future still clears listeners eagerly. `clearProvider` stays sync in every lane. See `doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md`.
 
 ### RequestBroker specifics
 
@@ -369,7 +370,7 @@ test/
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **nim-brokers** (6737 symbols, 11829 relationships, 210 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **nim-brokers** (6979 symbols, 12304 relationships, 204 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

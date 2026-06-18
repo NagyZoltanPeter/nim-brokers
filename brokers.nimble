@@ -350,6 +350,7 @@ task test, "Run all single and multi-threaded broker tests":
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
     "test_multi_thread_broker_configs", "test_mt_large_payload",
+    "test_mt_drop_async_eager",
   ]
   for f in mtTests:
     for opt in [
@@ -500,8 +501,9 @@ task perftest, "Run performance and stress tests":
       test opt, f
 
 task testApi, "Run codec unit tests + library init integration tests":
-  # Codec round-trip tests (no FFI flags needed).
-  let codecTests = ["test_api_codec", "test_api_table_codec"]
+  # Codec round-trip tests + event-courier drop evidence (no FFI flags needed).
+  let codecTests =
+    ["test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload"]
   for f in codecTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -1296,6 +1298,19 @@ task runTorpedoExamplePy,
   putEnv("TORPEDOLIB_BUILD_DIR", "build")
   exec quoteArg(findPythonExe()) & " " &
     quoteArg("examples/torpedo/python_example/main.py")
+
+task demoEventDrop,
+  "Demo: drive the REAL threaded FFI route until the courier drops events + logs them":
+  # Build benchlib (the EventBroker(API) lib) so its generated emit handler —
+  # the actual production drop-warn call site — runs on a real processing
+  # thread, draining to a real delivery thread.
+  exec "nim c --hints:off -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:test/ffibench/build --mm:orc " &
+    "--nimMainPrefix:benchlib test/ffibench/benchlib.nim"
+  mkDir("test/ffibench/cmake-build")
+  exec "cmake -S test/ffibench -B test/ffibench/cmake-build"
+  exec "cmake --build test/ffibench/cmake-build --target stress_event_drop_overload"
+  exec "test/ffibench/build/stress_event_drop_overload"
 
 task nph, "Install nph if needed and format modified Nim files":
   runNph(changedNimFiles(), "No modified .nim or .nimble files to format")

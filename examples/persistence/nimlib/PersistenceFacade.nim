@@ -49,7 +49,7 @@ BrokerImplement PersistenceImpl of IPersistence:
         backend: be, kind: kind, handle: uint32(subCtx), alive: true, terminate: term
       )
     )
-    await self.emit(BackendCreated, BackendCreated(handle: uint32(subCtx), kind: kind))
+    self.emit(BackendCreated, BackendCreated(handle: uint32(subCtx), kind: kind))
     ok(be)
 
   method listBackends(

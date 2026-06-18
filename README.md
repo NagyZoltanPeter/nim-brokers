@@ -178,12 +178,16 @@ GreetingEvent.emit(GreetingEvent(text: "hello"))
 # Emit by fields (inline object types only)
 GreetingEvent.emit(text = "hello")
 
-# Remove a single listener
-GreetingEvent.dropListener(handle.get())
+# Remove a single listener (drop* is async in every lane — await it)
+await GreetingEvent.dropListener(handle.get())
 
 # Remove all listeners
-GreetingEvent.dropAllListeners()
+await GreetingEvent.dropAllListeners()
 ```
+
+> `emit` is sync `void` and `dropListener` / `dropAllListeners` are async
+> `Future[void]` in **every** lane (single-thread, `(mt)`, `(API)`) — the call
+> shape never changes with the broker tag.
 
 ### RequestBroker
 
@@ -307,8 +311,8 @@ discard MyEvent.listen(ctxB, proc(evt: MyEvent): Future[void] {.async: (raises: 
 MyEvent.emit(ctxA, MyEvent(value: 1))  # only context A listener fires
 MyEvent.emit(ctxB, MyEvent(value: 2))  # only context B listener fires
 
-MyEvent.dropAllListeners(ctxA)
-MyEvent.dropAllListeners(ctxB)
+await MyEvent.dropAllListeners(ctxA)
+await MyEvent.dropAllListeners(ctxB)
 ```
 
 When no `BrokerContext` argument is passed, the `DefaultBrokerContext` is used.
@@ -470,7 +474,7 @@ EventBroker(mt):
 var doneFlag {.global.}: Atomic[bool]
 
 proc worker() {.thread.} =
-  waitFor Alert.emit(Alert(level: 1, message: "from worker"))
+  Alert.emit(Alert(level: 1, message: "from worker"))
   doneFlag.store(true, moRelaxed)
 
 # ── Listener on main thread ────────────────────────────
@@ -486,18 +490,26 @@ proc main() {.async.} =
   while not doneFlag.load(moRelaxed):
     await sleepAsync(chronos.milliseconds(1))
   t.joinThread()
-  Alert.dropAllListeners()
+  await Alert.dropAllListeners()
 
 waitFor main()
 ```
 
 Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
-**Key differences from single-thread EventBroker:**
+**Call shape is identical to the single-thread EventBroker** — `emit()` is sync
+`void` and `dropListener` / `dropAllListeners` are async (`Future[void]`) in
+every lane, so the same source compiles whether or not you add the `(mt)` tag.
 
-- `emit()` is **async** — use `await` in async contexts or `waitFor` from `{.thread.}` procs.
+**Operational differences from single-thread EventBroker:**
+
+- `emit()` is **sync `void`** — just call it (fire-and-forget). The cross-thread
+  marshal + ring enqueue happen synchronously before it returns; nothing to await.
+- `dropListener` / `dropAllListeners` are **async** — `await` them in async
+  contexts, or `waitFor` / `discard` from `{.thread.}` / sync contexts.
 - `dropListener` must be called from the **registering thread** (enforced at runtime).
-- `dropAllListeners` can be called from **any thread** — sends shutdown to all listener threads and drains in-flight listener tasks before cleanup.
+- `dropAllListeners` can be called from **any thread** — sends shutdown to all
+  listener threads and drains in-flight listener tasks before cleanup.
 
 **Performance considerations:**
 

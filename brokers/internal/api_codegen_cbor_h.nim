@@ -48,9 +48,17 @@ proc generateCborCHeaderFile*(
   h.add("/* ----------------------------------------------------------------\n")
   h.add(" * Library identity\n")
   h.add(" * ---------------------------------------------------------------- */\n\n")
+  # `version` is "" when registerBrokerLibrary was given a const identifier
+  # (resolved at the library's compile time, not knowable here) — omit the
+  # literal from the doc comment in that case.
+  let versionNote =
+    if version.len > 0:
+      " (\"" & version & "\")"
+    else:
+      " (resolved at build time)"
   h.add(
-    "/* Returns a NUL-terminated semver string for this library build (\"" & version &
-      "\").\n" & " * The returned pointer is owned by the library — do NOT free. */\n"
+    "/* Returns a NUL-terminated semver string for this library build" & versionNote &
+      ".\n" & " * The returned pointer is owned by the library — do NOT free. */\n"
   )
   h.add("const char* " & p & "version(void);\n\n")
 

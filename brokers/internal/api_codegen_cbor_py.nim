@@ -148,9 +148,12 @@ proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
     of atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
-      # `distinct seq[byte]` → `List[int]` rather than `""`).
-      return nimTypeToPyHint(resolveUnderlyingType(t))
+      # Reference the emitted alias BY NAME so fields/params keep the meaningful
+      # type (`ContentTopic`, `Timestamp`) instead of flattening to the
+      # underlying; "" when the underlying doesn't map.
+      if nimTypeToPyHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
@@ -581,10 +584,12 @@ proc generateCborPyFile*(
   # Its CBOR wire value is a bare scalar; the Python surface uses the
   # `X = <prim>` alias directly. Such a type is an emittable request
   # response / event payload despite having no object fields.
+  # Full mapper (not just primPyHint) so a container payload (`seq[string]`
+  # -> list[str]) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primPyHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToPyHint(resolveUnderlyingType(name)).len > 0
 
   proc isEmittablePayload(name: string): bool {.compileTime.} =
     name in objectNames or isScalarPayload(name)
@@ -619,16 +624,22 @@ proc generateCborPyFile*(
   # Distinct / alias — Python alias of the underlying primitive plus
   # passthrough decode/encode helpers (so callers can freely use the
   # alias name in type hints).
+  # The `Name = <pyType>` assignment is deferred until AFTER the object classes:
+  # for a proc-sugar broker returning an object (`GetRow = RowData`) the RHS is a
+  # class defined below, so a runtime assignment here would `NameError`. The
+  # decode/encode helpers stay (their annotations are lazy via
+  # `from __future__ import annotations`, and their bodies forward-ref fine).
+  var aliasAssigns: seq[(string, string)] = @[]
   for name in aliasNames:
     let underlying = resolveUnderlyingType(name)
-    let pyU = primPyHint(underlying)
+    let pyU = nimTypeToPyHint(underlying)
     if pyU.len == 0:
       py.add(
         "# TODO: alias '" & name & "' resolves to '" & underlying &
-          "' which has no Python primitive mapping\n\n"
+          "' which has no Python mapping\n\n"
       )
       continue
-    py.add(name & " = " & pyU & "\n")
+    aliasAssigns.add((name, pyU))
     py.add("def _decode_" & name & "(data: Any) -> " & pyU & ":\n")
     py.add("    return " & pyDecodeExpr(underlying, "data") & "\n\n")
     py.add("def _encode_" & name & "(v: Any) -> " & pyU & ":\n")
@@ -654,6 +665,24 @@ proc generateCborPyFile*(
       anyField = true
     if not anyField:
       py.add("    pass\n")
+    py.add("\n")
+
+  # Deferred alias assignments (`GetRow = RowData`, `ContentTopic = str`, …),
+  # now that any object RHS class is defined above. A bare-primitive response
+  # payload is decoded as the simple type (its `_decode_<Verb>` helper still
+  # exists), so its synthetic `Verb = bool` alias is dead — skip it; a field-used
+  # alias (`ContentTopic`) is never a response name, so it stays.
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
+  var emittedAssign = false
+  for (name, pyU) in aliasAssigns:
+    if name in responseNames and effectiveResponsePayload(name) != name:
+      continue
+    py.add(name & " = " & pyU & "\n")
+    emittedAssign = true
+  if emittedAssign:
     py.add("\n")
 
   # Per-object _decode and _encode helpers.

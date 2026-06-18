@@ -16,7 +16,7 @@ proc emitReadResult(
   ## Out-of-band read result: `read` acks immediately; this fires later, after a
   ## variable delay, on the processing thread (where it was spawned).
   await noCancel(sleepAsync(self.rng.rand(5 .. 40).milliseconds))
-  await self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
+  self.emit(ReadCompleted, ReadCompleted(key: key, value: value, found: found))
 
 BrokerImplement MemoryBackendImpl of IBackend:
   proc init(self: MemoryBackendImpl) =

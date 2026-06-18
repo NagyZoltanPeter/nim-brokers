@@ -33,17 +33,17 @@ var gListenerReady: Atomic[bool]
 # ── Thread procs (module-level, no closures) ─────────────────────────────
 
 proc emitterThread() {.thread.} =
-  waitFor MtEvt.emit(MtEvt(value: 42, label: "cross"))
+  MtEvt.emit(MtEvt(value: 42, label: "cross"))
 
 proc emitterThreadMulti() {.thread.} =
   for i in 1 .. 3:
-    waitFor MtEvt.emit(MtEvt(value: i, label: "multi"))
+    MtEvt.emit(MtEvt(value: i, label: "multi"))
 
 proc emitterThreadCtxA() {.thread.} =
-  waitFor MtEvt.emit(gCtxA, MtEvt(value: 100, label: "ctxA"))
+  MtEvt.emit(gCtxA, MtEvt(value: 100, label: "ctxA"))
 
 proc emitterThreadCtxB() {.thread.} =
-  waitFor MtEvt.emit(gCtxB, MtEvt(value: 200, label: "ctxB"))
+  MtEvt.emit(gCtxB, MtEvt(value: 200, label: "ctxB"))
 
 # A thread that listens, signals ready, then keeps event loop alive.
 proc listenerThread() {.thread.} =
@@ -59,7 +59,7 @@ proc listenerThread() {.thread.} =
     # Keep event loop alive until signalled to stop
     while not gDone.load():
       await sleepAsync(chronos.milliseconds(1))
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
 
   waitFor inner()
 
@@ -82,13 +82,13 @@ proc listenerThreadNoDrop() {.thread.} =
 
 # Multiple concurrent emitters
 proc concurrentEmitter1() {.thread.} =
-  waitFor MtEvt.emit(MtEvt(value: 10, label: "c1"))
+  MtEvt.emit(MtEvt(value: 10, label: "c1"))
 
 proc concurrentEmitter2() {.thread.} =
-  waitFor MtEvt.emit(MtEvt(value: 20, label: "c2"))
+  MtEvt.emit(MtEvt(value: 20, label: "c2"))
 
 proc concurrentEmitter3() {.thread.} =
-  waitFor MtEvt.emit(MtEvt(value: 30, label: "c3"))
+  MtEvt.emit(MtEvt(value: 30, label: "c3"))
 
 # ── Test suite ────────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 42
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "cross-thread emit to multiple listeners on same thread":
@@ -140,7 +140,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     check gReceivedCount.load() == 2
     check gReceivedSum.load() == 84 # 42 * 2
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "multiple listener threads, single emitter":
@@ -164,7 +164,7 @@ suite "EventBroker macro (multi-thread mode)":
       await sleepAsync(chronos.milliseconds(1))
 
     # Now emit from main thread (tests both same-thread and cross-thread delivery)
-    await MtEvt.emit(MtEvt(value: 7, label: "fanout"))
+    MtEvt.emit(MtEvt(value: 7, label: "fanout"))
 
     # Wait for both listeners (main + worker) to receive
     while gReceivedCount.load() < 2:
@@ -175,7 +175,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     gDone.store(true)
     lt.joinThread()
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "same-thread emit (fast path)":
@@ -189,18 +189,18 @@ suite "EventBroker macro (multi-thread mode)":
     )
     check handle.isOk()
 
-    await MtEvt.emit(MtEvt(value: 99, label: "local"))
+    MtEvt.emit(MtEvt(value: 99, label: "local"))
 
     # Same-thread: after a brief yield, the listener should have run
     await sleepAsync(chronos.milliseconds(10))
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 99
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "emit with no listeners (no crash)":
     # No listeners registered — emit should be a no-op
-    await MtEvt.emit(MtEvt(value: 999, label: "nobody"))
+    MtEvt.emit(MtEvt(value: 999, label: "nobody"))
     await sleepAsync(chronos.milliseconds(10))
     # Just verifying no crash / no assertion
 
@@ -222,14 +222,14 @@ suite "EventBroker macro (multi-thread mode)":
     check h2.isOk()
 
     # Drop first listener
-    MtEvt.dropListener(h1.get())
+    await MtEvt.dropListener(h1.get())
 
-    await MtEvt.emit(MtEvt(value: 1, label: "partial"))
+    MtEvt.emit(MtEvt(value: 1, label: "partial"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 20 # only h2 fired
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "dropAllListeners from own thread":
@@ -244,10 +244,10 @@ suite "EventBroker macro (multi-thread mode)":
         discard gReceivedCount.fetchAdd(1)
     )
 
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
-    await MtEvt.emit(MtEvt(value: 1, label: "gone"))
+    MtEvt.emit(MtEvt(value: 1, label: "gone"))
     await sleepAsync(chronos.milliseconds(10))
     check gReceivedCount.load() == 0
 
@@ -264,18 +264,18 @@ suite "EventBroker macro (multi-thread mode)":
       await sleepAsync(chronos.milliseconds(1))
 
     # Emit to confirm listener works
-    await MtEvt.emit(MtEvt(value: 5, label: "before"))
+    MtEvt.emit(MtEvt(value: 5, label: "before"))
     await sleepAsync(chronos.milliseconds(50))
     check gReceivedCount.load() >= 1
 
     # dropAllListeners from MAIN thread — this is the cross-thread shutdown
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     # Give the listener thread's processLoop time to receive shutdown and drain
     await sleepAsync(chronos.milliseconds(100))
 
     # Verify no more delivery
     gReceivedCount.store(0)
-    await MtEvt.emit(MtEvt(value: 999, label: "after"))
+    MtEvt.emit(MtEvt(value: 999, label: "after"))
     await sleepAsync(chronos.milliseconds(10))
     check gReceivedCount.load() == 0
 
@@ -303,21 +303,21 @@ suite "EventBroker macro (multi-thread mode)":
     )
 
     # Emit only to ctxA
-    await MtEvt.emit(gCtxA, MtEvt(value: 10, label: "onlyA"))
+    MtEvt.emit(gCtxA, MtEvt(value: 10, label: "onlyA"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 10
 
     # Emit only to ctxB
-    await MtEvt.emit(gCtxB, MtEvt(value: 20, label: "onlyB"))
+    MtEvt.emit(gCtxB, MtEvt(value: 20, label: "onlyB"))
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 2
     check gReceivedSum.load() == 30
 
-    MtEvt.dropAllListeners(gCtxA)
-    MtEvt.dropAllListeners(gCtxB)
+    await MtEvt.dropAllListeners(gCtxA)
+    await MtEvt.dropAllListeners(gCtxB)
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "BrokerContext isolation cross-thread":
@@ -349,8 +349,8 @@ suite "EventBroker macro (multi-thread mode)":
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 100
 
-    MtEvt.dropAllListeners(gCtxA)
-    MtEvt.dropAllListeners(gCtxB)
+    await MtEvt.dropAllListeners(gCtxA)
+    await MtEvt.dropAllListeners(gCtxB)
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "concurrent emitters from multiple threads":
@@ -383,7 +383,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     check gReceivedCount.load() == 3
     check gReceivedSum.load() == 60 # 10 + 20 + 30
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "field-constructor emit syntax":
@@ -397,12 +397,12 @@ suite "EventBroker macro (multi-thread mode)":
     )
     check handle.isOk()
 
-    await MtEvt.emit(value = 77, label = "ctor")
+    MtEvt.emit(value = 77, label = "ctor")
     await sleepAsync(chronos.milliseconds(10))
 
     check gReceivedCount.load() == 1
     check gReceivedSum.load() == 77
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "multiple sequential emissions":
@@ -424,7 +424,7 @@ suite "EventBroker macro (multi-thread mode)":
 
     check gReceivedCount.load() == 3
     check gReceivedSum.load() == 6 # 1 + 2 + 3
-    MtEvt.dropAllListeners()
+    await MtEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
 ## ---------------------------------------------------------------------------
@@ -451,13 +451,13 @@ suite "EventBroker macro (multi-thread mode, void / payload-less)":
     )
     check handle.isOk()
 
-    await MtVoidSignal.emit(MtVoidSignal())
-    await MtVoidSignal.emit(MtVoidSignal())
+    MtVoidSignal.emit(MtVoidSignal())
+    MtVoidSignal.emit(MtVoidSignal())
     await sleepAsync(chronos.milliseconds(20))
 
     check gVoidHits.load() == 2
 
-    MtVoidSignal.dropAllListeners()
+    await MtVoidSignal.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "dropAllListeners stops payload-less delivery":
@@ -469,12 +469,12 @@ suite "EventBroker macro (multi-thread mode, void / payload-less)":
     )
     check handle.isOk()
 
-    await MtVoidSignal.emit(MtVoidSignal())
+    MtVoidSignal.emit(MtVoidSignal())
     await sleepAsync(chronos.milliseconds(20))
     check gVoidHits.load() == 1
 
-    MtVoidSignal.dropAllListeners()
+    await MtVoidSignal.dropAllListeners()
     await sleepAsync(chronos.milliseconds(20))
-    await MtVoidSignal.emit(MtVoidSignal())
+    MtVoidSignal.emit(MtVoidSignal())
     await sleepAsync(chronos.milliseconds(20))
     check gVoidHits.load() == 1

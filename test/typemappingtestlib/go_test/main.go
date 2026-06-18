@@ -2371,6 +2371,225 @@ func test_map_event() {
 	lib.Close()
 }
 
+// ----- TestAliasAndByteGaps: pure-alias every direction + seq[byte]/
+//       Option[seq[byte]] event + param cells -----
+
+func test_alias_field_request() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.AliasFieldRequest("/waku/2/default", 3)
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Topic, "/waku/2/default", "topic")
+	checkEq(len(r.Topics), 3, "topics len")
+	if len(r.Topics) == 3 {
+		checkEq(r.Topics[0], "/waku/2/default/0", "topics[0]")
+		checkEq(r.Topics[2], "/waku/2/default/2", "topics[2]")
+	}
+	lib.Close()
+}
+
+func test_alias_field_request_empty_seq() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.AliasFieldRequest("topic", 0)
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Topic, "topic", "topic")
+	checkEq(len(r.Topics), 0, "topics empty")
+	lib.Close()
+}
+
+func test_alias_event() {
+	lib := newLib()
+	lib.CreateContext()
+	type cap struct {
+		topic  string
+		topics []string
+	}
+	evts := &safeList[cap]{}
+	h := lib.OnAliasEvent(func(topic string, topics []string) {
+		cp := make([]string, len(topics))
+		copy(cp, topics)
+		evts.push(cap{topic: topic, topics: cp})
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerAliasEventRequest("/t", 2)
+	waitFor(func() bool { return evts.size() >= 1 })
+	checkEq(evts.size(), 1, "events")
+	snap := evts.at(0)
+	checkEq(snap.topic, "/t", "topic")
+	checkEq(len(snap.topics), 2, "topics len")
+	if len(snap.topics) == 2 {
+		checkEq(snap.topics[0], "/t/0", "topics[0]")
+		checkEq(snap.topics[1], "/t/1", "topics[1]")
+	}
+	lib.OffAliasEvent(h)
+	lib.Close()
+}
+
+func test_byte_seq_event() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[[]byte]{}
+	h := lib.OnByteSeqEvent(func(data []byte) {
+		cp := make([]byte, len(data))
+		copy(cp, data)
+		evts.push(cp)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerByteEventsRequest(5, true)
+	waitFor(func() bool { return evts.size() >= 1 })
+	snap := evts.at(0)
+	checkEq(len(snap), 5, "data len")
+	if len(snap) == 5 {
+		checkEq(snap[0], byte(0), "data[0]")
+		checkEq(snap[4], byte(4), "data[4]")
+	}
+	lib.OffByteSeqEvent(h)
+	lib.Close()
+}
+
+func test_opt_byte_seq_event_present() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[*[]byte]{}
+	h := lib.OnOptByteSeqEvent(func(value *[]byte) {
+		evts.push(value)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerByteEventsRequest(0, true)
+	waitFor(func() bool { return evts.size() >= 1 })
+	v := evts.at(0)
+	check(v != nil, "value present")
+	if v != nil {
+		checkEq(len(*v), 4, "len")
+		checkEq((*v)[0], byte(1), "byte[0]")
+		checkEq((*v)[3], byte(4), "byte[3]")
+	}
+	lib.OffOptByteSeqEvent(h)
+	lib.Close()
+}
+
+func test_opt_byte_seq_event_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[*[]byte]{}
+	h := lib.OnOptByteSeqEvent(func(value *[]byte) {
+		evts.push(value)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerByteEventsRequest(0, false)
+	waitFor(func() bool { return evts.size() >= 1 })
+	check(evts.at(0) == nil, "value absent")
+	lib.OffOptByteSeqEvent(h)
+	lib.Close()
+}
+
+func test_opt_byte_param_present() {
+	lib := newLib()
+	lib.CreateContext()
+	payload := []byte{9, 8, 7}
+	r, err := lib.OptByteParamRequest(&payload)
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Length, int32(3), "length")
+	lib.Close()
+}
+
+func test_opt_byte_param_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.OptByteParamRequest(nil)
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Length, int32(-1), "length")
+	lib.Close()
+}
+
+func test_proc_sugar_alias_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.EchoTopic("/waku/2/x") // EchoTopic == string
+	checkEq(err, error(nil), "no err")
+	checkEq(string(r), "/waku/2/x/echo", "echo topic")
+	lib.Close()
+}
+
+func test_proc_sugar_distinct_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.NextJob(5) // NextJob == int32
+	checkEq(err, error(nil), "no err")
+	checkEq(int32(r), int32(6), "next job")
+	lib.Close()
+}
+
+func test_proc_sugar_seq_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.ListTopics("/t", 3) // ListTopics == []string
+	checkEq(err, error(nil), "no err")
+	checkEq(len(r), 3, "len")
+	if len(r) == 3 {
+		checkEq(r[0], "/t/0", "[0]")
+		checkEq(r[2], "/t/2", "[2]")
+	}
+	lib.Close()
+}
+
+func test_store_like_present() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.StoreLikeRequest(true)
+	checkEq(err, error(nil), "no err")
+	check(r.StartTime != nil, "startTime present")
+	if r.StartTime != nil {
+		checkEq(*r.StartTime, int64(1700), "startTime")
+	}
+	checkEq(len(r.Hashes), 1, "hashes len")
+	if len(r.Hashes) == 1 {
+		checkEq(len(r.Hashes[0]), 32, "hash len")
+		checkEq(r.Hashes[0][0], byte(0), "hash[0]")
+		checkEq(r.Hashes[0][31], byte(31), "hash[31]")
+	}
+	check(r.Cursor != nil, "cursor present")
+	if r.Cursor != nil {
+		checkEq(len(*r.Cursor), 32, "cursor len")
+		checkEq((*r.Cursor)[0], byte(255), "cursor[0]")
+	}
+	lib.Close()
+}
+
+func test_store_like_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.StoreLikeRequest(false)
+	checkEq(err, error(nil), "no err")
+	check(r.StartTime == nil, "startTime absent")
+	checkEq(len(r.Hashes), 0, "hashes empty")
+	check(r.Cursor == nil, "cursor absent")
+	lib.Close()
+}
+
+func test_proc_sugar_object_payload() {
+	lib := newLib()
+	lib.CreateContext()
+	r, err := lib.GetRow("abc") // GetRow == RowData
+	checkEq(err, error(nil), "no err")
+	checkEq(r.Id, int32(3), "id")
+	checkEq(r.Label, "row:abc", "label")
+	lib.Close()
+}
+
+func test_proc_sugar_bare_primitive() {
+	lib := newLib()
+	lib.CreateContext()
+	rb, err := lib.IsReady() // (bool, error), not (IsReady, error)
+	checkEq(err, error(nil), "isReady no err")
+	checkEq(rb, true, "isReady")
+	ri, err2 := lib.DoubleIt(21) // (int32, error)
+	checkEq(err2, error(nil), "doubleIt no err")
+	checkEq(ri, int32(42), "doubleIt")
+	lib.Close()
+}
+
 func main() {
 	fmt.Println("test_typemappingtestlib — Go type mapping coverage")
 	fmt.Println("library version:", typemappingtestlib.Version())
@@ -2538,6 +2757,23 @@ func main() {
 	runTest("test_map_result_all_key_flavors", test_map_result_all_key_flavors)
 	runTest("test_map_param_roundtrip", test_map_param_roundtrip)
 	runTest("test_map_event", test_map_event)
+
+	fmt.Println("\n--- TestAliasAndByteGaps ---")
+	runTest("test_alias_field_request", test_alias_field_request)
+	runTest("test_alias_field_request_empty_seq", test_alias_field_request_empty_seq)
+	runTest("test_alias_event", test_alias_event)
+	runTest("test_byte_seq_event", test_byte_seq_event)
+	runTest("test_opt_byte_seq_event_present", test_opt_byte_seq_event_present)
+	runTest("test_opt_byte_seq_event_absent", test_opt_byte_seq_event_absent)
+	runTest("test_opt_byte_param_present", test_opt_byte_param_present)
+	runTest("test_opt_byte_param_absent", test_opt_byte_param_absent)
+	runTest("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload)
+	runTest("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload)
+	runTest("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload)
+	runTest("test_store_like_present", test_store_like_present)
+	runTest("test_store_like_absent", test_store_like_absent)
+	runTest("test_proc_sugar_object_payload", test_proc_sugar_object_payload)
+	runTest("test_proc_sugar_bare_primitive", test_proc_sugar_bare_primitive)
 
 	fmt.Println("\n----------------------------------------------------------------------")
 	fmt.Printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal-gFailed, gFailed)

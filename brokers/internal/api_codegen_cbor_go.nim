@@ -125,9 +125,12 @@ proc nimTypeToGoCborHint*(nimType: string): string {.compileTime.} =
     of atkObject, atkEnum:
       return t
     of atkAlias, atkDistinct:
-      # Recurse via outer mapper for distinct/alias-over-compound (e.g.
-      # `distinct seq[byte]` → `[]byte` rather than `""`).
-      return nimTypeToGoCborHint(resolveUnderlyingType(t))
+      # Reference the emitted `type <name> = ...` alias BY NAME so fields/params
+      # keep the meaningful type (`ContentTopic`, `Timestamp`) instead of
+      # flattening to the underlying; "" when it doesn't map.
+      if nimTypeToGoCborHint(resolveUnderlyingType(t)).len > 0:
+        return t
+      return ""
   ""
 
 proc isGoCborMappable*(nimType: string): bool {.compileTime.} =
@@ -406,10 +409,12 @@ proc generateCborGoFile*(
   # Its CBOR wire value is a bare scalar; the Go surface uses the
   # `type X = <prim>` alias directly. Such a type has no object fields, so
   # the event handler delivers the bare value rather than unpacked fields.
+  # Full mapper (not just primGoHint) so a container payload (`seq[string]`
+  # -> []string) is an emittable scalar payload, not only primitives.
   proc isScalarPayload(name: string): bool {.compileTime.} =
     name.len > 0 and isTypeRegistered(name) and
       lookupTypeEntry(name).kind in {atkAlias, atkDistinct} and
-      primGoHint(resolveUnderlyingType(name)).len > 0
+      nimTypeToGoCborHint(resolveUnderlyingType(name)).len > 0
 
   if enumNames.len > 0 or aliasNames.len > 0 or objectNames.len > 0:
     g.add("// -------- Generated payload types --------\n\n")
@@ -425,13 +430,22 @@ proc generateCborGoFile*(
         g.add("\t" & name & "_" & v.name & " " & name & " = " & $v.ordinal & "\n")
     g.add(")\n\n")
 
+  # A bare-primitive response payload is unwrapped to the simple type, so its
+  # synthetic `type Verb = bool` alias is dead — skip it. Field-used aliases
+  # (`ContentTopic`) are never response names, so they stay.
+  var responseNames: seq[string] = @[]
+  for e in requestEntries:
+    if e.responseTypeName.len > 0 and e.responseTypeName notin responseNames:
+      responseNames.add(e.responseTypeName)
   for name in aliasNames:
+    if name in responseNames and effectiveResponsePayload(name) != name:
+      continue
     let underlying = resolveUnderlyingType(name)
-    let goU = primGoHint(underlying)
+    let goU = nimTypeToGoCborHint(underlying)
     if goU.len == 0:
       g.add(
         "// TODO: alias '" & name & "' resolves to '" & underlying &
-          "' (no Go primitive)\n\n"
+          "' (no Go mapping)\n\n"
       )
       continue
     g.add("type " & name & " = " & goU & "\n\n")
@@ -605,7 +619,15 @@ proc generateCborGoFile*(
   # Factored emitters reused by the main Lib and each sub-interface struct.
   proc emitGoReqMethod(e: CborRequestEntry, recv: string): string {.compileTime.} =
     let methodName = snakeToPascal(e.apiName)
-    let respType = e.responseTypeName
+    # A synthetic proc-sugar payload surfaces its real type: the named alias
+    # (`(RequestId, error)`), the bare primitive (`(bool, error)`), or the
+    # synthetic name for an anonymous container (`(ConnectedPeers, error)`).
+    let resp = effectiveResponsePayload(e.responseTypeName)
+    let respType =
+      if isNimPrimitive(resp):
+        primGoHint(resp)
+      else:
+        resp
     var argsStructFields = ""
     var argsAssign = ""
     var firstNonZero = false

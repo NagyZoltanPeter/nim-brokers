@@ -3,6 +3,40 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [Unreleased]
+
+**Uniform EventBroker call shape across all lanes — `emit` is now sync `void`
+everywhere and `dropListener` / `dropAllListeners` are async `Future[void]`
+everywhere.** The public shape of an EventBroker no longer changes when its tag
+flips between *(none)* / `(mt)` / `(API)`, so the same source compiles in any
+lane.
+
+### Changed — EventBroker `emit` / `drop*` shapes
+
+- **`emit` is now sync `void` in the multi-thread and API lanes** (it already
+  was in the single-thread lane). The MT `emitImpl` is a plain
+  `{.gcsafe, raises: [].}` proc; the public `emit` and inline field-constructor
+  overloads call it directly. The cross-thread marshal + ring enqueue still
+  happen synchronously before `emit` returns — no work is deferred. **Migration:
+  drop `await` / `waitFor` from every `(mt)` / `(API)` emit call site**
+  (`await X.emit(a)` → `X.emit(a)`).
+- **`dropListener` / `dropAllListeners` are now async `Future[void]` in the
+  multi-thread and API lanes** (they already were in the single-thread lane),
+  for cross-lane shape parity. The MT/API drop bodies stay suspension-free, so
+  the returned Future completes eagerly — a discarded Future (e.g. from sync FFI
+  teardown) still clears listeners and fires the Part D-3 cleanup hook.
+  Non-discardable in every lane. **Migration: `await` your `(mt)` / `(API)` drop
+  calls** (or `discard` / `waitFor` in sync / `{.thread.}` contexts).
+- `clearProvider` / `clearProviders` are unchanged — sync in every lane.
+- Guiding principle: the public shape follows whether the op *actually
+  suspends*. `emit` never awaits listener completion in any lane → sync. Drop on
+  the single-thread lane genuinely awaits in-flight listener cancellation →
+  async, and the other lanes adopt that shape. Full rationale, risk analysis,
+  and the eager-execution tripwire (`test/test_mt_drop_async_eager.nim`) are in
+  `doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md`.
+- No FFI ABI or foreign-wrapper change — neither `emit` nor `drop*` is exposed
+  on the C ABI (verified against the C++/Python/Rust/Go parity matrices).
+
 ## [3.1.2] — 2026-06-10
 
 **`Table[K, V]` associative-container support across the full FFI surface with

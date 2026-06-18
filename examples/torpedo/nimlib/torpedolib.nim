@@ -392,7 +392,7 @@ proc emitRemark(
     c: Captain, phase: string, turnNumber: int32, message: string
 ): Future[void] {.async.} =
   c.appendReplay(phase, turnNumber, message)
-  await CaptainRemark.emit(
+  CaptainRemark.emit(
     c.ctx,
     CaptainRemark(
       captainName: c.name, phase: phase, message: message, turnNumber: turnNumber
@@ -400,7 +400,7 @@ proc emitRemark(
   )
 
 proc emitBoardChanged(c: Captain, turnNumber: int32): Future[void] {.async.} =
-  await BoardChanged.emit(
+  BoardChanged.emit(
     c.ctx,
     BoardChanged(
       captainName: c.name,
@@ -414,7 +414,7 @@ proc emitMatchEnded(
     c: Captain, outcome: string, turnNumber: int32, message: string
 ): Future[void] {.async.} =
   c.appendReplay("end", turnNumber, message)
-  await MatchEnded.emit(
+  MatchEnded.emit(
     c.ctx,
     MatchEnded(
       captainName: c.name, outcome: outcome, message: message, turnNumber: turnNumber
@@ -434,7 +434,7 @@ proc emitVolley(
     gameOver: bool,
     message: string,
 ): Future[void] {.async.} =
-  await VolleyEvent.emit(
+  VolleyEvent.emit(
     c.ctx,
     VolleyEvent(
       captainName: c.name,
@@ -649,7 +649,9 @@ proc dropPeerLink(c: Captain) =
   ## Tear down the native listener on the opponent's VolleyEvent and
   ## reset all link/game-outcome state so the captain can be re-linked.
   if c.peerListenerInstalled:
-    VolleyEvent.dropListener(c.opponentCtx, c.peerVolleyHandle)
+    # drop* is async all-round now; this is a sync proc, and the MT impl is
+    # suspension-free so the drop runs eagerly — discard the completed Future.
+    discard VolleyEvent.dropListener(c.opponentCtx, c.peerVolleyHandle)
   c.peerListenerInstalled = false
   c.peerVolleyHandle = VolleyEventListener(id: 0'u64)
   c.opponentCtx = BrokerContext(0'u32)
@@ -735,7 +737,7 @@ proc receiveShot(
       c.name & " takes a hit at " & toCoordLabel(row, col)
 
   c.appendReplay("defense", turnNumber, message)
-  await ShotResolved.emit(
+  ShotResolved.emit(
     c.ctx,
     ShotResolved(
       captainName: c.name,
@@ -798,7 +800,7 @@ proc observeOutcome(
       c.name & " scores a hit at " & toCoordLabel(row, col)
 
   c.appendReplay("attack", turnNumber, message)
-  await ShotResolved.emit(
+  ShotResolved.emit(
     c.ctx,
     ShotResolved(
       captainName: c.name,

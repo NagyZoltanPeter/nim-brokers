@@ -63,7 +63,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   ?ShutdownRequest.setProvider(ctx, shutProv)
 
   proc triggerProv(n: int32): Future[Result[TriggerPing, string]] {.async.} =
-    await Ping.emit(ctx, Ping(seqNo: n))
+    Ping.emit(ctx, Ping(seqNo: n))
     return Result[TriggerPing, string].ok(TriggerPing(ok: true))
 
   ?TriggerPing.setProvider(ctx, triggerProv)
