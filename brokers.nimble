@@ -1,7 +1,7 @@
 import std/[os, strutils]
 
 # Package
-version = "3.1.2"
+version = "3.1.3"
 author = "Nagy Zoltan Peter"
 description =
   "Type-safe, decoupled messaging patterns for Nim / single thread, cross-thread and FFI API support!"
