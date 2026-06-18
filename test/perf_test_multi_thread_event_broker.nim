@@ -87,7 +87,7 @@ proc atomicMax(a: var Atomic[int64], val: int64) =
 proc stressEmitter() {.thread.} =
   let payload = makePayload()
   for i in 0 ..< EventsPerThread:
-    waitFor PerfEvt.emit(
+    PerfEvt.emit(
       PerfEvt(
         tag: "stress", payload: payload, seqNum: i, timestampNs: getMonoTime().ticks
       )
@@ -182,7 +182,7 @@ suite "Multi-thread EventBroker — performance":
     let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
     let delivered = gEventsReceived.load().int
 
-    PerfEvt.dropAllListeners()
+    await PerfEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
     # -- Statistics --
@@ -233,9 +233,7 @@ suite "Multi-thread EventBroker — performance":
 
     for i in 0 ..< TotalCrossThreadEvents:
       let t0 = getMonoTime()
-      await PerfEvt.emit(
-        PerfEvt(tag: "local", payload: payload, seqNum: i, timestampNs: 0)
-      )
+      PerfEvt.emit(PerfEvt(tag: "local", payload: payload, seqNum: i, timestampNs: 0))
       # Yield to let asyncSpawn'd listeners run.
       await sleepAsync(chronos.milliseconds(0))
       let elapsed = (getMonoTime() - t0).inNanoseconds
@@ -249,7 +247,7 @@ suite "Multi-thread EventBroker — performance":
 
     let wallElapsed = (getMonoTime() - wallStart).inNanoseconds
 
-    PerfEvt.dropAllListeners()
+    await PerfEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
     let avgNs = sumNs div int64(TotalCrossThreadEvents)

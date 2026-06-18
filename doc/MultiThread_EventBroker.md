@@ -27,9 +27,9 @@ This generates:
 | `Alert.emit(event)` | Broadcast an event to all listeners (default context) |
 | `Alert.emit(ctx, event)` | Broadcast an event to all listeners (keyed context) |
 | `Alert.emit(level=1, message="hi")` | Field-constructor emit (inline object types only) |
-| `await Alert.dropListener(handle)` | Remove a listener and drain in-flight futures (must be on registering thread, 5 s timeout) |
-| `Alert.dropAllListeners()` | Remove all listeners for default context, drain in-flight (any thread) |
-| `Alert.dropAllListeners(ctx)` | Remove all listeners for keyed context, drain in-flight (any thread) |
+| `await Alert.dropListener(handle)` | Remove a listener (must be on registering thread); async for cross-lane shape parity |
+| `await Alert.dropAllListeners()` | Remove all listeners for default context (any thread); async |
+| `await Alert.dropAllListeners(ctx)` | Remove all listeners for keyed context (any thread); async |
 
 ---
 
@@ -58,14 +58,14 @@ proc main() {.async.} =
   )
 
   proc worker() {.thread.} =
-    waitFor ChatMsg.emit(ChatMsg(user: "Alice", text: "Hello from worker!"))
+    ChatMsg.emit(ChatMsg(user: "Alice", text: "Hello from worker!"))
 
   var t: Thread[void]
   t.createThread(worker)
   while received.load() < 1:
     await sleepAsync(chronos.milliseconds(1))
   t.joinThread()
-  ChatMsg.dropAllListeners()
+  await ChatMsg.dropAllListeners()
 
 waitFor main()
 ```
@@ -76,13 +76,13 @@ Compile with `--threads:on`.
 
 ## Important Notices
 
-### `emit()` is async
+### `emit()` is sync `void`
 
-The multi-thread `emit()` is an **async** proc (`{.async: (raises: []).}`):
+The multi-thread `emit()` is a plain **sync `void`** proc — identical in shape to
+the single-thread EventBroker (no `await`, no `waitFor`):
 
-- In async contexts (e.g. inside `{.async.}` procs): use `await emit(...)`.
-- In `{.thread.}` procs with no event loop: use `waitFor emit(...)` — this creates
-  a temporary event loop for the duration of the call.
+- Just call `emit(...)`. The marshal + ring enqueue happen synchronously before it
+  returns; delivery to listeners is fire-and-forget (it never awaits listener work).
 - **Same-thread listeners**: dispatched via `asyncSpawn` (fire-and-forget).
 - **Cross-thread listeners**: delivered via a per-bucket lock-free Vyukov MPSC ring + `fireBrokerSignal` (near-instant, no OS fds consumed).
 
@@ -100,16 +100,18 @@ called locally on that thread.
 listener. The handle carries a `threadId` field that is validated at runtime.
 Calling from the wrong thread logs an error and returns without action.
 
-`dropListener` is **synchronous**: it removes the handler from the thread-local
-table and returns immediately. Already-dispatched `asyncSpawn` futures from a
-prior `emit` cycle continue to run until they complete — `dropListener` does not
-wait for them. If you are releasing resources that in-flight callbacks may still
-reference, wait for pending work to finish before dropping:
+`dropListener` is **async** (`Future[void]`) for call-shape parity with the
+single-thread EventBroker, but its body is **suspension-free**: it removes the
+handler from the thread-local table and the returned Future completes
+immediately. Already-dispatched `asyncSpawn` futures from a prior `emit` cycle
+continue to run until they complete — `dropListener` does not wait for them. If
+you are releasing resources that in-flight callbacks may still reference, wait
+for pending work to finish before dropping:
 
 ```nim
 # Safe pattern: let the event loop drain before releasing resources.
 await sleepAsync(0)          # yield so in-flight asyncSpawns can finish
-MyEvent.dropListener(handle)
+await MyEvent.dropListener(handle)
 connection.close()           # now safe
 ```
 
@@ -334,10 +336,11 @@ lower latencies.*
 |---------|---------------|-------------------|
 | Cross-thread emit | ✗ | ✓ |
 | Cross-thread listen | ✗ | ✓ |
-| `emit()` return type | void (asyncSpawn) | Future[void] (async) |
+| `emit()` return type | void (sync) | void (sync) |
+| `drop*()` return type | Future[void] (async) | Future[void] (async) |
 | Transport overhead | None | Per-bucket lock-free ring + global slab (per broker type) |
 | `dropListener` scope | Any (thread-local broker) | Must be from registering thread |
-| `dropListener` in-flight drain | No — in-flight continues | No — in-flight continues (sync, immediate) |
+| `dropListener` in-flight drain | No — in-flight continues | No — in-flight continues (async, body suspension-free) |
 | `dropAllListeners` scope | Any (thread-local broker) | Any thread (sends `CtrlClearListeners` sentinel, no drain) |
 | BrokerContext support | ✓ | ✓ |
 | Field-constructor emit | ✓ | ✓ |

@@ -52,11 +52,13 @@ await UserLoggedIn.dropListener(h.get())   # drop one — cancels its in-flight 
 await UserLoggedIn.dropAllListeners()      # drop all for this context
 ```
 
-- `emit` is **sync** here (single-thread): snapshots listeners, `asyncSpawn`s
-  each. It does not await delivery — `await sleepAsync(0)` or yield to flush in tests.
+- `emit` is **sync `void`** in *every* lane (single-thread, `(mt)`, `(API)`):
+  snapshots listeners, `asyncSpawn`s each. It does not await delivery —
+  `await sleepAsync(0)` or yield to flush in tests. Never `await`/`waitFor` an emit.
 - Handlers MUST be `{.async: (raises: []).}`. Swallow your own exceptions.
-- `dropListener`/`dropAllListeners` are `async` and **cancel** in-flight handlers
-  before returning — safe teardown point before releasing resources.
+- `dropListener`/`dropAllListeners` are **`async` (`Future[void]`) in every lane**
+  — `await` them (or `discard`/`waitFor` in sync/`{.thread.}` contexts). Single-thread
+  cancels in-flight handlers before returning; MT/API bodies are suspension-free.
 
 ### Payload variants
 ```nim
@@ -190,8 +192,9 @@ Async scoped swap (needs chronos loop): `lockGlobalBrokerContext` /
 
 ## Multi-thread variants `(mt)`
 
-Add `(mt)`. Same surface, but **`emit` becomes async** (cross-thread dispatch
-via `Channel[T]`). Build with `--threads:on`.
+Add `(mt)`. **Identical call surface** — `emit` stays sync `void` and `drop*`
+stay async (`Future[void]`), so the same source compiles with or without the
+tag. Cross-thread dispatch is handled under the hood. Build with `--threads:on`.
 
 ```nim
 EventBroker(mt):
@@ -200,7 +203,7 @@ EventBroker(mt):
 
 # from any thread:
 proc worker() {.thread.} =
-  waitFor Job.emit(Job(id: 1))     # mt emit is async — await / waitFor it
+  Job.emit(Job(id: 1))             # emit is sync void — same as single-thread
 ```
 
 - Same-thread calls take a direct fast path; cross-thread go through a per-bucket
@@ -272,7 +275,7 @@ generated runtime calls it on the processing thread during `createContext`):
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
   let r = GetDevice.setProvider(ctx,        # always pass the ctx the runtime gives you
     proc(deviceId: int64): Future[Result[GetDevice, string]] {.closure, async.} =
-      await DeviceStatusChanged.emit(ctx,   # API emit is async — await it
+      DeviceStatusChanged.emit(ctx,         # emit is sync void (all lanes)
         DeviceStatusChanged(deviceId: deviceId, online: true, timestampMs: 0))
       ok(GetDevice(deviceId: deviceId, name: "u")))
   if r.isErr(): return err("register GetDevice: " & r.error())

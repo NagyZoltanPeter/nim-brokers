@@ -69,18 +69,18 @@ var gEvtOk: Atomic[bool]
 var gEvtCount: Atomic[int]
 
 proc bigEmitter() {.thread.} =
-  waitFor BigEvt.emit(BigEvt(tag: 1, blob: makePayload(BigLen)))
+  BigEvt.emit(BigEvt(tag: 1, blob: makePayload(BigLen)))
 
 proc spillEmitter() {.thread.} =
-  waitFor SpillEvt.emit(SpillEvt(tag: 2, blob: makePayload(BigLen)))
+  SpillEvt.emit(SpillEvt(tag: 2, blob: makePayload(BigLen)))
 
 # Cross-thread emitters for the cap test — the spill/drop logic only runs on
 # the cross-thread slab path (same-thread emit dispatches directly, no marshal).
 proc cappedOverEmitter() {.thread.} =
-  waitFor CappedEvt.emit(CappedEvt(blob: makePayload(8192))) # > 4 KiB ceiling
+  CappedEvt.emit(CappedEvt(blob: makePayload(8192))) # > 4 KiB ceiling
 
 proc cappedUnderEmitter() {.thread.} =
-  waitFor CappedEvt.emit(CappedEvt(blob: makePayload(2048))) # < ceiling
+  CappedEvt.emit(CappedEvt(blob: makePayload(2048))) # < ceiling
 
 suite "MT large payload (uint32 payloadSize)":
   asyncTest "cross-thread event round-trips 1.5 MiB byte-exact":
@@ -105,7 +105,7 @@ suite "MT large payload (uint32 payloadSize)":
 
     check gEvtLen.load() == BigLen
     check gEvtOk.load() # byte-exact: old uint16 wrap would corrupt/truncate
-    BigEvt.dropAllListeners()
+    await BigEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "auto heap-spill: 1.5 MiB through a 256 B cell, byte-exact":
@@ -130,7 +130,7 @@ suite "MT large payload (uint32 payloadSize)":
 
     check gEvtLen.load() == BigLen # spilled to heap, not dropped
     check gEvtOk.load() # byte-exact through the spill buffer
-    SpillEvt.dropAllListeners()
+    await SpillEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "payload above maxDynamicPayloadBytes is dropped, not delivered":
@@ -156,7 +156,7 @@ suite "MT large payload (uint32 payloadSize)":
       await sleepAsync(chronos.milliseconds(1))
     tUnder.joinThread()
     check gEvtCount.load() == 1
-    CappedEvt.dropAllListeners()
+    await CappedEvt.dropAllListeners()
     await sleepAsync(chronos.milliseconds(50))
 
   asyncTest "request/response round-trips 1.5 MiB byte-exact":

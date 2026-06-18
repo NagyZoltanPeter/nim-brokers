@@ -101,7 +101,7 @@ BrokerImplement HierImpl of IHier:
 
   method fireTick(self: HierImpl, n: int32): Future[Result[int32, string]] {.async.} =
     # Emit an event through the instance-scoped facade (injects self.brokerCtx).
-    await self.emit(Tick, Tick(n: n))
+    self.emit(Tick, Tick(n: n))
     ok(n)
 
   method initializeRequest(
