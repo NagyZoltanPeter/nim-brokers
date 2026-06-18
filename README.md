@@ -16,8 +16,8 @@ What is nim-brokers?
    - A single **CBOR-encoded C ABI** strategy (the historical `native` C-ABI codegen was retired in 3.0.0).
      - The C++, Python, Rust and Go wrapper public surfaces are identical and idiomatic regardless of the CBOR wire format underneath. 
 
-> **Version:** current release is **3.1.2** (see `brokers.nimble`). 
-> :exclamation: Current recommended version to use is **3.1.2**.
+> **Version:** current release is **3.1.3** (see `brokers.nimble`). 
+> :exclamation: Current recommended version to use is **3.1.3**.
 > Full per-release history and feature notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Table of Contents

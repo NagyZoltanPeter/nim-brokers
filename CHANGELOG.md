@@ -3,13 +3,17 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
-## [Unreleased]
+## [3.1.3] — 2026-06-18
 
-**Uniform EventBroker call shape across all lanes — `emit` is now sync `void`
-everywhere and `dropListener` / `dropAllListeners` are async `Future[void]`
-everywhere.** The public shape of an EventBroker no longer changes when its tag
-flips between *(none)* / `(mt)` / `(API)`, so the same source compiles in any
-lane.
+**Uniform EventBroker call shape across all lanes, plus a batch of FFI
+wrapper type-mapping fixes (alias / `seq[byte]` / proc-sugar payloads) and
+courier-ring drop visibility.** `emit` is now sync `void` everywhere and
+`dropListener` / `dropAllListeners` are async `Future[void]` everywhere, so the
+public shape of an EventBroker no longer changes when its tag flips between
+*(none)* / `(mt)` / `(API)` and the same source compiles in any lane. The FFI
+fixes were surfaced while generating wrappers for the Logos Delivery library;
+they preserve meaningful alias names and fix several proc-sugar payload shapes
+across all four foreign wrappers.
 
 ### Changed — EventBroker `emit` / `drop*` shapes
 
@@ -24,18 +28,64 @@ lane.
   multi-thread and API lanes** (they already were in the single-thread lane),
   for cross-lane shape parity. The MT/API drop bodies stay suspension-free, so
   the returned Future completes eagerly — a discarded Future (e.g. from sync FFI
-  teardown) still clears listeners and fires the Part D-3 cleanup hook.
+  teardown) still clears listeners and fires the cleanup hook.
   Non-discardable in every lane. **Migration: `await` your `(mt)` / `(API)` drop
   calls** (or `discard` / `waitFor` in sync / `{.thread.}` contexts).
 - `clearProvider` / `clearProviders` are unchanged — sync in every lane.
 - Guiding principle: the public shape follows whether the op *actually
   suspends*. `emit` never awaits listener completion in any lane → sync. Drop on
   the single-thread lane genuinely awaits in-flight listener cancellation →
-  async, and the other lanes adopt that shape. Full rationale, risk analysis,
-  and the eager-execution tripwire (`test/test_mt_drop_async_eager.nim`) are in
-  `doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md`.
+  async, and the other lanes adopt that shape.
 - No FFI ABI or foreign-wrapper change — neither `emit` nor `drop*` is exposed
   on the C ABI (verified against the C++/Python/Rust/Go parity matrices).
+
+### Fixed — FFI wrapper type mapping (alias / `seq[byte]` / proc-sugar payloads)
+
+- **Registered type aliases / distincts now keep their name throughout every
+  wrapper.** Object and event-payload fields and unpacked event-callback params
+  typed with a registered alias (`channelId: ChannelId`, `timestamp: Timestamp`)
+  were flattened to the resolved primitive (`std::string`, `int64_t`); the field
+  and param mappers (`nimTypeToCppType` / `…PyHint` / `…RustHint` /
+  `…GoCborHint`) now return the alias name when its underlying maps, so C++,
+  Python, Rust, and Go all see `ChannelId` / `Timestamp` rather than the bare
+  primitive. The C++ event-callback param mapper got the same fix
+  (Rust/Go already went through the general field mapper).
+- **Pure type aliases are now resolved in wrapper type discovery.** Aliases like
+  `type ContentTopic = string` / `Timestamp = int64` were dropped because
+  registration keyed off `getTypeInst` (which echoes a pure alias's own name);
+  discovery now uses `getTypeImpl` to chain through alias-of-alias to the base
+  symbol. Also fixes alias-typed fields inside `Option[T]` / `seq[T]` and
+  structurally-identical `array[N, byte]` aliases (captured as-written so
+  `WakuMessageHash` and `Curve25519Key` no longer collide), and stops
+  `resolveActualSym` mis-unwrapping a non-`typedesc` `array[…]` bracket.
+- **`seq[byte]` maps to an ergonomic `Bytes` vector in the C++ wrapper** — a
+  per-library `struct Bytes : std::vector<uint8_t>` whose `json_type_traits`
+  force a CBOR byte string (major type 2), matching how Nim's
+  `cbor_serialization` decodes it. Previously C++ emitted a jsoncons-specific
+  `byte_string` (correct on the wire, unergonomic in the public type).
+- **proc-sugar request brokers now emit the right response payload type in
+  every wrapper.** A verb-named broker registers its verb as a synthetic
+  distinct alias of the payload; codegen used to surface that synthetic name
+  (`Result<Send>`, `Result<StartDiscv5>`) instead of the real payload. Fixed for
+  scalar alias/distinct payloads (`Result<RequestId>`), bare primitives
+  (`Result<bool>`), `seq[...]` / `array[N,T]` containers, and standalone
+  registered objects (whose return type is now scanned and registered, not
+  dropped as "not emittable").
+
+### Added on FFI layer
+
+- **`registerBrokerLibrary` `version:` accepts a `const` identifier**, not just
+  a string literal — so a build-time version (`-d:git_version=…` strdefine)
+  works. The generated `<lib>_version()` binds the version expression to a
+  string const in the caller's module and returns its `.cstring`; foreign
+  wrappers expose version only via the runtime `_version()` call and are
+  unchanged.
+- **Outbound events dropped on a full courier ring are now logged.** The CBOR
+  event courier is a bounded fire-and-forget ring (256 → 1024); on overflow
+  `tryEnqueue` drops by design, but the drop was silent. A throttled `warn` now
+  fires at the generated emit drop site — first drop always logs, then a
+  geometric count backoff (10, 100, 1000 …) plus a 5 s periodic floor so a
+  steady stall keeps reporting without flooding the producer hot path.
 
 ## [3.1.2] — 2026-06-10
 
