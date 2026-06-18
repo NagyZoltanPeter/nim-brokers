@@ -59,6 +59,16 @@ proc baseName(n: NimNode): NimNode {.compileTime.} =
   else:
     n
 
+proc copyLineInfoRec(n, info: NimNode) {.compileTime.} =
+  ## Recursively stamp `info`'s source location onto every node of `n`.
+  ## `parseStmt`-generated procs carry synthetic line info; for an `{.async.}`
+  ## proc that ALSO has a `typedesc` parameter (implicitly generic) that breaks
+  ## the chronos async transform with a compiler-level OSError. Re-stamping a
+  ## real location before emitting sidesteps it.
+  n.copyLineInfo(info)
+  for c in n:
+    copyLineInfoRec(c, info)
+
 macro BrokerImplement*(args: varargs[untyped]): untyped =
   ## See module docs. Invoked as `BrokerImplement Impl of IFace: <body>`.
   if args.len < 2:
@@ -266,30 +276,78 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
     else:
       ""
 
-  # createUnderContext() — adopts `ctx`. gcsafe: the create-instance FFI path
-  # constructs sub-instances inside a gcsafe request method body (classCtx is an
-  # immutable `let`, instanceCtx an atomic, setupProviders is gcsafe). Requires
-  # the user `new` body to be gcsafe (trivial field writes always are).
+  # createUnderContext() / create() MIRROR the user `new` constructor's result
+  # shape, so a natural constructor of any of these four forms decorates
+  # transparently (the wrapper unwraps `new` into a bare `self: T`, binds the
+  # ctx, runs the optional PostInit hook, then wires providers via
+  # SetupProviders — which never sees the Future/Result wrapper):
+  #   proc new(...): T                              -> wrapper: T {.gcsafe.}
+  #   proc new(...): Future[T] {.async.}            -> wrapper: Future[T] {.async.}
+  #   proc new(...): Result[T, string]             -> wrapper: Result[T, string]
+  #   proc new(...): Future[Result[T, string]] ...  -> Future[Result[T,string]] {.async.}
+  # Sync forms stay `{.gcsafe.}` (the create-instance FFI path constructs
+  # sub-instances inside a gcsafe request method body); async forms are
+  # `{.async.}` (in-process). The sync-bare form is byte-identical to the legacy
+  # codegen, so existing implementations are unaffected.
+  let retNew = if userNew != nil: userNew.params[0] else: copyNimTree(implName)
+  let newIsAsync = isAsyncRet(retNew)
+  let newIsResult = not extractResultOk(retNew, newIsAsync).isNil
+  # Real source location to stamp onto the async wrappers (see copyLineInfoRec).
+  let ctorInfoSrc = if userNew != nil: userNew else: implName
+
+  let wrapRet =
+    if newIsAsync and newIsResult:
+      "Future[Result[" & implStr & ", string]]"
+    elif newIsAsync:
+      "Future[" & implStr & "]"
+    elif newIsResult:
+      "Result[" & implStr & ", string]"
+    else:
+      implStr
+  let wrapPrag = if newIsAsync: "{.async.}" else: "{.gcsafe.}"
+
+  # Acquire the bare instance from `new`, unwrapping per shape into `self: T`.
+  let acquireSelf =
+    if newIsAsync and newIsResult:
+      "  let self = (await T.new" & newCallArgs & ").valueOr:\n    return err(error)\n"
+    elif newIsAsync:
+      "  let self = await T.new" & newCallArgs & "\n"
+    elif newIsResult:
+      "  let self = T.new" & newCallArgs & ".valueOr:\n    return err(error)\n"
+    else:
+      "  let self = T.new" & newCallArgs & "\n"
+  # Finish: yield the wired instance in the wrapper's result shape.
+  let finishSelf =
+    if newIsResult: "  return ok(self)\n"
+    elif newIsAsync: "  return self\n"
+    else: "  self\n"
+
   var cucSrc =
     "proc createUnderContext*(T: typedesc[" & implStr & "], ctx: BrokerContext" &
-    ctorParamDecls & "): " & implStr & " {.gcsafe.} =\n"
-  cucSrc.add("  let self = T.new" & newCallArgs & "\n")
+    ctorParamDecls & "): " & wrapRet & " " & wrapPrag & " =\n"
+  cucSrc.add(acquireSelf)
   cucSrc.add("  self.brokerCtx = ctx\n")
   if initBody != nil:
     cucSrc.add("  " & $postInitName & "(self)\n")
   cucSrc.add("  " & $setupName & "(self)\n")
-  cucSrc.add("  self\n")
-  result.add(parseStmt(cucSrc))
+  cucSrc.add(finishSelf)
+  let cucNode = parseStmt(cucSrc)
+  if newIsAsync:
+    copyLineInfoRec(cucNode, ctorInfoSrc)
+  result.add(cucNode)
 
   # create() — allocate a fresh per-instance ctx, then decorate.
+  let cucCall =
+    "T.createUnderContext(makeBrokerContext(" & $classCtxVar & ", " & $instCounter &
+    ".fetchAdd(1'u16, moRelaxed) + 1'u16)" & fwdArgs & ")"
   var createSrc =
-    "proc create*(T: typedesc[" & implStr & "]" & ctorParamDecls & "): " & implStr &
-    " {.gcsafe.} =\n"
-  createSrc.add(
-    "  T.createUnderContext(makeBrokerContext(" & $classCtxVar & ", " & $instCounter &
-      ".fetchAdd(1'u16, moRelaxed) + 1'u16)" & fwdArgs & ")\n"
-  )
-  result.add(parseStmt(createSrc))
+    "proc create*(T: typedesc[" & implStr & "]" & ctorParamDecls & "): " & wrapRet &
+    " " & wrapPrag & " =\n"
+  createSrc.add((if newIsAsync: "  return await " else: "  ") & cucCall & "\n")
+  let createNode = parseStmt(createSrc)
+  if newIsAsync:
+    copyLineInfoRec(createNode, ctorInfoSrc)
+  result.add(createNode)
 
   # close() — clear this instance's providers (breaks the refc cycle) and free
   # its ctx. Idempotent.
