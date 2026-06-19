@@ -336,7 +336,7 @@ task test, "Run all single and multi-threaded broker tests":
   let tests = [
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
     "test_request_broker_sync_void", "test_multi_request_broker", "test_broker_oop",
-    "test_broker_lifecycle",
+    "test_broker_lifecycle", "test_broker_ctor_shapes",
   ]
   for f in tests:
     for opt in [
