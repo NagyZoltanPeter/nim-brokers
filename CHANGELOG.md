@@ -3,6 +3,42 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.1.4] — 2026-06-19
+
+**`BrokerImplement` constructors gain result-shape parity with `new` and adopt
+the ambient global broker context.** The generated `create` /
+`createUnderContext` wrappers now mirror whatever shape the implementation's
+`new` returns, and `create` connects its instance to the current global scope
+instead of an isolated per-class context.
+
+### Changed — `BrokerImplement` `create` / `createUnderContext`
+
+- **`create` / `createUnderContext` mirror the `new` constructor's return
+  shape** across all four forms: `new(...): T` → `create(): T`,
+  `new(...): Future[T] {.async.}` → `create(): Future[T] {.async.}`,
+  `new(...): Result[T, string]` → `create(): Result[T, string]`, and
+  `new(...): Future[Result[T, string]]` → `Future[Result[T, string]] {.async.}`.
+  The wrapper unwraps `new`'s result (`await` / `valueOr`) into a bare `self: T`,
+  binds `brokerCtx`, runs the optional `PostInit` hook, then wires providers via
+  the unchanged `<Impl>SetupProviders` (which never sees the Future/Result
+  wrapper). The sync-bare form is byte-identical to the legacy codegen, so
+  existing implementations are unaffected. Also fixes a chronos/`parseStmt`
+  interaction — an `{.async.}` proc carrying a `typedesc` param is implicitly
+  generic, and synthetic line info crashed the async transform; the async
+  wrappers are now re-stamped with a real source location (`copyLineInfoRec`).
+- **`create` adopts the ambient global `classCtx`.** It previously minted a
+  per-class `classCtx` (`<Impl>BrokerClassCtx` via `newClassCtx()`), disconnected
+  from the thread-global scope. It now allocates its per-instance context with
+  `newInstanceCtx(globalBrokerContext())` — the `classCtx` is read from the
+  current `globalBrokerContext()` at call time, so a `create`'d instance shares
+  the global scope of the bare brokers (or the locked test context), while
+  `instanceCtx` stays unique via `newInstanceCtx`'s process-global counter. The
+  per-class `<Impl>BrokerClassCtx` / `<Impl>BrokerInstCounter` module state is
+  dropped. `createUnderContext(ctx, …)` is unchanged for explicit/foreign scopes.
+- New `test/test_broker_ctor_shapes.nim` covers all four constructor shapes plus
+  `createUnderContext` and the locked-scope adoption behavior; registered in the
+  `test` task.
+
 ## [3.1.3] — 2026-06-18
 
 **Uniform EventBroker call shape across all lanes, plus a batch of FFI
