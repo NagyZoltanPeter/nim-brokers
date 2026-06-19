@@ -25,35 +25,48 @@ BrokerInterface(ICtorShape):
 # Form 1 — sync bare:           create(): T
 type GSyncBare = ref object of ICtorShape
   prefix: string
+
 BrokerImplement GSyncBare of ICtorShape:
   proc new(T: typedesc[GSyncBare], prefix: string): GSyncBare =
     GSyncBare(prefix: prefix)
-  method greet(self: GSyncBare, name: string): Future[Result[string, string]] {.async.} =
+
+  method greet(
+      self: GSyncBare, name: string
+  ): Future[Result[string, string]] {.async.} =
     ok(self.prefix & name)
 
 # Form 2 — async bare:          create(): Future[T] {.async.}
 type GAsyncBare = ref object of ICtorShape
   prefix: string
+
 BrokerImplement GAsyncBare of ICtorShape:
   proc new(T: typedesc[GAsyncBare], prefix: string): Future[GAsyncBare] {.async.} =
     return GAsyncBare(prefix: prefix)
-  method greet(self: GAsyncBare, name: string): Future[Result[string, string]] {.async.} =
+
+  method greet(
+      self: GAsyncBare, name: string
+  ): Future[Result[string, string]] {.async.} =
     ok(self.prefix & name)
 
 # Form 3 — sync Result:         create(): Result[T, string]
 type GSyncResult = ref object of ICtorShape
   prefix: string
+
 BrokerImplement GSyncResult of ICtorShape:
   proc new(T: typedesc[GSyncResult], prefix: string): Result[GSyncResult, string] =
     if prefix.len == 0:
       return err("empty prefix")
     ok(GSyncResult(prefix: prefix))
-  method greet(self: GSyncResult, name: string): Future[Result[string, string]] {.async.} =
+
+  method greet(
+      self: GSyncResult, name: string
+  ): Future[Result[string, string]] {.async.} =
     ok(self.prefix & name)
 
 # Form 4 — async Result:        create(): Future[Result[T, string]] {.async.}
 type GAsyncResult = ref object of ICtorShape
   prefix: string
+
 BrokerImplement GAsyncResult of ICtorShape:
   proc new(
       T: typedesc[GAsyncResult], prefix: string
@@ -61,7 +74,10 @@ BrokerImplement GAsyncResult of ICtorShape:
     if prefix.len == 0:
       return err("empty prefix")
     return ok(GAsyncResult(prefix: prefix))
-  method greet(self: GAsyncResult, name: string): Future[Result[string, string]] {.async.} =
+
+  method greet(
+      self: GAsyncResult, name: string
+  ): Future[Result[string, string]] {.async.} =
     ok(self.prefix & name)
 
 suite "BrokerImplement: ctor result-shape mirroring":

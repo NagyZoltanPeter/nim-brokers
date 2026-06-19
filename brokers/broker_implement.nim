@@ -279,7 +279,11 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   # sub-instances inside a gcsafe request method body); async forms are
   # `{.async.}` (in-process). The sync-bare form is byte-identical to the legacy
   # codegen, so existing implementations are unaffected.
-  let retNew = if userNew != nil: userNew.params[0] else: copyNimTree(implName)
+  let retNew =
+    if userNew != nil:
+      userNew.params[0]
+    else:
+      copyNimTree(implName)
   let newIsAsync = isAsyncRet(retNew)
   let newIsResult = not extractResultOk(retNew, newIsAsync).isNil
   # Real source location to stamp onto the async wrappers (see copyLineInfoRec).
@@ -308,9 +312,12 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       "  let self = T.new" & newCallArgs & "\n"
   # Finish: yield the wired instance in the wrapper's result shape.
   let finishSelf =
-    if newIsResult: "  return ok(self)\n"
-    elif newIsAsync: "  return self\n"
-    else: "  self\n"
+    if newIsResult:
+      "  return ok(self)\n"
+    elif newIsAsync:
+      "  return self\n"
+    else:
+      "  self\n"
 
   var cucSrc =
     "proc createUnderContext*(T: typedesc[" & implStr & "], ctx: BrokerContext" &
@@ -335,10 +342,11 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   # across all impl classes that share a classCtx (a per-class counter would
   # collide once the classCtx is shared). For an explicit/foreign scope, call
   # `createUnderContext(ctx, …)` directly.
-  let cucCall = "T.createUnderContext(newInstanceCtx(globalBrokerContext())" & fwdArgs & ")"
+  let cucCall =
+    "T.createUnderContext(newInstanceCtx(globalBrokerContext())" & fwdArgs & ")"
   var createSrc =
-    "proc create*(T: typedesc[" & implStr & "]" & ctorParamDecls & "): " & wrapRet &
-    " " & wrapPrag & " =\n"
+    "proc create*(T: typedesc[" & implStr & "]" & ctorParamDecls & "): " & wrapRet & " " &
+    wrapPrag & " =\n"
   createSrc.add((if newIsAsync: "  return await " else: "  ") & cucCall & "\n")
   let createNode = parseStmt(createSrc)
   if newIsAsync:
