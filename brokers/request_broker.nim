@@ -529,15 +529,6 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
       result.add(
         quote do:
           proc request*(
-              _: typedesc[`typeIdent`]
-          ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
-            return await request(`typeIdent`, DefaultBrokerContext)
-
-      )
-
-      result.add(
-        quote do:
-          proc request*(
               _: typedesc[`typeIdent`], brokerCtx: BrokerContext
           ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
             var provider: `zeroArgProviderName`
@@ -577,6 +568,17 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
                     "RequestBroker(" & `typeNameLit` & "): provider returned nil result"
                   )
             return providerRes
+
+      )
+
+      # Non-async pass-through forwarder (see the arg-based note): returns the
+      # keyed request's Future directly so no wrapper Future is allocated for
+      # the default-context call. `auto` preserves the keyed raises-typed
+      # Future so callers keep raises:[] tracking through `await`.
+      result.add(
+        quote do:
+          proc request*(_: typedesc[`typeIdent`]): auto {.inline, gcsafe, raises: [].} =
+            request(`typeIdent`, DefaultBrokerContext)
 
       )
     of rbSync:
@@ -711,32 +713,39 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     for argName in argNameIdents:
       forwardCall.add(argName)
 
+    # The default-context forwarder is a non-async pass-through: it returns
+    # the keyed request's Future directly (no `await`), so the async lane
+    # allocates NO wrapper Future for `request(args)` — the caller's `await`
+    # drives the keyed Future straight through. For async modes the return
+    # type becomes `auto` so it inherits the keyed proc's raises-typed Future
+    # (InternalRaisesFuture[..., void]) and callers keep raises:[] tracking.
     var requestBody = newStmtList()
-    case mode
-    of rbAsync, rbMultiThread, rbApi:
-      requestBody.add(
-        quote do:
-          return await `forwardCall`
-      )
-    of rbSync:
-      requestBody.add(
-        quote do:
-          return `forwardCall`
-      )
+    requestBody.add(
+      quote do:
+        return `forwardCall`
+    )
+
+    var forwarderFormalParams = copyNimTree(formalParams)
+    let forwarderPragmas =
+      case mode
+      of rbAsync, rbMultiThread, rbApi:
+        forwarderFormalParams[0] = ident("auto")
+        quote:
+          {.inline, gcsafe, raises: [].}
+      of rbSync:
+        requestPragmas
 
     # Built now, but added to `result` only *after* the keyed variant below:
-    # the forwarder's body calls the keyed `request`, and in `sync` mode the
-    # body is sem-checked eagerly, so the keyed overload must already be
-    # declared (Nim has no forward references for overloaded routines). Async
-    # tolerates either order because the `async` macro reprocesses the body
-    # after the surrounding scope is fully populated.
+    # the forwarder's body calls the keyed `request`, so the keyed overload
+    # must already be declared (Nim has no forward references for overloaded
+    # routines, and the `auto` return needs the keyed proc's type resolved).
     let nonKeyedRequestProc = newTree(
       nnkProcDef,
       postfix(ident("request"), "*"),
       newEmptyNode(),
       newEmptyNode(),
-      formalParams,
-      requestPragmas,
+      forwarderFormalParams,
+      forwarderPragmas,
       newEmptyNode(),
       requestBody,
     )
