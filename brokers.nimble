@@ -485,6 +485,19 @@ task perftestInproc,
         flags.add(" -d:release")
       exec "nim c -r " & flags & " test/ffibench/perf_inproc.nim"
 
+task perfOverhead,
+  "Same-thread RequestBroker dispatch overhead vs direct proc call + memory (sync/async, scalar+512B; orc + refc, release)":
+  ## Isolates the broker machinery cost: each row calls one shared impl, so
+  ## the only variable is the dispatch path (direct / sync broker / async
+  ## broker). Reports ns/call overhead vs the matching direct-call floor,
+  ## per-call allocation churn, and the static footprint of a registered
+  ## broker. Churn is mm-specific (refc shows garbage/call; ORC reclaims
+  ## inline ≈ 0), so the matrix is orc + refc, release only.
+  for mm in memoryManagerMatrix():
+    echo "\n=== perfOverhead: --mm:" & mm & " (release) ==="
+    exec "nim c -r -d:release --path:. --outdir:build --mm:" & mm &
+      " test/ffibench/perf_overhead.nim"
+
 task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and run it":
   ## Part D-6 — captures the per-emit cost across four scenarios:
   ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
