@@ -281,7 +281,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
     ctx,
     proc(count: int32): Future[Result[TriggerEmitRequest, string]] {.closure, async.} =
       for i in 0 ..< count:
-        discard PingEvent.emit(ctx, PingEvent(seqNo: int64(i)))
+        PingEvent.emit(ctx, PingEvent(seqNo: int64(i)))
       return ok(TriggerEmitRequest(emitted: count)),
   )
   if emitRes.isErr():
@@ -305,7 +305,7 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       for i in 0 ..< n:
         payload[i] = byte(i and 0xFF)
       for i in 0 ..< count:
-        discard PingPayloadEvent.emit(
+        PingPayloadEvent.emit(
           ctx,
           PingPayloadEvent(
             seqNo: int64(i), emitTimestampNs: emitTimestampNs, bytes: payload
