@@ -41,6 +41,9 @@ const
   TotalOps = NumWorkerThreads * OpsPerThread
   PayloadBytes = 512
   VecElements = PayloadBytes div sizeof(int32) ## 128 × int32 = 512 B
+  PipelineWindow = 64
+    ## max in-flight requests per worker; × NumWorkerThreads (320) must stay ≤
+    ## the broker's slab/queue/response-slot capacities (512 below)
 
 # ---------------------------------------------------------------------------
 # Broker definitions — identical VecRequest shape to benchlib (echo the
@@ -54,7 +57,11 @@ RequestBroker:
 
   proc signature*(payload: seq[int32]): Future[Result[VecReqSt, string]] {.async.}
 
-RequestBroker(mt):
+RequestBroker(mt, queueDepth = 512, slabCapacity = 512, responseSlots = 512):
+  # Pools sized for pipelining: total in-flight (PipelineWindow ×
+  # NumWorkerThreads) must fit, else fired requests hit back-pressure
+  # (slab/queue/response-slot exhaustion). Defaults (64/256/256) are too
+  # small for the windowed pipeline below.
   type VecReqMt = object
     length*: int32
     checksum*: int64
@@ -243,9 +250,79 @@ proc runMtScenario() {.async.} =
     s,
   )
 
+# ---------------------------------------------------------------------------
+# Scenario MT pipelined — each worker keeps a window of in-flight requests
+# (fire without awaiting → collect futures → await allFinished), so the
+# requester loop stays hot and amortizes the per-request wakeup.
+# ---------------------------------------------------------------------------
+
+proc mtPipelineBody(ordinal: int) {.async.} =
+  let payload = makePayload()
+  var done = 0
+  var i = 0
+  while i < OpsPerThread:
+    let batch = min(PipelineWindow, OpsPerThread - i)
+    var futs = newSeqOfCap[Future[Result[VecReqMt, string]]](batch)
+    for b in 0 ..< batch:
+      futs.add(VecReqMt.request(payload)) # fire — do NOT await yet
+    discard await allFinished(futs) # async-wait for the whole window
+    for f in futs:
+      let r = f.read()
+      if r.isOk() and r.get().length == VecElements.int32:
+        inc done
+    i += batch
+  gMtCount[ordinal] = done
+
+proc mtPipelineWorker() {.thread.} =
+  let ordinal = gThreadOrdinal.fetchAdd(1)
+  waitFor mtPipelineBody(ordinal)
+  discard gWorkersFinished.fetchAdd(1)
+
+proc runMtPipelinedScenario() {.async.} =
+  gWorkersFinished.store(0)
+  gThreadOrdinal.store(0)
+  for t in 0 ..< NumWorkerThreads:
+    gMtCount[t] = 0
+
+  let provRes = VecReqMt.setProvider(
+    proc(payload: seq[int32]): Future[Result[VecReqMt, string]] {.async.} =
+      var checksum: int64 = 0
+      for v in payload:
+        checksum += v
+      ok(VecReqMt(length: int32(payload.len), checksum: checksum))
+  )
+  doAssert provRes.isOk(), "MT pipelined setProvider failed"
+
+  var threads: array[NumWorkerThreads, Thread[void]]
+  let t0 = getMonoTime()
+  for i in 0 ..< NumWorkerThreads:
+    threads[i].createThread(mtPipelineWorker)
+  while gWorkersFinished.load() < NumWorkerThreads:
+    await sleepAsync(chronos.milliseconds(1))
+  let wall = (getMonoTime() - t0).inNanoseconds
+  for i in 0 ..< NumWorkerThreads:
+    threads[i].joinThread()
+  VecReqMt.clearProvider()
+
+  var done = 0
+  for t in 0 ..< NumWorkerThreads:
+    done += gMtCount[t]
+
+  echo ""
+  echo "  ┌─── In-proc Request — multi-thread Nim PIPELINED (",
+    NumWorkerThreads, " threads × window ", PipelineWindow,
+    ") ──────────"
+  echo "  │ Completed      : ", done, " / ", TotalOps
+  echo "  │ Wall-clock     : ", fmtNs(wall)
+  echo "  │ Throughput     : ", fmtRate(done, wall)
+  echo "  └──────────────────────────────────────────────────────"
+  echo "csv,perftest_inproc,mt_request_pipelined,",
+    done, ",", TotalOps - done, ",", wall
+
 proc main() {.async.} =
   echo "in-proc Nim request baselines — 5 × 500 × 512 B (vecRequest echo)"
   await runStScenario()
   await runMtScenario()
+  await runMtPipelinedScenario()
 
 waitFor main()

@@ -498,6 +498,17 @@ task perfOverhead,
     exec "nim c -r -d:release --path:. --outdir:build --mm:" & mm &
       " test/ffibench/perf_overhead.nim"
 
+task perfPhases,
+  "Phase-timed MT RequestBroker round-trip: inbound/handler/outbound wake legs + same-thread floor (orc + refc, release)":
+  ## Splits one cross-thread request into inbound (requester→provider wake),
+  ## handler (provider body), and outbound (provider→requester wake) using a
+  ## shared monotonic epoch. Same-thread row is the dispatch floor. Proves
+  ## where the ~110 µs round-trip actually goes.
+  for mm in memoryManagerMatrix():
+    echo "\n=== perfPhases: --mm:" & mm & " (release) ==="
+    exec "nim c -r -d:release --threads:on --path:. --outdir:build --mm:" & mm &
+      " test/ffibench/perf_phases.nim"
+
 task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and run it":
   ## Part D-6 — captures the per-emit cost across four scenarios:
   ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
