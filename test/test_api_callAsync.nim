@@ -100,6 +100,8 @@ registerBrokerLibrary:
     InitializeRequest
   shutdownRequest:
     ShutdownRequest
+  asyncQueueDepth:
+    16
 
 # ---------------------------------------------------------------------------
 # Foreign-side plumbing: a shared-heap result block handed in as `userData`.
@@ -310,6 +312,52 @@ suite "API library async call (CBOR mode)":
     sleep(120)
     check r.callCount.load(moAcquire) == 1 # exactly once, never after timeout
     deallocShared(r)
+    discard acbtest_shutdown(ctx)
+
+  test "full async window returns -6 (EAGAIN) and does not fire the callback":
+    var err: cstring = nil
+    let ctx = acbtest_createContext(addr err)
+    check ctx != 0'u32
+
+    type AddArgs = object
+      a*: int32
+      b*: int32
+
+    # asyncQueueDepth is 16 for this lib. Fill the window with slow (40ms)
+    # requests so the depth reservation is held, then the next call must be
+    # rejected with -6 and its callback must NOT fire.
+    const Depth = 16
+    var held: array[Depth, ptr AsyncResult]
+    for i in 0 ..< Depth:
+      held[i] = newResult()
+      let argBuf = cborEncode(AddArgs(a: int32(i), b: 0'i32))
+      let inBuf = allocReq(argBuf.value)
+      let rc = acbtest_callAsync(
+        ctx, "add_slow".cstring, inBuf, int32(argBuf.value.len), uint64(i), 0'u32,
+        onResp, held[i],
+      )
+      check rc == 0'i32
+
+    # Window is now full — this extra call is rejected immediately.
+    let overflow = newResult()
+    let argBufX = cborEncode(AddArgs(a: 99'i32, b: 0'i32))
+    let inBufX = allocReq(argBufX.value)
+    let rcX = acbtest_callAsync(
+      ctx, "add_slow".cstring, inBufX, int32(argBufX.value.len), 0xBADBAD'u64, 0'u32,
+      onResp, overflow,
+    )
+    check rcX == -6'i32
+    # The rejected call's callback must never fire.
+    sleep(120)
+    check overflow.callCount.load(moAcquire) == 0
+    deallocShared(overflow)
+
+    # The 16 accepted calls all complete normally.
+    for i in 0 ..< Depth:
+      check waitDone(held[i])
+      check held[i].gotStatus == 0'i32
+      deallocShared(held[i])
+
     discard acbtest_shutdown(ctx)
 
   test "generous timeout lets the slow provider complete normally":

@@ -237,12 +237,23 @@ proc tryPop[T](r: var PodRing[T], dst: var T): bool =
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-proc newCborCourier*(slotCount: int): ptr CborCourier =
-  ## Allocate a courier with `slotCount` response slots. `slotCount` is the
-  ## *initial* ceiling on concurrent in-flight `_call`s; the request ring is
-  ## sized the same, so the slot pool gates the ring (a `_call` always claims
-  ## a slot before enqueuing). On exhaustion the pool and ring grow together
-  ## by doubling, up to a hard ceiling of `4 * slotCount` — see `claimSlot`.
+proc newCborCourier*(slotCount: int, asyncCap = 0): ptr CborCourier =
+  ## Allocate a courier. `slotCount` is the *initial* ceiling on concurrent
+  ## in-flight SYNC `_call`s; the sync request ring is sized the same, so the
+  ## slot pool gates the ring (a `_call` always claims a slot before enqueuing).
+  ## On exhaustion the sync pool and ring grow together by doubling, up to a
+  ## hard ceiling of `4 * slotCount` — see `claimSlot`.
+  ##
+  ## `asyncCap` is the SEPARATE, fixed ceiling on concurrent in-flight
+  ## `_callAsync`s (the async ring does not grow). `asyncCap <= 0` defaults it to
+  ## `slotCount`. The owning context's response courier MUST be sized
+  ## `>= asyncCap` so a bounded set of outstanding async calls can never overflow
+  ## the response ring.
+  let effAsyncCap =
+    if asyncCap > 0:
+      asyncCap
+    else:
+      slotCount
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
   c.ring.buf =
     cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))
@@ -262,9 +273,10 @@ proc newCborCourier*(slotCount: int): ptr CborCourier =
     seg0[i].inUse.store(0, moRelaxed)
   c.segs[0] = CborSlotSegment(slots: seg0, base: 0, len: slotCount)
   c.nSegs.store(1, moRelease)
-  # Async path: own ring + in-flight ceiling, sized to the same initial count.
-  initPodRing(c.asyncRing, slotCount)
-  c.asyncCap = slotCount
+  # Async path: own fixed-capacity ring + in-flight ceiling (independent of the
+  # sync slot pool, which may grow).
+  initPodRing(c.asyncRing, effAsyncCap)
+  c.asyncCap = effAsyncCap
   c.asyncDepth.store(0, moRelaxed)
   c
 

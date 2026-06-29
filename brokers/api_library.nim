@@ -70,6 +70,7 @@ proc parseLibraryConfig(
   refType: NimNode,
   mainClass: string,
   asyncTimeoutMs: int,
+  asyncQueueDepth: int,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
@@ -77,6 +78,11 @@ proc parseLibraryConfig(
   # wrappers + the C header as the policy default; the raw ABI stays mechanism
   # (0 = infinite). 30 s unless overridden by `asyncTimeoutMs:`.
   var asyncTimeoutMs = 30000
+  # Ceiling on concurrent in-flight `<lib>_callAsync`s per context (the async
+  # ring does not grow; full => -6 EAGAIN). Independent of the sync `_call` slot
+  # pool. Exposed to clients via the generated `<LIB>_ASYNC_QUEUE_DEPTH` macro so
+  # they can size a bounded send window. 64 unless overridden.
+  var asyncQueueDepth = 64
   # AST emitted into the generated `<lib>_version()` proc: a string literal, or
   # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
   var versionExpr: NimNode = newLit("0.1.0")
@@ -143,6 +149,16 @@ proc parseLibraryConfig(
             "asyncTimeoutMs must be an integer literal (milliseconds, 0 = infinite)",
             v,
           )
+      of "asyncqueuedepth":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkIntLit:
+          if v.intVal <= 0:
+            error("asyncQueueDepth must be > 0", v)
+          asyncQueueDepth = int(v.intVal)
+        else:
+          error("asyncQueueDepth must be a positive integer literal", v)
       of "mainclass":
         # reduced-A (A1): designates the main `BrokerInterface(API)` facade for
         # a multi-interface library. Other (API) interfaces are auto-discovered
@@ -188,6 +204,7 @@ proc parseLibraryConfig(
     refType: refTy,
     mainClass: mainClass,
     asyncTimeoutMs: asyncTimeoutMs,
+    asyncQueueDepth: asyncQueueDepth,
   )
 
 proc parseTypeExpr(
@@ -217,6 +234,7 @@ proc registerBrokerLibraryCborImpl(
       refType: NimNode,
       mainClass: string,
       asyncTimeoutMs: int,
+      asyncQueueDepth: int,
     ],
 ): NimNode
 
@@ -251,6 +269,7 @@ proc registerBrokerLibraryCborImpl(
         refType: NimNode,
         mainClass: string,
         asyncTimeoutMs: int,
+        asyncQueueDepth: int,
       ],
 ): NimNode =
   let libName = config.name
@@ -354,6 +373,10 @@ proc registerBrokerLibraryCborImpl(
 
   # Hard cap on a single buffer to detect runaway encodes.
   let bufSizeCap = newLit(64 * 1024 * 1024)
+
+  # Configured async in-flight window (per context), baked into `_createContext`
+  # courier sizing.
+  let asyncQueueDepthLit = newLit(config.asyncQueueDepth)
 
   result = newStmtList()
 
@@ -1455,9 +1478,10 @@ proc registerBrokerLibraryCborImpl(
         arg.deliveryReady.store(0, moRelaxed)
         arg.processingErrorMessage = nil
         arg.deliveryErrorMessage = nil
-        # Part C — courier: 64 response slots = ceiling on concurrent
-        # in-flight `<lib>_call`s; a call past that fails fast.
-        arg.courier = newCborCourier(64)
+        # Part C — courier: 64 response slots = initial ceiling on concurrent
+        # in-flight SYNC `<lib>_call`s (grows to 4x). The async window is a
+        # separate, fixed ceiling (`asyncQueueDepth`, default 64) — full => -6.
+        arg.courier = newCborCourier(64, `asyncQueueDepthLit`)
         arg.courierSignal = nil
         # Part D-3 — event courier: 256-slot ring (burst capacity, not
         # concurrency bound; producer is fire-and-forget). A full ring
@@ -1467,7 +1491,7 @@ proc registerBrokerLibraryCborImpl(
         # Async-response courier: sized to the call courier's async in-flight
         # ceiling so a bounded set of outstanding `<lib>_callAsync`s can never
         # overflow the ring. Drained by the delivery thread.
-        arg.respCourier = newCborRespCourier(64)
+        arg.respCourier = newCborRespCourier(`asyncQueueDepthLit`)
 
         let entry = cast[ptr `ctxEntryIdent`](allocShared0(sizeof(`ctxEntryIdent`)))
         entry.ctx = bctx
@@ -1908,10 +1932,12 @@ proc registerBrokerLibraryCborImpl(
   for e in eventEntries:
     eventNames.add(e.apiName)
   generateCborCHeaderFile(
-    outDir, libName, config.version, requestNames, eventNames, config.asyncTimeoutMs
+    outDir, libName, config.version, requestNames, eventNames, config.asyncTimeoutMs,
+    config.asyncQueueDepth,
   )
   generateCborCppHeaderFile(
-    outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs
+    outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
+    config.asyncQueueDepth,
   )
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(outDir, libName, entries, eventEntries, config.mainClass)

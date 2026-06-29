@@ -1289,9 +1289,17 @@ callback** — copy out anything you need; do **not** free it (this differs
 from `<lib>_call`, where the caller frees the response via
 `<lib>_freeBuffer`).
 
-**Back-pressure.** In-flight async requests are bounded (slot/ring caps).
-When the bound is reached `<lib>_callAsync` returns `-6` (EAGAIN) and the
-callback does not fire — retry later or drop.
+**Back-pressure.** In-flight async requests are bounded **per context** at a
+fixed window — `<LIB>_ASYNC_QUEUE_DEPTH` (default 64, set via
+`asyncTimeoutMs`'s sibling `asyncQueueDepth:` in `registerBrokerLibrary`). The
+async window is independent of the synchronous `<lib>_call` slot pool, so an
+async flood cannot starve blocking callers. When the window is full
+`<lib>_callAsync` returns `-6` (EAGAIN) and the **callback does not fire** —
+slow down and retry, or drop. A slot is held from a successful issue until its
+callback returns (success, `-4`, `-10`, `-11`, **or** `-12`), so a client can
+size a bounded send window to `<LIB>_ASYNC_QUEUE_DEPTH`, increment an
+outstanding counter on a `0` return, and decrement it in the callback
+regardless of status.
 
 **Timeout — exactly-once delivery.** `timeoutMs` is **dispatch-scoped**:
 `0` = infinite (no timeout); `N` = `N` milliseconds. If the provider
@@ -1322,9 +1330,25 @@ once, but that provider keeps running until shutdown.
 | `-12` | request timed out (provider exceeded `timeoutMs`) | yes |
 
 The typed wrappers expose this as a per-method async sibling — e.g. C++
-`lib.getDeviceAsync(id, cb, reqId = 0, timeoutMs = <default>)` where `cb`
-receives a decoded `Result<GetDevice>` (status `-4/-10/-11/-12` surface as
-`Result::err(...)`).
+`int32_t lib.getDeviceAsync(id, cb, reqId = 0, timeoutMs = <default>)` where
+`cb` receives a decoded `Result<GetDevice>`. The wrapper mirrors the raw ABI
+contract: the method **returns `int32_t`** — `0` = queued (`cb` fires exactly
+once later; runtime statuses `-4/-10/-11/-12` surface as `Result::err(...)`),
+and any **negative** return means NOT queued and `cb` does **not** fire
+(`asyncAgain` = `-6` EAGAIN → retry; `asyncBadContext` = `-5`; `asyncNoCallback`
+= `-7`; `asyncEncodeFailed` = `-1`). The class also exposes
+`static constexpr uint32_t asyncQueueDepth` so a client can size its bounded
+window without hardcoding the value. This keeps a transient `-6` cheap (no
+allocation consumed, no error callback) so backpressure is a simple retry loop:
+
+```cpp
+int32_t rc;
+do {
+    rc = lib.getDeviceAsync(id, on_done, reqId, timeoutMs);
+    if (rc == Lib::asyncAgain) std::this_thread::sleep_for(1ms);  // window full
+} while (rc == Lib::asyncAgain);
+if (rc == 0) ++outstanding;   // accepted — on_done fires once; --outstanding there
+```
 
 ### C++ wrapper
 

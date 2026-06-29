@@ -108,6 +108,67 @@ runs; sync path untouched.
 
 ---
 
+## Phase 1.6 — backpressure ergonomics (DONE, verified)
+
+Implemented: typed C++ async method now returns `int32_t` (`0` queued / `-6`
+EAGAIN / other negative = rejected; `cb` fires iff queued) with `asyncAgain`,
+`asyncQueueDepth`, etc. as class constants. Async window is configurable via
+`registerBrokerLibrary asyncQueueDepth:` (default 64, async-only; sync `_call`
+pool unchanged) → `newCborCourier(64, depth)` + `newCborRespCourier(depth)`;
+exposed as C `#define <LIB>_ASYNC_QUEUE_DEPTH` + C++ `static constexpr asyncQueueDepth`.
+Verified: 9/9 tests (incl. deterministic `-6` with a 16-deep window + slow
+provider, asserting `cb` does NOT fire) ORC/refc/refc+ASAN; cpp_example shows the
+retry-on-EAGAIN window loop; `runTypeMapTestLibCpp` 149/149; sync init 6/6.
+
+---
+
+### (original Phase 1.6 plan)
+
+Two changes so clients can do real overload handling.
+
+### A. Typed async wrapper returns the rc; cb fires iff accepted
+Today the C++ `fooAsync` returns `void` and folds a negative `rc` (incl. `-6`
+EAGAIN) into the callback as `Result::err("framework error: -6")`. That makes
+EAGAIN indistinguishable from a real failure and consumes the encode/cb work.
+
+New contract (mirrors the raw ABI): the typed async method **returns `int32_t`**
+and the callback fires **exactly once iff the call was accepted**:
+- `rc == 0`  → queued; `cb` will fire later (success or `-4/-10/-11/-12`).
+- `rc < 0`   → NOT queued; `cb` does **not** fire. `-6` = EAGAIN (retry/slow
+  down); other negatives = rejected (bad ctx/args). Local encode/alloc failures
+  return `-1` (no `cb`).
+
+Edit `api_codegen_cbor_hpp.nim`: change the generated method to
+`int32_t <class>::fooAsync(...)`; on encode/alloc failure `return -1` (delete
+box, no `cb`); after `callAsync`, `if (rc != 0) { delete inv; return rc; }`
+(no `(*inv)(...)`); else `return 0`. (Python/Rust/Go are Phase 2 and must adopt
+the same contract — note in their codegen.) Update the cpp_example to check the
+return (`if (rc == ...DEFAULT... ) ` retry/slow-down comment).
+
+### B. Configurable async window + expose it
+Async ceiling is hardcoded `newCborCourier(64)` in `_createContext`. Make the
+**async** window configurable (leave the sync slot pool at 64, untouched):
+- `api_cbor_courier.nim`: `newCborCourier(slotCount: int, asyncCap = slotCount)`
+  — size `asyncRing`/`asyncCap` from `asyncCap`, sync ring/slots from
+  `slotCount`. (`newCborRespCourier(cap)` already separate.)
+- `api_library.nim`: parse `asyncQueueDepth:` in `registerBrokerLibrary`
+  (default 64; must be > 0). `_createContext`:
+  `newCborCourier(64, cfg.asyncQueueDepth)` + `newCborRespCourier(cfg.asyncQueueDepth)`
+  (keeps respCourier cap == asyncCap so the no-overflow invariant holds).
+- `api_codegen_cbor_h.nim`: emit `#define <LIB>_ASYNC_QUEUE_DEPTH N` so a client
+  can size its bounded window to the actual ceiling.
+- `api_codegen_cbor_hpp.nim`: `static constexpr uint32_t asyncQueueDepth = N;`
+  on the class.
+
+### Verify
+`test_api_callAsync`: assert `fooAsync`-equivalent contract at the ABI (already
+covers `-6` retry); add a test with `asyncQueueDepth` set small (e.g. 4) +
+a slow provider to force `-6` deterministically and confirm cb does NOT fire on
+`-6`. C++ parity 149/149; cpp_example builds; sync regression green; ORC/refc/
+refc+ASAN.
+
+---
+
 Original plan below. Branch off `master` (proposed `ffi-async-call`). Do NOT
 build on `bench-and-perf-opt` (PR #35).
 

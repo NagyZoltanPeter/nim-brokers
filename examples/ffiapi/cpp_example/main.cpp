@@ -219,26 +219,40 @@ int main() {
     //    No thread is parked per in-flight request, so these pipeline freely.
     //    `reqId` is echoed for logging; response↔request correlation is via
     //    the lambda capture (the wrapper boxes it as the opaque userData).
+    //    fooAsync returns 0 when queued (callback fires once later) or a
+    //    negative code when NOT queued — Mylib::asyncAgain (-6) means the async
+    //    window (Mylib::asyncQueueDepth) is full: slow down and retry.
     printf("--- Async device queries (fire-and-forget) ---\n");
+    printf("  async window = %u in-flight\n", Mylib::asyncQueueDepth);
     {
-        std::atomic<int> pending{static_cast<int>(ids.size())};
+        std::atomic<int> pending{0};
         for (int64_t qid : ids) {
-            lib.getDeviceAsync(
-                qid,
-                [qid, &pending](Result<GetDevice> res) {
-                    if (res.isOk())
-                        printf("  [async] id=%lld -> \"%s\" (%s)\n",
-                               (long long)qid, res->name.c_str(),
-                               res->online ? "online" : "offline");
-                    else
-                        printf("  [async] id=%lld -> error: %s\n",
-                               (long long)qid, res.error().c_str());
-                    --pending;
-                },
-                /*reqId=*/static_cast<uint64_t>(qid),
-                /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+            int32_t rc;
+            do {
+                rc = lib.getDeviceAsync(
+                    qid,
+                    [qid, &pending](Result<GetDevice> res) {
+                        if (res.isOk())
+                            printf("  [async] id=%lld -> \"%s\" (%s)\n",
+                                   (long long)qid, res->name.c_str(),
+                                   res->online ? "online" : "offline");
+                        else
+                            printf("  [async] id=%lld -> error: %s\n",
+                                   (long long)qid, res.error().c_str());
+                        --pending;
+                    },
+                    /*reqId=*/static_cast<uint64_t>(qid),
+                    /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+                if (rc == Mylib::asyncAgain)  // window full — back off and retry
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (rc == Mylib::asyncAgain);
+            if (rc == 0)
+                ++pending;  // accepted: the callback will fire exactly once
+            else
+                printf("  [async] id=%lld -> not queued (rc=%d)\n",
+                       (long long)qid, rc);
         }
-        // Wait for every async callback to land (delivery thread).
+        // Wait for every accepted async callback to land (delivery thread).
         for (int spins = 0; pending.load() > 0 && spins < 500; ++spins)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         printf("  All async queries completed (%d pending left).\n", pending.load());
