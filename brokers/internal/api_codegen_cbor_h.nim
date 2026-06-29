@@ -25,11 +25,14 @@ proc generateCborCHeaderFile*(
     version: string,
     requestApiNames: seq[string],
     eventApiNames: seq[string],
+    asyncTimeoutMs: int = 30000,
 ) {.compileTime, raises: [].} =
   ## Writes the fixed-shape C header for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
 
   let guardName = libName.toUpperAscii().replace("-", "_") & "_H"
+  let defaultTimeoutMacro = libName.toUpperAscii().replace("-", "_") &
+    "_DEFAULT_ASYNC_TIMEOUT_MS"
   let headerPath =
     if outDir.len > 0:
       outDir & "/" & libName & ".h"
@@ -125,6 +128,56 @@ proc generateCborCHeaderFile*(
       "                       const char* apiName,\n" &
       "                       const void* reqBuf, int32_t reqLen,\n" &
       "                       void** respBufOut, int32_t* respLenOut);\n\n"
+  )
+
+  h.add("/* ----------------------------------------------------------------\n")
+  h.add(" * Async request gate (fire-and-forget; sits beside the sync `call`)\n")
+  h.add(" *\n")
+  h.add(" * " & p & "callAsync enqueues the request and returns immediately. The\n")
+  h.add(" * response is delivered LATER on the library's event-delivery thread\n")
+  h.add(" * via `cb(userData, reqId, status, respBuf, respLen)`:\n")
+  h.add(" *\n")
+  h.add(" *   userData — opaque handle passed straight back, never interpreted;\n")
+  h.add(" *              use it to correlate the response with the request.\n")
+  h.add(" *   reqId    — echoed back verbatim (caller's logging/cancel id).\n")
+  h.add(" *   status   — 0 success, -4 unknown apiName, -10 dispatch failure,\n")
+  h.add(" *              -11 library shut down before the response was delivered,\n")
+  h.add(" *              -12 request timed out (provider exceeded timeoutMs).\n")
+  h.add(" *   respBuf  — CBOR response envelope, valid ONLY for the duration of\n")
+  h.add(" *              the callback; library-owned, freed after the callback\n")
+  h.add(" *              returns. Do NOT free it; copy out what you need.\n")
+  h.add(" *\n")
+  h.add(" * " & p & "callAsync returns:\n")
+  h.add(" *   0  — enqueued; the callback will fire exactly once\n")
+  h.add(" *   -2 — apiName is NULL or too long\n")
+  h.add(" *   -3 — reqLen is negative or exceeds 64 MiB\n")
+  h.add(" *   -5 — unknown or torn-down ctx\n")
+  h.add(" *   -6 — EAGAIN: too many async calls in flight (retry later)\n")
+  h.add(" *   -7 — cb is NULL\n")
+  h.add(" * On any negative return the callback does NOT fire.\n")
+  h.add(" *\n")
+  h.add(" * timeoutMs is dispatch-scoped: 0 = infinite (no timeout); N = N ms.\n")
+  h.add(" * On expiry the callback fires exactly once with status -12 and a NULL\n")
+  h.add(" * respBuf, and the in-flight slot is released. A late provider result is\n")
+  h.add(" * discarded — the callback never fires twice. Pass " & defaultTimeoutMacro &
+    "\n")
+  h.add(" * for the library's policy default. */\n\n")
+  h.add("#define " & defaultTimeoutMacro & " " & $asyncTimeoutMs & "u\n\n")
+  h.add(
+    "typedef void (*" & p & "response_cb_t)(void* userData,\n" &
+      "                                          uint64_t reqId,\n" &
+      "                                          int32_t status,\n" &
+      "                                          const void* respBuf,\n" &
+      "                                          int32_t respLen);\n\n"
+  )
+  h.add(
+    "int32_t " & p & "callAsync(uint32_t ctx,\n" &
+      "                            const char* apiName,\n" &
+      "                            const void* reqBuf, int32_t reqLen,\n" &
+      "                            uint64_t reqId,\n" &
+      "                            uint32_t timeoutMs,\n" &
+      "                            " & p & "response_cb_t cb,\n" &
+      "                            void* userData);\n\n"
   )
 
   h.add("/* ----------------------------------------------------------------\n")
