@@ -26,13 +26,15 @@ proc generateCborCHeaderFile*(
     requestApiNames: seq[string],
     eventApiNames: seq[string],
     asyncTimeoutMs: int = 30000,
+    asyncQueueDepth: int = 64,
 ) {.compileTime, raises: [].} =
   ## Writes the fixed-shape C header for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
 
-  let guardName = libName.toUpperAscii().replace("-", "_") & "_H"
-  let defaultTimeoutMacro = libName.toUpperAscii().replace("-", "_") &
-    "_DEFAULT_ASYNC_TIMEOUT_MS"
+  let upperLib = libName.toUpperAscii().replace("-", "_")
+  let guardName = upperLib & "_H"
+  let defaultTimeoutMacro = upperLib & "_DEFAULT_ASYNC_TIMEOUT_MS"
+  let queueDepthMacro = upperLib & "_ASYNC_QUEUE_DEPTH"
   let headerPath =
     if outDir.len > 0:
       outDir & "/" & libName & ".h"
@@ -162,7 +164,13 @@ proc generateCborCHeaderFile*(
   h.add(" * discarded — the callback never fires twice. Pass " & defaultTimeoutMacro &
     "\n")
   h.add(" * for the library's policy default. */\n\n")
-  h.add("#define " & defaultTimeoutMacro & " " & $asyncTimeoutMs & "u\n\n")
+  h.add("#define " & defaultTimeoutMacro & " " & $asyncTimeoutMs & "u\n")
+  h.add(
+    "/* Max concurrent in-flight " & p &
+      "callAsync requests per context (fixed; full => -6 EAGAIN).\n" &
+      " * Size a client-side bounded send window to this value. */\n"
+  )
+  h.add("#define " & queueDepthMacro & " " & $asyncQueueDepth & "u\n\n")
   h.add(
     "typedef void (*" & p & "response_cb_t)(void* userData,\n" &
       "                                          uint64_t reqId,\n" &

@@ -494,11 +494,13 @@ proc generateCborCppHeaderFile*(
     eventEntries: seq[CborEventEntry],
     mainClass: string = "",
     asyncTimeoutMs: int = 30000,
+    asyncQueueDepth: int = 64,
 ) {.compileTime, raises: [].} =
   ## Writes the C++ wrapper header (.hpp) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
-  let defaultTimeoutMacro = libName.toUpperAscii().replace("-", "_") &
-    "_DEFAULT_ASYNC_TIMEOUT_MS"
+  let upperLib = libName.toUpperAscii().replace("-", "_")
+  let defaultTimeoutMacro = upperLib & "_DEFAULT_ASYNC_TIMEOUT_MS"
+  let queueDepthMacro = upperLib & "_ASYNC_QUEUE_DEPTH"
 
   # reduced-A: an entry belongs to the main class when no mainClass is
   # designated (legacy single class), or it is flat, or its owning interface is
@@ -908,6 +910,21 @@ proc generateCborCppHeaderFile*(
   h.add("  " & className & "(" & className & "&&) = delete;\n")
   h.add("  " & className & "& operator=(" & className & "&&) = delete;\n\n")
   h.add("  static std::string_view version() noexcept;\n\n")
+  h.add(
+    "  // Max concurrent in-flight <method>Async requests (full => returns the\n" &
+      "  // EAGAIN code below). Size a bounded send window to this value.\n"
+  )
+  h.add(
+    "  static constexpr uint32_t asyncQueueDepth = " & queueDepthMacro & ";\n"
+  )
+  h.add(
+    "  // <method>Async returns 0 when queued (callback fires once later) or a\n" &
+      "  // negative code when NOT queued (callback does NOT fire):\n"
+  )
+  h.add("  static constexpr int32_t asyncAgain = -6;     // EAGAIN — retry/slow down\n")
+  h.add("  static constexpr int32_t asyncBadContext = -5;\n")
+  h.add("  static constexpr int32_t asyncNoCallback = -7;\n")
+  h.add("  static constexpr int32_t asyncEncodeFailed = -1;\n\n")
   h.add("  Result<void> createContext();\n")
   h.add("  bool validContext() const noexcept;\n")
   h.add("  explicit operator bool() const noexcept;\n")
@@ -969,7 +986,7 @@ proc generateCborCppHeaderFile*(
       else:
         "std::function<void(Result<" & payloadCppType(e.responseTypeName) & ">)> cb" &
           asyncTail
-    h.add("  void " & methodName & "Async(" & asyncSig & ");\n")
+    h.add("  int32_t " & methodName & "Async(" & asyncSig & ");\n")
   h.add("\n")
 
   # Per-event Callback aliases + on/off declarations. The public alias is
@@ -1889,38 +1906,34 @@ proc generateCborCppHeaderFile*(
             ")> cb, uint64_t reqId, uint32_t timeoutMs"
         else:
           "std::function<void(" & aResTy & ")> cb, uint64_t reqId, uint32_t timeoutMs"
+      # Returns 0 when queued (cb fires once later) or a negative code when NOT
+      # queued (cb does NOT fire): asyncAgain (-6) = EAGAIN, asyncBadContext (-5),
+      # asyncNoCallback (-7), asyncEncodeFailed (-1). This mirrors the raw ABI so
+      # callers can implement backpressure (retry on -6) without the callback
+      # being consumed by a transient failure.
       h.add(
-        "inline void " & className & "::" & methodName & "Async(" & asyncSig & ") {\n"
+        "inline int32_t " & className & "::" & methodName & "Async(" & asyncSig &
+          ") {\n"
       )
-      h.add("  if (!cb) return;\n")
+      h.add("  if (!cb) return asyncNoCallback;\n")
       if e.argFields.len > 0:
         h.add("  " & argsName & " args;\n")
         h.add(argsAssign)
         h.add("  std::size_t cborLen = 0;\n")
         h.add("  try { cborLen = detail::cborEncodedSize(args); }\n")
-        h.add("  catch (const std::exception& ex) {\n")
-        h.add(
-          "    cb(" & aResTy &
-            "::err(std::string(\"size pass failed: \") + ex.what())); return;\n"
-        )
-        h.add("  }\n")
+        h.add("  catch (const std::exception&) { return asyncEncodeFailed; }\n")
         h.add(
           "  void* inBuf = (cborLen > 0) ? " & p &
             "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
         )
-        h.add("  if (cborLen > 0 && !inBuf) {\n")
-        h.add("    cb(" & aResTy & "::err(\"allocBuffer failed\")); return;\n")
-        h.add("  }\n")
+        h.add("  if (cborLen > 0 && !inBuf) return asyncEncodeFailed;\n")
         h.add("  try {\n")
         h.add(
           "    if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
         )
-        h.add("  } catch (const std::exception& ex) {\n")
+        h.add("  } catch (const std::exception&) {\n")
         h.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
-        h.add(
-          "    cb(" & aResTy &
-            "::err(std::string(\"encode pass failed: \") + ex.what())); return;\n"
-        )
+        h.add("    return asyncEncodeFailed;\n")
         h.add("  }\n")
       else:
         h.add("  void* inBuf = nullptr;\n")
@@ -1967,10 +1980,13 @@ proc generateCborCppHeaderFile*(
           "      &detail::asyncResponseTrampoline, inv);\n"
       )
       h.add("  if (rc != 0) {\n")
-      h.add("    // Library will not invoke the callback; surface the error here.\n")
-      h.add("    (*inv)(rc, nullptr, 0);\n")
+      h.add("    // Not queued — the library frees inBuf and will NOT invoke the\n")
+      h.add("    // callback. Drop the box (cb unconsumed) and report rc so the\n")
+      h.add("    // caller can retry on asyncAgain (-6) or handle the rejection.\n")
       h.add("    delete inv;\n")
+      h.add("    return rc;\n")
       h.add("  }\n")
+      h.add("  return 0;\n")
       h.add("}\n\n")
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----
