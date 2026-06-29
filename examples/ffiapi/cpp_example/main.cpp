@@ -25,6 +25,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <span>
@@ -209,6 +210,38 @@ int main() {
                        d.address.c_str(), d.online ? "online" : "offline");
             }
         }
+    }
+    printf("\n");
+
+    // ── 5b. Async fire-and-forget queries (callAsync) ────────────────
+    //    Issue all getDevice calls without blocking; each Result<GetDevice>
+    //    arrives later on the library's delivery thread via the callback.
+    //    No thread is parked per in-flight request, so these pipeline freely.
+    //    `reqId` is echoed for logging; response↔request correlation is via
+    //    the lambda capture (the wrapper boxes it as the opaque userData).
+    printf("--- Async device queries (fire-and-forget) ---\n");
+    {
+        std::atomic<int> pending{static_cast<int>(ids.size())};
+        for (int64_t qid : ids) {
+            lib.getDeviceAsync(
+                qid,
+                [qid, &pending](Result<GetDevice> res) {
+                    if (res.isOk())
+                        printf("  [async] id=%lld -> \"%s\" (%s)\n",
+                               (long long)qid, res->name.c_str(),
+                               res->online ? "online" : "offline");
+                    else
+                        printf("  [async] id=%lld -> error: %s\n",
+                               (long long)qid, res.error().c_str());
+                    --pending;
+                },
+                /*reqId=*/static_cast<uint64_t>(qid),
+                /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+        }
+        // Wait for every async callback to land (delivery thread).
+        for (int spins = 0; pending.load() > 0 && spins < 500; ++spins)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        printf("  All async queries completed (%d pending left).\n", pending.load());
     }
     printf("\n");
 

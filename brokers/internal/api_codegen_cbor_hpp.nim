@@ -493,9 +493,12 @@ proc generateCborCppHeaderFile*(
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
     mainClass: string = "",
+    asyncTimeoutMs: int = 30000,
 ) {.compileTime, raises: [].} =
   ## Writes the C++ wrapper header (.hpp) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
+  let defaultTimeoutMacro = libName.toUpperAscii().replace("-", "_") &
+    "_DEFAULT_ASYNC_TIMEOUT_MS"
 
   # reduced-A: an entry belongs to the main class when no mainClass is
   # designated (legacy single class), or it is flat, or its owning interface is
@@ -954,6 +957,19 @@ proc generateCborCppHeaderFile*(
       "  Result<" & payloadCppType(e.responseTypeName) & "> " & methodName & "(" &
         sigParams & ");\n"
     )
+    # Fire-and-forget async sibling: same args, plus a completion callback and
+    # an optional caller-supplied reqId. Delivered on the library's event
+    # delivery thread. (Instance-returning create methods are sync-only here.)
+    let asyncTail =
+      ", uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    let asyncSig =
+      if sigParams.len > 0:
+        sigParams & ", std::function<void(Result<" & payloadCppType(e.responseTypeName) &
+          ">)> cb" & asyncTail
+      else:
+        "std::function<void(Result<" & payloadCppType(e.responseTypeName) & ">)> cb" &
+          asyncTail
+    h.add("  void " & methodName & "Async(" & asyncSig & ");\n")
   h.add("\n")
 
   # Per-event Callback aliases + on/off declarations. The public alias is
@@ -1464,6 +1480,20 @@ proc generateCborCppHeaderFile*(
   h.add("  return {0, std::move(resp)};\n")
   h.add("}\n\n")
 
+  # ---- Async response trampoline ----
+  # `callAsync` boxes a type-erased invoker (the typed user callback + its
+  # decode step) as `userData`. One C-ABI trampoline reconstructs the box,
+  # runs it with the raw (status, respBuf, respLen), then frees it. `respBuf`
+  # is library-owned and valid only for the duration of the call.
+  h.add("using AsyncInvoker = std::function<void(int32_t, const void*, int32_t)>;\n")
+  h.add(
+    "inline void asyncResponseTrampoline(void* userData, uint64_t /*reqId*/,\n" &
+      "    int32_t status, const void* respBuf, int32_t respLen) {\n"
+  )
+  h.add("  std::unique_ptr<AsyncInvoker> inv(static_cast<AsyncInvoker*>(userData));\n")
+  h.add("  if (inv && *inv) (*inv)(status, respBuf, respLen);\n")
+  h.add("}\n\n")
+
   # ---- EventDispatcher template (CBOR-flavored) ----
   # One C-level subscription per event type, lazily registered on first
   # add() and unregistered when the last user callback is removed. User
@@ -1844,6 +1874,104 @@ proc generateCborCppHeaderFile*(
     h.add("    return " & okExpr & ";\n")
     h.add("  return " & resTy & "::err(\"malformed response envelope\");\n")
     h.add("}\n\n")
+
+    # ---- Async sibling definition (non-instance methods only) ----
+    if not isInstance:
+      let aResTy = "Result<" & payloadCppType(e.responseTypeName) & ">"
+      let aOkExpr =
+        if voidResp:
+          aResTy & "::ok()"
+        else:
+          aResTy & "::ok(std::move(*env.ok))"
+      let asyncSig =
+        if sigParams.len > 0:
+          sigParams & ", std::function<void(" & aResTy &
+            ")> cb, uint64_t reqId, uint32_t timeoutMs"
+        else:
+          "std::function<void(" & aResTy & ")> cb, uint64_t reqId, uint32_t timeoutMs"
+      h.add(
+        "inline void " & className & "::" & methodName & "Async(" & asyncSig & ") {\n"
+      )
+      h.add("  if (!cb) return;\n")
+      if e.argFields.len > 0:
+        h.add("  " & argsName & " args;\n")
+        h.add(argsAssign)
+        h.add("  std::size_t cborLen = 0;\n")
+        h.add("  try { cborLen = detail::cborEncodedSize(args); }\n")
+        h.add("  catch (const std::exception& ex) {\n")
+        h.add(
+          "    cb(" & aResTy &
+            "::err(std::string(\"size pass failed: \") + ex.what())); return;\n"
+        )
+        h.add("  }\n")
+        h.add(
+          "  void* inBuf = (cborLen > 0) ? " & p &
+            "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
+        )
+        h.add("  if (cborLen > 0 && !inBuf) {\n")
+        h.add("    cb(" & aResTy & "::err(\"allocBuffer failed\")); return;\n")
+        h.add("  }\n")
+        h.add("  try {\n")
+        h.add(
+          "    if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
+        )
+        h.add("  } catch (const std::exception& ex) {\n")
+        h.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
+        h.add(
+          "    cb(" & aResTy &
+            "::err(std::string(\"encode pass failed: \") + ex.what())); return;\n"
+        )
+        h.add("  }\n")
+      else:
+        h.add("  void* inBuf = nullptr;\n")
+        h.add("  std::size_t cborLen = 0;\n")
+      # Box the typed decode + user callback as the opaque correlation handle.
+      h.add(
+        "  auto* inv = new detail::AsyncInvoker(\n" &
+          "      [cb = std::move(cb)](int32_t status, const void* respBuf, int32_t respLen) {\n"
+      )
+      h.add("    if (status != 0) {\n")
+      h.add("      std::string lastError;\n")
+      h.add("      if (status == -4 && respBuf && respLen > 0)\n")
+      h.add(
+        "        lastError.assign(reinterpret_cast<const char*>(respBuf), static_cast<size_t>(respLen));\n"
+      )
+      h.add("      else if (status == -12)\n")
+      h.add("        lastError = \"request timed out\";\n")
+      h.add("      else\n")
+      h.add(
+        "        lastError = std::string(\"framework error: \") + std::to_string(status);\n"
+      )
+      h.add("      cb(" & aResTy & "::err(lastError)); return;\n")
+      h.add("    }\n")
+      h.add("    if (!respBuf || respLen <= 0) {\n")
+      h.add("      cb(" & aResTy & "::err(\"empty response\")); return;\n")
+      h.add("    }\n")
+      h.add("    " & envName & " env;\n")
+      h.add("    try {\n")
+      h.add("      const auto* p0 = static_cast<const std::uint8_t*>(respBuf);\n")
+      h.add("      env = jsoncons::cbor::decode_cbor<" & envName & ">(p0, p0 + respLen);\n")
+      h.add("    } catch (const std::exception& ex) {\n")
+      h.add(
+        "      cb(" & aResTy &
+          "::err(std::string(\"decode failed: \") + ex.what())); return;\n"
+      )
+      h.add("    }\n")
+      h.add("    if (env.err.has_value()) { cb(" & aResTy & "::err(*env.err)); return; }\n")
+      h.add("    if (env.ok.has_value()) { cb(" & aOkExpr & "); return; }\n")
+      h.add("    cb(" & aResTy & "::err(\"malformed response envelope\"));\n")
+      h.add("  });\n")
+      h.add(
+        "  const int32_t rc = " & p & "callAsync(ctx_, \"" & e.apiName &
+          "\", inBuf, static_cast<int32_t>(cborLen), reqId, timeoutMs,\n" &
+          "      &detail::asyncResponseTrampoline, inv);\n"
+      )
+      h.add("  if (rc != 0) {\n")
+      h.add("    // Library will not invoke the callback; surface the error here.\n")
+      h.add("    (*inv)(rc, nullptr, 0);\n")
+      h.add("    delete inv;\n")
+      h.add("  }\n")
+      h.add("}\n\n")
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----
   for ev in mainEvents:
