@@ -564,7 +564,8 @@ proc generateCborCppHeaderFile*(
     "#ifndef " & guardName & "\n" & "#define " & guardName & "\n\n" & "#include \"" &
     libName & ".h\"\n\n" & "#include <jsoncons/json.hpp>\n" &
     "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <cstdint>\n" &
-    "#include <cstring>\n" & "#include <functional>\n" & "#include <memory>\n" &
+    "#include <cstring>\n" & "#include <functional>\n" & "#include <future>\n" &
+    "#include <memory>\n" &
     "#include <optional>\n" & "#include <span>\n" & "#include <string>\n" &
     "#include <system_error>\n" & "#include <unordered_map>\n" & "#include <utility>\n" &
     "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
@@ -987,6 +988,19 @@ proc generateCborCppHeaderFile*(
         "std::function<void(Result<" & payloadCppType(e.responseTypeName) & ">)> cb" &
           asyncTail
     h.add("  int32_t " & methodName & "Async(" & asyncSig & ");\n")
+    # Future-returning convenience (built on <method>Async via std::promise —
+    # no thread parked per call, unlike wrapping the sync call in std::async).
+    let futureTail =
+      "uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    let futureSig =
+      if sigParams.len > 0:
+        sigParams & ", " & futureTail
+      else:
+        futureTail
+    h.add(
+      "  std::future<Result<" & payloadCppType(e.responseTypeName) & ">> " & methodName &
+        "Future(" & futureSig & ");\n"
+    )
   h.add("\n")
 
   # Per-event Callback aliases + on/off declarations. The public alias is
@@ -1987,6 +2001,42 @@ proc generateCborCppHeaderFile*(
       h.add("    return rc;\n")
       h.add("  }\n")
       h.add("  return 0;\n")
+      h.add("}\n\n")
+
+      # ---- Future-returning definition (std::promise bridge over Async) ----
+      var argNamesCsv = ""
+      for (n, _) in e.argFields:
+        argNamesCsv.add(n & ", ")
+      let futureSig =
+        if sigParams.len > 0:
+          sigParams & ", uint64_t reqId, uint32_t timeoutMs"
+        else:
+          "uint64_t reqId, uint32_t timeoutMs"
+      h.add(
+        "inline std::future<" & aResTy & "> " & className & "::" & methodName &
+          "Future(" & futureSig & ") {\n"
+      )
+      h.add("  auto prom = std::make_shared<std::promise<" & aResTy & ">>();\n")
+      h.add("  auto fut = prom->get_future();\n")
+      h.add(
+        "  // The promise is fulfilled from exactly one place: the delivery-thread\n"
+      )
+      h.add(
+        "  // callback when the call is queued (rc == 0), or inline below when it\n"
+      )
+      h.add("  // is rejected (rc != 0 — the callback never fires).\n")
+      h.add(
+        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv &
+          "[prom](" & aResTy & " __r) { prom->set_value(std::move(__r)); }, reqId, timeoutMs);\n"
+      )
+      h.add("  if (rc != 0) {\n")
+      h.add("    prom->set_value(" & aResTy & "::err(\n")
+      h.add("        rc == asyncAgain ? std::string(\"EAGAIN: async window full\")\n")
+      h.add(
+        "                         : std::string(\"request not queued: rc=\") + std::to_string(rc)));\n"
+      )
+      h.add("  }\n")
+      h.add("  return fut;\n")
       h.add("}\n\n")
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----

@@ -1341,6 +1341,15 @@ and any **negative** return means NOT queued and `cb` does **not** fire
 window without hardcoding the value. This keeps a transient `-6` cheap (no
 allocation consumed, no error callback) so backpressure is a simple retry loop:
 
+The C++ wrapper also ships a **`std::future`-returning sibling** for every
+request method — `std::future<Result<T>> <method>Future(args…, reqId = 0,
+timeoutMs = <default>)` — so callers get a future without hand-rolling the
+bridge: `auto r = lib.getDeviceFuture(id).get();`. It is implemented on top of
+`<method>Async` via a shared `std::promise` (fulfilled by the delivery-thread
+callback when queued, or inline on a negative `rc`), so it parks **no** thread
+per call — unlike wrapping the blocking sync method in `std::async`. See
+[cpp_async_with_std_future.md](cpp_async_with_std_future.md).
+
 ```cpp
 int32_t rc;
 do {
