@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdio>
 #include <chrono>
+#include <future>
 #include <span>
 #include <string>
 #include <string_view>
@@ -256,6 +257,29 @@ int main() {
         for (int spins = 0; pending.load() > 0 && spins < 500; ++spins)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         printf("  All async queries completed (%d pending left).\n", pending.load());
+    }
+    printf("\n");
+
+    // ── 5c. Future-based async (generated getDeviceFuture) ───────────
+    //    The wrapper ships a std::future surface built on getDeviceAsync via
+    //    std::promise — no callback, no thread parked per call. Issue all,
+    //    then block only at .get(): pipelined, bounded by the async window.
+    printf("--- Async device queries (std::future) ---\n");
+    {
+        std::vector<std::future<Result<GetDevice>>> futs;
+        for (int64_t qid : ids)
+            futs.push_back(lib.getDeviceFuture(qid));
+        for (size_t i = 0; i < futs.size(); ++i) {
+            Result<GetDevice> res = futs[i].get();   // blocks until delivery
+            if (res.isOk())
+                printf("  [future] id=%lld -> \"%s\" (%s)\n",
+                       (long long)ids[i], res->name.c_str(),
+                       res->online ? "online" : "offline");
+            else
+                printf("  [future] id=%lld -> error: %s\n",
+                       (long long)ids[i], res.error().c_str());
+        }
+        printf("  All future queries completed.\n");
     }
     printf("\n");
 
