@@ -137,7 +137,8 @@ template churn(body: untyped): float =
       GC_fullCollect()
     except Exception:
       discard
-    float(m1 - m0) / float(ChurnN)
+let delta = max(m1 - m0, 0)
+float(delta) / float(ChurnN)
 
 proc footprintOf(register: proc() {.gcsafe, raises: [].}): int {.raises: [].} =
   ## getOccupiedMem growth across provider registration + lazy init.
