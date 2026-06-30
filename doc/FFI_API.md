@@ -1350,6 +1350,23 @@ do {
 if (rc == 0) ++outstanding;   // accepted — on_done fires once; --outstanding there
 ```
 
+The Python, Rust, and Go wrappers expose the same response through each
+language's native async machinery instead of a raw callback (the underlying
+ABI is identical):
+
+| Wrapper | Async surface | Backpressure (`-6`) | Bridge |
+|---------|---------------|---------------------|--------|
+| **Rust** | `async fn <m>_async(&self,…) -> Result<T,String>` (`.await`) | `Err("EAGAIN: async window full")` | `tokio::sync::oneshot` (tokio is a hard dep of the CBOR crate) |
+| **Go** | `<M>Async(args) (<-chan <M>Result, error)` | returns `ErrAsyncAgain` | buffered channel + per-call goroutine via `cgo.Handle` |
+| **Python** | `async def <m>_async(self,…) -> Result[T]` (`await`) | raises `AsyncAgainError` | `asyncio.Future` + `loop.call_soon_threadsafe` |
+
+`-12`/`-11` and provider errors surface as the language's error
+(`Result::err` / channel `Err` / `Result.err`). Each wrapper exposes the
+window size as a constant (`ASYNC_QUEUE_DEPTH` / `AsyncQueueDepth` /
+`ASYNC_QUEUE_DEPTH`) and the default timeout (`DEFAULT_ASYNC_TIMEOUT_MS` /
+`DefaultAsyncTimeoutMs` / `DEFAULT_ASYNC_TIMEOUT_MS`). See the worked async
+sections in `rust_example`, `go_example`, and `python_example`.
+
 ### C++ wrapper
 
 The C++ wrapper is generated as a separate `.hpp` file that includes the C

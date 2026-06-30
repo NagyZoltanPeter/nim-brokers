@@ -120,6 +120,72 @@ Verified: 9/9 tests (incl. deterministic `-6` with a 16-deep window + slow
 provider, asserting `cb` does NOT fire) ORC/refc/refc+ASAN; cpp_example shows the
 retry-on-EAGAIN window loop; `runTypeMapTestLibCpp` 149/149; sync init 6/6.
 
+## Phase 2 — Python / Rust / Go async wrappers (DONE, verified)
+
+Implemented idiomatic async in all three, reusing the ABI `_callAsync` +
+`response_cb_t`; a per-call state object is the opaque `userData`, freed without
+firing on a negative return. `-12`/`-11` → language error; `-6` → EAGAIN signal;
+each exposes the depth constant + default-timeout constant.
+- **Rust:** `pub async fn <m>_async(&self,…) -> Result<T,String>` via
+  `tokio::sync::oneshot` (tokio always-on with cbor). `ASYNC_QUEUE_DEPTH`,
+  `DEFAULT_ASYNC_TIMEOUT_MS` consts; `-6` → `Err("EAGAIN: async window full")`.
+  rust_example drives it on a tokio runtime. Added tokio to rust_example +
+  rust_test Cargo.toml (the generated lib is `#[path]`-included into them).
+- **Go:** `func (l *Lib) <M>Async(args) (<-chan <M>Result, error)` — buffered
+  chan via `cgo.Handle`; new `//export goCborResponseTrampoline` + a
+  `go_cbor_call_async` C shim (callbacks.c now emitted whenever requests exist).
+  `AsyncQueueDepth`/`DefaultAsyncTimeoutMs` consts; `ErrAsyncAgain` sentinel.
+- **Python:** `async def <m>_async(self,…) -> Result[T]` via `asyncio.Future` +
+  `loop.call_soon_threadsafe`; module-level token registry + kept-alive
+  `RESPONSE_CB_T` trampoline. `ASYNC_QUEUE_DEPTH`, `AsyncAgainError` (raised on
+  `-6`). asyncio.gather pipelines in python_example.
+
+Verified: all three examples run (5 async queries each, pipelined); parity
+`runTypeMapTestLibRust` 148/148, `…Go` 148/148, `…Py` 101/101; Nim core
+`test_api_callAsync` 9/9; sync paths untouched.
+
+### (original Phase 2 plan)
+
+Idiomatic async per language (not just a C-style callback). All three reuse the
+ABI `_callAsync(ctx, api, reqBuf, reqLen, reqId, timeoutMs, cb, userData)` +
+`response_cb_t(userData, reqId, status, respBuf, respLen)`; a per-call state
+object is boxed as `userData`, the trampoline decodes the `ok/err` envelope and
+fulfils it. `-12`/`-11` arrive as `status` → surfaced as the language's error.
+On a negative `_callAsync` return the state is freed WITHOUT firing (mirrors C++).
+
+**Rust — tokio `.await`** (tokio optional, behind an `async` cargo feature):
+```rust
+#[cfg(feature = "async")]
+pub async fn get_device_async(&self, device_id: i64) -> Result<GetDevice, String>;
+```
+Bridge: `tokio::sync::oneshot`; box the `Sender` as `userData`; trampoline
+decodes `__Env<T>` → `sender.send(Ok/Err)` (fires from the delivery thread;
+tokio wakes the awaiting task). `-6` → `Err("EAGAIN: async window full")`.
+`pub const ASYNC_QUEUE_DEPTH: u32`.
+
+**Go — channel + goroutine-friendly**:
+```go
+type GetDeviceResult struct { Value GetDevice; Err error }
+func (l *Mylib) GetDeviceAsync(deviceId int64) (<-chan GetDeviceResult, error)
+```
+Buffered chan (cap 1) carried via `cgo.Handle` as `userData`; a new
+`//export goCborResponseTrampoline` decodes and sends once, then `h.Delete()`.
+`-6` → `(nil, ErrAsyncAgain)`. Caller: `r := <-ch; if r.Err != nil {…}` (or
+`select` with a `context.Context`). `const AsyncQueueDepth = N`.
+
+**Python — asyncio**:
+```python
+async def get_device_async(self, device_id: int) -> GetDevice
+```
+Capture the running loop; box an `asyncio.Future`; trampoline does
+`loop.call_soon_threadsafe(fut.set_result / set_exception, …)`. `-6` raises
+`AsyncAgainError`; `-12` → `TimeoutError`. `Mylib.ASYNC_QUEUE_DEPTH`.
+
+Each: add a worked async call to its example (rust_example/go_example/
+python_example) and confirm `runTypeMapTestLib{Rust,Go,Py}` stay green (async
+methods are additive). Per-call `reqId` = a wrapper-local atomic counter (logging
+only). Lifetime: box freed on fire (trampoline) or on negative return (caller).
+
 ---
 
 ### (original Phase 1.6 plan)

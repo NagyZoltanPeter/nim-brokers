@@ -1940,11 +1940,20 @@ proc registerBrokerLibraryCborImpl(
     config.asyncQueueDepth,
   )
   when defined(BrokerFfiApiGenPy):
-    generateCborPyFile(outDir, libName, entries, eventEntries, config.mainClass)
+    generateCborPyFile(
+      outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
+      config.asyncQueueDepth,
+    )
   when defined(BrokerFfiApiGenRust):
-    generateCborRustFile(outDir, libName, entries, eventEntries, config.mainClass)
+    generateCborRustFile(
+      outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
+      config.asyncQueueDepth,
+    )
   when defined(BrokerFfiApiGenGo):
-    generateCborGoFile(outDir, libName, entries, eventEntries, config.mainClass)
+    generateCborGoFile(
+      outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
+      config.asyncQueueDepth,
+    )
 
   generateCMakePackageFiles(
     outDir, libName, config.version, cborMode = true, hasCpp = true

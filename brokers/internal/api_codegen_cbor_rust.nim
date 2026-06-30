@@ -229,6 +229,8 @@ proc generateCborRustFile*(
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
     mainClass: string = "",
+    asyncTimeoutMs: int = 30000,
+    asyncQueueDepth: int = 64,
 ) {.compileTime, raises: [].} =
   ## Writes the Rust wrapper crate (Cargo.toml + src/lib.rs) for a
   ## CBOR-mode library under `<outDir>/<libName>_rs/`.
@@ -282,6 +284,9 @@ proc generateCborRustFile*(
   cargo.add("serde = { version = \"1\", features = [\"derive\"] }\n")
   cargo.add("serde_bytes = \"0.11\"\n")
   cargo.add("serde_json = \"1\"\n")
+  # Async request surface (`<method>_async().await`) bridges the C response
+  # callback to a tokio oneshot. tokio is a hard dep of the CBOR crate.
+  cargo.add("tokio = { version = \"1\", features = [\"sync\", \"rt\", \"macros\"] }\n")
   try:
     writeFile(crateDir & "/Cargo.toml", cargo)
   except IOError:
@@ -362,6 +367,16 @@ proc generateCborRustFile*(
     "    fn " & p &
       "unsubscribe(ctx: u32, event_name: *const c_char, handle: u64) -> i32;\n"
   )
+  rs.add("    fn " & p & "callAsync(\n")
+  rs.add("        ctx: u32,\n")
+  rs.add("        api_name: *const c_char,\n")
+  rs.add("        in_buf: *const c_void,\n")
+  rs.add("        in_len: i32,\n")
+  rs.add("        req_id: u64,\n")
+  rs.add("        timeout_ms: u32,\n")
+  rs.add("        cb: ResponseCb,\n")
+  rs.add("        user_data: *mut c_void,\n")
+  rs.add("    ) -> i32;\n")
   rs.add(
     "    fn " & p & "listApis(out_buf: *mut *mut c_void, out_len: *mut i32) -> i32;\n"
   )
@@ -371,8 +386,125 @@ proc generateCborRustFile*(
   rs.add("}\n\n")
 
   rs.add(
-    "pub type EventCb = unsafe extern \"C\" fn(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, ud: *mut c_void);\n\n"
+    "pub type EventCb = unsafe extern \"C\" fn(ctx: u32, name: *const c_char, buf: *const c_void, buf_len: i32, ud: *mut c_void);\n"
   )
+  rs.add(
+    "pub type ResponseCb = unsafe extern \"C\" fn(ud: *mut c_void, req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32);\n\n"
+  )
+
+  # ---- Async request plumbing (tokio oneshot bridge) -------------------
+  rs.add("/// Max concurrent in-flight `_async` requests per context (full =>\n")
+  rs.add("/// the async method returns Err(\"EAGAIN: async window full\")).\n")
+  rs.add("pub const ASYNC_QUEUE_DEPTH: u32 = " & $asyncQueueDepth & ";\n")
+  rs.add("/// Library default dispatch timeout (ms) applied by `_async` methods.\n")
+  rs.add("pub const DEFAULT_ASYNC_TIMEOUT_MS: u32 = " & $asyncTimeoutMs & ";\n\n")
+  rs.add(
+    "type CborAsyncSlot = tokio::sync::oneshot::Sender<::std::result::Result<Vec<u8>, String>>;\n\n"
+  )
+  rs.add(
+    "/// C response trampoline: reconstruct the boxed oneshot sender (the opaque\n"
+  )
+  rs.add(
+    "/// userData), turn (status, respBuf) into Ok(bytes)/Err(msg), and fulfil it.\n"
+  )
+  rs.add("/// Runs on the library's delivery thread; tokio wakes the awaiting task.\n")
+  rs.add(
+    "unsafe extern \"C\" fn cbor_response_trampoline(ud: *mut c_void, _req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32) {\n"
+  )
+  rs.add("    if ud.is_null() { return; }\n")
+  rs.add("    let sender: Box<CborAsyncSlot> = unsafe { Box::from_raw(ud as *mut CborAsyncSlot) };\n")
+  rs.add(
+    "    let result: ::std::result::Result<Vec<u8>, String> = if status != 0 {\n"
+  )
+  rs.add("        if status == -4 && !resp_buf.is_null() && resp_len > 0 {\n")
+  rs.add(
+    "            let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
+  )
+  rs.add("            Err(String::from_utf8_lossy(slice).into_owned())\n")
+  rs.add("        } else if status == -12 {\n")
+  rs.add("            Err(\"request timed out\".to_string())\n")
+  rs.add("        } else {\n")
+  rs.add("            Err(format!(\"framework error: {}\", status))\n")
+  rs.add("        }\n")
+  rs.add("    } else if resp_buf.is_null() || resp_len <= 0 {\n")
+  rs.add("        Err(\"empty response envelope\".to_string())\n")
+  rs.add("    } else {\n")
+  rs.add(
+    "        let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
+  )
+  rs.add("        Ok(slice.to_vec())\n")
+  rs.add("    };\n")
+  rs.add("    let _ = sender.send(result);\n")
+  rs.add("}\n\n")
+
+  # Shared `do_call_async` body (used by the main Lib impl and each sub-impl —
+  # both have a private `ctx: u32`). Encodes nothing; takes raw request bytes,
+  # bridges the C response callback to a tokio oneshot, and returns the raw
+  # response envelope bytes (the per-method async fn decodes them into T).
+  proc emitDoCallAsync(p: string): string {.compileTime.} =
+    result.add(
+      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, String> {\n"
+    )
+    result.add(
+      "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
+    )
+    result.add(
+      "        let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+    )
+    result.add("        let in_buf: *const c_void = if req_payload.is_empty() {\n")
+    result.add("            std::ptr::null()\n")
+    result.add("        } else {\n")
+    result.add("            unsafe {\n")
+    result.add(
+      "                let bp = " & p & "allocBuffer(req_payload.len() as i32);\n"
+    )
+    result.add(
+      "                if bp.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+    )
+    result.add(
+      "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), bp as *mut u8, req_payload.len());\n"
+    )
+    result.add("                bp as *const c_void\n")
+    result.add("            }\n")
+    result.add("        };\n")
+    result.add(
+      "        let (tx, rx) = tokio::sync::oneshot::channel::<::std::result::Result<Vec<u8>, String>>();\n"
+    )
+    result.add(
+      "        let boxed: *mut c_void = Box::into_raw(Box::new(tx)) as *mut c_void;\n"
+    )
+    result.add("        let rc = unsafe {\n")
+    result.add("            " & p & "callAsync(\n")
+    result.add("                self.ctx,\n")
+    result.add("                cname.as_ptr(),\n")
+    result.add("                in_buf,\n")
+    result.add("                req_payload.len() as i32,\n")
+    result.add("                0,\n")
+    result.add("                DEFAULT_ASYNC_TIMEOUT_MS,\n")
+    result.add("                cbor_response_trampoline,\n")
+    result.add("                boxed,\n")
+    result.add("            )\n")
+    result.add("        };\n")
+    result.add("        if rc != 0 {\n")
+    result.add(
+      "            // Not queued: the library freed in_buf (ABI) and the callback\n"
+    )
+    result.add(
+      "            // will NOT fire — reclaim the boxed sender ourselves.\n"
+    )
+    result.add(
+      "            unsafe { drop(Box::from_raw(boxed as *mut CborAsyncSlot)); }\n"
+    )
+    result.add(
+      "            if rc == -6 { return Err(\"EAGAIN: async window full\".into()); }\n"
+    )
+    result.add("            return Err(format!(\"framework error: {}\", rc));\n")
+    result.add("        }\n")
+    result.add("        match rx.await {\n")
+    result.add("            Ok(r) => r,\n")
+    result.add("            Err(_) => Err(\"response channel closed\".into()),\n")
+    result.add("        }\n")
+    result.add("    }\n\n")
 
   # ---- Result envelope -------------------------------------------------
   rs.add("/// Mirror of Nim's `Result[T, string]` envelope on the wire.\n")
@@ -723,6 +855,7 @@ proc generateCborRustFile*(
   rs.add("            Ok(out)\n")
   rs.add("        }\n")
   rs.add("    }\n\n")
+  rs.add(emitDoCallAsync(p))
 
   # Per-request methods. Factored into a reusable emitter so the main Lib impl
   # and each sub-interface impl share identical bodies (reduced-A).
@@ -781,6 +914,51 @@ proc generateCborRustFile*(
     else:
       result.add("        let buf: Vec<u8> = Vec::new();\n")
     result.add("        let raw = match self.do_call(\"" & e.apiName & "\", &buf) {\n")
+    result.add("            Ok(v) => v,\n")
+    result.add("            Err(e) => return Result::err(e),\n")
+    result.add("        };\n")
+    result.add("        if raw.is_empty() {\n")
+    result.add("            return Result::err(\"empty response envelope\");\n")
+    result.add("        }\n")
+    result.add("        #[derive(Deserialize)]\n")
+    result.add(
+      "        struct __Env { #[serde(default)] ok: Option<" & respRust &
+        ">, #[serde(default)] err: Option<String> }\n"
+    )
+    result.add(
+      "        let env: __Env = match ciborium::from_reader(raw.as_slice()) {\n"
+    )
+    result.add("            Ok(v) => v,\n")
+    result.add(
+      "            Err(e) => return Result::err(format!(\"cbor decode: {}\", e)),\n"
+    )
+    result.add("        };\n")
+    result.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
+    result.add("        match env.ok {\n")
+    result.add("            Some(v) => Result::ok(v),\n")
+    result.add("            None => Result::err(\"missing ok in envelope\"),\n")
+    result.add("        }\n")
+    result.add("    }\n\n")
+
+    # ---- async sibling: `<method>_async().await` via tokio oneshot ----
+    result.add(
+      "    pub async fn " & methodName & "_async(" & sigParams & ") -> Result<" &
+        respRust & "> {\n"
+    )
+    if e.argFields.len > 0:
+      result.add(argsStructDecl)
+      result.add("        let args = __Args {\n")
+      result.add(argsStructInit)
+      result.add("        };\n")
+      result.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      result.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
+      result.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
+      result.add("        }\n")
+    else:
+      result.add("        let buf: Vec<u8> = Vec::new();\n")
+    result.add(
+      "        let raw = match self.do_call_async(\"" & e.apiName & "\", &buf).await {\n"
+    )
     result.add("            Ok(v) => v,\n")
     result.add("            Err(e) => return Result::err(e),\n")
     result.add("        };\n")
@@ -1033,6 +1211,7 @@ proc generateCborRustFile*(
     rs.add("            Ok(out)\n")
     rs.add("        }\n")
     rs.add("    }\n\n")
+    rs.add(emitDoCallAsync(p))
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         rs.add(emitRustReqMethod(e))

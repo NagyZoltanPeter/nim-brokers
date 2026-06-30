@@ -168,6 +168,32 @@ fn main() {
     }
     println!();
 
+    // --- Async queries (tokio .await) -----------------------------------
+    // get_device_async() returns a Future resolved on the library's delivery
+    // thread via a tokio oneshot. -12/-11 surface as Err; a full window
+    // (mylib::ASYNC_QUEUE_DEPTH) returns Err("EAGAIN: async window full").
+    println!("--- Async device queries (get_device_async) ---");
+    println!("  async window = {} in-flight", mylib::ASYNC_QUEUE_DEPTH);
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            for &qid in &ids {
+                match lib.get_device_async(qid).await.into_result() {
+                    Ok(d) => {
+                        let state = if d.online { "online" } else { "offline" };
+                        println!("  [async] id={qid} -> \"{}\" ({state})", d.name);
+                    }
+                    Err(e) => println!("  [async] id={qid} -> error: {e}"),
+                }
+            }
+        });
+        println!("  All async queries completed.");
+    }
+    println!();
+
     // --- Query one (cpp picks ids[2]) ----------------------------------
     if ids.len() > 2 {
         let qid = ids[2];
