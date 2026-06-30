@@ -122,10 +122,13 @@ type
     reqId*: uint64 ## carried for logging/cancel/idempotency; NOT used for matching
     timeoutMs*: uint32
       ## Dispatch-scoped timeout. 0 = infinite (no timeout); N = N milliseconds.
-      ## The processing thread wraps the provider dispatch in `withTimeout`; on
-      ## expiry it delivers status -12 exactly once and best-effort-cancels the
-      ## provider. The library default (when a wrapper/caller wants it) is applied
-      ## at the call site, NOT here — this field is the literal effective value.
+      ## The processing thread RACES the provider dispatch against a chronos timer
+      ## (`race`, deliberately not `withTimeout` — the broker/provider machinery
+      ## swallows `withTimeout`'s cancellation into a normal completion, masking
+      ## the timeout). On expiry it delivers status -12 exactly once and
+      ## best-effort-cancels the provider. The library default (when a
+      ## wrapper/caller wants it) is applied at the call site, NOT here — this
+      ## field is the literal effective value.
     cb*: pointer ## the foreign `<lib>_response_cb_t`; never interpreted by the library
     userData*: pointer ## opaque correlation handle; handed back verbatim in `cb`
 

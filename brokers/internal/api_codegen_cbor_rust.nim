@@ -423,6 +423,8 @@ proc generateCborRustFile*(
   rs.add("            Err(String::from_utf8_lossy(slice).into_owned())\n")
   rs.add("        } else if status == -12 {\n")
   rs.add("            Err(\"request timed out\".to_string())\n")
+  rs.add("        } else if status == -11 {\n")
+  rs.add("            Err(\"library shut down\".to_string())\n")
   rs.add("        } else {\n")
   rs.add("            Err(format!(\"framework error: {}\", status))\n")
   rs.add("        }\n")

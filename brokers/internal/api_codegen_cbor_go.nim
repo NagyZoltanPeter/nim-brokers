@@ -645,6 +645,8 @@ proc generateCborGoFile*(
   g.add("\t\treturn errors.New(string(payload))\n")
   g.add("\tcase status == -12:\n")
   g.add("\t\treturn errors.New(\"request timed out\")\n")
+  g.add("\tcase status == -11:\n")
+  g.add("\t\treturn errors.New(\"library shut down\")\n")
   g.add("\tdefault:\n")
   g.add("\t\treturn fmt.Errorf(\"framework error: %d\", status)\n")
   g.add("\t}\n")

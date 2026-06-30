@@ -230,6 +230,10 @@ int main() {
         for (int64_t qid : ids) {
             int32_t rc;
             do {
+                // Count the call as in-flight BEFORE issuing it: the callback
+                // (which does --pending) can run on the delivery thread before
+                // getDeviceAsync even returns. Roll back if it wasn't queued.
+                pending.fetch_add(1, std::memory_order_relaxed);
                 rc = lib.getDeviceAsync(
                     qid,
                     [qid, &pending](Result<GetDevice> res) {
@@ -240,16 +244,16 @@ int main() {
                         else
                             printf("  [async] id=%lld -> error: %s\n",
                                    (long long)qid, res.error().c_str());
-                        --pending;
+                        pending.fetch_sub(1, std::memory_order_relaxed);
                     },
                     /*reqId=*/static_cast<uint64_t>(qid),
                     /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+                if (rc != 0)
+                    pending.fetch_sub(1, std::memory_order_relaxed);  // not queued
                 if (rc == Mylib::asyncAgain)  // window full — back off and retry
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
             } while (rc == Mylib::asyncAgain);
-            if (rc == 0)
-                ++pending;  // accepted: the callback will fire exactly once
-            else
+            if (rc != 0 && rc != Mylib::asyncAgain)
                 printf("  [async] id=%lld -> not queued (rc=%d)\n",
                        (long long)qid, rc);
         }

@@ -1965,6 +1965,8 @@ proc generateCborCppHeaderFile*(
       )
       h.add("      else if (status == -12)\n")
       h.add("        lastError = \"request timed out\";\n")
+      h.add("      else if (status == -11)\n")
+      h.add("        lastError = \"library shut down\";\n")
       h.add("      else\n")
       h.add(
         "        lastError = std::string(\"framework error: \") + std::to_string(status);\n"
