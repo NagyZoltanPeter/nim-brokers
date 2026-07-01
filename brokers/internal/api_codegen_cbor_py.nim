@@ -401,9 +401,9 @@ proc generateCborPyFile*(
     "# Python wrapper around the C ABI declared in `" & libName & ".h`.\n" &
     "# Requires Python 3.8+ and the `cbor2` package (pip install cbor2).\n" & "\n" &
     "from __future__ import annotations\n" & "\n" & "import asyncio\n" &
-    "import ctypes\n" & "import json\n" &
-    "import os\n" & "import platform\n" & "import threading\n" &
-    "from dataclasses import dataclass, field\n" & "from enum import IntEnum\n" &
+    "import ctypes\n" & "import json\n" & "import os\n" & "import platform\n" &
+    "import threading\n" & "from dataclasses import dataclass, field\n" &
+    "from enum import IntEnum\n" &
     "from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar\n" & "\n" &
     "import cbor2\n" & "\n\n"
 
@@ -1130,10 +1130,14 @@ proc generateCborPyFile*(
     result.add("        if status != 0:\n")
     result.add("            return Result.err(_async_status_message(status, resp))\n")
     result.add("        if not resp:\n")
-    result.add("            return Result.err(\"empty or malformed response envelope\")\n")
+    result.add(
+      "            return Result.err(\"empty or malformed response envelope\")\n"
+    )
     result.add("        envelope = cbor2.loads(resp)\n")
     result.add("        if not isinstance(envelope, dict):\n")
-    result.add("            return Result.err(\"empty or malformed response envelope\")\n")
+    result.add(
+      "            return Result.err(\"empty or malformed response envelope\")\n"
+    )
     result.add("        if envelope.get(\"err\") is not None:\n")
     result.add("            return Result.err(str(envelope[\"err\"]))\n")
     result.add(

@@ -146,8 +146,7 @@ proc parseLibraryConfig(
           asyncTimeoutMs = int(v.intVal)
         else:
           error(
-            "asyncTimeoutMs must be an integer literal (milliseconds, 0 = infinite)",
-            v,
+            "asyncTimeoutMs must be an integer literal (milliseconds, 0 = infinite)", v
           )
       of "asyncqueuedepth":
         var v = value

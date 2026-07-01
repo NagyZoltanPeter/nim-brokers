@@ -780,7 +780,9 @@ proc generateCborGoFile*(
     result.add("\tvar inPtr unsafe.Pointer\n")
     result.add("\tif len(inBytes) > 0 {\n")
     result.add("\t\tinPtr = C." & p & "allocBuffer(C.int32_t(len(inBytes)))\n")
-    result.add("\t\tif inPtr == nil { return nil, errors.New(\"allocBuffer failed\") }\n")
+    result.add(
+      "\t\tif inPtr == nil { return nil, errors.New(\"allocBuffer failed\") }\n"
+    )
     result.add(
       "\t\tC.memcpy(inPtr, unsafe.Pointer(&inBytes[0]), C.size_t(len(inBytes)))\n"
     )

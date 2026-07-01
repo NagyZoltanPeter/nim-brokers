@@ -412,10 +412,10 @@ proc generateCborRustFile*(
     "unsafe extern \"C\" fn cbor_response_trampoline(ud: *mut c_void, _req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32) {\n"
   )
   rs.add("    if ud.is_null() { return; }\n")
-  rs.add("    let sender: Box<CborAsyncSlot> = unsafe { Box::from_raw(ud as *mut CborAsyncSlot) };\n")
   rs.add(
-    "    let result: ::std::result::Result<Vec<u8>, String> = if status != 0 {\n"
+    "    let sender: Box<CborAsyncSlot> = unsafe { Box::from_raw(ud as *mut CborAsyncSlot) };\n"
   )
+  rs.add("    let result: ::std::result::Result<Vec<u8>, String> = if status != 0 {\n")
   rs.add("        if status == -4 && !resp_buf.is_null() && resp_len > 0 {\n")
   rs.add(
     "            let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
@@ -491,9 +491,7 @@ proc generateCborRustFile*(
     result.add(
       "            // Not queued: the library freed in_buf (ABI) and the callback\n"
     )
-    result.add(
-      "            // will NOT fire — reclaim the boxed sender ourselves.\n"
-    )
+    result.add("            // will NOT fire — reclaim the boxed sender ourselves.\n")
     result.add(
       "            unsafe { drop(Box::from_raw(boxed as *mut CborAsyncSlot)); }\n"
     )

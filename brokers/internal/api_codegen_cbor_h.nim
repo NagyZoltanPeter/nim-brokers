@@ -161,8 +161,9 @@ proc generateCborCHeaderFile*(
   h.add(" * timeoutMs is dispatch-scoped: 0 = infinite (no timeout); N = N ms.\n")
   h.add(" * On expiry the callback fires exactly once with status -12 and a NULL\n")
   h.add(" * respBuf, and the in-flight slot is released. A late provider result is\n")
-  h.add(" * discarded — the callback never fires twice. Pass " & defaultTimeoutMacro &
-    "\n")
+  h.add(
+    " * discarded — the callback never fires twice. Pass " & defaultTimeoutMacro & "\n"
+  )
   h.add(" * for the library's policy default. */\n\n")
   h.add("#define " & defaultTimeoutMacro & " " & $asyncTimeoutMs & "u\n")
   h.add(
