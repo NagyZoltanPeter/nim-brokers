@@ -118,7 +118,8 @@ type
     apiName*: array[CborApiNameMax, char] ## NUL-terminated ASCII
     reqBuf*: pointer ## allocShared0; ownership transfers to the processing thread
     reqLen*: int32
-    targetCtx*: uint32 ## reduced-A full BrokerContext — same meaning as `CborCallMsg.targetCtx`
+    targetCtx*: uint32
+      ## reduced-A full BrokerContext — same meaning as `CborCallMsg.targetCtx`
     reqId*: uint64 ## carried for logging/cancel/idempotency; NOT used for matching
     timeoutMs*: uint32
       ## Dispatch-scoped timeout. 0 = infinite (no timeout); N = N milliseconds.
@@ -156,8 +157,7 @@ type
     asyncRing*: PodRing[CborAsyncCallMsg]
       ## Fire-and-forget request ring for `_callAsync`. Separate from `ring`;
       ## fixed-capacity, full ⇒ EAGAIN. Never gated by the slot pool.
-    asyncCap: int
-      ## In-flight ceiling for async calls (== `asyncRing` capacity).
+    asyncCap: int ## In-flight ceiling for async calls (== `asyncRing` capacity).
     asyncDepth*: Atomic[int]
       ## Accept→delivery counter bounding outstanding async calls so the
       ## response ring (sized to `asyncCap`) can never overflow. Incremented at
@@ -252,11 +252,7 @@ proc newCborCourier*(slotCount: int, asyncCap = 0): ptr CborCourier =
   ## `slotCount`. The owning context's response courier MUST be sized
   ## `>= asyncCap` so a bounded set of outstanding async calls can never overflow
   ## the response ring.
-  let effAsyncCap =
-    if asyncCap > 0:
-      asyncCap
-    else:
-      slotCount
+  let effAsyncCap = if asyncCap > 0: asyncCap else: slotCount
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
   c.ring.buf =
     cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))

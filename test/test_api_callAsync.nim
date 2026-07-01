@@ -168,8 +168,14 @@ suite "API library async call (CBOR mode)":
 
     let r = newResult()
     let rc = acbtest_callAsync(
-      ctx, "add_numbers".cstring, inBuf, int32(argBuf.value.len), 0xC0FFEE'u64, 0'u32,
-      onResp, r,
+      ctx,
+      "add_numbers".cstring,
+      inBuf,
+      int32(argBuf.value.len),
+      0xC0FFEE'u64,
+      0'u32,
+      onResp,
+      r,
     )
     check rc == 0'i32
     check waitDone(r)
@@ -237,7 +243,8 @@ suite "API library async call (CBOR mode)":
       if rc == -6'i32:
         while acbtest_callAsync(
           ctx, "get_status".cstring, nil, 0'i32, uint64(i), 0'u32, onResp, results[i]
-        ) == -6'i32:
+        ) == -6'i32
+        :
           sleep(1)
       else:
         check rc == 0'i32
@@ -270,8 +277,14 @@ suite "API library async call (CBOR mode)":
       let argBuf = cborEncode(AddArgs(a: int32(i), b: 1'i32))
       let inBuf = allocReq(argBuf.value)
       let rc = acbtest_callAsync(
-        ctx, "add_slow".cstring, inBuf, int32(argBuf.value.len), uint64(i), 0'u32,
-        onResp, results[i],
+        ctx,
+        "add_slow".cstring,
+        inBuf,
+        int32(argBuf.value.len),
+        uint64(i),
+        0'u32,
+        onResp,
+        results[i],
       )
       check rc == 0'i32
 
@@ -333,8 +346,14 @@ suite "API library async call (CBOR mode)":
       let argBuf = cborEncode(AddArgs(a: int32(i), b: 0'i32))
       let inBuf = allocReq(argBuf.value)
       let rc = acbtest_callAsync(
-        ctx, "add_slow".cstring, inBuf, int32(argBuf.value.len), uint64(i), 0'u32,
-        onResp, held[i],
+        ctx,
+        "add_slow".cstring,
+        inBuf,
+        int32(argBuf.value.len),
+        uint64(i),
+        0'u32,
+        onResp,
+        held[i],
       )
       check rc == 0'i32
 
@@ -343,8 +362,14 @@ suite "API library async call (CBOR mode)":
     let argBufX = cborEncode(AddArgs(a: 99'i32, b: 0'i32))
     let inBufX = allocReq(argBufX.value)
     let rcX = acbtest_callAsync(
-      ctx, "add_slow".cstring, inBufX, int32(argBufX.value.len), 0xBADBAD'u64, 0'u32,
-      onResp, overflow,
+      ctx,
+      "add_slow".cstring,
+      inBufX,
+      int32(argBufX.value.len),
+      0xBADBAD'u64,
+      0'u32,
+      onResp,
+      overflow,
     )
     check rcX == -6'i32
     # The rejected call's callback must never fire.
@@ -374,7 +399,13 @@ suite "API library async call (CBOR mode)":
     let r = newResult()
     # 40ms provider, 5000ms budget -> completes in time.
     let rc = acbtest_callAsync(
-      ctx, "add_slow".cstring, inBuf, int32(argBuf.value.len), 1'u64, 5000'u32, onResp,
+      ctx,
+      "add_slow".cstring,
+      inBuf,
+      int32(argBuf.value.len),
+      1'u64,
+      5000'u32,
+      onResp,
       r,
     )
     check rc == 0'i32

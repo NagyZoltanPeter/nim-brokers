@@ -565,10 +565,9 @@ proc generateCborCppHeaderFile*(
     libName & ".h\"\n\n" & "#include <jsoncons/json.hpp>\n" &
     "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <cstdint>\n" &
     "#include <cstring>\n" & "#include <functional>\n" & "#include <future>\n" &
-    "#include <memory>\n" &
-    "#include <optional>\n" & "#include <span>\n" & "#include <string>\n" &
-    "#include <system_error>\n" & "#include <unordered_map>\n" & "#include <utility>\n" &
-    "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
+    "#include <memory>\n" & "#include <optional>\n" & "#include <span>\n" &
+    "#include <string>\n" & "#include <system_error>\n" & "#include <unordered_map>\n" &
+    "#include <utility>\n" & "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
 
   # Result<T>
   h.add("template <typename T>\n")
@@ -915,14 +914,14 @@ proc generateCborCppHeaderFile*(
     "  // Max concurrent in-flight <method>Async requests (full => returns the\n" &
       "  // EAGAIN code below). Size a bounded send window to this value.\n"
   )
-  h.add(
-    "  static constexpr uint32_t asyncQueueDepth = " & queueDepthMacro & ";\n"
-  )
+  h.add("  static constexpr uint32_t asyncQueueDepth = " & queueDepthMacro & ";\n")
   h.add(
     "  // <method>Async returns 0 when queued (callback fires once later) or a\n" &
       "  // negative code when NOT queued (callback does NOT fire):\n"
   )
-  h.add("  static constexpr int32_t asyncAgain = -6;     // EAGAIN — retry/slow down\n")
+  h.add(
+    "  static constexpr int32_t asyncAgain = -6;     // EAGAIN — retry/slow down\n"
+  )
   h.add("  static constexpr int32_t asyncBadContext = -5;\n")
   h.add("  static constexpr int32_t asyncNoCallback = -7;\n")
   h.add("  static constexpr int32_t asyncEncodeFailed = -1;\n\n")
@@ -978,8 +977,7 @@ proc generateCborCppHeaderFile*(
     # Fire-and-forget async sibling: same args, plus a completion callback and
     # an optional caller-supplied reqId. Delivered on the library's event
     # delivery thread. (Instance-returning create methods are sync-only here.)
-    let asyncTail =
-      ", uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    let asyncTail = ", uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
     let asyncSig =
       if sigParams.len > 0:
         sigParams & ", std::function<void(Result<" & payloadCppType(e.responseTypeName) &
@@ -990,8 +988,7 @@ proc generateCborCppHeaderFile*(
     h.add("  int32_t " & methodName & "Async(" & asyncSig & ");\n")
     # Future-returning convenience (built on <method>Async via std::promise —
     # no thread parked per call, unlike wrapping the sync call in std::async).
-    let futureTail =
-      "uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    let futureTail = "uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
     let futureSig =
       if sigParams.len > 0:
         sigParams & ", " & futureTail
@@ -1926,8 +1923,7 @@ proc generateCborCppHeaderFile*(
       # callers can implement backpressure (retry on -6) without the callback
       # being consumed by a transient failure.
       h.add(
-        "inline int32_t " & className & "::" & methodName & "Async(" & asyncSig &
-          ") {\n"
+        "inline int32_t " & className & "::" & methodName & "Async(" & asyncSig & ") {\n"
       )
       h.add("  if (!cb) return asyncNoCallback;\n")
       if e.argFields.len > 0:
@@ -1979,14 +1975,18 @@ proc generateCborCppHeaderFile*(
       h.add("    " & envName & " env;\n")
       h.add("    try {\n")
       h.add("      const auto* p0 = static_cast<const std::uint8_t*>(respBuf);\n")
-      h.add("      env = jsoncons::cbor::decode_cbor<" & envName & ">(p0, p0 + respLen);\n")
+      h.add(
+        "      env = jsoncons::cbor::decode_cbor<" & envName & ">(p0, p0 + respLen);\n"
+      )
       h.add("    } catch (const std::exception& ex) {\n")
       h.add(
         "      cb(" & aResTy &
           "::err(std::string(\"decode failed: \") + ex.what())); return;\n"
       )
       h.add("    }\n")
-      h.add("    if (env.err.has_value()) { cb(" & aResTy & "::err(*env.err)); return; }\n")
+      h.add(
+        "    if (env.err.has_value()) { cb(" & aResTy & "::err(*env.err)); return; }\n"
+      )
       h.add("    if (env.ok.has_value()) { cb(" & aOkExpr & "); return; }\n")
       h.add("    cb(" & aResTy & "::err(\"malformed response envelope\"));\n")
       h.add("  });\n")
@@ -2015,8 +2015,8 @@ proc generateCborCppHeaderFile*(
         else:
           "uint64_t reqId, uint32_t timeoutMs"
       h.add(
-        "inline std::future<" & aResTy & "> " & className & "::" & methodName &
-          "Future(" & futureSig & ") {\n"
+        "inline std::future<" & aResTy & "> " & className & "::" & methodName & "Future(" &
+          futureSig & ") {\n"
       )
       h.add("  auto prom = std::make_shared<std::promise<" & aResTy & ">>();\n")
       h.add("  auto fut = prom->get_future();\n")
@@ -2028,8 +2028,8 @@ proc generateCborCppHeaderFile*(
       )
       h.add("  // is rejected (rc != 0 — the callback never fires).\n")
       h.add(
-        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv &
-          "[prom](" & aResTy & " __r) { prom->set_value(std::move(__r)); }, reqId, timeoutMs);\n"
+        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv & "[prom](" &
+          aResTy & " __r) { prom->set_value(std::move(__r)); }, reqId, timeoutMs);\n"
       )
       h.add("  if (rc != 0) {\n")
       h.add("    prom->set_value(" & aResTy & "::err(\n")
