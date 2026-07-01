@@ -470,6 +470,45 @@ task perftestFfi, "FFI perftest from C++ (5×500×512B; orc + refc × debug + re
       exec "cmake --build test/ffibench/cmake-build --target perf_driver"
       exec "test/ffibench/build/perf_driver"
 
+task perftestInproc,
+  "In-proc Nim request baselines — single-thread + multi-thread vecRequest (5×500×512B; orc + refc × debug + release)":
+  ## Layered companion to `perftestFfi`. Same 5 × 500 × 512 B shape, but the
+  ## traffic stays in-process: ST = single-thread dispatch floor, MT =
+  ## cross-thread channel hop. Stack the boxes against the FFI request path
+  ## (CBOR + FFI ABI on top of the MT cost) to attribute where the time goes.
+  for mm in memoryManagerMatrix():
+    for releaseTag in ["debug", "release"]:
+      let release = releaseTag == "release"
+      echo "\n=== perftestInproc: --mm:" & mm & " (" & releaseTag & ") ==="
+      var flags = "--threads:on --path:. --outdir:build --mm:" & mm
+      if release:
+        flags.add(" -d:release")
+      exec "nim c -r " & flags & " test/ffibench/perf_inproc.nim"
+
+task perfOverhead,
+  "Same-thread RequestBroker dispatch overhead vs direct proc call + memory (sync/async, scalar+512B; orc + refc, release)":
+  ## Isolates the broker machinery cost: each row calls one shared impl, so
+  ## the only variable is the dispatch path (direct / sync broker / async
+  ## broker). Reports ns/call overhead vs the matching direct-call floor,
+  ## per-call allocation churn, and the static footprint of a registered
+  ## broker. Churn is mm-specific (refc shows garbage/call; ORC reclaims
+  ## inline ≈ 0), so the matrix is orc + refc, release only.
+  for mm in memoryManagerMatrix():
+    echo "\n=== perfOverhead: --mm:" & mm & " (release) ==="
+    exec "nim c -r -d:release --path:. --outdir:build --mm:" & mm &
+      " test/ffibench/perf_overhead.nim"
+
+task perfPhases,
+  "Phase-timed MT RequestBroker round-trip: inbound/handler/outbound wake legs + same-thread floor (orc + refc, release)":
+  ## Splits one cross-thread request into inbound (requester→provider wake),
+  ## handler (provider body), and outbound (provider→requester wake) using a
+  ## shared monotonic epoch. Same-thread row is the dispatch floor. Proves
+  ## where the ~110 µs round-trip actually goes.
+  for mm in memoryManagerMatrix():
+    echo "\n=== perfPhases: --mm:" & mm & " (release) ==="
+    exec "nim c -r -d:release --threads:on --path:. --outdir:build --mm:" & mm &
+      " test/ffibench/perf_phases.nim"
+
 task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and run it":
   ## Part D-6 — captures the per-emit cost across four scenarios:
   ##   (a) no foreign subs, no nim listeners — atomic-counter fast path
