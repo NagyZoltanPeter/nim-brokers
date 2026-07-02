@@ -120,6 +120,44 @@ func main() {
 	}
 	fmt.Println()
 
+	// --- Async device queries (channel + goroutine) -------------------
+	// Each GetDeviceAsync returns a channel resolved on the library's delivery
+	// thread; a full window (mylib.AsyncQueueDepth) returns mylib.ErrAsyncAgain,
+	// and -12/-11 surface as the channel result's Err.
+	fmt.Println("--- Async device queries (GetDeviceAsync) ---")
+	fmt.Printf("  async window = %d in-flight\n", mylib.AsyncQueueDepth)
+	{
+		// Fire them all (pipelined), then collect — keep each channel paired
+		// with its originating id so a skipped (errored) call can't misalign.
+		type pendingQuery struct {
+			qid int64
+			ch  <-chan mylib.GetDeviceResult
+		}
+		queries := make([]pendingQuery, 0, len(ids))
+		for _, qid := range ids {
+			ch, err := lib.GetDeviceAsync(qid)
+			if err != nil {
+				fmt.Printf("  [async] id=%d -> not queued: %v\n", qid, err)
+				continue
+			}
+			queries = append(queries, pendingQuery{qid: qid, ch: ch})
+		}
+		for _, q := range queries {
+			r := <-q.ch
+			if r.Err != nil {
+				fmt.Printf("  [async] id=%d -> error: %v\n", q.qid, r.Err)
+			} else {
+				state := "offline"
+				if r.Value.Online {
+					state = "online"
+				}
+				fmt.Printf("  [async] id=%d -> %q (%s)\n", q.qid, r.Value.Name, state)
+			}
+		}
+		fmt.Println("  All async queries completed.")
+	}
+	fmt.Println()
+
 	// --- Query one device (cpp picks ids[2] = Edge-Switch-B) -----------
 	if len(ids) > 2 {
 		qid := ids[2]

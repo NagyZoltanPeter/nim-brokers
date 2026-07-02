@@ -53,6 +53,7 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [Data ownership for request results](#data-ownership-for-request-results)
   - [Generated Foreign Surfaces](#generated-foreign-surfaces)
     - [C API](#c-api)
+      - [Async requests (`<lib>_callAsync`)](#async-requests-lib_callasync)
     - [C++ wrapper](#c-wrapper)
     - [Python wrapper](#python-wrapper)
   - [Operational Expectations](#operational-expectations)
@@ -90,7 +91,8 @@ Typical consumers are:
 
 The FFI API solution provides:
 
-- a fixed 11-function CBOR C ABI (see `## C API` below) that every
+- a fixed CBOR C ABI — 11 core functions plus the async `<lib>_callAsync`
+  gate (see `## C API` below) — that every
   library exports identically — same shape regardless of how many
   request / event brokers are declared
 - a generated library lifecycle API (`<lib>_initialize`,
@@ -1168,11 +1170,14 @@ the raw ABI must follow the rules above explicitly.
 
 ### C API
 
-Every library exposes the **same fixed 11-function CBOR ABI**, plus one
-event-callback typedef. The C ABI is intentionally narrow — typed
-methods live in the language wrappers above. Pure-C consumers see only
-the raw CBOR ABI; the typed-C surface is on the deferred work list
-(see `doc/CBOR_Refactoring.md` §10).
+Every library exposes the **same fixed CBOR ABI**, plus per-library
+callback typedefs. The core is **11 synchronous functions**; a **12th**,
+`<lib>_callAsync`, adds a fire-and-forget request gate whose response is
+delivered later via a foreign callback (see
+[Async requests](#async-requests-lib_callasync) below). The C ABI is
+intentionally narrow — typed methods live in the language wrappers
+above. Pure-C consumers see only the raw CBOR ABI; the typed-C surface
+is on the deferred work list (see `doc/CBOR_Refactoring.md` §10).
 
 ```c
 // Fixed across all libraries:
@@ -1199,18 +1204,185 @@ int32_t       <lib>_unsubscribe(                                     // event un
 int32_t       <lib>_listApis(void** outBuf, int32_t* outLen);        // discovery: CBOR list of methods
 int32_t       <lib>_getSchema(void** outBuf, int32_t* outLen);       // discovery: CDDL schema bytes
 
-// Per-library typedef (one declaration per library, generated):
+// 12th function — fire-and-forget async request (response via callback):
+int32_t       <lib>_callAsync(
+                  uint32_t ctx,
+                  const char* apiName,
+                  void* reqBuf, int32_t reqLen,
+                  uint64_t reqId,                                    // echoed back; logging/cancel id
+                  uint32_t timeoutMs,                                // 0 = infinite; N = ms
+                  <lib>_response_cb_t cb,
+                  void* userData);                                   // opaque; passed back verbatim
+
+// Per-library typedefs (one declaration per library, generated):
 typedef void (*<lib>EventCallback)(
     uint32_t ctx,
     const char* eventName,
     const void* payloadBuf, int32_t payloadLen,
     void* userData);
+
+typedef void (*<lib>_response_cb_t)(
+    void* userData,
+    uint64_t reqId,
+    int32_t status,
+    const void* respBuf, int32_t respLen);
+
+// Generated policy default for the async timeout (ms):
+#define <LIB>_DEFAULT_ASYNC_TIMEOUT_MS 30000u
 ```
 
 Wire format: every payload buffer is CBOR. `apiName` and `eventName`
 are NUL-terminated ASCII strings selected from the discovery API. The
 typed wrapper layer (`<lib>.hpp` / `.py` / Rust / Go) is what most
 consumers actually use.
+
+### Async requests (`<lib>_callAsync`)
+
+`<lib>_call` is **synchronous**: it posts the request to the processing
+thread and **blocks the calling foreign thread** on a condition variable
+until the response is ready. That is simple and gives the lowest single-
+request latency, but it parks one OS thread per in-flight request — so
+throughput is capped by how many threads the caller is willing to block.
+
+`<lib>_callAsync` is the **fire-and-forget** sibling. It enqueues the
+request and **returns immediately** (`0` on success); the response is
+delivered later by invoking `cb` on the library's **event delivery
+thread** — the *same* thread that fans out event callbacks, never the
+processing thread that runs providers. A single caller thread can issue
+many async requests back-to-back and let the callbacks land as results
+arrive (pipelining), without a thread blocked per request.
+
+```c
+// Issue (returns 0 immediately on success):
+int32_t rc = mylib_callAsync(ctx, "get_device", reqBuf, reqLen,
+                             /*reqId=*/42, /*timeoutMs=*/0,
+                             on_response, my_corr_ptr);
+
+// Delivered later, on the delivery thread:
+void on_response(void* userData, uint64_t reqId, int32_t status,
+                 const void* respBuf, int32_t respLen) {
+    // userData == my_corr_ptr (verbatim); decode respBuf if status == 0
+}
+```
+
+**Correlation — `userData`.** `userData` is an opaque `void*` the library
+**never interprets**; it is handed back verbatim in the callback. This is
+how the caller matches a response to its originating request (e.g. a heap-
+boxed continuation / promise / closure handle), so the library keeps no
+`reqId → continuation` map. `reqId` is carried only for the caller's
+logging / cancellation / idempotency.
+
+**Threading & reentrancy.** Because `cb` runs on the delivery thread (not
+the processing thread), it is safe to call back into the library from
+inside `cb` — including `<lib>_callAsync` again — without deadlock.
+Calling the **synchronous** `<lib>_call` from inside `cb` is also safe but
+blocks the delivery thread (head-of-line stalls other callbacks); prefer
+`<lib>_callAsync` from within a callback. Callbacks for one context are
+serialized (one delivery thread per context).
+
+**Buffer ownership.** `reqBuf` follows the same rule as `<lib>_call`:
+allocate it with `<lib>_allocBuffer`; ownership transfers into the library
+on a successful (`0`) return, and the library frees it. On any negative
+return the library frees `reqBuf` and the callback does **not** fire.
+`respBuf` is **library-owned and valid only for the duration of the
+callback** — copy out anything you need; do **not** free it (this differs
+from `<lib>_call`, where the caller frees the response via
+`<lib>_freeBuffer`).
+
+**Back-pressure.** In-flight async requests are bounded **per context** at a
+fixed window — `<LIB>_ASYNC_QUEUE_DEPTH` (default 64, set via
+`asyncTimeoutMs`'s sibling `asyncQueueDepth:` in `registerBrokerLibrary`). The
+async window is independent of the synchronous `<lib>_call` slot pool, so an
+async flood cannot starve blocking callers. When the window is full
+`<lib>_callAsync` returns `-6` (EAGAIN) and the **callback does not fire** —
+slow down and retry, or drop. A slot is held from a successful issue until its
+callback returns (success, `-4`, `-10`, `-11`, **or** `-12`), so a client can
+size a bounded send window to `<LIB>_ASYNC_QUEUE_DEPTH`, increment an
+outstanding counter on a `0` return, and decrement it in the callback
+regardless of status.
+
+**Timeout — exactly-once delivery.** `timeoutMs` is **dispatch-scoped**:
+`0` = infinite (no timeout); `N` = `N` milliseconds. If the provider
+exceeds the budget, the callback fires **exactly once** with `status ==
+-12` and a `NULL` `respBuf`, the in-flight slot is released, and the
+provider is best-effort-cancelled. A late provider result is discarded —
+**the callback never fires twice, and never after a timeout**. The policy
+default is `<LIB>_DEFAULT_ASYNC_TIMEOUT_MS` (30 s), configurable per
+library via `asyncTimeoutMs:` in `registerBrokerLibrary`; the raw ABI
+itself stays pure mechanism (`0` = infinite). Caveat: a provider stuck in
+a *blocking* (non-chronos) call cannot be cancelled — `-12` still fires
+once, but that provider keeps running until shutdown.
+
+**Status codes** (passed to `cb` as `status`, or returned by
+`<lib>_callAsync` as a negative `rc` when the callback will not fire):
+
+| Value | Meaning | Callback fires? |
+|------:|---------|-----------------|
+| `0`   | success; `respBuf` holds the CBOR response envelope | yes |
+| `-2`  | `apiName` NULL or too long | no (rc) |
+| `-3`  | `reqLen` negative or > 64 MiB | no (rc) |
+| `-4`  | unknown `apiName`; `respBuf` holds a UTF-8 message | yes |
+| `-5`  | unknown / torn-down `ctx` | no (rc) |
+| `-6`  | EAGAIN — too many async calls in flight | no (rc) |
+| `-7`  | `cb` is NULL | no (rc) |
+| `-10` | internal dispatch failure | yes |
+| `-11` | library shut down before the response was delivered | yes |
+| `-12` | request timed out (provider exceeded `timeoutMs`) | yes |
+
+The typed wrappers expose this as a per-method async sibling — e.g. C++
+`int32_t lib.getDeviceAsync(id, cb, reqId = 0, timeoutMs = <default>)` where
+`cb` receives a decoded `Result<GetDevice>`. The wrapper mirrors the raw ABI
+contract: the method **returns `int32_t`** — `0` = queued (`cb` fires exactly
+once later; runtime statuses `-4/-10/-11/-12` surface as `Result::err(...)`),
+and any **negative** return means NOT queued and `cb` does **not** fire
+(`asyncAgain` = `-6` EAGAIN → retry; `asyncBadContext` = `-5`; `asyncNoCallback`
+= `-7`; `asyncEncodeFailed` = `-1`). The class also exposes
+`static constexpr uint32_t asyncQueueDepth` so a client can size its bounded
+window without hardcoding the value. This keeps a transient `-6` cheap (no
+allocation consumed, no error callback) so backpressure is a simple retry loop:
+
+The C++ wrapper also ships a **`std::future`-returning sibling** for every
+request method — `std::future<Result<T>> <method>Future(args…, reqId = 0,
+timeoutMs = <default>)` — so callers get a future without hand-rolling the
+bridge: `auto r = lib.getDeviceFuture(id).get();`. It is implemented on top of
+`<method>Async` via a shared `std::promise` (fulfilled by the delivery-thread
+callback when queued, or inline on a negative `rc`), so it parks **no** thread
+per call — unlike wrapping the blocking sync method in `std::async`. See
+[cpp_async_with_std_future.md](cpp_async_with_std_future.md).
+
+```cpp
+int32_t rc;
+do {
+    rc = lib.getDeviceAsync(id, on_done, reqId, timeoutMs);
+    if (rc == Lib::asyncAgain) std::this_thread::sleep_for(1ms);  // window full
+} while (rc == Lib::asyncAgain);
+if (rc == 0) ++outstanding;   // accepted — on_done fires once; --outstanding there
+```
+
+The Python, Rust, and Go wrappers expose the same response through each
+language's native async machinery instead of a raw callback (the underlying
+ABI is identical):
+
+| Wrapper | Async surface | Backpressure (`-6`) | Bridge |
+|---------|---------------|---------------------|--------|
+| **Rust** | `async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`) | `Err(AsyncError::Again)` — matchable; `is_again()` | `tokio::sync::oneshot` (tokio is a hard dep of the CBOR crate) |
+| **Go** | `<M>Async(args) (<-chan <M>Result, error)` | returns `ErrAsyncAgain` | buffered channel + per-call goroutine via `cgo.Handle` |
+| **Python** | `async def <m>_async(self,…) -> Result[T]` (`await`) | raises `AsyncAgainError` | `asyncio.Future` + `loop.call_soon_threadsafe` |
+
+The Rust async methods deliberately use **std `Result`** with a typed
+`AsyncError` enum (`Again` / `TimedOut` / `ShutDown` / `Provider(String)` /
+`Codec(String)` / `Framework(i32)`, `Display` + `std::error::Error`) instead of
+the wrapper's cross-language `Result<T>`, so backpressure and timeouts are
+`match`-able and calls compose with `?` / `.await?`. (Sync methods keep the
+wrapper `Result<T>` for cross-language parity.)
+
+`-12`/`-11` and provider errors surface as the language's error
+(`AsyncError::TimedOut`/`ShutDown`/`Provider` / channel `Err` / `Result.err`).
+Each wrapper exposes the
+window size as a constant (`ASYNC_QUEUE_DEPTH` / `AsyncQueueDepth` /
+`ASYNC_QUEUE_DEPTH`) and the default timeout (`DEFAULT_ASYNC_TIMEOUT_MS` /
+`DefaultAsyncTimeoutMs` / `DEFAULT_ASYNC_TIMEOUT_MS`). See the worked async
+sections in `rust_example`, `go_example`, and `python_example`.
 
 ### C++ wrapper
 

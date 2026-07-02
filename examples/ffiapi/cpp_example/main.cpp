@@ -25,8 +25,10 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <chrono>
+#include <future>
 #include <span>
 #include <string>
 #include <string_view>
@@ -209,6 +211,79 @@ int main() {
                        d.address.c_str(), d.online ? "online" : "offline");
             }
         }
+    }
+    printf("\n");
+
+    // ── 5b. Async fire-and-forget queries (callAsync) ────────────────
+    //    Issue all getDevice calls without blocking; each Result<GetDevice>
+    //    arrives later on the library's delivery thread via the callback.
+    //    No thread is parked per in-flight request, so these pipeline freely.
+    //    `reqId` is echoed for logging; response↔request correlation is via
+    //    the lambda capture (the wrapper boxes it as the opaque userData).
+    //    fooAsync returns 0 when queued (callback fires once later) or a
+    //    negative code when NOT queued — Mylib::asyncAgain (-6) means the async
+    //    window (Mylib::asyncQueueDepth) is full: slow down and retry.
+    printf("--- Async device queries (fire-and-forget) ---\n");
+    printf("  async window = %u in-flight\n", Mylib::asyncQueueDepth);
+    {
+        std::atomic<int> pending{0};
+        for (int64_t qid : ids) {
+            int32_t rc;
+            do {
+                // Count the call as in-flight BEFORE issuing it: the callback
+                // (which does --pending) can run on the delivery thread before
+                // getDeviceAsync even returns. Roll back if it wasn't queued.
+                pending.fetch_add(1, std::memory_order_relaxed);
+                rc = lib.getDeviceAsync(
+                    qid,
+                    [qid, &pending](Result<GetDevice> res) {
+                        if (res.isOk())
+                            printf("  [async] id=%lld -> \"%s\" (%s)\n",
+                                   (long long)qid, res->name.c_str(),
+                                   res->online ? "online" : "offline");
+                        else
+                            printf("  [async] id=%lld -> error: %s\n",
+                                   (long long)qid, res.error().c_str());
+                        pending.fetch_sub(1, std::memory_order_relaxed);
+                    },
+                    /*reqId=*/static_cast<uint64_t>(qid),
+                    /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+                if (rc != 0)
+                    pending.fetch_sub(1, std::memory_order_relaxed);  // not queued
+                if (rc == Mylib::asyncAgain)  // window full — back off and retry
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (rc == Mylib::asyncAgain);
+            if (rc != 0 && rc != Mylib::asyncAgain)
+                printf("  [async] id=%lld -> not queued (rc=%d)\n",
+                       (long long)qid, rc);
+        }
+        // Wait for every accepted async callback to land (delivery thread).
+        for (int spins = 0; pending.load() > 0 && spins < 500; ++spins)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        printf("  All async queries completed (%d pending left).\n", pending.load());
+    }
+    printf("\n");
+
+    // ── 5c. Future-based async (generated getDeviceFuture) ───────────
+    //    The wrapper ships a std::future surface built on getDeviceAsync via
+    //    std::promise — no callback, no thread parked per call. Issue all,
+    //    then block only at .get(): pipelined, bounded by the async window.
+    printf("--- Async device queries (std::future) ---\n");
+    {
+        std::vector<std::future<Result<GetDevice>>> futs;
+        for (int64_t qid : ids)
+            futs.push_back(lib.getDeviceFuture(qid));
+        for (size_t i = 0; i < futs.size(); ++i) {
+            Result<GetDevice> res = futs[i].get();   // blocks until delivery
+            if (res.isOk())
+                printf("  [future] id=%lld -> \"%s\" (%s)\n",
+                       (long long)ids[i], res->name.c_str(),
+                       res->online ? "online" : "offline");
+            else
+                printf("  [future] id=%lld -> error: %s\n",
+                       (long long)ids[i], res.error().c_str());
+        }
+        printf("  All future queries completed.\n");
     }
     printf("\n");
 

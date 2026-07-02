@@ -12,6 +12,7 @@ Demonstrates the generated Python wrapper API on the mylib library:
 The same shape works for native- and CBOR-mode builds of the library.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -24,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _BUILD_DIR = os.environ.get("MYLIB_BUILD_DIR", "build")
 sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 
-from mylib import AddDeviceSpec, Mylib  # noqa: E402
+from mylib import ASYNC_QUEUE_DEPTH, AddDeviceSpec, Mylib  # noqa: E402
 
 
 _EXPECTED_VERSION = "1.0.0"
@@ -135,6 +136,26 @@ def main() -> int:
                 f"  [{i}] id={d.deviceId:<3} {d.name:<18} "
                 f"type={d.deviceType:<10} addr={d.address:<16} {state}"
             )
+        print()
+
+        # --- Async device queries (asyncio) ---------------------------
+        # Each get_device_async returns a Result[GetDevice] resolved on the
+        # library's delivery thread; asyncio.gather pipelines them. A full
+        # window (ASYNC_QUEUE_DEPTH) raises AsyncAgainError.
+        print("--- Async device queries (asyncio) ---")
+        print(f"  async window = {ASYNC_QUEUE_DEPTH} in-flight")
+
+        async def _run_async() -> None:
+            results = await asyncio.gather(*(lib.get_device_async(q) for q in ids))
+            for q, res in zip(ids, results):
+                if res.is_ok():
+                    state = "online" if res.value.online else "offline"
+                    print(f'  [async] id={q} -> "{res.value.name}" ({state})')
+                else:
+                    print(f"  [async] id={q} -> error: {res.error}")
+
+        asyncio.run(_run_async())
+        print("  All async queries completed.")
         print()
 
         if len(ids) > 2:
