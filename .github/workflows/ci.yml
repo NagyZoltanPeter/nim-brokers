@@ -92,6 +92,17 @@ jobs:
         shell: bash
         run: nimble test --verbose
 
+      - name: Run teardown UAF gate (Windows)
+        # Repeated-run reproducer harness for the worker-thread teardown UAF
+        # (see teardownBrokerThread in brokers/internal/mt_broker_common.nim
+        # and doc/LIMITATION.md §2.2). Pre-fix crash rate was ~30% per run on
+        # these runners under refc+release; the gate fails on ANY crash in
+        # 40 trials per variant. Windows-only: the detonation mechanism is
+        # the Win32 RegisterWaitForSingleObject wait-thread path.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: nimble testAllocRace --verbose
+
       - name: Run nimble testApi
         # Nim-side API matrix (codec + library init + event subscribe +
         # discovery API + typemappingtestlib parity). Doesn't compile
