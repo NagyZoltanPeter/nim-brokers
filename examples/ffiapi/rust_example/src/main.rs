@@ -169,9 +169,12 @@ fn main() {
     println!();
 
     // --- Async queries (tokio .await) -----------------------------------
-    // get_device_async() returns a Future resolved on the library's delivery
-    // thread via a tokio oneshot. -12/-11 surface as Err; a full window
-    // (mylib::ASYNC_QUEUE_DEPTH) returns Err("EAGAIN: async window full").
+    // get_device_async() returns a std Result<T, AsyncError> resolved on the
+    // library's delivery thread via a tokio oneshot — it composes with `?`,
+    // and backpressure/timeout/shutdown are MATCHABLE variants:
+    // AsyncError::Again (window full, mylib::ASYNC_QUEUE_DEPTH — retry),
+    // AsyncError::TimedOut (-12), AsyncError::ShutDown (-11),
+    // AsyncError::Provider(msg) for handler errors.
     println!("--- Async device queries (get_device_async) ---");
     println!("  async window = {} in-flight", mylib::ASYNC_QUEUE_DEPTH);
     {
@@ -181,10 +184,14 @@ fn main() {
             .expect("tokio runtime");
         rt.block_on(async {
             for &qid in &ids {
-                match lib.get_device_async(qid).await.into_result() {
+                match lib.get_device_async(qid).await {
                     Ok(d) => {
                         let state = if d.online { "online" } else { "offline" };
                         println!("  [async] id={qid} -> \"{}\" ({state})", d.name);
+                    }
+                    Err(mylib::AsyncError::Again) => {
+                        // Window full — a real caller backs off and retries.
+                        println!("  [async] id={qid} -> window full (retry later)");
                     }
                     Err(e) => println!("  [async] id={qid} -> error: {e}"),
                 }

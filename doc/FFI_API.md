@@ -1365,12 +1365,20 @@ ABI is identical):
 
 | Wrapper | Async surface | Backpressure (`-6`) | Bridge |
 |---------|---------------|---------------------|--------|
-| **Rust** | `async fn <m>_async(&self,…) -> Result<T,String>` (`.await`) | `Err("EAGAIN: async window full")` | `tokio::sync::oneshot` (tokio is a hard dep of the CBOR crate) |
+| **Rust** | `async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`) | `Err(AsyncError::Again)` — matchable; `is_again()` | `tokio::sync::oneshot` (tokio is a hard dep of the CBOR crate) |
 | **Go** | `<M>Async(args) (<-chan <M>Result, error)` | returns `ErrAsyncAgain` | buffered channel + per-call goroutine via `cgo.Handle` |
 | **Python** | `async def <m>_async(self,…) -> Result[T]` (`await`) | raises `AsyncAgainError` | `asyncio.Future` + `loop.call_soon_threadsafe` |
 
+The Rust async methods deliberately use **std `Result`** with a typed
+`AsyncError` enum (`Again` / `TimedOut` / `ShutDown` / `Provider(String)` /
+`Codec(String)` / `Framework(i32)`, `Display` + `std::error::Error`) instead of
+the wrapper's cross-language `Result<T>`, so backpressure and timeouts are
+`match`-able and calls compose with `?` / `.await?`. (Sync methods keep the
+wrapper `Result<T>` for cross-language parity.)
+
 `-12`/`-11` and provider errors surface as the language's error
-(`Result::err` / channel `Err` / `Result.err`). Each wrapper exposes the
+(`AsyncError::TimedOut`/`ShutDown`/`Provider` / channel `Err` / `Result.err`).
+Each wrapper exposes the
 window size as a constant (`ASYNC_QUEUE_DEPTH` / `AsyncQueueDepth` /
 `ASYNC_QUEUE_DEPTH`) and the default timeout (`DEFAULT_ASYNC_TIMEOUT_MS` /
 `DefaultAsyncTimeoutMs` / `DEFAULT_ASYNC_TIMEOUT_MS`). See the worked async

@@ -394,20 +394,59 @@ proc generateCborRustFile*(
 
   # ---- Async request plumbing (tokio oneshot bridge) -------------------
   rs.add("/// Max concurrent in-flight `_async` requests per context (full =>\n")
-  rs.add("/// the async method returns Err(\"EAGAIN: async window full\")).\n")
+  rs.add("/// the async method returns `Err(AsyncError::Again)`).\n")
   rs.add("pub const ASYNC_QUEUE_DEPTH: u32 = " & $asyncQueueDepth & ";\n")
   rs.add("/// Library default dispatch timeout (ms) applied by `_async` methods.\n")
   rs.add("pub const DEFAULT_ASYNC_TIMEOUT_MS: u32 = " & $asyncTimeoutMs & ";\n\n")
+  rs.add("/// Typed error surface of the `_async` methods, so callers can MATCH\n")
+  rs.add("/// backpressure / timeout / shutdown instead of string-comparing. The\n")
   rs.add(
-    "type CborAsyncSlot = tokio::sync::oneshot::Sender<::std::result::Result<Vec<u8>, String>>;\n\n"
+    "/// sync methods keep the wrapper `Result<T>` (cross-language parity surface).\n"
+  )
+  rs.add("#[derive(Debug, Clone, PartialEq, Eq)]\n")
+  rs.add("pub enum AsyncError {\n")
+  rs.add("    /// Async window full (EAGAIN, -6): NOT queued — back off and retry.\n")
+  rs.add("    Again,\n")
+  rs.add("    /// Provider exceeded the dispatch timeout (-12).\n")
+  rs.add("    TimedOut,\n")
+  rs.add("    /// Library shut down before the response was delivered (-11).\n")
+  rs.add("    ShutDown,\n")
+  rs.add("    /// Provider-level failure (the envelope `err`, or -4 unknown api).\n")
+  rs.add("    Provider(String),\n")
+  rs.add("    /// CBOR encode/decode failure in the wrapper.\n")
+  rs.add("    Codec(String),\n")
+  rs.add("    /// Any other framework status / enqueue rc.\n")
+  rs.add("    Framework(i32),\n")
+  rs.add("}\n\n")
+  rs.add("impl AsyncError {\n")
+  rs.add("    /// True when the call was rejected with EAGAIN — retry later.\n")
+  rs.add("    pub fn is_again(&self) -> bool { matches!(self, AsyncError::Again) }\n")
+  rs.add("}\n\n")
+  rs.add("impl std::fmt::Display for AsyncError {\n")
+  rs.add("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n")
+  rs.add("        match self {\n")
+  rs.add("            AsyncError::Again => write!(f, \"EAGAIN: async window full\"),\n")
+  rs.add("            AsyncError::TimedOut => write!(f, \"request timed out\"),\n")
+  rs.add("            AsyncError::ShutDown => write!(f, \"library shut down\"),\n")
+  rs.add("            AsyncError::Provider(m) => write!(f, \"{}\", m),\n")
+  rs.add("            AsyncError::Codec(m) => write!(f, \"{}\", m),\n")
+  rs.add(
+    "            AsyncError::Framework(s) => write!(f, \"framework error: {}\", s),\n"
+  )
+  rs.add("        }\n")
+  rs.add("    }\n")
+  rs.add("}\n\n")
+  rs.add("impl std::error::Error for AsyncError {}\n\n")
+  rs.add(
+    "type CborAsyncSlot = tokio::sync::oneshot::Sender<::std::result::Result<Vec<u8>, AsyncError>>;\n\n"
   )
   rs.add(
     "/// C response trampoline: reconstruct the boxed oneshot sender (the opaque\n"
   )
+  rs.add("/// userData), turn (status, respBuf) into Ok(bytes)/Err(AsyncError), and\n")
   rs.add(
-    "/// userData), turn (status, respBuf) into Ok(bytes)/Err(msg), and fulfil it.\n"
+    "/// fulfil it. Runs on the library's delivery thread; tokio wakes the task.\n"
   )
-  rs.add("/// Runs on the library's delivery thread; tokio wakes the awaiting task.\n")
   rs.add(
     "unsafe extern \"C\" fn cbor_response_trampoline(ud: *mut c_void, _req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32) {\n"
   )
@@ -415,21 +454,25 @@ proc generateCborRustFile*(
   rs.add(
     "    let sender: Box<CborAsyncSlot> = unsafe { Box::from_raw(ud as *mut CborAsyncSlot) };\n"
   )
-  rs.add("    let result: ::std::result::Result<Vec<u8>, String> = if status != 0 {\n")
+  rs.add(
+    "    let result: ::std::result::Result<Vec<u8>, AsyncError> = if status != 0 {\n"
+  )
   rs.add("        if status == -4 && !resp_buf.is_null() && resp_len > 0 {\n")
   rs.add(
     "            let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
   )
-  rs.add("            Err(String::from_utf8_lossy(slice).into_owned())\n")
+  rs.add(
+    "            Err(AsyncError::Provider(String::from_utf8_lossy(slice).into_owned()))\n"
+  )
   rs.add("        } else if status == -12 {\n")
-  rs.add("            Err(\"request timed out\".to_string())\n")
+  rs.add("            Err(AsyncError::TimedOut)\n")
   rs.add("        } else if status == -11 {\n")
-  rs.add("            Err(\"library shut down\".to_string())\n")
+  rs.add("            Err(AsyncError::ShutDown)\n")
   rs.add("        } else {\n")
-  rs.add("            Err(format!(\"framework error: {}\", status))\n")
+  rs.add("            Err(AsyncError::Framework(status))\n")
   rs.add("        }\n")
   rs.add("    } else if resp_buf.is_null() || resp_len <= 0 {\n")
-  rs.add("        Err(\"empty response envelope\".to_string())\n")
+  rs.add("        Err(AsyncError::Codec(\"empty response envelope\".to_string()))\n")
   rs.add("    } else {\n")
   rs.add(
     "        let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
@@ -445,13 +488,13 @@ proc generateCborRustFile*(
   # response envelope bytes (the per-method async fn decodes them into T).
   proc emitDoCallAsync(p: string): string {.compileTime.} =
     result.add(
-      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, String> {\n"
+      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, AsyncError> {\n"
     )
     result.add(
-      "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
+      "        if self.ctx == 0 { return Err(AsyncError::Provider(\"Library context is not created\".into())); }\n"
     )
     result.add(
-      "        let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+      "        let cname = CString::new(api_name).map_err(|e| AsyncError::Codec(e.to_string()))?;\n"
     )
     result.add("        let in_buf: *const c_void = if req_payload.is_empty() {\n")
     result.add("            std::ptr::null()\n")
@@ -461,7 +504,7 @@ proc generateCborRustFile*(
       "                let bp = " & p & "allocBuffer(req_payload.len() as i32);\n"
     )
     result.add(
-      "                if bp.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+      "                if bp.is_null() { return Err(AsyncError::Codec(\"allocBuffer failed\".into())); }\n"
     )
     result.add(
       "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), bp as *mut u8, req_payload.len());\n"
@@ -470,7 +513,7 @@ proc generateCborRustFile*(
     result.add("            }\n")
     result.add("        };\n")
     result.add(
-      "        let (tx, rx) = tokio::sync::oneshot::channel::<::std::result::Result<Vec<u8>, String>>();\n"
+      "        let (tx, rx) = tokio::sync::oneshot::channel::<::std::result::Result<Vec<u8>, AsyncError>>();\n"
     )
     result.add(
       "        let boxed: *mut c_void = Box::into_raw(Box::new(tx)) as *mut c_void;\n"
@@ -495,14 +538,14 @@ proc generateCborRustFile*(
     result.add(
       "            unsafe { drop(Box::from_raw(boxed as *mut CborAsyncSlot)); }\n"
     )
-    result.add(
-      "            if rc == -6 { return Err(\"EAGAIN: async window full\".into()); }\n"
-    )
-    result.add("            return Err(format!(\"framework error: {}\", rc));\n")
+    result.add("            if rc == -6 { return Err(AsyncError::Again); }\n")
+    result.add("            return Err(AsyncError::Framework(rc));\n")
     result.add("        }\n")
     result.add("        match rx.await {\n")
     result.add("            Ok(r) => r,\n")
-    result.add("            Err(_) => Err(\"response channel closed\".into()),\n")
+    result.add(
+      "            Err(_) => Err(AsyncError::Codec(\"response channel closed\".into())),\n"
+    )
     result.add("        }\n")
     result.add("    }\n\n")
 
@@ -941,9 +984,12 @@ proc generateCborRustFile*(
     result.add("    }\n\n")
 
     # ---- async sibling: `<method>_async().await` via tokio oneshot ----
+    # Returns STD Result with the typed AsyncError (not the wrapper Result<T>):
+    # composes with `?`/`.await?`, and EAGAIN/timeout/shutdown are matchable
+    # variants instead of strings.
     result.add(
-      "    pub async fn " & methodName & "_async(" & sigParams & ") -> Result<" &
-        respRust & "> {\n"
+      "    pub async fn " & methodName & "_async(" & sigParams &
+        ") -> ::std::result::Result<" & respRust & ", AsyncError> {\n"
     )
     if e.argFields.len > 0:
       result.add(argsStructDecl)
@@ -952,18 +998,19 @@ proc generateCborRustFile*(
       result.add("        };\n")
       result.add("        let mut buf: Vec<u8> = Vec::new();\n")
       result.add("        if let Err(e) = ciborium::into_writer(&args, &mut buf) {\n")
-      result.add("            return Result::err(format!(\"cbor encode: {}\", e));\n")
+      result.add(
+        "            return Err(AsyncError::Codec(format!(\"cbor encode: {}\", e)));\n"
+      )
       result.add("        }\n")
     else:
       result.add("        let buf: Vec<u8> = Vec::new();\n")
     result.add(
-      "        let raw = match self.do_call_async(\"" & e.apiName & "\", &buf).await {\n"
+      "        let raw = self.do_call_async(\"" & e.apiName & "\", &buf).await?;\n"
     )
-    result.add("            Ok(v) => v,\n")
-    result.add("            Err(e) => return Result::err(e),\n")
-    result.add("        };\n")
     result.add("        if raw.is_empty() {\n")
-    result.add("            return Result::err(\"empty response envelope\");\n")
+    result.add(
+      "            return Err(AsyncError::Codec(\"empty response envelope\".into()));\n"
+    )
     result.add("        }\n")
     result.add("        #[derive(Deserialize)]\n")
     result.add(
@@ -975,13 +1022,17 @@ proc generateCborRustFile*(
     )
     result.add("            Ok(v) => v,\n")
     result.add(
-      "            Err(e) => return Result::err(format!(\"cbor decode: {}\", e)),\n"
+      "            Err(e) => return Err(AsyncError::Codec(format!(\"cbor decode: {}\", e))),\n"
     )
     result.add("        };\n")
-    result.add("        if let Some(msg) = env.err { return Result::err(msg); }\n")
+    result.add(
+      "        if let Some(msg) = env.err { return Err(AsyncError::Provider(msg)); }\n"
+    )
     result.add("        match env.ok {\n")
-    result.add("            Some(v) => Result::ok(v),\n")
-    result.add("            None => Result::err(\"missing ok in envelope\"),\n")
+    result.add("            Some(v) => Ok(v),\n")
+    result.add(
+      "            None => Err(AsyncError::Codec(\"missing ok in envelope\".into())),\n"
+    )
     result.add("        }\n")
     result.add("    }\n\n")
 
