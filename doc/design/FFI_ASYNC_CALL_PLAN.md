@@ -126,10 +126,14 @@ Implemented idiomatic async in all three, reusing the ABI `_callAsync` +
 `response_cb_t`; a per-call state object is the opaque `userData`, freed without
 firing on a negative return. `-12`/`-11` → language error; `-6` → EAGAIN signal;
 each exposes the depth constant + default-timeout constant.
-- **Rust:** `pub async fn <m>_async(&self,…) -> Result<T,String>` via
-  `tokio::sync::oneshot` (tokio always-on with cbor). `ASYNC_QUEUE_DEPTH`,
-  `DEFAULT_ASYNC_TIMEOUT_MS` consts; `-6` → `Err("EAGAIN: async window full")`.
-  rust_example drives it on a tokio runtime. Added tokio to rust_example +
+- **Rust:** `pub async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>`
+  via `tokio::sync::oneshot` (tokio always-on with cbor). `AsyncError` enum
+  (`Again`/`TimedOut`/`ShutDown`/`Provider(String)`/`Codec(String)`/`Framework(i32)`,
+  `Display` + `std::error::Error`, `is_again()`) — EAGAIN/timeout/shutdown are
+  matchable and calls compose with `?` (post-review change from the original
+  wrapper-`Result<T,String>` shape; sync methods keep the wrapper Result).
+  `ASYNC_QUEUE_DEPTH`, `DEFAULT_ASYNC_TIMEOUT_MS` consts. rust_example drives it
+  on a tokio runtime + matches `AsyncError::Again`. Added tokio to rust_example +
   rust_test Cargo.toml (the generated lib is `#[path]`-included into them).
 - **Go:** `func (l *Lib) <M>Async(args) (<-chan <M>Result, error)` — buffered
   chan via `cgo.Handle`; new `//export goCborResponseTrampoline` + a
@@ -143,6 +147,30 @@ each exposes the depth constant + default-timeout constant.
 Verified: all three examples run (5 async queries each, pipelined); parity
 `runTypeMapTestLibRust` 148/148, `…Go` 148/148, `…Py` 101/101; Nim core
 `test_api_callAsync` 9/9; sync paths untouched.
+
+## External review follow-ups (deferred — ergonomics, not correctness)
+
+From the second (human) review of PR #36. Actioned now: Rust typed
+`AsyncError` + std `Result` (above). Deferred by decision:
+1. **Examples/docs honesty about backpressure:** the "nice" surfaces (C++
+   `fooFuture`, Python `asyncio.gather`) turn a full window into errors — the
+   gather idiom breaks past `ASYNC_QUEUE_DEPTH` items. Add a bounded-window /
+   `Semaphore(ASYNC_QUEUE_DEPTH)` pattern to the Python + C++ examples, and
+   document loudly that future/gather do not retry.
+2. **Cancellation doc:** dropping a future / cancelling a task / abandoning a
+   Go channel does NOT cancel the in-flight request (resources free on
+   response/timeout). Document prominently. Design note: `reqId` is already
+   threaded through the whole ABI and is the natural handle for a future
+   `<lib>_cancelAsync(ctx, reqId)` that wrappers could wire to Drop/task-cancel.
+3. **`timeoutMs`/`reqId` parity, idiomatically:** Rust `Duration`, Go
+   `context.Context` (also the #1 Go idiom miss — add `ctx` as first param with
+   a `select` on `ctx.Done()`), Python `timeout: float | None`. Do NOT plumb a
+   raw `u32` to match C++. Reconsider whether `reqId` belongs in the typed C++
+   signature at all (logging-only).
+4. **tokio dependency:** `futures::channel::oneshot` is runtime-agnostic and
+   would drop the forced tokio dep entirely (supersedes the feature-gate idea).
+5. **Small:** comment the Go per-call goroutine cost rationale; camelCase param
+   names emit `non_snake_case` warnings in Rust (pre-existing, codegen-wide).
 
 ### (original Phase 2 plan)
 
