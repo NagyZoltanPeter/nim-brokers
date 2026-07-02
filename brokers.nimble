@@ -99,10 +99,13 @@ proc skipRefcOnWindows(opt, label: string): bool =
   ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
   ## phase, so the same code is safe under --mm:orc.
   ##
-  ## TEMPORARILY DISABLED — refc-on-Windows is forced through CI so we
-  ## can observe whether the channel-dispatch refactor + Round-2 CBOR
-  ## work has actually closed the failure mode. Restore the body when
-  ## the experiment ends (or wrap the experiment in a kill switch).
+  ## DISABLED (2026-07, teardown-sequence fix) — the observation window
+  ## found the real mechanism: the win+refc crash was a worker-thread-exit
+  ## UAF (live RegisterWaitForSingleObject registration + refc
+  ## deallocOsPages), fixed by BrokerSignalShared + teardownBrokerThread in
+  ## brokers/internal/mt_broker_common.nim and gated by `nimble
+  ## testAllocRace` / teardown_verify.yml. See doc/LIMITATION.md §2.2.
+  ## The predicate is kept as a one-line revert if a regression appears.
   discard opt
   discard label
   # when defined(windows):
@@ -350,7 +353,7 @@ task test, "Run all single and multi-threaded broker tests":
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
     "test_multi_thread_broker_configs", "test_mt_large_payload",
-    "test_mt_drop_async_eager",
+    "test_mt_drop_async_eager", "test_alloc_race_variants",
   ]
   for f in mtTests:
     for opt in [
@@ -362,6 +365,61 @@ task test, "Run all single and multi-threaded broker tests":
       if skipRefcOnWindows(opt, f):
         continue
       test opt, f
+
+task testAllocRace,
+  "Regression gate: worker-thread teardown UAF reproducer, N trials per variant":
+  ## Repeated-run crash harness for the historical win+refc MT-broker UAF
+  ## (0xC0000005 at worker-thread exit; see teardownBrokerThread in
+  ## brokers/internal/mt_broker_common.nim). Before the teardown-sequence fix
+  ## the V1 variant crashed ~30% of runs on GitHub win runners under
+  ## refc+release, on every Nim 2.2.x. The gate runs each single-ingredient
+  ## variant from test/test_alloc_race_variants.nim solo (own process,
+  ## unittest2 positional glob), `trials` times, and fails on ANY crash.
+  ##
+  ## Piped output (gorgeEx) is intentional — it widens the race window far
+  ## beyond what a single console-attached CI run samples.
+  const
+    varFile = "test_alloc_race_variants"
+    varSuite = "alloc-race variants"
+    variants = [
+      "V1 worker provider, one worker requester",
+      "V2 main provider, three concurrent requesters",
+      "V3 worker provider, main-thread requester",
+      "V4 no provider, one error-path requester",
+      "V5 worker provider, worker requester + default-fail requester",
+      "V6 full original shape",
+    ]
+    trials = 40
+
+  proc buildBin(name, opt: string): string =
+    result = joinPath("build", "alloc_race_" & name).addFileExt(ExeExt)
+    exec "nim c " & opt & " --path:. --out:" & quoteArg(result) & " test/" & varFile &
+      ".nim"
+
+  proc runTrials(label, exePath, args: string): int =
+    ## Runs the binary `trials` times with `args`, returns crashed-run count.
+    for i in 1 .. trials:
+      let (outp, code) = gorgeEx(quoteArg(exePath) & args)
+      if code != 0:
+        inc result
+        echo "[" & label & "] trial " & $i & "/" & $trials & ": CRASH (exit code " &
+          $code & "), last output lines:"
+        let lines = outp.splitLines()
+        for l in lines[max(0, lines.len - 8) ..< lines.len]:
+          echo "    " & l
+
+  let exe = buildBin(
+    "refc_rel", "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on"
+  )
+
+  var totalCrashes = 0
+  for v in variants:
+    let crashes = runTrials(v, exe, " " & quoteArg(varSuite & "::" & v))
+    totalCrashes += crashes
+    echo "TEARDOWN-GATE: " & v & ": " & $crashes & "/" & $trials & " crashed"
+  if totalCrashes > 0:
+    quit("TEARDOWN-GATE FAILED: " & $totalCrashes & " crashed trials", 1)
+  echo "TEARDOWN-GATE PASSED: 0 crashes across " & $(variants.len * trials) & " trials"
 
 task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
   let rejects =

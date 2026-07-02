@@ -527,7 +527,7 @@ proc registerBrokerLibraryCborImpl(
           # the processing thread once its chronos loop is up so a foreign
           # `<lib>_call` can wake it after enqueuing a request.
           courier: ptr CborCourier
-          courierSignal: ThreadSignalPtr
+          courierSignal: ptr BrokerSignalShared
           # Part D-3 — event courier. Producer is the processing thread
           # (per-event handler runs there now, encode-once-on-emit-thread);
           # consumer is the delivery thread, which polls the ring and
@@ -535,7 +535,7 @@ proc registerBrokerLibraryCborImpl(
           # thread's broker dispatch signal so the processing thread can
           # wake it after enqueuing an event.
           eventCourier: ptr CborEventCourier
-          deliverySignal: ThreadSignalPtr
+          deliverySignal: ptr BrokerSignalShared
 
         `ctxEntryIdent` = object
           ctx: BrokerContext
@@ -847,7 +847,7 @@ proc registerBrokerLibraryCborImpl(
             # exact emitting ctx — per-instance event routing stays exact.
             let libCtxKey = uint32(ctx) and 0x0000FFFF'u32
             var courier: ptr CborEventCourier = nil
-            var sig: ThreadSignalPtr = nil
+            var sig: ptr BrokerSignalShared = nil
             {.cast(gcsafe).}:
               withLock `ctxsLockIdent`:
                 for i in 0 ..< `ctxsIdent`.len:
@@ -1097,10 +1097,10 @@ proc registerBrokerLibraryCborImpl(
         # eventCourierPoll and returns before the loop exits. Buffers
         # still queued in the courier ring at this point are freed by
         # `drainAndFree(arg.eventCourier)` in `_shutdown`.
-        stopBrokerDispatchHere()
-        # Reclaim this thread's chronos dispatcher selector fd — chronos has
-        # no PDispatcher teardown, so it would otherwise leak per ctx cycle.
-        closeThreadDispatcherSelector()
+        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees
+        # + closeThreadDispatcherSelector, latched so the automatic
+        # onThreadDestruction hook does not run it a second time.
+        teardownBrokerThread()
 
   )
 
@@ -1250,10 +1250,10 @@ proc registerBrokerLibraryCborImpl(
         # thread exits. `_shutdown` waits for `courier.inFlight` to reach 0
         # (while this thread is still handling) before it sets
         # `shutdownFlag`, so no courier message is in flight here.
-        stopBrokerDispatchHere()
-        # Reclaim this thread's chronos dispatcher selector fd — chronos has
-        # no PDispatcher teardown, so it would otherwise leak per ctx cycle.
-        closeThreadDispatcherSelector()
+        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees
+        # + closeThreadDispatcherSelector, latched so the automatic
+        # onThreadDestruction hook does not run it a second time.
+        teardownBrokerThread()
 
   )
 
@@ -1509,7 +1509,7 @@ proc registerBrokerLibraryCborImpl(
         # (targetCtx) so the processing thread dispatches against the sub ctx.
         let libCtxKey = ctx and 0x0000FFFF'u32
         var courier: ptr CborCourier = nil
-        var courierSig: ThreadSignalPtr = nil
+        var courierSig: ptr BrokerSignalShared = nil
         withLock `ctxsLockIdent`:
           for i in 0 ..< `ctxsIdent`.len:
             let e = `ctxsIdent`[i]
@@ -1550,7 +1550,7 @@ proc registerBrokerLibraryCborImpl(
             deallocShared(reqBuf)
           return -6'i32
         if not courierSig.isNil:
-          discard courierSig.fireSync()
+          fireBrokerSignal(courierSig)
 
         let res = waitSlot(courier, slotIdx)
         releaseSlot(courier, slotIdx)
@@ -1578,7 +1578,7 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         let libCtxKey = ctx and 0x0000FFFF'u32
         var courier: ptr CborCourier = nil
-        var courierSig: ThreadSignalPtr = nil
+        var courierSig: ptr BrokerSignalShared = nil
         withLock `ctxsLockIdent`:
           for i in 0 ..< `ctxsIdent`.len:
             let e = `ctxsIdent`[i]
@@ -1605,7 +1605,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           return -6'i32
         if not courierSig.isNil:
-          discard courierSig.fireSync()
+          fireBrokerSignal(courierSig)
         let res = waitSlot(courier, slotIdx)
         releaseSlot(courier, slotIdx)
         discard courier.inFlight.fetchSub(1, moAcquireRelease)

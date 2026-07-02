@@ -182,7 +182,7 @@ proc generateMtEventBroker*(
         `bucketName` = object
           brokerCtx: BrokerContext
           ring: ptr VyukovMpscRing[uint32]
-          listenerSignal: ThreadSignalPtr
+          listenerSignal: ptr BrokerSignalShared
           threadId: pointer
           threadGen: uint64 ## disambiguates reused threadvar addresses
           active: bool
@@ -502,7 +502,7 @@ proc generateMtEventBroker*(
 
         type CrossTarget = object
           ring: ptr VyukovMpscRing[uint32]
-          signal: ThreadSignalPtr
+          signal: ptr BrokerSignalShared
 
         var crossTargets: seq[CrossTarget] = @[]
         var hasSameThread = false
@@ -767,7 +767,7 @@ proc generateMtEventBroker*(
         `initProcIdent`()
 
         let myThreadId = currentMtThreadId()
-        var crossRings: seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
+        var crossRings: seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared)] = @[]
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
@@ -870,7 +870,8 @@ proc generateMtEventBroker*(
       ) {.async: (raises: []).} =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
-        var ringsToShutdown: seq[(ptr VyukovMpscRing[uint32], ThreadSignalPtr)] = @[]
+        var ringsToShutdown: seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared)] =
+          @[]
         withLock(`globalLockIdent`):
           var i = 0
           while i < `globalBucketCountIdent`:
