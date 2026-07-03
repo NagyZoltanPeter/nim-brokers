@@ -88,32 +88,14 @@ proc nimWindowsImplibFlag(outDir, libName: string): string =
   else:
     ""
 
-proc skipRefcOnWindows(opt, label: string): bool =
-  ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
-  ## Windows. See README → "Platform Support" + "Known Limitations" for the
-  ## reasoning: chronos' Win32 RegisterWaitForSingleObject path fires its
-  ## completion on a thread-pool thread that the refc stop-the-world GC
-  ## cannot suspend, leading to use-after-free on
-  ## ThreadSignalPtr/Channel-driven workloads. This affects every layer that
-  ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
-  ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
-  ## phase, so the same code is safe under --mm:orc.
-  ##
-  ## DISABLED (2026-07, teardown-sequence fix) — the observation window
-  ## found the real mechanism: the win+refc crash was a worker-thread-exit
-  ## UAF (live RegisterWaitForSingleObject registration + refc
-  ## deallocOsPages), fixed by BrokerSignalShared + teardownBrokerThread in
-  ## brokers/internal/mt_broker_common.nim and gated by `nimble
-  ## testAllocRace` / teardown_verify.yml. See doc/LIMITATION.md §2.2.
-  ## The predicate is kept as a one-line revert if a regression appears.
-  discard opt
-  discard label
-  # when defined(windows):
-  #   if "--mm:refc" in opt or "refc" == opt:
-  #     echo "Skipping " & label & " (" & opt &
-  #       ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
-  #     return true
-  false
+# NOTE: the historical `skipRefcOnWindows` predicate (refc excluded from the
+# Windows MT/FFI matrix) was removed in the teardown-sequence fix. The crash
+# it papered over was a worker-thread-exit UAF (live RegisterWaitForSingleObject
+# registration + refc deallocOsPages), fixed by BrokerSignalShared +
+# teardownBrokerThread in brokers/internal/mt_broker_common.nim and regression-
+# gated by `nimble testAllocRace` (a Windows step in ci.yml) — see
+# doc/LIMITATION.md §2.2. refc and orc run the identical matrix on every
+# platform; if a regression ever reappears, the gate fails loudly.
 
 proc memoryManagerMatrix(): seq[string] =
   ## Returns the set of `--mm:` values the wrapper / example tasks
@@ -122,16 +104,9 @@ proc memoryManagerMatrix(): seq[string] =
   ## - If `MM` is set in the environment, honour the explicit choice
   ##   (e.g. `MM=refc nimble runTypeMapTestLibPy`) — run that one only.
   ## - Otherwise, run both `orc` and `refc` so the parity matrix is
-  ##   exercised end-to-end under both memory managers.
-  ##
-  ## TEMPORARILY: Windows runs the same orc+refc default — see the
-  ## `skipRefcOnWindows` doc-block for the (commented-out) historical
-  ## reason refc was excluded. Restore the branch below when the
-  ## experiment ends.
+  ##   exercised end-to-end under both memory managers, on every platform.
   if existsEnv("MM"):
     @[getEnv("MM")]
-  # elif defined(windows):
-  #   @["orc"]
   else:
     @["orc", "refc"]
 
@@ -362,8 +337,6 @@ task test, "Run all single and multi-threaded broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       test opt, f
 
 task testAllocRace,
@@ -554,8 +527,6 @@ task perftest, "Run performance and stress tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       test opt, f
 
 task testApi, "Run codec unit tests + library init integration tests":
@@ -589,8 +560,6 @@ task testApi, "Run codec unit tests + library init integration tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
 
@@ -1113,8 +1082,6 @@ task testMtEventBrokerAsanOrc,
 
 task testMtEventBrokerAsanRefc,
   "Run multi-thread event broker tests under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtEventBrokerAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_event_broker")
 
 task testMtRequestBrokerAsanOrc,
@@ -1123,8 +1090,6 @@ task testMtRequestBrokerAsanOrc,
 
 task testMtRequestBrokerAsanRefc,
   "Run multi-thread request broker tests under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtRequestBrokerAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_request_broker")
 
 task testMtBrokerConfigsAsanOrc,
@@ -1133,8 +1098,6 @@ task testMtBrokerConfigsAsanOrc,
 
 task testMtBrokerConfigsAsanRefc,
   "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtBrokerConfigsAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_broker_configs")
 
 # ---------------------------------------------------------------------------
@@ -1149,8 +1112,6 @@ task testMtEventBrokerTsanOrc,
 
 task testMtEventBrokerTsanRefc,
   "Run multi-thread event broker tests under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtEventBrokerTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_event_broker")
 
 task testMtRequestBrokerTsanOrc,
@@ -1159,8 +1120,6 @@ task testMtRequestBrokerTsanOrc,
 
 task testMtRequestBrokerTsanRefc,
   "Run multi-thread request broker tests under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtRequestBrokerTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_request_broker")
 
 task testMtBrokerConfigsTsanOrc,
@@ -1169,8 +1128,6 @@ task testMtBrokerConfigsTsanOrc,
 
 task testMtBrokerConfigsTsanRefc,
   "Run multi-thread broker config showcase under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtBrokerConfigsTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_broker_configs")
 
 # ---------------------------------------------------------------------------
@@ -1186,8 +1143,6 @@ task testApiTeardownAsanOrc,
 
 task testApiTeardownAsanRefc,
   "Run FFI event-teardown isolation test under ASan+UBSan (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testApiTeardownAsanRefc"):
-    return
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 task testApiTeardownTsanOrc,
@@ -1196,8 +1151,6 @@ task testApiTeardownTsanOrc,
 
 task testApiTeardownTsanRefc,
   "Run FFI event-teardown isolation test under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testApiTeardownTsanRefc"):
-    return
   testSan("tsan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 # ---------------------------------------------------------------------------

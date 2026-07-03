@@ -147,9 +147,11 @@ either `--mm:orc` or `--mm:refc`. But:
 - **Threads not created by Nim (FFI callers) that used broker APIs
   must call `teardownBrokerThread()` before their final return.**
 - **Prefer `--mm:orc`** if you want full peace of mind.
-- The `skipRefcOnWindows` predicate in `brokers.nimble` remains
-  *disabled*; the teardown-sequence fix addresses the broker-path
-  crash it used to paper over.
+- The historical `skipRefcOnWindows` predicate in `brokers.nimble`
+  was **removed entirely**: the teardown-sequence fix addresses the
+  broker-path crash it used to paper over, and the `testAllocRace`
+  gate on the Windows CI cells fails loudly if it ever regresses.
+  refc and orc now run the identical test matrix on every platform.
 
 Run `nimble probeWinTlsUninitRefc` on a Windows host to reproduce the
 raw hazard, or `nimble probeWinTlsUninitOrc` to verify ORC is clean.
