@@ -596,9 +596,18 @@ No allocations. No data copying beyond normal parameter passing.
 | Requester unmarshal Result on requester heap | Symmetric to marshal cost |
 | Slot/cell release back to pool/slab | Atomic free-list push, ~10-30 ns each |
 
-**Total broker overhead per cross-thread request: ~200-800 ns + handler runtime**
-(dominated by signal-fire round-trip and chronos Future allocation; both
-are outside the broker layer's control).
+**Total broker-layer overhead per cross-thread request: ~200-800 ns + handler
+runtime** (the marshal/claim/enqueue/release work above).
+
+This is **not** the end-to-end latency. A single blocking cross-thread request
+also pays two thread wake-ups — `fireBrokerSignal` to the provider, then back to
+the requester — plus the chronos Future/poller resume on the requester side.
+Those dominate and are outside the broker layer's control: measured end-to-end
+round-trip is **~50-120 µs** (Apple M4, `-d:release`), of which the requester
+wake + resume is the largest leg (~85-90 µs). It is platform-dependent (OS
+thread-wake latency). Because that cost is per blocking request, **pipelining**
+amortizes it across many in-flight requests — see *Calling Pattern: Serial vs
+Pipelined Requests* below.
 
 ### Allocation profile
 
@@ -661,6 +670,63 @@ pool.
 | Number of provider threads | Each owns independent contexts. No cross-provider contention. |
 | Message size | Linear with marshal cost (memcpy for POD, recursive walk for non-POD). MM-agnostic — the marshaler does its own bytewise work regardless of `--mm:orc` vs `--mm:refc`. |
 
+### Calling Pattern: Serial vs Pipelined Requests
+
+A cross-thread `request` is a synchronous request/response: the caller blocks
+(cooperatively, via `await` / `waitFor`) until *its* reply returns. Each call
+therefore pays one cross-thread round-trip — and the bulk of that round-trip is
+the requester being **woken and resumed** when the response is ready (signal
+wake + chronos Future/poller resume), not the broker's own marshal/enqueue
+work. **How you issue requests dominates throughput:**
+
+- **Serial** — `await` / `waitFor` each request before issuing the next. Every
+  request pays its full round-trip wake before the next one starts, so aggregate
+  throughput is bound by round-trip *latency*, not handler time. With `N`
+  requester threads you get at most `N` requests in flight.
+- **Pipelined** — issue a window of requests *without* awaiting (collect their
+  `Future`s), then `await allFinished(window)`. The requester's event loop stays
+  hot with many in-flight requests, so the per-request wake **amortizes across
+  the whole window** and throughput becomes bound by the provider's processing
+  rate instead.
+
+Measured (`test/ffibench/perf_inproc.nim`, Apple M4, `-d:release`, 5 requester
+threads × 512 B echo payload, 2500 requests):
+
+| Calling pattern | Throughput (orc) | Throughput (refc) |
+|-----------------|------------------|-------------------|
+| Serial (`waitFor` per request) | ~44 K req/s | ~42 K req/s |
+| Pipelined (window 64) | ~630 K req/s | ~634 K req/s |
+| Same-thread fast path (reference ceiling) | ~1.6 M req/s | ~1.1 M req/s |
+
+Pipelining lifts cross-thread throughput **~15×** with no broker changes — only
+the calling pattern differs.
+
+```nim
+# Pipelined: fire a window, then await it together.
+var futs: seq[Future[Result[MyReq, string]]]
+for item in batch: # batch size <= the in-flight window
+  futs.add(MyReq.request(item)) # fire — do NOT await yet
+discard await allFinished(futs) # async-wait for the whole window
+for f in futs:
+  let r = f.read() # consume each result
+```
+
+Caveats:
+
+- **Size the pools to your window.** In-flight requests = window ×
+  concurrent requesters, and this must stay within the bucket's
+  `slabCapacity`, `queueDepth`, and `responseSlots`, or fired requests hit
+  back-pressure (`err` return). The defaults (slab 64 / queue 256 / slots 256)
+  cap in-flight; raise them via
+  `RequestBroker(mt, queueDepth = 512, slabCapacity = 512, responseSlots = 512)`
+  (see `MT_BROKER_CONFIG.md`).
+- **Pipelining improves throughput, not single-request latency.** Individual
+  requests now overlap/queue, so each one's latency is the same or higher — only
+  aggregate throughput rises. For the lowest single-call latency, co-locate the
+  provider on the caller's thread (the same-thread fast path).
+- Out-of-order completion holds: a fast request can finish before an earlier
+  slow one (the provider `asyncSpawn`s each handler — see the dispatch flow).
+
 ### Comparison with Single-Thread RequestBroker
 
 | Aspect | `RequestBroker():` (single-thread) | `RequestBroker(mt):` (multi-thread) |
@@ -671,7 +737,8 @@ pool.
 | Memory per request | Zero | Cross-thread: ~200 bytes (response channel) |
 | Thread safety | None (same thread only) | Full cross-thread support |
 | Latency (same thread) | ~10 ns | ~50-200 ns (lock overhead) |
-| Latency (cross thread) | N/A | ~2-5 us |
+| Latency (cross thread, blocking) | N/A | ~200-800 ns broker overhead, but **~50-120 us end-to-end** incl. two thread wake-ups (platform-dependent; see *Per-Request Overhead* and *Calling Pattern*) |
+| Throughput (cross thread) | N/A | ~40 K req/s serial; **~600 K+ req/s pipelined** (see *Calling Pattern*) |
 
 ---
 
