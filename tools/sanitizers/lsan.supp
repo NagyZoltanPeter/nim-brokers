@@ -14,6 +14,31 @@
 # These are allocated once and reclaimed by the OS at process exit by design.
 leak:getOrInitBrokerSignal
 leak:registerBrokerPoller
+# chronos (4.2.2) per-thread dispatcher: newDispatcher() allocates the
+# PDispatcher object graph (selector, queues, tables) lazily on every thread
+# that runs a chronos loop, and upstream has NO PDispatcher teardown — no
+# =destroy, no close proc for the object graph. teardownBrokerThread()
+# reclaims the OS handle (see closeThreadDispatcherSelector), but the heap
+# graph itself is unreclaimable from our side until chronos grows a
+# destructor. Worker threads that served brokers therefore leak one
+# dispatcher graph (~36 KB) per thread lifetime by upstream design.
+leak:newDispatcher
+leak:getThreadDispatcher
+# Broker registration state allocated on worker threads: the generated
+# `listen<T>MtImpl` / `setProvider<T>MtImpl` procs grow threadvar seqs
+# (listener tables, gBrokerThreadPollers, Nim's onThreadDestruction handler
+# list) and createShared the per-broker-type global registry via
+# `ensureInit<T>Broker`. Under --mm:orc these thread-lifetime seq payloads are
+# never freed at thread exit (orc skips deallocOsPages), leaking ~100-450 B
+# per worker-thread lifetime by Nim-runtime design. LSan suppressions match
+# ANY stack frame, and every such allocation passes through a *MtImpl frame,
+# so one entry covers the set. NOTE the trade-off: this also masks would-be
+# leaks whose stack passes through a generated *MtImpl proc (registration and
+# same-thread emit fast path); cross-thread dispatch/decode (brokerDispatchLoop
+# rooted) and the FFI courier paths remain fully leak-checked.
+leak:MtImpl
+leak:onThreadDestruction
+leak:ensureBrokerDispatchStarted
 # Nim runtime one-time globals (thread-local registries, GC metadata) allocated
 # at startup and intentionally not freed at exit.
 leak:nimRegisterThreadLocalMarkers

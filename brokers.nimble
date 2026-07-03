@@ -88,29 +88,14 @@ proc nimWindowsImplibFlag(outDir, libName: string): string =
   else:
     ""
 
-proc skipRefcOnWindows(opt, label: string): bool =
-  ## Returns true (and prints a skip notice) when `opt` requests --mm:refc on
-  ## Windows. See README → "Platform Support" + "Known Limitations" for the
-  ## reasoning: chronos' Win32 RegisterWaitForSingleObject path fires its
-  ## completion on a thread-pool thread that the refc stop-the-world GC
-  ## cannot suspend, leading to use-after-free on
-  ## ThreadSignalPtr/Channel-driven workloads. This affects every layer that
-  ## relies on the cross-thread signal infrastructure: MT brokers, the FFI
-  ## API runtime and all FFI tests. ORC's atomic refcounting has no STW
-  ## phase, so the same code is safe under --mm:orc.
-  ##
-  ## TEMPORARILY DISABLED — refc-on-Windows is forced through CI so we
-  ## can observe whether the channel-dispatch refactor + Round-2 CBOR
-  ## work has actually closed the failure mode. Restore the body when
-  ## the experiment ends (or wrap the experiment in a kill switch).
-  discard opt
-  discard label
-  # when defined(windows):
-  #   if "--mm:refc" in opt or "refc" == opt:
-  #     echo "Skipping " & label & " (" & opt &
-  #       ") on Windows: refc + chronos thread-pool callback is unsafe — use --mm:orc."
-  #     return true
-  false
+# NOTE: the historical `skipRefcOnWindows` predicate (refc excluded from the
+# Windows MT/FFI matrix) was removed in the teardown-sequence fix. The crash
+# it papered over was a worker-thread-exit UAF (live RegisterWaitForSingleObject
+# registration + refc deallocOsPages), fixed by BrokerSignalShared +
+# teardownBrokerThread in brokers/internal/mt_broker_common.nim and regression-
+# gated by `nimble testAllocRace` (a Windows step in ci.yml) — see
+# doc/LIMITATION.md §2.2. refc and orc run the identical matrix on every
+# platform; if a regression ever reappears, the gate fails loudly.
 
 proc memoryManagerMatrix(): seq[string] =
   ## Returns the set of `--mm:` values the wrapper / example tasks
@@ -119,16 +104,9 @@ proc memoryManagerMatrix(): seq[string] =
   ## - If `MM` is set in the environment, honour the explicit choice
   ##   (e.g. `MM=refc nimble runTypeMapTestLibPy`) — run that one only.
   ## - Otherwise, run both `orc` and `refc` so the parity matrix is
-  ##   exercised end-to-end under both memory managers.
-  ##
-  ## TEMPORARILY: Windows runs the same orc+refc default — see the
-  ## `skipRefcOnWindows` doc-block for the (commented-out) historical
-  ## reason refc was excluded. Restore the branch below when the
-  ## experiment ends.
+  ##   exercised end-to-end under both memory managers, on every platform.
   if existsEnv("MM"):
     @[getEnv("MM")]
-  # elif defined(windows):
-  #   @["orc"]
   else:
     @["orc", "refc"]
 
@@ -350,7 +328,7 @@ task test, "Run all single and multi-threaded broker tests":
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
     "test_multi_thread_broker_configs", "test_mt_large_payload",
-    "test_mt_drop_async_eager",
+    "test_mt_drop_async_eager", "test_alloc_race_variants",
   ]
   for f in mtTests:
     for opt in [
@@ -359,9 +337,62 @@ task test, "Run all single and multi-threaded broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       test opt, f
+
+task testAllocRace,
+  "Regression gate: worker-thread teardown UAF reproducer, N trials per variant":
+  ## Repeated-run crash harness for the historical win+refc MT-broker UAF
+  ## (0xC0000005 at worker-thread exit; see teardownBrokerThread in
+  ## brokers/internal/mt_broker_common.nim). Before the teardown-sequence fix
+  ## the V1 variant crashed ~30% of runs on GitHub win runners under
+  ## refc+release, on every Nim 2.2.x. The gate runs each single-ingredient
+  ## variant from test/test_alloc_race_variants.nim solo (own process,
+  ## unittest2 positional glob), `trials` times, and fails on ANY crash.
+  ##
+  ## Piped output (gorgeEx) is intentional — it widens the race window far
+  ## beyond what a single console-attached CI run samples.
+  const
+    varFile = "test_alloc_race_variants"
+    varSuite = "alloc-race variants"
+    variants = [
+      "V1 worker provider, one worker requester",
+      "V2 main provider, three concurrent requesters",
+      "V3 worker provider, main-thread requester",
+      "V4 no provider, one error-path requester",
+      "V5 worker provider, worker requester + default-fail requester",
+      "V6 full original shape",
+    ]
+    trials = 40
+
+  proc buildBin(name, opt: string): string =
+    result = joinPath("build", "alloc_race_" & name).addFileExt(ExeExt)
+    exec "nim c " & opt & " --path:. --out:" & quoteArg(result) & " test/" & varFile &
+      ".nim"
+
+  proc runTrials(label, exePath, args: string): int =
+    ## Runs the binary `trials` times with `args`, returns crashed-run count.
+    for i in 1 .. trials:
+      let (outp, code) = gorgeEx(quoteArg(exePath) & args)
+      if code != 0:
+        inc result
+        echo "[" & label & "] trial " & $i & "/" & $trials & ": CRASH (exit code " &
+          $code & "), last output lines:"
+        let lines = outp.splitLines()
+        for l in lines[max(0, lines.len - 8) ..< lines.len]:
+          echo "    " & l
+
+  let exe = buildBin(
+    "refc_rel", "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on"
+  )
+
+  var totalCrashes = 0
+  for v in variants:
+    let crashes = runTrials(v, exe, " " & quoteArg(varSuite & "::" & v))
+    totalCrashes += crashes
+    echo "TEARDOWN-GATE: " & v & ": " & $crashes & "/" & $trials & " crashed"
+  if totalCrashes > 0:
+    quit("TEARDOWN-GATE FAILED: " & $totalCrashes & " crashed trials", 1)
+  echo "TEARDOWN-GATE PASSED: 0 crashes across " & $(variants.len * trials) & " trials"
 
 task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
   let rejects =
@@ -496,8 +527,6 @@ task perftest, "Run performance and stress tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       test opt, f
 
 task testApi, "Run codec unit tests + library init integration tests":
@@ -531,8 +560,6 @@ task testApi, "Run codec unit tests + library init integration tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:BrokerFfiApi -d:release --mm:refc --threads:on",
     ]:
-      if skipRefcOnWindows(opt, f):
-        continue
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
 
@@ -979,7 +1006,10 @@ proc setSanitizerEnv(mode: string) =
       "symbolize=1:halt_on_error=1:second_deadlock_stack=1:history_size=4:exitcode=66"
     let supp = sanitizerSuppPath("tsan.supp")
     if fileExists(supp):
-      opts.add(":suppressions=" & supp)
+      # Single-quote the path: the sanitizer flag parser splits on ':', so an
+      # unquoted Windows drive letter ("D:\...") aborts the runtime with
+      # "expected '=' in TSAN_OPTIONS". Quotes are accepted on POSIX too.
+      opts.add(":suppressions='" & supp & "'")
     putEnv("TSAN_OPTIONS", opts)
     linuxSharedRuntimeOnPath("libclang_rt.tsan-x86_64.so")
   else: # asan / asanleak
@@ -997,12 +1027,15 @@ proc setSanitizerEnv(mode: string) =
     var ubopts = "print_stacktrace=1:halt_on_error=1"
     let usupp = sanitizerSuppPath("ubsan.supp")
     if fileExists(usupp):
-      ubopts.add(":suppressions=" & usupp)
+      # Single-quoted for the same Windows drive-letter reason as tsan above —
+      # this unquoted path is what failed every Windows Sanitizer CI cell with
+      # "AddressSanitizer: ERROR: expected '=' in UBSAN_OPTIONS".
+      ubopts.add(":suppressions='" & usupp & "'")
     putEnv("UBSAN_OPTIONS", ubopts)
     if leaks:
       let lsupp = sanitizerSuppPath("lsan.supp")
       if fileExists(lsupp):
-        putEnv("LSAN_OPTIONS", "suppressions=" & lsupp)
+        putEnv("LSAN_OPTIONS", "suppressions='" & lsupp & "'")
     linuxSharedRuntimeOnPath("libclang_rt.asan-x86_64.so")
 
 # Back-compat shims (pre-existing call sites + external dispatch references).
@@ -1055,8 +1088,6 @@ task testMtEventBrokerAsanOrc,
 
 task testMtEventBrokerAsanRefc,
   "Run multi-thread event broker tests under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtEventBrokerAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_event_broker")
 
 task testMtRequestBrokerAsanOrc,
@@ -1065,8 +1096,6 @@ task testMtRequestBrokerAsanOrc,
 
 task testMtRequestBrokerAsanRefc,
   "Run multi-thread request broker tests under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtRequestBrokerAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_request_broker")
 
 task testMtBrokerConfigsAsanOrc,
@@ -1075,8 +1104,6 @@ task testMtBrokerConfigsAsanOrc,
 
 task testMtBrokerConfigsAsanRefc,
   "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtBrokerConfigsAsanRefc"):
-    return
   testAsan("refc", "test_multi_thread_broker_configs")
 
 # ---------------------------------------------------------------------------
@@ -1091,8 +1118,6 @@ task testMtEventBrokerTsanOrc,
 
 task testMtEventBrokerTsanRefc,
   "Run multi-thread event broker tests under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtEventBrokerTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_event_broker")
 
 task testMtRequestBrokerTsanOrc,
@@ -1101,8 +1126,6 @@ task testMtRequestBrokerTsanOrc,
 
 task testMtRequestBrokerTsanRefc,
   "Run multi-thread request broker tests under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtRequestBrokerTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_request_broker")
 
 task testMtBrokerConfigsTsanOrc,
@@ -1111,8 +1134,6 @@ task testMtBrokerConfigsTsanOrc,
 
 task testMtBrokerConfigsTsanRefc,
   "Run multi-thread broker config showcase under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testMtBrokerConfigsTsanRefc"):
-    return
   testSan("tsan", "refc", "test_multi_thread_broker_configs")
 
 # ---------------------------------------------------------------------------
@@ -1128,8 +1149,6 @@ task testApiTeardownAsanOrc,
 
 task testApiTeardownAsanRefc,
   "Run FFI event-teardown isolation test under ASan+UBSan (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testApiTeardownAsanRefc"):
-    return
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 task testApiTeardownTsanOrc,
@@ -1138,8 +1157,6 @@ task testApiTeardownTsanOrc,
 
 task testApiTeardownTsanRefc,
   "Run FFI event-teardown isolation test under ThreadSanitizer (clang, refc, debug)":
-  if skipRefcOnWindows("refc", "testApiTeardownTsanRefc"):
-    return
   testSan("tsan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 # ---------------------------------------------------------------------------

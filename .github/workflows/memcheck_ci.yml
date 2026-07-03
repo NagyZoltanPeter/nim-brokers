@@ -70,10 +70,14 @@ jobs:
           else
             nims="[\"$NIM_IN\"]"
           fi
+          # windows × devel is excluded for the same reason as in ci.yml:
+          # jiro4989/setup-nim-action cannot install Nim devel on Windows,
+          # so the cell would always fail at "Set up Nim".
           matrix=$(jq -nc \
             --argjson r "$runners" \
             --argjson n "$nims" \
             '[ $r[] as $runner | $n[] as $nim
+               | select(($runner == "windows-latest" and $nim == "devel") | not)
                | {runner: $runner, "nim-version": $nim} ]')
           echo "Computed matrix: $matrix"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"

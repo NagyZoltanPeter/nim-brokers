@@ -1,0 +1,45 @@
+# Manual verification harness for the MT worker-thread teardown UAF fix
+# (see teardownBrokerThread in brokers/internal/mt_broker_common.nim).
+#
+# Runs `nimble testAllocRace` — 40 repeated-run trials per single-ingredient
+# reproducer variant, refc + release — on the Windows runners where the
+# pre-fix crash rate was ~30% per run. Dispatch-only: this is a
+# statistical harness (several minutes of repeated process spawns), not a
+# per-PR gate.
+name: Teardown UAF verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: teardown-verify / ${{ matrix.platform.id }} / Nim ${{ matrix.nim }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        nim: ["2.2.4", "2.2.10"]
+        platform:
+          - { id: win-amd64,    runs-on: windows-latest }
+          - { id: linux-amd64,  runs-on: ubuntu-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
+      - name: Run teardown UAF gate (40 trials per variant)
+        shell: bash
+        run: nimble testAllocRace --verbose
