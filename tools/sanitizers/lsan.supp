@@ -39,6 +39,15 @@ leak:getThreadDispatcher
 leak:MtImpl
 leak:onThreadDestruction
 leak:ensureBrokerDispatchStarted
+# The generated event poll closure (makePollFn<T>'s anonymous proc) appends
+# each spawned listener future to the per-broker-type threadvar bookkeeping
+# seq (tvListenerFuts); that seq's payload buffer is thread-lifetime and orc
+# never frees it at thread exit (24 B per worker thread × broker type).
+# Trade-off: this frame also appears in event-decode stacks inside the poll
+# closure, so a hypothetical decode-path leak in the MT EVENT lane would be
+# masked here — the request-broker response lane and the FFI courier lanes
+# are unaffected and remain fully leak-checked.
+leak:makePollFn
 # Nim runtime one-time globals (thread-local registries, GC metadata) allocated
 # at startup and intentionally not freed at exit.
 leak:nimRegisterThreadLocalMarkers
