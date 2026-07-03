@@ -14,6 +14,16 @@
 # These are allocated once and reclaimed by the OS at process exit by design.
 leak:getOrInitBrokerSignal
 leak:registerBrokerPoller
+# chronos (4.2.2) per-thread dispatcher: newDispatcher() allocates the
+# PDispatcher object graph (selector, queues, tables) lazily on every thread
+# that runs a chronos loop, and upstream has NO PDispatcher teardown — no
+# =destroy, no close proc for the object graph. teardownBrokerThread()
+# reclaims the OS handle (see closeThreadDispatcherSelector), but the heap
+# graph itself is unreclaimable from our side until chronos grows a
+# destructor. Worker threads that served brokers therefore leak one
+# dispatcher graph (~36 KB) per thread lifetime by upstream design.
+leak:newDispatcher
+leak:getThreadDispatcher
 # Nim runtime one-time globals (thread-local registries, GC metadata) allocated
 # at startup and intentionally not freed at exit.
 leak:nimRegisterThreadLocalMarkers

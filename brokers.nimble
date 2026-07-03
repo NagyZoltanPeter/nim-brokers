@@ -1006,7 +1006,10 @@ proc setSanitizerEnv(mode: string) =
       "symbolize=1:halt_on_error=1:second_deadlock_stack=1:history_size=4:exitcode=66"
     let supp = sanitizerSuppPath("tsan.supp")
     if fileExists(supp):
-      opts.add(":suppressions=" & supp)
+      # Single-quote the path: the sanitizer flag parser splits on ':', so an
+      # unquoted Windows drive letter ("D:\...") aborts the runtime with
+      # "expected '=' in TSAN_OPTIONS". Quotes are accepted on POSIX too.
+      opts.add(":suppressions='" & supp & "'")
     putEnv("TSAN_OPTIONS", opts)
     linuxSharedRuntimeOnPath("libclang_rt.tsan-x86_64.so")
   else: # asan / asanleak
@@ -1024,12 +1027,15 @@ proc setSanitizerEnv(mode: string) =
     var ubopts = "print_stacktrace=1:halt_on_error=1"
     let usupp = sanitizerSuppPath("ubsan.supp")
     if fileExists(usupp):
-      ubopts.add(":suppressions=" & usupp)
+      # Single-quoted for the same Windows drive-letter reason as tsan above —
+      # this unquoted path is what failed every Windows Sanitizer CI cell with
+      # "AddressSanitizer: ERROR: expected '=' in UBSAN_OPTIONS".
+      ubopts.add(":suppressions='" & usupp & "'")
     putEnv("UBSAN_OPTIONS", ubopts)
     if leaks:
       let lsupp = sanitizerSuppPath("lsan.supp")
       if fileExists(lsupp):
-        putEnv("LSAN_OPTIONS", "suppressions=" & lsupp)
+        putEnv("LSAN_OPTIONS", "suppressions='" & lsupp & "'")
     linuxSharedRuntimeOnPath("libclang_rt.asan-x86_64.so")
 
 # Back-compat shims (pre-existing call sites + external dispatch references).
