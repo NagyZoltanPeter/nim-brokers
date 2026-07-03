@@ -48,6 +48,17 @@ leak:ensureBrokerDispatchStarted
 # masked here — the request-broker response lane and the FFI courier lanes
 # are unaffected and remain fully leak-checked.
 leak:makePollFn
+# Nim ORC runtime: the cycle collector's per-thread roots buffer (CellSeq,
+# 16 KB) is allocated lazily by registerCycle() on whichever thread first
+# destroys a cyclic candidate (e.g. futures in request/emit paths) and is
+# never freed at thread exit. GC-internal allocation only — a broker leak
+# can never allocate through this frame, so the entry is exact.
+leak:registerCycle
+# Request-broker registration: the generated `setProvider` grows per-thread
+# provider registry seqs (tvNoArgCtx/tvWithArgCtx + handler seqs) — the
+# request-side analog of the *MtImpl listener entries above, same
+# thread-lifetime-by-design rationale.
+leak:setProvider
 # Nim runtime one-time globals (thread-local registries, GC metadata) allocated
 # at startup and intentionally not freed at exit.
 leak:nimRegisterThreadLocalMarkers
