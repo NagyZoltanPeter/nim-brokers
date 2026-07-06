@@ -24,12 +24,21 @@ import brokers/broker_implement
 # mechanism is unreliable because it relies on deterministic destruction.
 # Fixed in Nim 2.2.10 (codegen fix upstream); macOS arm64 unaffected due to
 # a different ABI. Skip the whole test for Nim 2.2.4 + refc on Linux/Windows.
+#
+# 2026-07: the same signature reappeared on Nim devel (2.3.x) — Linux + refc +
+# -d:release, both tests fail with gAlive == 1 (CI run 28779048733). devel is a
+# moving toolchain, so skip refc there too on Linux/Windows; the semantic stays
+# covered by every ORC cell and by 2.2.10 refc.
 const SkipRefcLifecycle {.used.} =
-  NimMajor == 2 and NimMinor == 2 and NimPatch == 4 and
-  (defined(linux) or defined(windows)) and compileOption("mm", "refc")
+  (
+    (NimMajor == 2 and NimMinor == 2 and NimPatch == 4) or (NimMajor, NimMinor) >= (
+      2, 3
+    )
+  ) and (defined(linux) or defined(windows)) and compileOption("mm", "refc")
 
 when SkipRefcLifecycle:
-  echo "test_broker_lifecycle: skipped (Nim 2.2.4 + refc on Linux/Windows; fixed in 2.2.10)"
+  echo "test_broker_lifecycle: skipped (refc conservative-stack-scan flake on " &
+    "this toolchain: Nim 2.2.4 / devel + Linux/Windows)"
 else:
   var gAlive {.global.} = 0
 
