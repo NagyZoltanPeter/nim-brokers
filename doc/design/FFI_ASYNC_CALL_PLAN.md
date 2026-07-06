@@ -148,10 +148,91 @@ Verified: all three examples run (5 async queries each, pipelined); parity
 `runTypeMapTestLibRust` 148/148, `…Go` 148/148, `…Py` 101/101; Nim core
 `test_api_callAsync` 9/9; sync paths untouched.
 
-## External review follow-ups (deferred — ergonomics, not correctness)
+## Phase 3 — idiomatic-async ergonomics (DONE, verified)
 
-From the second (human) review of PR #36. Actioned now: Rust typed
-`AsyncError` + std `Result` (above). Deferred by decision:
+Implemented exactly as confirmed below. Verified: rust_example runs the same
+`_async` under tokio AND `futures::executor::block_on` (tokio gone from the
+generated crate + rust_test); go_example fans out `GetDeviceContext` over
+goroutines with a `context.WithTimeout` (no per-call goroutine left in the
+wrapper); python_example pushes a **3× window burst (192/192 ok, zero EAGAIN)**
+through the internal semaphore; cpp_example uses chrono timeouts and the
+semaphore-backed future. Parity: Rust 148/148, Go 148/148, Py 101/101,
+C++ 149/149; Nim `test_api_callAsync` 9/9 (ABI untouched).
+
+### (confirmed plan)
+
+Aim: **maximum per-language ergonomics** — each wrapper adopts its language's
+native async idiom fully. Raw C ABI unchanged. Absorbs external-review points
+1–5. All four decisions confirmed:
+
+### Rust — drop tokio; runtime-agnostic (`futures-channel`)
+- Swap `tokio::sync::oneshot` → `futures_channel::oneshot` (tiny dep:
+  futures-core + futures-channel only). `Receiver` implements `Future`, so
+  `rx.await` works under tokio, smol, async-std, or `futures::executor::block_on`
+  — the generated crate no longer forces a runtime.
+- Cargo.toml: replace `tokio` with `futures-channel = "0.3"`. rust_example may
+  keep tokio as *its own* dep (it demonstrates tokio compat); rust_test can use
+  `futures::executor::block_on` to prove runtime-independence. Cargo.locks.
+- **No per-call timeout param** (confirmed): callers compose their runtime's
+  timeout (`tokio::time::timeout(d, lib.foo_async(...))`) for latency control;
+  the library default (30 s, `-12` → `AsyncError::TimedOut`) guards slot
+  hygiene regardless. Document this composition in the crate docs + example.
+- Trampoline note: `futures_channel::oneshot::Sender::send` is non-async,
+  callable from the delivery thread exactly like tokio's — bridge unchanged.
+
+### Go — `FooContext(ctx, args) (T, error)` replaces the channel API
+- database/sql `QueryContext` naming precedent: blocking, ctx-aware, the
+  stdlib idiom for "sync call with deadline/cancel". Fan-out = goroutines /
+  errgroup (shown in go_example). The `(<-chan FooResult, error)` surface is
+  REMOVED (unreleased, safe).
+- `ctx.Deadline()` → derives `timeoutMs` for the ABI (remaining time, clamped;
+  no deadline → lib default). Inside: `select { case <-ctx.Done(): return
+  zero, ctx.Err(); case r := <-rawCh: ... }`.
+- On ctx cancel the Nim-side request keeps running (no cancel ABI — documented);
+  abandonment is leak-free: the trampoline owns the cgo.Handle deletion and the
+  raw chan is buffered (cap 1), so the late send never blocks and GC collects.
+- Keep `ErrAsyncAgain` (-6) + `AsyncQueueDepth`. Add the per-call
+  goroutine-cost rationale comment (review point 5).
+
+### Python — timeout kwarg + await-not-throw backpressure
+- `async def foo_async(self, args…, timeout: float | None = None)` — seconds,
+  asyncio-style. `None` → lib default; `float('inf')` → infinite (ABI 0).
+- `-12` → raise **`TimeoutError`** (what `asyncio.wait_for` users expect);
+  provider/envelope errors stay `Result[T]`.
+- Per-instance `asyncio.Semaphore(ASYNC_QUEUE_DEPTH)` acquired before
+  `_callAsync`, released from the response trampoline via
+  `loop.call_soon_threadsafe` — backpressure becomes *awaiting*, so
+  `asyncio.gather(*200 calls)` just works (fixes the review-1 footgun).
+  `AsyncAgainError` retained for the residual cross-process `-6` (bounded
+  retry, then raise).
+
+### C++ — chrono, no reqId, semaphore-backed future
+- `fooFuture(args…, std::chrono::milliseconds timeout = <default>)`;
+  `fooAsync` likewise takes chrono. `reqId` REMOVED from both typed signatures
+  (wrapper supplies an internal counter — matches Rust/Go/Py). Raw ABI keeps
+  `uint32_t timeoutMs` + `reqId`.
+- `fooFuture` blocks briefly on a per-lib `std::counting_semaphore`
+  (`asyncQueueDepth`) when the window is full — released in the invoker after
+  the callback — so the future surface never sees `-6`. `fooAsync` keeps the
+  non-blocking `int32_t` rc contract (`asyncAgain` for manual control).
+- cpp_example: future section drops its retry loop (semaphore handles it).
+
+### Cross-cutting docs (review point 2)
+- FFI_API.md: prominent "dropping a future / cancelling a task / ctx-cancel
+  does NOT cancel the in-flight request" section; note `reqId` as the intended
+  handle for a future `<lib>_cancelAsync(ctx, reqId)`.
+
+### Verify
+Examples all run (incl. a >depth pipelined burst in python_example proving the
+semaphore); parity matrices Rust/Go/Py/C++ green; `test_api_callAsync` 9/9
+ORC/refc/refc+ASAN; rust_test under `block_on` (no tokio) compiles + runs;
+sync surfaces untouched; nphall clean.
+
+## External review follow-ups (superseded — absorbed into Phase 3 above)
+
+From the second (human) review of PR #36. Actioned immediately: Rust typed
+`AsyncError` + std `Result`. Points 1–5 below are now covered by the confirmed
+Phase 3 plan (kept for traceability):
 1. **Examples/docs honesty about backpressure:** the "nice" surfaces (C++
    `fooFuture`, Python `asyncio.gather`) turn a full window into errors — the
    gather idiom breaks past `ASYNC_QUEUE_DEPTH` items. Add a bounded-window /

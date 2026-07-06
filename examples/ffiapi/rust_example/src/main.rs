@@ -170,11 +170,14 @@ fn main() {
 
     // --- Async queries (tokio .await) -----------------------------------
     // get_device_async() returns a std Result<T, AsyncError> resolved on the
-    // library's delivery thread via a tokio oneshot — it composes with `?`,
-    // and backpressure/timeout/shutdown are MATCHABLE variants:
-    // AsyncError::Again (window full, mylib::ASYNC_QUEUE_DEPTH — retry),
-    // AsyncError::TimedOut (-12), AsyncError::ShutDown (-11),
+    // library's delivery thread via a runtime-agnostic futures-channel oneshot
+    // — it composes with `?`, and backpressure/timeout/shutdown are MATCHABLE
+    // variants: AsyncError::Again (window full, mylib::ASYNC_QUEUE_DEPTH —
+    // retry), AsyncError::TimedOut (-12), AsyncError::ShutDown (-11),
     // AsyncError::Provider(msg) for handler errors.
+    // Per-call deadlines: compose your runtime's timer, e.g.
+    //   tokio::time::timeout(Duration::from_millis(500), lib.get_device_async(id))
+    // — the library-default timeout still guards the in-flight slot regardless.
     println!("--- Async device queries (get_device_async) ---");
     println!("  async window = {} in-flight", mylib::ASYNC_QUEUE_DEPTH);
     {
@@ -200,6 +203,20 @@ fn main() {
         println!("  All async queries completed.");
     }
     println!();
+
+    // --- Async without tokio (futures::executor::block_on) --------------
+    // The generated crate depends only on futures-channel: the same _async
+    // methods run under ANY executor. Prove it with futures' minimal block_on
+    // — no tokio runtime in sight.
+    if !ids.is_empty() {
+        println!("--- Async query without tokio (block_on) ---");
+        let qid = ids[0];
+        match futures::executor::block_on(lib.get_device_async(qid)) {
+            Ok(d) => println!("  [block_on] id={qid} -> \"{}\"", d.name),
+            Err(e) => println!("  [block_on] id={qid} -> error: {e}"),
+        }
+        println!();
+    }
 
     // --- Query one (cpp picks ids[2]) ----------------------------------
     if ids.len() > 2 {

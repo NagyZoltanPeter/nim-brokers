@@ -285,8 +285,10 @@ proc generateCborRustFile*(
   cargo.add("serde_bytes = \"0.11\"\n")
   cargo.add("serde_json = \"1\"\n")
   # Async request surface (`<method>_async().await`) bridges the C response
-  # callback to a tokio oneshot. tokio is a hard dep of the CBOR crate.
-  cargo.add("tokio = { version = \"1\", features = [\"sync\", \"rt\", \"macros\"] }\n")
+  # callback to a runtime-agnostic futures-channel oneshot: the crate works
+  # under tokio, smol, async-std, or futures::executor::block_on alike —
+  # no async runtime is forced on consumers.
+  cargo.add("futures-channel = \"0.3\"\n")
   try:
     writeFile(crateDir & "/Cargo.toml", cargo)
   except IOError:
@@ -392,7 +394,7 @@ proc generateCborRustFile*(
     "pub type ResponseCb = unsafe extern \"C\" fn(ud: *mut c_void, req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32);\n\n"
   )
 
-  # ---- Async request plumbing (tokio oneshot bridge) -------------------
+  # ---- Async request plumbing (runtime-agnostic oneshot bridge) --------
   rs.add("/// Max concurrent in-flight `_async` requests per context (full =>\n")
   rs.add("/// the async method returns `Err(AsyncError::Again)`).\n")
   rs.add("pub const ASYNC_QUEUE_DEPTH: u32 = " & $asyncQueueDepth & ";\n")
@@ -438,14 +440,14 @@ proc generateCborRustFile*(
   rs.add("}\n\n")
   rs.add("impl std::error::Error for AsyncError {}\n\n")
   rs.add(
-    "type CborAsyncSlot = tokio::sync::oneshot::Sender<::std::result::Result<Vec<u8>, AsyncError>>;\n\n"
+    "type CborAsyncSlot = futures_channel::oneshot::Sender<::std::result::Result<Vec<u8>, AsyncError>>;\n\n"
   )
   rs.add(
     "/// C response trampoline: reconstruct the boxed oneshot sender (the opaque\n"
   )
   rs.add("/// userData), turn (status, respBuf) into Ok(bytes)/Err(AsyncError), and\n")
   rs.add(
-    "/// fulfil it. Runs on the library's delivery thread; tokio wakes the task.\n"
+    "/// fulfil it. Runs on the library's delivery thread; the caller's runtime\n/// (tokio, smol, block_on, ...) wakes the awaiting task.\n"
   )
   rs.add(
     "unsafe extern \"C\" fn cbor_response_trampoline(ud: *mut c_void, _req_id: u64, status: i32, resp_buf: *const c_void, resp_len: i32) {\n"
@@ -484,7 +486,8 @@ proc generateCborRustFile*(
 
   # Shared `do_call_async` body (used by the main Lib impl and each sub-impl —
   # both have a private `ctx: u32`). Encodes nothing; takes raw request bytes,
-  # bridges the C response callback to a tokio oneshot, and returns the raw
+  # bridges the C response callback to a futures-channel oneshot (runtime-
+  # agnostic), and returns the raw
   # response envelope bytes (the per-method async fn decodes them into T).
   proc emitDoCallAsync(p: string): string {.compileTime.} =
     result.add(
@@ -513,7 +516,7 @@ proc generateCborRustFile*(
     result.add("            }\n")
     result.add("        };\n")
     result.add(
-      "        let (tx, rx) = tokio::sync::oneshot::channel::<::std::result::Result<Vec<u8>, AsyncError>>();\n"
+      "        let (tx, rx) = futures_channel::oneshot::channel::<::std::result::Result<Vec<u8>, AsyncError>>();\n"
     )
     result.add(
       "        let boxed: *mut c_void = Box::into_raw(Box::new(tx)) as *mut c_void;\n"
@@ -983,7 +986,7 @@ proc generateCborRustFile*(
     result.add("        }\n")
     result.add("    }\n\n")
 
-    # ---- async sibling: `<method>_async().await` via tokio oneshot ----
+    # ---- async sibling: `<method>_async().await` via oneshot bridge ----
     # Returns STD Result with the typed AsyncError (not the wrapper Result<T>):
     # composes with `?`/`.await?`, and EAGAIN/timeout/shutdown are matchable
     # variants instead of strings.

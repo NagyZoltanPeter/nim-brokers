@@ -140,19 +140,36 @@ def main() -> int:
 
         # --- Async device queries (asyncio) ---------------------------
         # Each get_device_async returns a Result[GetDevice] resolved on the
-        # library's delivery thread; asyncio.gather pipelines them. A full
-        # window (ASYNC_QUEUE_DEPTH) raises AsyncAgainError.
+        # library's delivery thread; asyncio.gather pipelines them.
+        # Backpressure is transparent: an internal Semaphore(ASYNC_QUEUE_DEPTH)
+        # makes calls past the window AWAIT a free slot instead of erroring —
+        # gather over any number of calls just works (proved by the burst
+        # below). `timeout` is asyncio-style seconds (None = lib default);
+        # a library-side timeout raises TimeoutError, like asyncio.wait_for.
         print("--- Async device queries (asyncio) ---")
         print(f"  async window = {ASYNC_QUEUE_DEPTH} in-flight")
 
         async def _run_async() -> None:
-            results = await asyncio.gather(*(lib.get_device_async(q) for q in ids))
+            results = await asyncio.gather(
+                *(lib.get_device_async(q, timeout=2.0) for q in ids)
+            )
             for q, res in zip(ids, results):
                 if res.is_ok():
                     state = "online" if res.value.online else "offline"
                     print(f'  [async] id={q} -> "{res.value.name}" ({state})')
                 else:
                     print(f"  [async] id={q} -> error: {res.error}")
+
+            # Burst PAST the window: 3x depth concurrent awaits. Without the
+            # internal semaphore this would raise AsyncAgainError; with it the
+            # excess calls simply wait for slots.
+            burst = ASYNC_QUEUE_DEPTH * 3
+            burst_ids = [ids[i % len(ids)] for i in range(burst)]
+            burst_res = await asyncio.gather(
+                *(lib.get_device_async(q) for q in burst_ids)
+            )
+            ok = sum(1 for r in burst_res if r.is_ok())
+            print(f"  burst: {ok}/{burst} ok (window={ASYNC_QUEUE_DEPTH}, no EAGAIN)")
 
         asyncio.run(_run_async())
         print("  All async queries completed.")

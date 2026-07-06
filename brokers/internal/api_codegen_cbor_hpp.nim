@@ -563,9 +563,10 @@ proc generateCborCppHeaderFile*(
     "// Requires C++20 and jsoncons + jsoncons_ext/cbor in the include path.\n" &
     "#ifndef " & guardName & "\n" & "#define " & guardName & "\n\n" & "#include \"" &
     libName & ".h\"\n\n" & "#include <jsoncons/json.hpp>\n" &
-    "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <cstdint>\n" &
-    "#include <cstring>\n" & "#include <functional>\n" & "#include <future>\n" &
-    "#include <memory>\n" & "#include <optional>\n" & "#include <span>\n" &
+    "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <atomic>\n" &
+    "#include <chrono>\n" & "#include <cstdint>\n" & "#include <cstring>\n" &
+    "#include <functional>\n" & "#include <future>\n" & "#include <memory>\n" &
+    "#include <optional>\n" & "#include <semaphore>\n" & "#include <span>\n" &
     "#include <string>\n" & "#include <system_error>\n" & "#include <unordered_map>\n" &
     "#include <utility>\n" & "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
 
@@ -975,9 +976,12 @@ proc generateCborCppHeaderFile*(
         sigParams & ");\n"
     )
     # Fire-and-forget async sibling: same args, plus a completion callback and
-    # an optional caller-supplied reqId. Delivered on the library's event
-    # delivery thread. (Instance-returning create methods are sync-only here.)
-    let asyncTail = ", uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    # a std::chrono timeout (<= 0ms means infinite; default = library policy).
+    # Delivered on the library's event delivery thread. reqId is internal.
+    # (Instance-returning create methods are sync-only here.)
+    let asyncTail =
+      ", std::chrono::milliseconds timeout = std::chrono::milliseconds(" &
+      defaultTimeoutMacro & ")"
     let asyncSig =
       if sigParams.len > 0:
         sigParams & ", std::function<void(Result<" & payloadCppType(e.responseTypeName) &
@@ -988,7 +992,11 @@ proc generateCborCppHeaderFile*(
     h.add("  int32_t " & methodName & "Async(" & asyncSig & ");\n")
     # Future-returning convenience (built on <method>Async via std::promise —
     # no thread parked per call, unlike wrapping the sync call in std::async).
-    let futureTail = "uint64_t reqId = 0, uint32_t timeoutMs = " & defaultTimeoutMacro
+    # Backpressure-aware: blocks briefly on the window semaphore when full, so
+    # this surface never returns EAGAIN.
+    let futureTail =
+      "std::chrono::milliseconds timeout = std::chrono::milliseconds(" &
+      defaultTimeoutMacro & ")"
     let futureSig =
       if sigParams.len > 0:
         sigParams & ", " & futureTail
@@ -1042,6 +1050,18 @@ proc generateCborCppHeaderFile*(
   # caught by ASAN under stress_shutdown).
   h.add(" private:\n")
   h.add("  uint32_t ctx_ = 0;\n")
+  h.add("  // Internal reqId for the ABI (logging/correlation is via the boxed\n")
+  h.add("  // callback, not reqId — so it is not part of the typed surface).\n")
+  h.add("  std::atomic<uint64_t> asyncReqId_{0};\n")
+  h.add("  // <method>Future backpressure: acquire before issue, release in the\n")
+  h.add("  // completion callback. Initialised to asyncQueueDepth - 1 because the\n")
+  h.add("  // library releases its own depth slot only AFTER the callback returns\n")
+  h.add("  // (single delivery thread => at most one such in-flight release), so\n")
+  h.add("  // the margin of one makes a post-release reissue race-free.\n")
+  h.add(
+    "  std::counting_semaphore<> asyncWindow_{static_cast<std::ptrdiff_t>(\n" &
+      "      asyncQueueDepth > 1 ? asyncQueueDepth - 1 : 1)};\n"
+  )
   for ev in mainEvents:
     let dispatcherType = ev.typeName & "Dispatcher"
     let dispatcherMember = ev.apiName & "Dispatcher_"
@@ -1914,9 +1934,9 @@ proc generateCborCppHeaderFile*(
       let asyncSig =
         if sigParams.len > 0:
           sigParams & ", std::function<void(" & aResTy &
-            ")> cb, uint64_t reqId, uint32_t timeoutMs"
+            ")> cb, std::chrono::milliseconds timeout"
         else:
-          "std::function<void(" & aResTy & ")> cb, uint64_t reqId, uint32_t timeoutMs"
+          "std::function<void(" & aResTy & ")> cb, std::chrono::milliseconds timeout"
       # Returns 0 when queued (cb fires once later) or a negative code when NOT
       # queued (cb does NOT fire): asyncAgain (-6) = EAGAIN, asyncBadContext (-5),
       # asyncNoCallback (-7), asyncEncodeFailed (-1). This mirrors the raw ABI so
@@ -1990,9 +2010,16 @@ proc generateCborCppHeaderFile*(
       h.add("    if (env.ok.has_value()) { cb(" & aOkExpr & "); return; }\n")
       h.add("    cb(" & aResTy & "::err(\"malformed response envelope\"));\n")
       h.add("  });\n")
+      h.add("  // chrono -> ABI ms: <= 0 means infinite (ABI 0); clamp to u32.\n")
+      h.add("  const auto __tc = timeout.count();\n")
+      h.add(
+        "  const uint32_t timeoutMs = __tc <= 0 ? 0u\n" &
+          "      : (__tc > 0xFFFFFFFFll ? 0xFFFFFFFFu : static_cast<uint32_t>(__tc));\n"
+      )
       h.add(
         "  const int32_t rc = " & p & "callAsync(ctx_, \"" & e.apiName &
-          "\", inBuf, static_cast<int32_t>(cborLen), reqId, timeoutMs,\n" &
+          "\", inBuf, static_cast<int32_t>(cborLen),\n" &
+          "      asyncReqId_.fetch_add(1, std::memory_order_relaxed) + 1, timeoutMs,\n" &
           "      &detail::asyncResponseTrampoline, inv);\n"
       )
       h.add("  if (rc != 0) {\n")
@@ -2011,15 +2038,21 @@ proc generateCborCppHeaderFile*(
         argNamesCsv.add(n & ", ")
       let futureSig =
         if sigParams.len > 0:
-          sigParams & ", uint64_t reqId, uint32_t timeoutMs"
+          sigParams & ", std::chrono::milliseconds timeout"
         else:
-          "uint64_t reqId, uint32_t timeoutMs"
+          "std::chrono::milliseconds timeout"
       h.add(
         "inline std::future<" & aResTy & "> " & className & "::" & methodName & "Future(" &
           futureSig & ") {\n"
       )
       h.add("  auto prom = std::make_shared<std::promise<" & aResTy & ">>();\n")
       h.add("  auto fut = prom->get_future();\n")
+      h.add("  // Backpressure by WAITING, not erroring: block briefly on the window\n")
+      h.add(
+        "  // semaphore when asyncQueueDepth calls are in flight. Released in the\n"
+      )
+      h.add("  // completion callback (below) or inline on a rejected call.\n")
+      h.add("  asyncWindow_.acquire();\n")
       h.add(
         "  // The promise is fulfilled from exactly one place: the delivery-thread\n"
       )
@@ -2028,10 +2061,14 @@ proc generateCborCppHeaderFile*(
       )
       h.add("  // is rejected (rc != 0 — the callback never fires).\n")
       h.add(
-        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv & "[prom](" &
-          aResTy & " __r) { prom->set_value(std::move(__r)); }, reqId, timeoutMs);\n"
+        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv & "[this, prom](" &
+          aResTy & " __r) {\n" & "      asyncWindow_.release();\n" &
+          "      prom->set_value(std::move(__r));\n" & "  }, timeout);\n"
       )
       h.add("  if (rc != 0) {\n")
+      h.add("    asyncWindow_.release();\n")
+      h.add("    // asyncAgain can still surface here when callback-style fooAsync\n")
+      h.add("    // callers share the same context window outside the semaphore.\n")
       h.add("    prom->set_value(" & aResTy & "::err(\n")
       h.add("        rc == asyncAgain ? std::string(\"EAGAIN: async window full\")\n")
       h.add(

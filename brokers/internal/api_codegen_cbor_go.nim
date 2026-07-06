@@ -358,16 +358,20 @@ proc generateCborGoFile*(
   g.add("import \"C\"\n\n")
 
   g.add("import (\n")
+  g.add("\t\"context\"\n")
   g.add("\t\"errors\"\n")
   g.add("\t\"fmt\"\n")
   g.add("\t\"runtime\"\n")
   g.add("\t\"runtime/cgo\"\n")
   g.add("\t\"strconv\"\n")
   g.add("\t\"sync\"\n")
+  g.add("\t\"time\"\n")
   g.add("\t\"unsafe\"\n")
   g.add("\t\"github.com/fxamacker/cbor/v2\"\n")
   g.add(")\n\n")
+  g.add("var _ = context.Background\n")
   g.add("var _ = errors.New\n")
+  g.add("var _ = time.Until\n")
   g.add("var _ = fmt.Errorf\n")
   g.add("var _ = runtime.SetFinalizer\n")
   g.add("var _ = strconv.Itoa\n")
@@ -727,10 +731,17 @@ proc generateCborGoFile*(
     result.add("\treturn zeroResp, errors.New(\"empty response envelope\")\n")
     result.add("}\n\n")
 
-  # Async sibling: `<Method>Async(args) (<-chan <Method>Result, error)`. The C
-  # response callback hands raw bytes to a per-call goroutine over a channel;
-  # the goroutine decodes the envelope into the typed result and sends it once.
-  proc emitGoAsyncMethod(e: CborRequestEntry, recv: string): string {.compileTime.} =
+  # Context sibling (database/sql `QueryContext` idiom): a BLOCKING, ctx-aware
+  # call riding the async ABI. `ctx.Deadline()` maps to the ABI `timeoutMs`
+  # (no deadline → library default); `ctx.Done()` returns `ctx.Err()` early.
+  # Fan-out is the caller's goroutines — no per-call goroutine or typed channel
+  # is spawned here; the C response callback fulfils the buffered raw chan and
+  # the caller's goroutine decodes inline. Abandonment on ctx-cancel is
+  # leak-free: the trampoline owns the cgo.Handle deletion and the raw chan is
+  # buffered (cap 1), so the late send never blocks and the chan is GC'd.
+  # NOTE: ctx cancellation cannot stop the Nim-side request (no cancel ABI);
+  # the in-flight slot is reclaimed when the response or library timeout fires.
+  proc emitGoContextMethod(e: CborRequestEntry, recv: string): string {.compileTime.} =
     let methodName = snakeToPascal(e.apiName)
     let resp = effectiveResponsePayload(e.responseTypeName)
     let respType =
@@ -748,23 +759,30 @@ proc generateCborGoFile*(
       argsStructFields.add("\t\t" & exN & " " & hType & " `cbor:\"" & n & "\"`\n")
       argsAssign.add("\t\t" & exN & ": " & goSafeParam(n) & ",\n")
       firstNonZero = true
-    result.add("type " & methodName & "Result struct {\n")
-    result.add("\tValue " & respType & "\n")
-    result.add("\tErr   error\n")
-    result.add("}\n\n")
-    result.add("func (l *" & recv & ") " & methodName & "Async(")
-    var firstP = true
+    result.add("func (l *" & recv & ") " & methodName & "Context(ctx context.Context")
     for (n, t) in e.argFields:
       let h = nimTypeToGoCborHint(t)
       let hType = if h.len > 0: h else: "any"
-      if not firstP:
-        result.add(", ")
-      result.add(goSafeParam(n) & " " & hType)
-      firstP = false
-    result.add(") (<-chan " & methodName & "Result, error) {\n")
+      result.add(", " & goSafeParam(n) & " " & hType)
+    result.add(") (" & respType & ", error) {\n")
+    result.add("\tvar zeroResp " & respType & "\n")
     result.add(
-      "\tif l.ctx == 0 { return nil, errors.New(\"library context is not created\") }\n"
+      "\tif l.ctx == 0 { return zeroResp, errors.New(\"library context is not created\") }\n"
     )
+    result.add("\tif ctx == nil {\n")
+    result.add("\t\tctx = context.Background()\n")
+    result.add("\t}\n")
+    result.add("\t// ctx deadline -> ABI timeoutMs; no deadline -> library default.\n")
+    result.add("\ttimeoutMs := uint32(DefaultAsyncTimeoutMs)\n")
+    result.add("\tif d, ok := ctx.Deadline(); ok {\n")
+    result.add("\t\tremaining := time.Until(d)\n")
+    result.add("\t\tif remaining <= 0 { return zeroResp, context.DeadlineExceeded }\n")
+    result.add("\t\tms := remaining.Milliseconds()\n")
+    result.add("\t\tif ms < 1 {\n")
+    result.add("\t\t\tms = 1\n")
+    result.add("\t\t}\n")
+    result.add("\t\ttimeoutMs = uint32(ms)\n")
+    result.add("\t}\n")
     if firstNonZero:
       result.add("\targs := struct {\n")
       result.add(argsStructFields)
@@ -772,7 +790,7 @@ proc generateCborGoFile*(
       result.add(argsAssign)
       result.add("\t}\n")
       result.add("\tinBytes, merr := cbor.Marshal(args)\n")
-      result.add("\tif merr != nil { return nil, merr }\n")
+      result.add("\tif merr != nil { return zeroResp, merr }\n")
     else:
       result.add("\tvar inBytes []byte\n")
     result.add("\tcName := C.CString(\"" & e.apiName & "\")\n")
@@ -781,7 +799,7 @@ proc generateCborGoFile*(
     result.add("\tif len(inBytes) > 0 {\n")
     result.add("\t\tinPtr = C." & p & "allocBuffer(C.int32_t(len(inBytes)))\n")
     result.add(
-      "\t\tif inPtr == nil { return nil, errors.New(\"allocBuffer failed\") }\n"
+      "\t\tif inPtr == nil { return zeroResp, errors.New(\"allocBuffer failed\") }\n"
     )
     result.add(
       "\t\tC.memcpy(inPtr, unsafe.Pointer(&inBytes[0]), C.size_t(len(inBytes)))\n"
@@ -790,37 +808,38 @@ proc generateCborGoFile*(
     result.add("\trawCh := make(chan cborAsyncRaw, 1)\n")
     result.add("\th := cgo.NewHandle(rawCh)\n")
     result.add(
-      "\trc := int32(C.go_cbor_call_async(l.ctx, cName, inPtr, C.int32_t(len(inBytes)), 0, C.uint32_t(DefaultAsyncTimeoutMs), unsafe.Pointer(h)))\n"
+      "\trc := int32(C.go_cbor_call_async(l.ctx, cName, inPtr, C.int32_t(len(inBytes)), 0, C.uint32_t(timeoutMs), unsafe.Pointer(h)))\n"
     )
     result.add("\tif rc != 0 {\n")
     result.add("\t\th.Delete()\n")
-    result.add("\t\tif rc == -6 { return nil, ErrAsyncAgain }\n")
-    result.add("\t\treturn nil, fmt.Errorf(\"framework error: %d\", rc)\n")
+    result.add("\t\tif rc == -6 { return zeroResp, ErrAsyncAgain }\n")
+    result.add("\t\treturn zeroResp, fmt.Errorf(\"framework error: %d\", rc)\n")
     result.add("\t}\n")
-    result.add("\tout := make(chan " & methodName & "Result, 1)\n")
-    result.add("\tgo func() {\n")
-    result.add("\t\traw := <-rawCh\n")
-    result.add("\t\tvar res " & methodName & "Result\n")
+    result.add("\tselect {\n")
+    result.add("\tcase <-ctx.Done():\n")
+    result.add("\t\t// The Nim-side request keeps running (no cancel ABI); its slot\n")
+    result.add("\t\t// frees on response/timeout. The late trampoline send hits the\n")
+    result.add("\t\t// buffered chan and the whole thing is GC'd — leak-free.\n")
+    result.add("\t\treturn zeroResp, ctx.Err()\n")
+    result.add("\tcase raw := <-rawCh:\n")
     result.add("\t\tif raw.status != 0 {\n")
-    result.add("\t\t\tres.Err = asyncStatusError(raw.status, raw.payload)\n")
-    result.add("\t\t} else {\n")
-    result.add("\t\t\tvar env struct {\n")
-    result.add("\t\t\t\tOk  *" & respType & " `cbor:\"ok\"`\n")
-    result.add("\t\t\t\tErr *string `cbor:\"err\"`\n")
-    result.add("\t\t\t}\n")
-    result.add("\t\t\tif derr := cbor.Unmarshal(raw.payload, &env); derr != nil {\n")
-    result.add("\t\t\t\tres.Err = derr\n")
-    result.add("\t\t\t} else if env.Err != nil {\n")
-    result.add("\t\t\t\tres.Err = errors.New(*env.Err)\n")
-    result.add("\t\t\t} else if env.Ok != nil {\n")
-    result.add("\t\t\t\tres.Value = *env.Ok\n")
-    result.add("\t\t\t} else {\n")
-    result.add("\t\t\t\tres.Err = errors.New(\"empty response envelope\")\n")
-    result.add("\t\t\t}\n")
+    result.add("\t\t\treturn zeroResp, asyncStatusError(raw.status, raw.payload)\n")
     result.add("\t\t}\n")
-    result.add("\t\tout <- res\n")
-    result.add("\t}()\n")
-    result.add("\treturn out, nil\n")
+    result.add("\t\tvar env struct {\n")
+    result.add("\t\t\tOk  *" & respType & " `cbor:\"ok\"`\n")
+    result.add("\t\t\tErr *string `cbor:\"err\"`\n")
+    result.add("\t\t}\n")
+    result.add("\t\tif derr := cbor.Unmarshal(raw.payload, &env); derr != nil {\n")
+    result.add("\t\t\treturn zeroResp, derr\n")
+    result.add("\t\t}\n")
+    result.add("\t\tif env.Err != nil {\n")
+    result.add("\t\t\treturn zeroResp, errors.New(*env.Err)\n")
+    result.add("\t\t}\n")
+    result.add("\t\tif env.Ok != nil {\n")
+    result.add("\t\t\treturn *env.Ok, nil\n")
+    result.add("\t\t}\n")
+    result.add("\t\treturn zeroResp, errors.New(\"empty response envelope\")\n")
+    result.add("\t}\n")
     result.add("}\n\n")
 
   # reduced-A: a create-instance method returns the typed sub-wrapper. The wire
@@ -881,7 +900,7 @@ proc generateCborGoFile*(
       g.add(emitGoInstanceMethod(e, className))
     else:
       g.add(emitGoReqMethod(e, className))
-      g.add(emitGoAsyncMethod(e, className))
+      g.add(emitGoContextMethod(e, className))
 
   # ---- Single CBOR event trampoline + per-event On/Off ---------------------
   if eventEntries.len > 0:
@@ -1052,7 +1071,7 @@ proc generateCborGoFile*(
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         g.add(emitGoReqMethod(e, sub))
-        g.add(emitGoAsyncMethod(e, sub))
+        g.add(emitGoContextMethod(e, sub))
     # Sub-interface event methods (subscribe/unsubscribe keyed by l.ctx).
     for ev in eventEntries:
       if interfaceOwningEventType(ev.typeName) != ifaceName:

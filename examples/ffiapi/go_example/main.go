@@ -10,9 +10,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -120,41 +122,40 @@ func main() {
 	}
 	fmt.Println()
 
-	// --- Async device queries (channel + goroutine) -------------------
-	// Each GetDeviceAsync returns a channel resolved on the library's delivery
-	// thread; a full window (mylib.AsyncQueueDepth) returns mylib.ErrAsyncAgain,
-	// and -12/-11 surface as the channel result's Err.
-	fmt.Println("--- Async device queries (GetDeviceAsync) ---")
+	// --- Concurrent ctx-aware queries (GetDeviceContext) ---------------
+	// GetDeviceContext follows the database/sql QueryContext idiom: a blocking,
+	// ctx-aware call riding the non-blocking async ABI. The ctx deadline maps to
+	// the library timeout; ctx cancel returns ctx.Err() early (the in-flight
+	// request completes server-side and is reclaimed — no leak). Fan-out is
+	// plain Go: one goroutine per call. mylib.ErrAsyncAgain (errors.Is-able)
+	// signals a full window (mylib.AsyncQueueDepth in flight).
+	fmt.Println("--- Concurrent device queries (GetDeviceContext) ---")
 	fmt.Printf("  async window = %d in-flight\n", mylib.AsyncQueueDepth)
 	{
-		// Fire them all (pipelined), then collect — keep each channel paired
-		// with its originating id so a skipped (errored) call can't misalign.
-		type pendingQuery struct {
-			qid int64
-			ch  <-chan mylib.GetDeviceResult
-		}
-		queries := make([]pendingQuery, 0, len(ids))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var wg sync.WaitGroup
+		var mu sync.Mutex // serialize prints
 		for _, qid := range ids {
-			ch, err := lib.GetDeviceAsync(qid)
-			if err != nil {
-				fmt.Printf("  [async] id=%d -> not queued: %v\n", qid, err)
-				continue
-			}
-			queries = append(queries, pendingQuery{qid: qid, ch: ch})
-		}
-		for _, q := range queries {
-			r := <-q.ch
-			if r.Err != nil {
-				fmt.Printf("  [async] id=%d -> error: %v\n", q.qid, r.Err)
-			} else {
+			wg.Add(1)
+			go func(qid int64) {
+				defer wg.Done()
+				d, err := lib.GetDeviceContext(ctx, qid)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					fmt.Printf("  [ctx] id=%d -> error: %v\n", qid, err)
+					return
+				}
 				state := "offline"
-				if r.Value.Online {
+				if d.Online {
 					state = "online"
 				}
-				fmt.Printf("  [async] id=%d -> %q (%s)\n", q.qid, r.Value.Name, state)
-			}
+				fmt.Printf("  [ctx] id=%d -> %q (%s)\n", qid, d.Name, state)
+			}(qid)
 		}
-		fmt.Println("  All async queries completed.")
+		wg.Wait()
+		fmt.Println("  All concurrent queries completed.")
 	}
 	fmt.Println()
 

@@ -6,11 +6,13 @@
 > ```cpp
 > std::future<Result<GetDevice>>
 > getDeviceFuture(int64_t deviceId,
->                 uint64_t reqId = 0,
->                 uint32_t timeoutMs = MYLIB_DEFAULT_ASYNC_TIMEOUT_MS);
+>                 std::chrono::milliseconds timeout =
+>                     std::chrono::milliseconds(MYLIB_DEFAULT_ASYNC_TIMEOUT_MS));
 > ```
 >
 > Use it directly: `auto fut = lib.getDeviceFuture(id); auto r = fut.get();`.
+> It is backpressure-aware: past the async window the issuing call blocks
+> briefly on an internal `std::counting_semaphore` instead of erroring.
 > The rest of this document explains *how* that method is implemented (the
 > `std::promise` bridge) and why it does **not** use `std::async`.
 
@@ -19,8 +21,8 @@ The generated C++ async method is **callback-based**:
 ```cpp
 int32_t getDeviceAsync(int64_t deviceId,
                        std::function<void(Result<GetDevice>)> cb,
-                       uint64_t reqId = 0,
-                       uint32_t timeoutMs = MYLIB_DEFAULT_ASYNC_TIMEOUT_MS);
+                       std::chrono::milliseconds timeout =
+                           std::chrono::milliseconds(MYLIB_DEFAULT_ASYNC_TIMEOUT_MS));
 ```
 
 - returns `0` when **queued** (the callback fires exactly once, later, on the

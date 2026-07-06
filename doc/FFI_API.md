@@ -1330,34 +1330,40 @@ once, but that provider keeps running until shutdown.
 | `-12` | request timed out (provider exceeded `timeoutMs`) | yes |
 
 The typed wrappers expose this as a per-method async sibling — e.g. C++
-`int32_t lib.getDeviceAsync(id, cb, reqId = 0, timeoutMs = <default>)` where
-`cb` receives a decoded `Result<GetDevice>`. The wrapper mirrors the raw ABI
+`int32_t lib.getDeviceAsync(id, cb, timeout = <default>)` where
+`timeout` is a `std::chrono::milliseconds` (`<= 0ms` = infinite) and `cb`
+receives a decoded `Result<GetDevice>`. The wrapper mirrors the raw ABI
 contract: the method **returns `int32_t`** — `0` = queued (`cb` fires exactly
 once later; runtime statuses `-4/-10/-11/-12` surface as `Result::err(...)`),
 and any **negative** return means NOT queued and `cb` does **not** fire
 (`asyncAgain` = `-6` EAGAIN → retry; `asyncBadContext` = `-5`; `asyncNoCallback`
 = `-7`; `asyncEncodeFailed` = `-1`). The class also exposes
 `static constexpr uint32_t asyncQueueDepth` so a client can size its bounded
-window without hardcoding the value. This keeps a transient `-6` cheap (no
-allocation consumed, no error callback) so backpressure is a simple retry loop:
-
-The C++ wrapper also ships a **`std::future`-returning sibling** for every
-request method — `std::future<Result<T>> <method>Future(args…, reqId = 0,
-timeoutMs = <default>)` — so callers get a future without hand-rolling the
-bridge: `auto r = lib.getDeviceFuture(id).get();`. It is implemented on top of
-`<method>Async` via a shared `std::promise` (fulfilled by the delivery-thread
-callback when queued, or inline on a negative `rc`), so it parks **no** thread
-per call — unlike wrapping the blocking sync method in `std::async`. See
-[cpp_async_with_std_future.md](cpp_async_with_std_future.md).
+window without hardcoding the value. (`reqId` is not part of the typed surface
+— correlation is via the closure/future; the wrapper feeds an internal counter
+to the ABI for logging.) This keeps a transient `-6` cheap (no allocation
+consumed, no error callback) so backpressure is a simple retry loop:
 
 ```cpp
 int32_t rc;
 do {
-    rc = lib.getDeviceAsync(id, on_done, reqId, timeoutMs);
+    rc = lib.getDeviceAsync(id, on_done, 2000ms);
     if (rc == Lib::asyncAgain) std::this_thread::sleep_for(1ms);  // window full
 } while (rc == Lib::asyncAgain);
 if (rc == 0) ++outstanding;   // accepted — on_done fires once; --outstanding there
 ```
+
+The C++ wrapper also ships a **`std::future`-returning sibling** for every
+request method — `std::future<Result<T>> <method>Future(args…, timeout =
+<default>)` — so callers get a future without hand-rolling the bridge:
+`auto r = lib.getDeviceFuture(id).get();`. It is implemented on top of
+`<method>Async` via a shared `std::promise` (fulfilled by the delivery-thread
+callback when queued, or inline on a negative `rc`), so it parks **no** thread
+per call — unlike wrapping the blocking sync method in `std::async`. It is
+also **backpressure-aware**: past the window the issuing call blocks briefly
+on an internal `std::counting_semaphore` instead of failing, so pipelining any
+number of futures just works. See
+[cpp_async_with_std_future.md](cpp_async_with_std_future.md).
 
 The Python, Rust, and Go wrappers expose the same response through each
 language's native async machinery instead of a raw callback (the underlying
@@ -1365,9 +1371,16 @@ ABI is identical):
 
 | Wrapper | Async surface | Backpressure (`-6`) | Bridge |
 |---------|---------------|---------------------|--------|
-| **Rust** | `async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`) | `Err(AsyncError::Again)` — matchable; `is_again()` | `tokio::sync::oneshot` (tokio is a hard dep of the CBOR crate) |
-| **Go** | `<M>Async(args) (<-chan <M>Result, error)` | returns `ErrAsyncAgain` | buffered channel + per-call goroutine via `cgo.Handle` |
-| **Python** | `async def <m>_async(self,…) -> Result[T]` (`await`) | raises `AsyncAgainError` | `asyncio.Future` + `loop.call_soon_threadsafe` |
+| **Rust** | `async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`) | `Err(AsyncError::Again)` — matchable; `is_again()` | **runtime-agnostic** `futures_channel::oneshot` — works under tokio, smol, async-std, or `futures::executor::block_on`; no runtime dependency |
+| **Go** | `<M>Context(ctx, args) (T, error)` — blocking, ctx-aware (the `database/sql QueryContext` idiom); `ctx` deadline → library timeout, `ctx` cancel → early `ctx.Err()`; fan-out via goroutines | returns `ErrAsyncAgain` (`errors.Is`-able) | buffered raw chan via `cgo.Handle`; decode inline on the caller's goroutine (no per-call goroutine) |
+| **Python** | `async def <m>_async(self,…, timeout: float \| None = None) -> Result[T]` (`await`; seconds, `None` = lib default, `inf` = infinite) | **awaits** an internal `asyncio.Semaphore(depth)` — `gather(*many)` pipelines past the window transparently; `AsyncAgainError` only for cross-process contention | `asyncio.Future` + `loop.call_soon_threadsafe` |
+
+Per-call deadlines, idiomatically: **Rust** composes the runtime's timer
+(`tokio::time::timeout(d, lib.foo_async(...))` — the library default still
+guards the in-flight slot); **Go** uses the `ctx` deadline; **Python** passes
+`timeout=` seconds; **C++** passes `std::chrono::milliseconds`. A library-side
+timeout surfaces as `AsyncError::TimedOut` / a Go error / a raised
+`TimeoutError` / `Result::err("request timed out")` respectively.
 
 The Rust async methods deliberately use **std `Result`** with a typed
 `AsyncError` enum (`Again` / `TimedOut` / `ShutDown` / `Provider(String)` /
@@ -1377,12 +1390,23 @@ the wrapper's cross-language `Result<T>`, so backpressure and timeouts are
 wrapper `Result<T>` for cross-language parity.)
 
 `-12`/`-11` and provider errors surface as the language's error
-(`AsyncError::TimedOut`/`ShutDown`/`Provider` / channel `Err` / `Result.err`).
-Each wrapper exposes the
+(`AsyncError::TimedOut`/`ShutDown`/`Provider` / Go `error` / Python
+`TimeoutError` / `Result.err`). Each wrapper exposes the
 window size as a constant (`ASYNC_QUEUE_DEPTH` / `AsyncQueueDepth` /
 `ASYNC_QUEUE_DEPTH`) and the default timeout (`DEFAULT_ASYNC_TIMEOUT_MS` /
 `DefaultAsyncTimeoutMs` / `DEFAULT_ASYNC_TIMEOUT_MS`). See the worked async
 sections in `rust_example`, `go_example`, and `python_example`.
+
+**Cancellation — dropping a handle does NOT cancel the request.** Dropping a
+Rust future, cancelling a Python task, letting a `std::future` die, or
+cancelling a Go `ctx` stops the *waiting*, never the *work*: the Nim-side
+request keeps running and its in-flight slot is reclaimed when the response or
+the library timeout fires. Abandonment is leak-free in every wrapper (the
+boxed per-call state is freed by the response trampoline), but callers who
+need the slot back promptly should rely on the timeout. `reqId` is threaded
+through the entire ABI and is the intended handle for a future
+`<lib>_cancelAsync(ctx, reqId)`, which wrappers could then wire to
+Drop / task-cancel / ctx-cancel to make cancellation real.
 
 ### C++ wrapper
 

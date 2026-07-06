@@ -553,6 +553,19 @@ proc generateCborPyFile*(
   py.add(
     "    \"\"\"Raised by *_async when the async window is full (EAGAIN) — retry later.\"\"\"\n\n"
   )
+  py.add("def _timeout_to_ms(timeout: Optional[float]) -> int:\n")
+  py.add("    \"\"\"asyncio-style seconds -> ABI milliseconds.\n\n")
+  py.add("    None -> library default; float('inf') -> 0 (infinite); else >= 1 ms.\n")
+  py.add("    \"\"\"\n")
+  py.add("    if timeout is None:\n")
+  py.add("        return DEFAULT_ASYNC_TIMEOUT_MS\n")
+  py.add("    if timeout == float(\"inf\"):\n")
+  py.add("        return 0\n")
+  py.add("    if timeout <= 0:\n")
+  py.add(
+    "        raise ValueError(\"timeout must be positive, None, or float('inf')\")\n"
+  )
+  py.add("    return max(1, int(timeout * 1000))\n\n")
   py.add("# Correlation registry: each in-flight *_async call gets an integer token\n")
   py.add("# passed to the C ABI as userData and handed back verbatim in the response\n")
   py.add("# callback (which runs on the library's delivery thread).\n")
@@ -967,7 +980,7 @@ proc generateCborPyFile*(
   # (the C ABI frees it), passes the correlation token as userData, and returns
   # the raw rc (0 queued; negative not queued — callback will not fire).
   py.add(
-    "    def _call_async(self, api_name: str, req_payload: bytes, token: int) -> int:\n"
+    "    def _call_async(self, api_name: str, req_payload: bytes, token: int, timeout_ms: int) -> int:\n"
   )
   py.add("        in_buf = None\n")
   py.add("        if req_payload:\n")
@@ -981,7 +994,7 @@ proc generateCborPyFile*(
   py.add("            in_buf,\n")
   py.add("            len(req_payload),\n")
   py.add("            token,\n")
-  py.add("            DEFAULT_ASYNC_TIMEOUT_MS,\n")
+  py.add("            timeout_ms,\n")
   py.add("            _ASYNC_RESPONSE_CB,\n")
   py.add("            ctypes.c_void_p(token),\n")
   py.add("        )\n\n")
@@ -1101,32 +1114,58 @@ proc generateCborPyFile*(
           dictParts.add(", ")
         dictParts.add("\"" & n & "\": " & pyEncodeExpr(t, n))
       argsDictBuilder = "{" & dictParts & "}"
+    # asyncio idiom: `timeout` in SECONDS (None -> lib default, inf -> none);
+    # -12 raises TimeoutError (like asyncio.wait_for); backpressure AWAITS on a
+    # per-instance Semaphore(ASYNC_QUEUE_DEPTH) instead of throwing, so
+    # `asyncio.gather(*many)` pipelines beyond the window transparently.
+    # AsyncAgainError remains only for the residual cross-process -6.
     result.add(
-      "    async def " & methodName & "_async(" & sigParams & ") -> Result[" &
-        e.responseTypeName & "]:\n"
+      "    async def " & methodName & "_async(" & sigParams &
+        ", timeout: Optional[float] = None) -> Result[" & e.responseTypeName & "]:\n"
     )
     result.add("        if self._ctx == 0:\n")
     result.add("            return Result.err(\"Library context is not created\")\n")
-    result.add("        loop = asyncio.get_running_loop()\n")
-    result.add("        fut = loop.create_future()\n")
-    result.add("        token = _async_register(loop, fut)\n")
+    result.add("        timeout_ms = _timeout_to_ms(timeout)\n")
+    result.add("        # Lazy per-instance window semaphore (bound to the running\n")
+    result.add("        # loop on first await; one loop per wrapper instance).\n")
+    result.add("        sem = getattr(self, \"_async_sem\", None)\n")
+    result.add("        if sem is None:\n")
+    result.add("            sem = asyncio.Semaphore(ASYNC_QUEUE_DEPTH)\n")
+    result.add("            self._async_sem = sem\n")
     if e.argFields.len > 0:
       result.add("        req_payload = cbor2.dumps(" & argsDictBuilder & ")\n")
     else:
       result.add("        req_payload = b\"\"\n")
-    result.add("        try:\n")
+    result.add("        async with sem:\n")
+    result.add("            loop = asyncio.get_running_loop()\n")
+    result.add("            fut = loop.create_future()\n")
+    result.add("            token = _async_register(loop, fut)\n")
+    result.add("            try:\n")
     result.add(
-      "            rc = self._call_async(\"" & methodName & "\", req_payload, token)\n"
+      "                rc = self._call_async(\"" & methodName &
+        "\", req_payload, token, timeout_ms)\n"
     )
-    result.add("        except RuntimeError as exc:\n")
-    result.add("            _async_unregister(token)\n")
-    result.add("            return Result.err(str(exc))\n")
-    result.add("        if rc != 0:\n")
-    result.add("            _async_unregister(token)\n")
-    result.add("            if rc == -6:\n")
-    result.add("                raise AsyncAgainError(\"async window full\")\n")
-    result.add("            return Result.err(f\"framework error: {rc}\")\n")
-    result.add("        status, resp = await fut\n")
+    result.add("            except RuntimeError as exc:\n")
+    result.add("                _async_unregister(token)\n")
+    result.add("                return Result.err(str(exc))\n")
+    result.add("            if rc != 0:\n")
+    result.add("                _async_unregister(token)\n")
+    result.add("                if rc == -6:\n")
+    result.add(
+      "                    # The semaphore bounds this instance to the window;\n"
+    )
+    result.add(
+      "                    # -6 here means another client shares the context.\n"
+    )
+    result.add("                    raise AsyncAgainError(\"async window full\")\n")
+    result.add("                return Result.err(f\"framework error: {rc}\")\n")
+    result.add("            status, resp = await fut\n")
+    result.add("        if status == -12:\n")
+    result.add("            raise TimeoutError(\n")
+    result.add(
+      "                f\"" & methodName & " timed out after {timeout_ms} ms\"\n"
+    )
+    result.add("            )\n")
     result.add("        if status != 0:\n")
     result.add("            return Result.err(_async_status_message(status, resp))\n")
     result.add("        if not resp:\n")
@@ -1321,7 +1360,7 @@ proc generateCborPyFile*(
       py.add("            raise RuntimeError(f\"framework error: {status}\")\n")
       py.add("        return cbor2.loads(out) if out else None\n\n")
       py.add(
-        "    def _call_async(self, api_name: str, req_payload: bytes, token: int) -> int:\n"
+        "    def _call_async(self, api_name: str, req_payload: bytes, token: int, timeout_ms: int) -> int:\n"
       )
       py.add("        in_buf = None\n")
       py.add("        if req_payload:\n")
@@ -1335,7 +1374,7 @@ proc generateCborPyFile*(
       py.add("            in_buf,\n")
       py.add("            len(req_payload),\n")
       py.add("            token,\n")
-      py.add("            DEFAULT_ASYNC_TIMEOUT_MS,\n")
+      py.add("            timeout_ms,\n")
       py.add("            _ASYNC_RESPONSE_CB,\n")
       py.add("            ctypes.c_void_p(token),\n")
       py.add("        )\n\n")

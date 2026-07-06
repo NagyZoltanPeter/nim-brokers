@@ -246,8 +246,8 @@ int main() {
                                    (long long)qid, res.error().c_str());
                         pending.fetch_sub(1, std::memory_order_relaxed);
                     },
-                    /*reqId=*/static_cast<uint64_t>(qid),
-                    /*timeoutMs=*/2000);  // 0 = infinite; omit for the lib default
+                    std::chrono::milliseconds(2000));  // <= 0ms = infinite;
+                                                       // omit for the lib default
                 if (rc != 0)
                     pending.fetch_sub(1, std::memory_order_relaxed);  // not queued
                 if (rc == Mylib::asyncAgain)  // window full — back off and retry
@@ -267,7 +267,9 @@ int main() {
     // ── 5c. Future-based async (generated getDeviceFuture) ───────────
     //    The wrapper ships a std::future surface built on getDeviceAsync via
     //    std::promise — no callback, no thread parked per call. Issue all,
-    //    then block only at .get(): pipelined, bounded by the async window.
+    //    then block only at .get(). Backpressure is built in: past the window
+    //    (Mylib::asyncQueueDepth) the issuing call briefly blocks on an
+    //    internal counting_semaphore instead of failing with EAGAIN.
     printf("--- Async device queries (std::future) ---\n");
     {
         std::vector<std::future<Result<GetDevice>>> futs;
