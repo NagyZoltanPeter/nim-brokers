@@ -1658,6 +1658,11 @@ proc registerBrokerLibraryCborImpl(
                 cbTyped(rm.userData, rm.reqId, -11'i32, nil, 0'i32)
               if not rm.buf.isNil:
                 deallocShared(rm.buf)
+              # Symmetry with `respCourierPoll`, which releases one depth
+              # reservation per delivered response. Harmless today (the courier
+              # is freed just below), but keeps `asyncDepth` a correct running
+              # sum if the courier ever outlives a single shutdown.
+              asyncDepthDec(entryToShutdown.arg.courier)
         # Part C — free the courier after both threads joined.
         freeCborCourier(entryToShutdown.arg.courier)
         # Part D-3 — free the event courier (drains any messages left
