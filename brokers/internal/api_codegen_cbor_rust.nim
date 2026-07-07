@@ -491,7 +491,7 @@ proc generateCborRustFile*(
   # response envelope bytes (the per-method async fn decodes them into T).
   proc emitDoCallAsync(p: string): string {.compileTime.} =
     result.add(
-      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, AsyncError> {\n"
+      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8], timeout_ms: u32) -> ::std::result::Result<Vec<u8>, AsyncError> {\n"
     )
     result.add(
       "        if self.ctx == 0 { return Err(AsyncError::Provider(\"Library context is not created\".into())); }\n"
@@ -528,7 +528,7 @@ proc generateCborRustFile*(
     result.add("                in_buf,\n")
     result.add("                req_payload.len() as i32,\n")
     result.add("                0,\n")
-    result.add("                DEFAULT_ASYNC_TIMEOUT_MS,\n")
+    result.add("                timeout_ms,\n")
     result.add("                cbor_response_trampoline,\n")
     result.add("                boxed,\n")
     result.add("            )\n")
@@ -990,9 +990,14 @@ proc generateCborRustFile*(
     # Returns STD Result with the typed AsyncError (not the wrapper Result<T>):
     # composes with `?`/`.await?`, and EAGAIN/timeout/shutdown are matchable
     # variants instead of strings.
+    # Per-call timeout parity with the C++/Python/Go wrappers: the ABI carries
+    # a per-call `timeoutMs`, so expose it here as `Option<u32>` (ms). `None`
+    # falls back to the library default — the idiomatic Rust analogue of the
+    # defaulted C++ arg / Python `Optional[float]`.
     result.add(
       "    pub async fn " & methodName & "_async(" & sigParams &
-        ") -> ::std::result::Result<" & respRust & ", AsyncError> {\n"
+        ", timeout_ms: Option<u32>) -> ::std::result::Result<" & respRust &
+        ", AsyncError> {\n"
     )
     if e.argFields.len > 0:
       result.add(argsStructDecl)
@@ -1008,7 +1013,11 @@ proc generateCborRustFile*(
     else:
       result.add("        let buf: Vec<u8> = Vec::new();\n")
     result.add(
-      "        let raw = self.do_call_async(\"" & e.apiName & "\", &buf).await?;\n"
+      "        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_ASYNC_TIMEOUT_MS);\n"
+    )
+    result.add(
+      "        let raw = self.do_call_async(\"" & e.apiName &
+        "\", &buf, timeout_ms).await?;\n"
     )
     result.add("        if raw.is_empty() {\n")
     result.add(
