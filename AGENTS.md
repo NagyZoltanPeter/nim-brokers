@@ -69,7 +69,7 @@ Tests use `testutils/unittests` (not the stdlib `unittest`).
 
 ### FFI API example build and run tasks
 
-The FFI example library and runnable consumers are driven from Nimble tasks. `-d:BrokerFfiApi` selects the (CBOR-based) FFI codegen; every library exposes a fixed 11-function ABI (`<lib>_version`, `_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus a typedef for the event callback. Wrappers carry the typed surface; wire format is CBOR.
+The FFI example library and runnable consumers are driven from Nimble tasks. `-d:BrokerFfiApi` selects the (CBOR-based) FFI codegen; every library exposes a fixed 12-function ABI (`<lib>_version`, `_initialize`, `_createContext`, `_shutdown`, `_allocBuffer`, `_freeBuffer`, `_call`, `_callAsync`, `_subscribe`, `_unsubscribe`, `_listApis`, `_getSchema`) plus typedefs for the event callback and the async response callback. Wrappers carry the typed surface; wire format is CBOR.
 
 `<lib>_version() -> const char*` returns the static semver string baked from the `version:` field of `registerBrokerLibrary` (default `0.1.0`). The pointer references library-owned static storage and must NOT be freed by the caller. Wrappers re-export it as a class member: `<Lib>::version() -> std::string_view` (C++ static method) and `<Lib>.version() -> str` (Python `@staticmethod`). Both can be called without an instance — no context, no library lifecycle required.
 
