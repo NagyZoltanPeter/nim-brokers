@@ -1153,6 +1153,14 @@ task testMtBrokerConfigsAsanRefc,
   "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
   testAsan("refc", "test_multi_thread_broker_configs")
 
+task testMtSignalBrokerAsanOrc,
+  "Run multi-thread signal broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_signal_broker")
+
+task testMtSignalBrokerAsanRefc,
+  "Run multi-thread signal broker tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_multi_thread_signal_broker")
+
 # ---------------------------------------------------------------------------
 # ThreadSanitizer variants of the multi-thread broker tests. TSan is the
 # most relevant sanitizer for these: it validates the Channel[T] / shared
@@ -1183,6 +1191,14 @@ task testMtBrokerConfigsTsanRefc,
   "Run multi-thread broker config showcase under ThreadSanitizer (clang, refc, debug)":
   testSan("tsan", "refc", "test_multi_thread_broker_configs")
 
+task testMtSignalBrokerTsanOrc,
+  "Run multi-thread signal broker tests under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_multi_thread_signal_broker")
+
+task testMtSignalBrokerTsanRefc,
+  "Run multi-thread signal broker tests under ThreadSanitizer (clang, refc, debug)":
+  testSan("tsan", "refc", "test_multi_thread_signal_broker")
+
 # ---------------------------------------------------------------------------
 # Sanitizer coverage for the FFI event-teardown isolation regression test
 # (the cross-context subs-count fix). FFI build needs -d:BrokerFfiApi and a
@@ -1197,6 +1213,24 @@ task testApiTeardownAsanOrc,
 task testApiTeardownAsanRefc,
   "Run FFI event-teardown isolation test under ASan+UBSan (clang, refc, debug)":
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
+
+task testApiSignalAsanOrc,
+  "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalAsanRefc,
+  "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalTsanOrc,
+  "Run FFI SignalBroker(API) slot-free _call test under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalTsanRefc,
+  "Run FFI SignalBroker(API) slot-free _call test under ThreadSanitizer (clang, refc, debug)":
+  testSan("tsan", "refc", "test_api_signal_broker", signalApiTestExtra)
 
 task testApiTeardownTsanOrc,
   "Run FFI event-teardown isolation test under ThreadSanitizer (clang, orc, debug)":
@@ -1398,8 +1432,12 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testMtRequestBrokerAsanRefc"
   exec "nimble testMtBrokerConfigsAsanOrc"
   exec "nimble testMtBrokerConfigsAsanRefc"
+  exec "nimble testMtSignalBrokerAsanOrc"
+  exec "nimble testMtSignalBrokerAsanRefc"
   exec "nimble testApiTeardownAsanOrc"
   exec "nimble testApiTeardownAsanRefc"
+  exec "nimble testApiSignalAsanOrc"
+  exec "nimble testApiSignalAsanRefc"
 
 task allTsan,
   "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
@@ -1409,8 +1447,12 @@ task allTsan,
   exec "nimble testMtRequestBrokerTsanRefc"
   exec "nimble testMtBrokerConfigsTsanOrc"
   exec "nimble testMtBrokerConfigsTsanRefc"
+  exec "nimble testMtSignalBrokerTsanOrc"
+  exec "nimble testMtSignalBrokerTsanRefc"
   exec "nimble testApiTeardownTsanOrc"
   exec "nimble testApiTeardownTsanRefc"
+  exec "nimble testApiSignalTsanOrc"
+  exec "nimble testApiSignalTsanRefc"
 
 task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
   # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
