@@ -424,12 +424,21 @@ proc registerBrokerLibraryCborImpl(
   # (e.g., snapshot a length and slice from there next time).
   let entries = gApiCborRequestEntries
   let eventEntries = gApiCborEventEntries
+  let signalEntries = gApiCborSignalEntries
 
   # The dispatch proc is async and returns just `seq[byte]`. To signal
   # "unknown apiName" without raising or capturing a `var bool`, the
   # convention is: empty seq + the calling `<lib>_call` checks against the
   # known-name set (a separate non-async predicate proc).
   let knownNamePredIdent = ident(libName & "CborIsKnownApiName")
+
+  # SignalBroker(API): a signal rides `<lib>_call` on a slot-free path — no
+  # response slot, no round trip. Its dispatch proc returns `Future[void]`
+  # (no envelope); `isSignalName` routes `<lib>_call` to the slot-free branch
+  # and `signalHasHandler` is the lock-free caller-thread fast-fail.
+  let signalDispatchProcIdent = ident(libName & "CborSignalDispatch")
+  let isSignalNamePredIdent = ident(libName & "CborIsSignalName")
+  let signalHasHandlerPredIdent = ident(libName & "CborSignalHasHandler")
 
   var caseStmt = nnkCaseStmt.newTree(ident("apiName"))
   for entry in entries:
@@ -499,6 +508,17 @@ proc registerBrokerLibraryCborImpl(
           "      " & e.typeName & ".dropAllListeners(ctx)\n" & "    else:\n" &
           "      discard " & e.typeName & ".dropAllListeners(ctx)\n"
       )
+    var seenSig: seq[string] = @[]
+    for e in signalEntries:
+      if e.typeName in seenSig:
+        continue
+      seenSig.add(e.typeName)
+      # dropSignalHandler is async Future[void]; discard is safe — the MT drop
+      # body is suspension-free, so it clears eagerly.
+      body.add(
+        "  when compiles(" & e.typeName & ".dropSignalHandler(ctx)):\n" & "    discard " &
+          e.typeName & ".dropSignalHandler(ctx)\n"
+      )
     if body.len == 0:
       body = "  discard ctx\n"
     src.add(body)
@@ -532,6 +552,97 @@ proc registerBrokerLibraryCborImpl(
     nameSet,
   )
   result.add(knownProc)
+
+  # ------------------------------------------------------------------
+  # SignalBroker(API) codegen: a Future[void] dispatch proc + two plain
+  # predicates. `<lib>_call` uses `isSignalName` to take the slot-free branch,
+  # `signalHasHandler` (lock-free) to fast-fail with ProviderErr, and the
+  # processing thread runs `signalDispatch` (which awaits the one-way adapter
+  # that decodes the payload and calls `signal()` — no response is produced).
+  # ------------------------------------------------------------------
+  block:
+    var sigCase = nnkCaseStmt.newTree(ident("apiName"))
+    for e in signalEntries:
+      let adapterCall = newCall(ident(e.adapterProc), ident("ctx"), ident("reqBuf"))
+      sigCase.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName),
+          newStmtList(nnkCommand.newTree(ident("await"), adapterCall)),
+        )
+      )
+    sigCase.add(nnkElse.newTree(newStmtList(nnkDiscardStmt.newTree(newEmptyNode()))))
+    let sigDispatchProc = nnkProcDef.newTree(
+      postfix(signalDispatchProcIdent, "*"),
+      newEmptyNode(),
+      newEmptyNode(),
+      nnkFormalParams.newTree(
+        nnkBracketExpr.newTree(ident("Future"), ident("void")),
+        newIdentDefs(ident("apiName"), ident("string")),
+        newIdentDefs(ident("ctx"), ident("BrokerContext")),
+        newIdentDefs(
+          ident("reqBuf"), nnkBracketExpr.newTree(ident("seq"), ident("byte"))
+        ),
+      ),
+      nnkPragma.newTree(
+        newColonExpr(
+          ident("async"),
+          nnkTupleConstr.newTree(newColonExpr(ident("raises"), nnkBracket.newTree())),
+        ),
+        ident("gcsafe"),
+      ),
+      newEmptyNode(),
+      newStmtList(sigCase),
+    )
+    result.add(sigDispatchProc)
+
+    # isSignalName predicate.
+    var isSigCase = nnkCaseStmt.newTree(ident("apiName"))
+    for e in signalEntries:
+      isSigCase.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName), newStmtList(nnkReturnStmt.newTree(ident("true")))
+        )
+      )
+    isSigCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+    result.add(
+      nnkProcDef.newTree(
+        postfix(isSignalNamePredIdent, "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        nnkFormalParams.newTree(
+          ident("bool"), newIdentDefs(ident("apiName"), ident("string"))
+        ),
+        nnkPragma.newTree(ident("gcsafe")),
+        newEmptyNode(),
+        newStmtList(isSigCase),
+      )
+    )
+
+    # signalHasHandler predicate — lock-free, caller-thread fast-fail. Each
+    # branch reads the per-type present counter via `<Type>.signalHandlerPresent`.
+    var hasCase = nnkCaseStmt.newTree(ident("apiName"))
+    for e in signalEntries:
+      let presentCall =
+        newCall(newDotExpr(ident(e.typeName), ident("signalHandlerPresent")))
+      hasCase.add(
+        nnkOfBranch.newTree(
+          newLit(e.apiName), newStmtList(nnkReturnStmt.newTree(presentCall))
+        )
+      )
+    hasCase.add(nnkElse.newTree(newStmtList(nnkReturnStmt.newTree(ident("false")))))
+    result.add(
+      nnkProcDef.newTree(
+        postfix(signalHasHandlerPredIdent, "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        nnkFormalParams.newTree(
+          ident("bool"), newIdentDefs(ident("apiName"), ident("string"))
+        ),
+        nnkPragma.newTree(ident("gcsafe")),
+        newEmptyNode(),
+        newStmtList(hasCase),
+      )
+    )
 
   # ------------------------------------------------------------------
   # Event known-name predicate (companion to request side).
@@ -1290,6 +1401,20 @@ proc registerBrokerLibraryCborImpl(
             `releaseCtxProcIdent`(BrokerContext(m.targetCtx))
             completeSlot(arg.courier, m.slotIdx.int, nil, 0'i32, 0'i32)
             return
+          if m.slotIdx < 0'i32:
+            # Slot-free signal (`<lib>_call` enqueued it with slotIdx = -1). Run
+            # the one-way adapter — it decodes the payload and calls `signal()`
+            # (same-thread fast path). No response slot to complete. Release the
+            # shutdown gate here, mirroring the async path (the foreign caller
+            # already returned Ok at enqueue time).
+            let sigCtx =
+              if m.targetCtx != 0'u32:
+                BrokerContext(m.targetCtx)
+              else:
+                arg.ctx
+            await `signalDispatchProcIdent`(apiName, sigCtx, nimReq)
+            discard arg.courier.inFlight.fetchSub(1, moAcquireRelease)
+            return
           let known = `knownNamePredIdent`(apiName)
           var dispErr = false
           var respBytes: seq[byte]
@@ -1753,6 +1878,36 @@ proc registerBrokerLibraryCborImpl(
             deallocShared(reqBuf)
           return -5'i32
 
+        # SignalBroker(API): slot-free one-way path. No response slot is
+        # claimed and the caller does not block — both failure modes resolve
+        # here on the caller's thread. `signalHasHandler` is a lock-free atomic
+        # load; a false is a fast ProviderErr with no cross-thread hop. The
+        # message rides the SAME courier ring with slotIdx = -1 (the processing
+        # thread's `handleCourierMsg` recognises the sentinel, runs the one-way
+        # adapter, and decrements `inFlight` — which stays bumped until then).
+        let sigApiName = $apiNameC
+        if `isSignalNamePredIdent`(sigApiName):
+          if not `signalHasHandlerPredIdent`(sigApiName):
+            discard courier.inFlight.fetchSub(1, moAcquireRelease)
+            if not reqBuf.isNil:
+              deallocShared(reqBuf)
+            return ApiStatusProviderErr
+          var smsg: CborCallMsg
+          if nameLen > 0:
+            copyMem(addr smsg.apiName[0], apiNameC, nameLen)
+          smsg.reqBuf = reqBuf
+          smsg.reqLen = reqLen
+          smsg.slotIdx = -1'i32 # signal sentinel: no response slot
+          smsg.targetCtx = ctx
+          if not tryEnqueue(addr courier.ring, smsg):
+            discard courier.inFlight.fetchSub(1, moAcquireRelease)
+            if not reqBuf.isNil:
+              deallocShared(reqBuf)
+            return ApiStatusAgain
+          if not courierSig.isNil:
+            fireBrokerSignal(courierSig)
+          return ApiStatusOk
+
         let slotIdx = claimSlot(courier)
         if slotIdx < 0:
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
@@ -1853,6 +2008,16 @@ proc registerBrokerLibraryCborImpl(
           if not reqBuf.isNil:
             deallocShared(reqBuf)
           return -5'i32
+
+        # Signals are one-way: a completion callback would carry no information
+        # not already returned synchronously by the slot-free `<lib>_call`, and
+        # a signal burst would starve the bounded async window real async
+        # requests depend on. Reject here (before reserving a depth slot).
+        if `isSignalNamePredIdent`($apiNameC):
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return ApiStatusOneWay
 
         var msg: CborAsyncCallMsg
         if nameLen > 0:

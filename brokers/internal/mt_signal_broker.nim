@@ -674,6 +674,14 @@ proc generateMtSignalBroker*(
       proc hasSignalHandler*(_: typedesc[`typeIdent`]): bool =
         hasSignalHandler(`typeIdent`, DefaultBrokerContext)
 
+      proc signalHandlerPresent*(_: typedesc[`typeIdent`]): bool {.gcsafe.} =
+        ## Lock-free acquire-load of the handler-present counter — safe to call
+        ## from any thread (used by the FFI `<lib>_call` slot-free signal path to
+        ## fast-fail with ProviderErr before the cross-thread hop). Coarse: true
+        ## means a handler exists for *some* context (the FFI lane installs a
+        ## single handler on the processing thread, so this is exact there).
+        `presentIdent`.load(moAcquire) != 0
+
   )
 
   # ── Mock/replace trio (owning thread only) ────────────────────────────

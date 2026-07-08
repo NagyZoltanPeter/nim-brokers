@@ -71,6 +71,10 @@ when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_signal_broker
   export mt_config, mt_signal_broker
 
+when compileOption("threads") and defined(BrokerFfiApi):
+  import ./internal/api_signal_broker_cbor
+  export api_signal_broker_cbor
+
 export chronicles, results, chronos, broker_context, options
 
 type SignalBrokerMode = enum
@@ -519,9 +523,19 @@ macro SignalBroker*(args: varargs[untyped]): untyped =
       let cfg = parseMtSigKwargs(kwargs)
       generateMtSignalBroker(body, cfg)
   of sbApi:
-    error(
-      "SignalBroker(API) is not yet available (implemented in a follow-up step)", mode
-    )
+    when not compileOption("threads"):
+      {.
+        error:
+          "SignalBroker(API) requires --threads:on. " &
+          "Compile with `--threads:on` to use API SignalBroker."
+      .}
+    else:
+      when defined(BrokerFfiApi):
+        discard parseMtSigKwargs(kwargs)
+        generateApiCborSignalBroker(body, kwargs)
+      else:
+        let cfg = parseMtSigKwargs(kwargs)
+        generateMtSignalBroker(body, cfg)
   of sbDefault:
     if kwargs.len > 0:
       error("SignalBroker does not accept kwargs in default mode", kwargs[0])

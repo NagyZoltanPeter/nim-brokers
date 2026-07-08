@@ -593,6 +593,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   let apiTests = [
     ("test_api_library_init", "apitest"),
     ("test_api_callAsync", "acbtest"),
+    ("test_api_signal_broker", "sigtest"),
     ("test_api_event_teardown_isolation", "cbevt"),
     ("test_api_discovery", "apidisc"),
     ("test_broker_interface_api", "brokerifaceapi"),
