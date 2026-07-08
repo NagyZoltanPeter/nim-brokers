@@ -2132,7 +2132,7 @@ proc registerBrokerLibraryCborImpl(
   when defined(BrokerFfiApiGenGo):
     generateCborGoFile(
       outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-      config.asyncQueueDepth,
+      config.asyncQueueDepth, signalEntries,
     )
 
   generateCMakePackageFiles(

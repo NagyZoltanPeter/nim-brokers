@@ -256,6 +256,7 @@ proc generateCborGoFile*(
     mainClass: string = "",
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
+    signalEntries: seq[CborSignalEntry] = @[],
 ) {.compileTime, raises: [].} =
   ## Emits `<outDir>/<libName>_go/{<libName>.go, <libName>_callbacks.c}`.
   ## Same filenames as the native generator — only one wrapper exists per
@@ -626,6 +627,48 @@ proc generateCborGoFile*(
   g.add("\treturn out, nil\n")
   g.add("}\n\n")
 
+  # signalCall: slot-free one-way dispatch through `_call`. No response; status
+  # maps to nil (accepted) or a distinguishable error.
+  g.add("// signalCall dispatches a one-way signal (no response envelope).\n")
+  g.add(
+    "func (l *" & className & ") signalCall(apiName string, args interface{}) error {\n"
+  )
+  g.add("\tif l.ctx == 0 { return errors.New(\"library context is not created\") }\n")
+  g.add("\tvar inBytes []byte\n")
+  g.add("\tif args != nil {\n")
+  g.add("\t\tvar err error\n")
+  g.add("\t\tinBytes, err = cbor.Marshal(args)\n")
+  g.add("\t\tif err != nil { return err }\n")
+  g.add("\t}\n")
+  g.add("\tcName := C.CString(apiName)\n")
+  g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+  g.add("\tvar inPtr unsafe.Pointer\n")
+  g.add("\tif len(inBytes) > 0 {\n")
+  g.add("\t\tinPtr = C." & p & "allocBuffer(C.int32_t(len(inBytes)))\n")
+  g.add("\t\tif inPtr == nil { return errors.New(\"allocBuffer failed\") }\n")
+  g.add("\t\tC.memcpy(inPtr, unsafe.Pointer(&inBytes[0]), C.size_t(len(inBytes)))\n")
+  g.add("\t}\n")
+  g.add("\tvar outBuf unsafe.Pointer\n")
+  g.add("\tvar outLen C.int32_t\n")
+  g.add(
+    "\trc := C." & p &
+      "call(l.ctx, cName, inPtr, C.int32_t(len(inBytes)), &outBuf, &outLen)\n"
+  )
+  g.add("\tif outBuf != nil { C." & p & "freeBuffer(outBuf) }\n")
+  g.add("\tswitch int32(rc) {\n")
+  g.add("\tcase 0:\n\t\treturn nil\n")
+  g.add(
+    "\tcase " & $ApiStatusAgain &
+      ":\n\t\treturn errors.New(\"EAGAIN: signal queue full\")\n"
+  )
+  g.add(
+    "\tcase " & $ApiStatusProviderErr &
+      ":\n\t\treturn errors.New(\"no signal handler installed\")\n"
+  )
+  g.add("\tdefault:\n\t\treturn fmt.Errorf(\"signal failed: %d\", int32(rc))\n")
+  g.add("\t}\n")
+  g.add("}\n\n")
+
   # ---- Async request plumbing (goroutine + channel per call) --------------
   g.add("// AsyncQueueDepth is the max concurrent in-flight <Method>Async calls\n")
   g.add("// per context; a full window makes <Method>Async return ErrAsyncAgain.\n")
@@ -903,6 +946,59 @@ proc generateCborGoFile*(
     else:
       g.add(emitGoReqMethod(e, className))
       g.add(emitGoContextMethod(e, className))
+
+  # ---- Per-signal one-way methods: `func (l *Lib) <Name>(fields...) error` --
+  proc emitGoSignalMethod(s: CborSignalEntry): string {.compileTime.} =
+    if not (s.typeName in objectNames or isScalarPayload(s.typeName)):
+      return
+        "// TODO: signal '" & s.apiName & "' payload '" & s.typeName &
+        "' is not a registered type.\n\n"
+    var fields: seq[ApiFieldDef]
+    if s.typeName in objectNames:
+      fields = lookupTypeEntry(s.typeName).fields
+    else:
+      fields = @[ApiFieldDef(name: "value", nimType: resolveUnderlyingType(s.typeName))]
+    for f in fields:
+      if nimTypeToGoCborHint(f.nimType).len == 0:
+        return
+          "// TODO: signal '" & s.apiName &
+          "' has fields whose Nim types aren't yet mappable to Go.\n\n"
+    let methodName = snakeToPascal(s.apiName)
+    var sigParams = ""
+    var first = true
+    for f in fields:
+      if not first:
+        sigParams.add(", ")
+      sigParams.add(goSafeParam(f.name) & " " & nimTypeToGoCborHint(f.nimType))
+      first = false
+    result.add(
+      "func (l *" & className & ") " & methodName & "(" & sigParams & ") error {\n"
+    )
+    if fields.len == 0:
+      result.add("\treturn l.signalCall(\"" & s.apiName & "\", nil)\n")
+    elif s.typeName in objectNames:
+      result.add("\targs := struct {\n")
+      for f in fields:
+        result.add(
+          "\t\t" & goExportedField(f.name) & " " & nimTypeToGoCborHint(f.nimType) &
+            " `cbor:\"" & f.name & "\"`\n"
+        )
+      result.add("\t}{\n")
+      for f in fields:
+        result.add(
+          "\t\t" & goExportedField(f.name) & ": " & goSafeParam(f.name) & ",\n"
+        )
+      result.add("\t}\n")
+      result.add("\treturn l.signalCall(\"" & s.apiName & "\", args)\n")
+    else:
+      result.add(
+        "\treturn l.signalCall(\"" & s.apiName & "\", " & goSafeParam(fields[0].name) &
+          ")\n"
+      )
+    result.add("}\n\n")
+
+  for s in signalEntries:
+    g.add(emitGoSignalMethod(s))
 
   # ---- Single CBOR event trampoline + per-event On/Off ---------------------
   if eventEntries.len > 0:
