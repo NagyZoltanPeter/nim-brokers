@@ -921,7 +921,8 @@ proc generateCborCppHeaderFile*(
       "  // negative code when NOT queued (callback does NOT fire):\n"
   )
   h.add(
-    "  static constexpr int32_t asyncAgain = -6;     // EAGAIN — retry/slow down\n"
+    "  static constexpr int32_t asyncAgain = " & $ApiStatusAgain &
+      ";     // EAGAIN — retry/slow down\n"
   )
   h.add("  static constexpr int32_t asyncBadContext = -5;\n")
   h.add("  static constexpr int32_t asyncNoCallback = -7;\n")
@@ -1486,7 +1487,7 @@ proc generateCborCppHeaderFile*(
   )
   h.add("  NimBuffer resp{respBuf, respLen};\n")
   h.add("  if (status != 0) {\n")
-  h.add("    if (status == -4 && !resp.empty()) {\n")
+  h.add("    if (status == " & $ApiStatusUnknownApi & " && !resp.empty()) {\n")
   h.add("      auto v = resp.view();\n")
   h.add("      lastError.assign(reinterpret_cast<const char*>(v.data()), v.size());\n")
   h.add("    } else {\n")
@@ -1516,7 +1517,7 @@ proc generateCborCppHeaderFile*(
   )
   h.add("  NimBuffer resp{respBuf, respLen};\n")
   h.add("  if (status != 0) {\n")
-  h.add("    if (status == -4 && !resp.empty()) {\n")
+  h.add("    if (status == " & $ApiStatusUnknownApi & " && !resp.empty()) {\n")
   h.add("      auto v = resp.view();\n")
   h.add("      lastError.assign(reinterpret_cast<const char*>(v.data()), v.size());\n")
   h.add("    } else {\n")
@@ -1975,13 +1976,15 @@ proc generateCborCppHeaderFile*(
       )
       h.add("    if (status != 0) {\n")
       h.add("      std::string lastError;\n")
-      h.add("      if (status == -4 && respBuf && respLen > 0)\n")
+      h.add(
+        "      if (status == " & $ApiStatusUnknownApi & " && respBuf && respLen > 0)\n"
+      )
       h.add(
         "        lastError.assign(reinterpret_cast<const char*>(respBuf), static_cast<size_t>(respLen));\n"
       )
-      h.add("      else if (status == -12)\n")
+      h.add("      else if (status == " & $ApiStatusTimeout & ")\n")
       h.add("        lastError = \"request timed out\";\n")
-      h.add("      else if (status == -11)\n")
+      h.add("      else if (status == " & $ApiStatusShutdown & ")\n")
       h.add("        lastError = \"library shut down\";\n")
       h.add("      else\n")
       h.add(

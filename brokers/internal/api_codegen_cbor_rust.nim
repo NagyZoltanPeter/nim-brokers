@@ -459,16 +459,19 @@ proc generateCborRustFile*(
   rs.add(
     "    let result: ::std::result::Result<Vec<u8>, AsyncError> = if status != 0 {\n"
   )
-  rs.add("        if status == -4 && !resp_buf.is_null() && resp_len > 0 {\n")
+  rs.add(
+    "        if status == " & $ApiStatusUnknownApi &
+      " && !resp_buf.is_null() && resp_len > 0 {\n"
+  )
   rs.add(
     "            let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
   )
   rs.add(
     "            Err(AsyncError::Provider(String::from_utf8_lossy(slice).into_owned()))\n"
   )
-  rs.add("        } else if status == -12 {\n")
+  rs.add("        } else if status == " & $ApiStatusTimeout & " {\n")
   rs.add("            Err(AsyncError::TimedOut)\n")
-  rs.add("        } else if status == -11 {\n")
+  rs.add("        } else if status == " & $ApiStatusShutdown & " {\n")
   rs.add("            Err(AsyncError::ShutDown)\n")
   rs.add("        } else {\n")
   rs.add("            Err(AsyncError::Framework(status))\n")
@@ -541,7 +544,9 @@ proc generateCborRustFile*(
     result.add(
       "            unsafe { drop(Box::from_raw(boxed as *mut CborAsyncSlot)); }\n"
     )
-    result.add("            if rc == -6 { return Err(AsyncError::Again); }\n")
+    result.add(
+      "            if rc == " & $ApiStatusAgain & " { return Err(AsyncError::Again); }\n"
+    )
     result.add("            return Err(AsyncError::Framework(rc));\n")
     result.add("        }\n")
     result.add("        match rx.await {\n")
@@ -891,7 +896,9 @@ proc generateCborRustFile*(
   rs.add("                " & p & "freeBuffer(out_buf);\n")
   rs.add("            }\n")
   rs.add("            if status != 0 {\n")
-  rs.add("                if status == -4 && !out.is_empty() {\n")
+  rs.add(
+    "                if status == " & $ApiStatusUnknownApi & " && !out.is_empty() {\n"
+  )
   rs.add(
     "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
   )
@@ -1264,7 +1271,9 @@ proc generateCborRustFile*(
     rs.add("                " & p & "freeBuffer(out_buf);\n")
     rs.add("            }\n")
     rs.add("            if status != 0 {\n")
-    rs.add("                if status == -4 && !out.is_empty() {\n")
+    rs.add(
+      "                if status == " & $ApiStatusUnknownApi & " && !out.is_empty() {\n"
+    )
     rs.add(
       "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
     )

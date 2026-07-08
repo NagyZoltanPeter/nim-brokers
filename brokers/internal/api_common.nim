@@ -25,6 +25,29 @@ export api_schema
 export api_outdir
 
 # ---------------------------------------------------------------------------
+# FFI response status codes — single source of truth
+# ---------------------------------------------------------------------------
+#
+# The `status` field delivered on every `_call` / `_callAsync` response, plus
+# the `-6` EAGAIN return of `_callAsync`, is one wire-level code space decoded
+# identically by every generated wrapper. Define it ONCE here: the Nim runtime
+# uses these consts directly, and each codegen interpolates the numeric value
+# into the wrapper it emits, so a code can never drift between languages.
+#
+# The per-function argument-validation returns (-1/-2/-3/-5/-7) are deliberately
+# NOT part of this space — they are function-local (e.g. the same -1 flags a
+# different NULL argument in different entry points), so a shared name would
+# misrepresent them.
+const
+  ApiStatusOk* = 0'i32 ## success
+  ApiStatusUnknownApi* = -4'i32 ## apiName not registered; payload is a UTF-8 message
+  ApiStatusAgain* = -6'i32 ## async window full (EAGAIN backpressure) — retry later
+  ApiStatusProviderErr* = -10'i32
+    ## provider/dispatch or internal failure (e.g. serialization)
+  ApiStatusShutdown* = -11'i32 ## context shut down before the response was delivered
+  ApiStatusTimeout* = -12'i32 ## async dispatch exceeded its timeoutMs
+
+# ---------------------------------------------------------------------------
 # Library name accumulator
 # ---------------------------------------------------------------------------
 

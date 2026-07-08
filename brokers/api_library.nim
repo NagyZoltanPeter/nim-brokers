@@ -1265,14 +1265,14 @@ proc registerBrokerLibraryCborImpl(
             let b = allocShared0(em.len)
             if em.len > 0:
               copyMem(b, unsafeAddr em[0], em.len)
-            return (-4'i32, b, int32(em.len))
+            return (ApiStatusUnknownApi, b, int32(em.len))
           if dispErr:
-            return (-10'i32, nil, 0'i32)
+            return (ApiStatusProviderErr, nil, 0'i32)
           if respBytes.len > 0:
             let b = allocShared0(respBytes.len)
             copyMem(b, unsafeAddr respBytes[0], respBytes.len)
-            return (0'i32, b, int32(respBytes.len))
-          return (0'i32, nil, 0'i32)
+            return (ApiStatusOk, b, int32(respBytes.len))
+          return (ApiStatusOk, nil, 0'i32)
 
         proc handleCourierMsg(m: CborCallMsg) {.async: (raises: []), gcsafe.} =
           # Copy the request bytes off the shared buffer, then free it —
@@ -1374,7 +1374,7 @@ proc registerBrokerLibraryCborImpl(
           var respBuf: pointer = nil
           var respLen: int32 = 0
           if timedOut:
-            status = -12'i32
+            status = ApiStatusTimeout
           else:
             let enc = encodeApiResp(apiName, known, dispErr, respBytes)
             status = enc.status
@@ -1663,7 +1663,7 @@ proc registerBrokerLibraryCborImpl(
             while tryDequeueResp(rc, rm):
               if not rm.cb.isNil:
                 let cbTyped = cast[`responseCallbackTypeIdent`](rm.cb)
-                cbTyped(rm.userData, rm.reqId, -11'i32, nil, 0'i32)
+                cbTyped(rm.userData, rm.reqId, ApiStatusShutdown, nil, 0'i32)
               if not rm.buf.isNil:
                 deallocShared(rm.buf)
               # Symmetry with `respCourierPoll`, which releases one depth
@@ -1758,7 +1758,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
 
         var msg: CborCallMsg
         if nameLen > 0:
@@ -1778,7 +1778,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
 
@@ -1872,7 +1872,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
         return 0'i32
@@ -1910,7 +1910,7 @@ proc registerBrokerLibraryCborImpl(
         let slotIdx = claimSlot(courier)
         if slotIdx < 0:
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
-          return -6'i32
+          return ApiStatusAgain
         var msg: CborCallMsg
         const relName = `releaseApiNameLit`
         copyMem(addr msg.apiName[0], cstring(relName), relName.len)
@@ -1921,7 +1921,7 @@ proc registerBrokerLibraryCborImpl(
         if not tryEnqueue(addr courier.ring, msg):
           releaseSlot(courier, slotIdx)
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
         let res = waitSlot(courier, slotIdx)
@@ -2102,7 +2102,7 @@ proc registerBrokerLibraryCborImpl(
         try:
           jsonStr = toJsonString(`apiListIdent`)
         except CatchableError:
-          return -10'i32
+          return ApiStatusProviderErr
         if jsonStr.len > 0:
           let buf = allocShared0(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)
@@ -2128,7 +2128,7 @@ proc registerBrokerLibraryCborImpl(
         try:
           jsonStr = toJsonString(`descriptorIdent`)
         except CatchableError:
-          return -10'i32
+          return ApiStatusProviderErr
         if jsonStr.len > 0:
           let buf = allocShared0(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)
