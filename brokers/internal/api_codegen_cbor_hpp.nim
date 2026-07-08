@@ -493,9 +493,14 @@ proc generateCborCppHeaderFile*(
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
     mainClass: string = "",
+    asyncTimeoutMs: int = 30000,
+    asyncQueueDepth: int = 64,
 ) {.compileTime, raises: [].} =
   ## Writes the C++ wrapper header (.hpp) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
+  let upperLib = libName.toUpperAscii().replace("-", "_")
+  let defaultTimeoutMacro = upperLib & "_DEFAULT_ASYNC_TIMEOUT_MS"
+  let queueDepthMacro = upperLib & "_ASYNC_QUEUE_DEPTH"
 
   # reduced-A: an entry belongs to the main class when no mainClass is
   # designated (legacy single class), or it is flat, or its owning interface is
@@ -558,11 +563,12 @@ proc generateCborCppHeaderFile*(
     "// Requires C++20 and jsoncons + jsoncons_ext/cbor in the include path.\n" &
     "#ifndef " & guardName & "\n" & "#define " & guardName & "\n\n" & "#include \"" &
     libName & ".h\"\n\n" & "#include <jsoncons/json.hpp>\n" &
-    "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <cstdint>\n" &
-    "#include <cstring>\n" & "#include <functional>\n" & "#include <memory>\n" &
-    "#include <optional>\n" & "#include <span>\n" & "#include <string>\n" &
-    "#include <system_error>\n" & "#include <unordered_map>\n" & "#include <utility>\n" &
-    "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
+    "#include <jsoncons_ext/cbor/cbor.hpp>\n\n" & "#include <atomic>\n" &
+    "#include <chrono>\n" & "#include <cstdint>\n" & "#include <cstring>\n" &
+    "#include <functional>\n" & "#include <future>\n" & "#include <memory>\n" &
+    "#include <optional>\n" & "#include <semaphore>\n" & "#include <span>\n" &
+    "#include <string>\n" & "#include <system_error>\n" & "#include <unordered_map>\n" &
+    "#include <utility>\n" & "#include <vector>\n\n" & "namespace " & libName & " {\n\n"
 
   # Result<T>
   h.add("template <typename T>\n")
@@ -905,6 +911,21 @@ proc generateCborCppHeaderFile*(
   h.add("  " & className & "(" & className & "&&) = delete;\n")
   h.add("  " & className & "& operator=(" & className & "&&) = delete;\n\n")
   h.add("  static std::string_view version() noexcept;\n\n")
+  h.add(
+    "  // Max concurrent in-flight <method>Async requests (full => returns the\n" &
+      "  // EAGAIN code below). Size a bounded send window to this value.\n"
+  )
+  h.add("  static constexpr uint32_t asyncQueueDepth = " & queueDepthMacro & ";\n")
+  h.add(
+    "  // <method>Async returns 0 when queued (callback fires once later) or a\n" &
+      "  // negative code when NOT queued (callback does NOT fire):\n"
+  )
+  h.add(
+    "  static constexpr int32_t asyncAgain = -6;     // EAGAIN — retry/slow down\n"
+  )
+  h.add("  static constexpr int32_t asyncBadContext = -5;\n")
+  h.add("  static constexpr int32_t asyncNoCallback = -7;\n")
+  h.add("  static constexpr int32_t asyncEncodeFailed = -1;\n\n")
   h.add("  Result<void> createContext();\n")
   h.add("  bool validContext() const noexcept;\n")
   h.add("  explicit operator bool() const noexcept;\n")
@@ -954,6 +975,37 @@ proc generateCborCppHeaderFile*(
       "  Result<" & payloadCppType(e.responseTypeName) & "> " & methodName & "(" &
         sigParams & ");\n"
     )
+    # Fire-and-forget async sibling: same args, plus a completion callback and
+    # a std::chrono timeout (<= 0ms means infinite; default = library policy).
+    # Delivered on the library's event delivery thread. reqId is internal.
+    # (Instance-returning create methods are sync-only here.)
+    let asyncTail =
+      ", std::chrono::milliseconds timeout = std::chrono::milliseconds(" &
+      defaultTimeoutMacro & ")"
+    let asyncSig =
+      if sigParams.len > 0:
+        sigParams & ", std::function<void(Result<" & payloadCppType(e.responseTypeName) &
+          ">)> cb" & asyncTail
+      else:
+        "std::function<void(Result<" & payloadCppType(e.responseTypeName) & ">)> cb" &
+          asyncTail
+    h.add("  int32_t " & methodName & "Async(" & asyncSig & ");\n")
+    # Future-returning convenience (built on <method>Async via std::promise —
+    # no thread parked per call, unlike wrapping the sync call in std::async).
+    # Backpressure-aware: blocks briefly on the window semaphore when full, so
+    # this surface never returns EAGAIN.
+    let futureTail =
+      "std::chrono::milliseconds timeout = std::chrono::milliseconds(" &
+      defaultTimeoutMacro & ")"
+    let futureSig =
+      if sigParams.len > 0:
+        sigParams & ", " & futureTail
+      else:
+        futureTail
+    h.add(
+      "  std::future<Result<" & payloadCppType(e.responseTypeName) & ">> " & methodName &
+        "Future(" & futureSig & ");\n"
+    )
   h.add("\n")
 
   # Per-event Callback aliases + on/off declarations. The public alias is
@@ -998,6 +1050,18 @@ proc generateCborCppHeaderFile*(
   # caught by ASAN under stress_shutdown).
   h.add(" private:\n")
   h.add("  uint32_t ctx_ = 0;\n")
+  h.add("  // Internal reqId for the ABI (logging/correlation is via the boxed\n")
+  h.add("  // callback, not reqId — so it is not part of the typed surface).\n")
+  h.add("  std::atomic<uint64_t> asyncReqId_{0};\n")
+  h.add("  // <method>Future backpressure: acquire before issue, release in the\n")
+  h.add("  // completion callback. Initialised to asyncQueueDepth - 1 because the\n")
+  h.add("  // library releases its own depth slot only AFTER the callback returns\n")
+  h.add("  // (single delivery thread => at most one such in-flight release), so\n")
+  h.add("  // the margin of one makes a post-release reissue race-free.\n")
+  h.add(
+    "  std::counting_semaphore<> asyncWindow_{static_cast<std::ptrdiff_t>(\n" &
+      "      asyncQueueDepth > 1 ? asyncQueueDepth - 1 : 1)};\n"
+  )
   for ev in mainEvents:
     let dispatcherType = ev.typeName & "Dispatcher"
     let dispatcherMember = ev.apiName & "Dispatcher_"
@@ -1464,6 +1528,20 @@ proc generateCborCppHeaderFile*(
   h.add("  return {0, std::move(resp)};\n")
   h.add("}\n\n")
 
+  # ---- Async response trampoline ----
+  # `callAsync` boxes a type-erased invoker (the typed user callback + its
+  # decode step) as `userData`. One C-ABI trampoline reconstructs the box,
+  # runs it with the raw (status, respBuf, respLen), then frees it. `respBuf`
+  # is library-owned and valid only for the duration of the call.
+  h.add("using AsyncInvoker = std::function<void(int32_t, const void*, int32_t)>;\n")
+  h.add(
+    "inline void asyncResponseTrampoline(void* userData, uint64_t /*reqId*/,\n" &
+      "    int32_t status, const void* respBuf, int32_t respLen) {\n"
+  )
+  h.add("  std::unique_ptr<AsyncInvoker> inv(static_cast<AsyncInvoker*>(userData));\n")
+  h.add("  if (inv && *inv) (*inv)(status, respBuf, respLen);\n")
+  h.add("}\n\n")
+
   # ---- EventDispatcher template (CBOR-flavored) ----
   # One C-level subscription per event type, lazily registered on first
   # add() and unregistered when the last user callback is removed. User
@@ -1844,6 +1922,161 @@ proc generateCborCppHeaderFile*(
     h.add("    return " & okExpr & ";\n")
     h.add("  return " & resTy & "::err(\"malformed response envelope\");\n")
     h.add("}\n\n")
+
+    # ---- Async sibling definition (non-instance methods only) ----
+    if not isInstance:
+      let aResTy = "Result<" & payloadCppType(e.responseTypeName) & ">"
+      let aOkExpr =
+        if voidResp:
+          aResTy & "::ok()"
+        else:
+          aResTy & "::ok(std::move(*env.ok))"
+      let asyncSig =
+        if sigParams.len > 0:
+          sigParams & ", std::function<void(" & aResTy &
+            ")> cb, std::chrono::milliseconds timeout"
+        else:
+          "std::function<void(" & aResTy & ")> cb, std::chrono::milliseconds timeout"
+      # Returns 0 when queued (cb fires once later) or a negative code when NOT
+      # queued (cb does NOT fire): asyncAgain (-6) = EAGAIN, asyncBadContext (-5),
+      # asyncNoCallback (-7), asyncEncodeFailed (-1). This mirrors the raw ABI so
+      # callers can implement backpressure (retry on -6) without the callback
+      # being consumed by a transient failure.
+      h.add(
+        "inline int32_t " & className & "::" & methodName & "Async(" & asyncSig & ") {\n"
+      )
+      h.add("  if (!cb) return asyncNoCallback;\n")
+      if e.argFields.len > 0:
+        h.add("  " & argsName & " args;\n")
+        h.add(argsAssign)
+        h.add("  std::size_t cborLen = 0;\n")
+        h.add("  try { cborLen = detail::cborEncodedSize(args); }\n")
+        h.add("  catch (const std::exception&) { return asyncEncodeFailed; }\n")
+        h.add(
+          "  void* inBuf = (cborLen > 0) ? " & p &
+            "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
+        )
+        h.add("  if (cborLen > 0 && !inBuf) return asyncEncodeFailed;\n")
+        h.add("  try {\n")
+        h.add(
+          "    if (cborLen > 0) detail::cborEncodeInto(args, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
+        )
+        h.add("  } catch (const std::exception&) {\n")
+        h.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
+        h.add("    return asyncEncodeFailed;\n")
+        h.add("  }\n")
+      else:
+        h.add("  void* inBuf = nullptr;\n")
+        h.add("  std::size_t cborLen = 0;\n")
+      # Box the typed decode + user callback as the opaque correlation handle.
+      h.add(
+        "  auto* inv = new detail::AsyncInvoker(\n" &
+          "      [cb = std::move(cb)](int32_t status, const void* respBuf, int32_t respLen) {\n"
+      )
+      h.add("    if (status != 0) {\n")
+      h.add("      std::string lastError;\n")
+      h.add("      if (status == -4 && respBuf && respLen > 0)\n")
+      h.add(
+        "        lastError.assign(reinterpret_cast<const char*>(respBuf), static_cast<size_t>(respLen));\n"
+      )
+      h.add("      else if (status == -12)\n")
+      h.add("        lastError = \"request timed out\";\n")
+      h.add("      else if (status == -11)\n")
+      h.add("        lastError = \"library shut down\";\n")
+      h.add("      else\n")
+      h.add(
+        "        lastError = std::string(\"framework error: \") + std::to_string(status);\n"
+      )
+      h.add("      cb(" & aResTy & "::err(lastError)); return;\n")
+      h.add("    }\n")
+      h.add("    if (!respBuf || respLen <= 0) {\n")
+      h.add("      cb(" & aResTy & "::err(\"empty response\")); return;\n")
+      h.add("    }\n")
+      h.add("    " & envName & " env;\n")
+      h.add("    try {\n")
+      h.add("      const auto* p0 = static_cast<const std::uint8_t*>(respBuf);\n")
+      h.add(
+        "      env = jsoncons::cbor::decode_cbor<" & envName & ">(p0, p0 + respLen);\n"
+      )
+      h.add("    } catch (const std::exception& ex) {\n")
+      h.add(
+        "      cb(" & aResTy &
+          "::err(std::string(\"decode failed: \") + ex.what())); return;\n"
+      )
+      h.add("    }\n")
+      h.add(
+        "    if (env.err.has_value()) { cb(" & aResTy & "::err(*env.err)); return; }\n"
+      )
+      h.add("    if (env.ok.has_value()) { cb(" & aOkExpr & "); return; }\n")
+      h.add("    cb(" & aResTy & "::err(\"malformed response envelope\"));\n")
+      h.add("  });\n")
+      h.add("  // chrono -> ABI ms: <= 0 means infinite (ABI 0); clamp to u32.\n")
+      h.add("  const auto __tc = timeout.count();\n")
+      h.add(
+        "  const uint32_t timeoutMs = __tc <= 0 ? 0u\n" &
+          "      : (__tc > 0xFFFFFFFFll ? 0xFFFFFFFFu : static_cast<uint32_t>(__tc));\n"
+      )
+      h.add(
+        "  const int32_t rc = " & p & "callAsync(ctx_, \"" & e.apiName &
+          "\", inBuf, static_cast<int32_t>(cborLen),\n" &
+          "      asyncReqId_.fetch_add(1, std::memory_order_relaxed) + 1, timeoutMs,\n" &
+          "      &detail::asyncResponseTrampoline, inv);\n"
+      )
+      h.add("  if (rc != 0) {\n")
+      h.add("    // Not queued — the library frees inBuf and will NOT invoke the\n")
+      h.add("    // callback. Drop the box (cb unconsumed) and report rc so the\n")
+      h.add("    // caller can retry on asyncAgain (-6) or handle the rejection.\n")
+      h.add("    delete inv;\n")
+      h.add("    return rc;\n")
+      h.add("  }\n")
+      h.add("  return 0;\n")
+      h.add("}\n\n")
+
+      # ---- Future-returning definition (std::promise bridge over Async) ----
+      var argNamesCsv = ""
+      for (n, _) in e.argFields:
+        argNamesCsv.add(n & ", ")
+      let futureSig =
+        if sigParams.len > 0:
+          sigParams & ", std::chrono::milliseconds timeout"
+        else:
+          "std::chrono::milliseconds timeout"
+      h.add(
+        "inline std::future<" & aResTy & "> " & className & "::" & methodName & "Future(" &
+          futureSig & ") {\n"
+      )
+      h.add("  auto prom = std::make_shared<std::promise<" & aResTy & ">>();\n")
+      h.add("  auto fut = prom->get_future();\n")
+      h.add("  // Backpressure by WAITING, not erroring: block briefly on the window\n")
+      h.add(
+        "  // semaphore when asyncQueueDepth calls are in flight. Released in the\n"
+      )
+      h.add("  // completion callback (below) or inline on a rejected call.\n")
+      h.add("  asyncWindow_.acquire();\n")
+      h.add(
+        "  // The promise is fulfilled from exactly one place: the delivery-thread\n"
+      )
+      h.add(
+        "  // callback when the call is queued (rc == 0), or inline below when it\n"
+      )
+      h.add("  // is rejected (rc != 0 — the callback never fires).\n")
+      h.add(
+        "  const int32_t rc = " & methodName & "Async(" & argNamesCsv & "[this, prom](" &
+          aResTy & " __r) {\n" & "      asyncWindow_.release();\n" &
+          "      prom->set_value(std::move(__r));\n" & "  }, timeout);\n"
+      )
+      h.add("  if (rc != 0) {\n")
+      h.add("    asyncWindow_.release();\n")
+      h.add("    // asyncAgain can still surface here when callback-style fooAsync\n")
+      h.add("    // callers share the same context window outside the semaphore.\n")
+      h.add("    prom->set_value(" & aResTy & "::err(\n")
+      h.add("        rc == asyncAgain ? std::string(\"EAGAIN: async window full\")\n")
+      h.add(
+        "                         : std::string(\"request not queued: rc=\") + std::to_string(rc)));\n"
+      )
+      h.add("  }\n")
+      h.add("  return fut;\n")
+      h.add("}\n\n")
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----
   for ev in mainEvents:

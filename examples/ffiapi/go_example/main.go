@@ -10,9 +10,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -117,6 +119,43 @@ func main() {
 			fmt.Printf("  [%d] id=%-3d  %-18s  type=%-10s  addr=%-16s  %s\n",
 				i, d.DeviceId, d.Name, d.DeviceType, d.Address, state)
 		}
+	}
+	fmt.Println()
+
+	// --- Concurrent ctx-aware queries (GetDeviceContext) ---------------
+	// GetDeviceContext follows the database/sql QueryContext idiom: a blocking,
+	// ctx-aware call riding the non-blocking async ABI. The ctx deadline maps to
+	// the library timeout; ctx cancel returns ctx.Err() early (the in-flight
+	// request completes server-side and is reclaimed — no leak). Fan-out is
+	// plain Go: one goroutine per call. mylib.ErrAsyncAgain (errors.Is-able)
+	// signals a full window (mylib.AsyncQueueDepth in flight).
+	fmt.Println("--- Concurrent device queries (GetDeviceContext) ---")
+	fmt.Printf("  async window = %d in-flight\n", mylib.AsyncQueueDepth)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var wg sync.WaitGroup
+		var mu sync.Mutex // serialize prints
+		for _, qid := range ids {
+			wg.Add(1)
+			go func(qid int64) {
+				defer wg.Done()
+				d, err := lib.GetDeviceContext(ctx, qid)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					fmt.Printf("  [ctx] id=%d -> error: %v\n", qid, err)
+					return
+				}
+				state := "offline"
+				if d.Online {
+					state = "online"
+				}
+				fmt.Printf("  [ctx] id=%d -> %q (%s)\n", qid, d.Name, state)
+			}(qid)
+		}
+		wg.Wait()
+		fmt.Println("  All concurrent queries completed.")
 	}
 	fmt.Println()
 

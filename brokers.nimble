@@ -235,16 +235,20 @@ proc test(env, path: string) =
   exec quoteArg(outputPath)
   echo "=== PASS " & label & " ==="
 
+# Directory names that are pruned at ANY depth during the Nim-file walk. These
+# hold no source we format but can contain huge generated trees (cargo `target/`
+# under the Rust example + test crates, cmake build dirs, Python venvs) that
+# would otherwise blow the NimScript VM iteration budget in `collectNimFiles`.
+const nphExcludedDirs = [
+  "nimbledeps", "vendor", "doc", "build", ".venv", ".git", "target", "cmake-build",
+  "cmake-build-asan", "node_modules", "__pycache__", ".mypy_cache",
+]
+
 proc isExcludedNimPath(path: string): bool =
-  let normalized = path.replace('\\', '/')
-  normalized == "nimbledeps" or normalized == "vendor" or normalized == "doc" or
-    normalized == "build" or normalized == ".venv" or normalized == ".git" or
-    normalized.startsWith("nimbledeps/") or normalized.startsWith("vendor/") or
-    normalized.startsWith("doc/") or normalized.startsWith("build/") or
-    normalized.startsWith(".venv/") or normalized.startsWith(".git/") or
-    normalized.startsWith("./nimbledeps/") or normalized.startsWith("./vendor/") or
-    normalized.startsWith("./doc/") or normalized.startsWith("./build/") or
-    normalized.startsWith("./.venv/") or normalized.startsWith("./.git/")
+  for part in path.replace('\\', '/').split('/'):
+    if part.len > 0 and part != "." and part in nphExcludedDirs:
+      return true
+  false
 
 proc isNphFile(path: string): bool =
   path.endsWith(".nim") or path.endsWith(".nimble")
@@ -586,6 +590,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   # NimMain symbols distinct.
   let apiTests = [
     ("test_api_library_init", "apitest"),
+    ("test_api_callAsync", "acbtest"),
     ("test_api_event_teardown_isolation", "cbevt"),
     ("test_api_discovery", "apidisc"),
     ("test_broker_interface_api", "brokerifaceapi"),
