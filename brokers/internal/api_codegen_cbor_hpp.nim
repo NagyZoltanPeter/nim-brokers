@@ -1034,7 +1034,10 @@ proc generateCborCppHeaderFile*(
 
   for s in signalEntries:
     let methodName = snakeToLowerCamel(s.apiName)
-    if not (isVoidPayload(s.typeName) or isObjectSignal(s.typeName)):
+    if not (
+      isVoidPayload(s.typeName) or isObjectSignal(s.typeName) or
+      isScalarPayload(s.typeName)
+    ):
       h.add(
         "  // TODO: signal '" & s.apiName & "' payload '" & s.typeName &
           "' is not yet emitted as a typed C++ signal method.\n"
@@ -2125,7 +2128,10 @@ proc generateCborCppHeaderFile*(
 
   # ---- Per-signal method implementations (one-way, slot-free `_call`) ----
   for s in signalEntries:
-    if not (isVoidPayload(s.typeName) or isObjectSignal(s.typeName)):
+    if not (
+      isVoidPayload(s.typeName) or isObjectSignal(s.typeName) or
+      isScalarPayload(s.typeName)
+    ):
       continue
     let sp = signalSigParams(s.typeName)
     if not sp.mappable:
@@ -2141,9 +2147,14 @@ proc generateCborCppHeaderFile*(
           "\", nullptr, 0);\n"
       )
     else:
-      h.add("  " & s.typeName & " __p;\n")
-      for f in effectiveFields(s.typeName):
-        h.add("  __p." & f.name & " = " & f.name & ";\n")
+      if isObjectSignal(s.typeName):
+        h.add("  " & s.typeName & " __p;\n")
+        for f in effectiveFields(s.typeName):
+          h.add("  __p." & f.name & " = " & f.name & ";\n")
+      else:
+        # Scalar / distinct payload: encode the bare value (the wire form the
+        # Nim adapter's `cborDecode(reqBuf, <Type>)` expects).
+        h.add("  const auto& __p = value;\n")
       h.add("  std::size_t cborLen = 0;\n")
       h.add("  try { cborLen = detail::cborEncodedSize(__p); }\n")
       h.add(
