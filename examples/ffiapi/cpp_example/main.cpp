@@ -34,6 +34,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 #include "mylib.hpp"
 
@@ -403,7 +405,37 @@ int main() {
     }
     printf("\n");
     
-    // ── 11. Remove all event listeners ─────────────────────────    
+    // ── 10.5 One-way signal (IngestReading) + readback (LastReading) ─
+    printf("--- Firing IngestReading signals (one-way, slot-free) ---\n");
+    {
+        auto s1 = lib.ingestReading(42, 3.5);
+        if (!s1.isOk()) {
+            fprintf(stderr, "FATAL: ingestReading: %s\n", s1.error().c_str());
+            return 1;
+        }
+        auto s2 = lib.ingestReading(42, 7.25);
+        if (!s2.isOk()) {
+            fprintf(stderr, "FATAL: ingestReading: %s\n", s2.error().c_str());
+            return 1;
+        }
+        // The handler runs asynchronously on the processing thread; give it a
+        // moment before reading the recorded value back.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        auto rb = lib.lastReading();
+        if (!rb.isOk()) {
+            fprintf(stderr, "FATAL: lastReading: %s\n", rb.error().c_str());
+            return 1;
+        }
+        printf("  LastReading: deviceId=%lld value=%.2f count=%d\n",
+               (long long)rb->deviceId, rb->value, rb->count);
+        if (rb->count != 2 || rb->deviceId != 42 || rb->value != 7.25) {
+            fprintf(stderr, "FATAL: signal round-trip mismatch\n");
+            return 1;
+        }
+        printf("  Signal round-trip verified.\n\n");
+    }
+
+    // ── 11. Remove all event listeners ─────────────────────────
     printf("--- Unsubscribing all ---\n");
     lib.offDeviceDiscovered();      // handle=0 → remove all
     lib.offSensorAlert();           // handle=0 → remove all

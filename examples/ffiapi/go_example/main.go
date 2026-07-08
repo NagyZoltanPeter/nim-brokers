@@ -252,6 +252,31 @@ func main() {
 	}
 	fmt.Println()
 
+	// --- One-way signal (IngestReading) + readback (LastReading) --------
+	fmt.Println("--- Firing IngestReading signals (one-way, slot-free) ---")
+	if err := lib.IngestReading(42, 3.5); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: IngestReading: %v\n", err)
+		os.Exit(1)
+	}
+	if err := lib.IngestReading(42, 7.25); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: IngestReading: %v\n", err)
+		os.Exit(1)
+	}
+	time.Sleep(50 * time.Millisecond)
+	rb, rbErr := lib.LastReading()
+	if rbErr != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: LastReading: %v\n", rbErr)
+		os.Exit(1)
+	}
+	fmt.Printf("  LastReading: deviceId=%d value=%g count=%d\n",
+		rb.DeviceId, rb.Value, rb.Count)
+	if rb.Count != 2 || rb.DeviceId != 42 || rb.Value != 7.25 {
+		fmt.Fprintf(os.Stderr, "FATAL: signal round-trip mismatch: %+v\n", rb)
+		os.Exit(1)
+	}
+	fmt.Println("  Signal round-trip verified.")
+	fmt.Println()
+
 	// --- Unsubscribe all ------------------------------------------------
 	fmt.Println("--- Unsubscribing all ---")
 	lib.OffDeviceDiscovered(0)    // 0 -> remove all
