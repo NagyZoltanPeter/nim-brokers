@@ -317,8 +317,8 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
 task test, "Run all single and multi-threaded broker tests":
   let tests = [
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
-    "test_request_broker_sync_void", "test_multi_request_broker", "test_broker_oop",
-    "test_broker_lifecycle", "test_broker_ctor_shapes",
+    "test_request_broker_sync_void", "test_multi_request_broker", "test_signal_broker",
+    "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
   ]
   for f in tests:
     for opt in [
@@ -331,8 +331,8 @@ task test, "Run all single and multi-threaded broker tests":
 
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
-    "test_multi_thread_broker_configs", "test_mt_large_payload",
-    "test_mt_drop_async_eager", "test_alloc_race_variants",
+    "test_multi_thread_signal_broker", "test_multi_thread_broker_configs",
+    "test_mt_large_payload", "test_mt_drop_async_eager", "test_alloc_race_variants",
   ]
   for f in mtTests:
     for opt in [
@@ -399,8 +399,10 @@ task testAllocRace,
   echo "TEARDOWN-GATE PASSED: 0 crashes across " & $(variants.len * trials) & " trials"
 
 task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
-  let rejects =
-    ["reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret"]
+  let rejects = [
+    "reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret",
+    "reject_signal_badmode",
+  ]
   for f in rejects:
     let (outp, code) = gorgeEx(
       "nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim"

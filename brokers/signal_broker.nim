@@ -67,6 +67,10 @@ import chronos, chronicles, results
 import ./internal/helper/broker_utils, ./broker_context
 import ./internal/broker_debug
 
+when compileOption("threads"):
+  import ./internal/mt_config, ./internal/mt_signal_broker
+  export mt_config, mt_signal_broker
+
 export chronicles, results, chronos, broker_context, options
 
 type SignalBrokerMode = enum
@@ -505,9 +509,15 @@ macro SignalBroker*(args: varargs[untyped]): untyped =
   let m = parseSignalBrokerMode(mode)
   case m
   of sbMultiThread:
-    error(
-      "SignalBroker(mt) is not yet available (implemented in a follow-up step)", mode
-    )
+    when not compileOption("threads"):
+      {.
+        error:
+          "SignalBroker(mt) requires --threads:on. " &
+          "Compile with `--threads:on` to use multi-thread SignalBroker."
+      .}
+    else:
+      let cfg = parseMtSigKwargs(kwargs)
+      generateMtSignalBroker(body, cfg)
   of sbApi:
     error(
       "SignalBroker(API) is not yet available (implemented in a follow-up step)", mode
