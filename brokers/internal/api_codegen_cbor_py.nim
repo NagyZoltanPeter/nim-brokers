@@ -586,11 +586,11 @@ proc generateCborPyFile*(
   py.add("    if not fut.done():\n")
   py.add("        fut.set_result((status, payload))\n\n")
   py.add("def _async_status_message(status: int, payload: bytes) -> str:\n")
-  py.add("    if status == -4 and payload:\n")
+  py.add("    if status == " & $ApiStatusUnknownApi & " and payload:\n")
   py.add("        return payload.decode(\"utf-8\", errors=\"replace\")\n")
-  py.add("    if status == -12:\n")
+  py.add("    if status == " & $ApiStatusTimeout & ":\n")
   py.add("        return \"request timed out\"\n")
-  py.add("    if status == -11:\n")
+  py.add("    if status == " & $ApiStatusShutdown & ":\n")
   py.add("        return \"library shut down\"\n")
   py.add("    return f\"framework error: {status}\"\n\n")
   py.add(
@@ -969,7 +969,7 @@ proc generateCborPyFile*(
   py.add("            out = ctypes.string_at(resp_buf, resp_len.value)\n")
   py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
   py.add("        if status != 0:\n")
-  py.add("            if status == -4 and out:\n")
+  py.add("            if status == " & $ApiStatusUnknownApi & " and out:\n")
   py.add(
     "                raise RuntimeError(out.decode(\"utf-8\", errors=\"replace\"))\n"
   )
@@ -1150,7 +1150,7 @@ proc generateCborPyFile*(
     result.add("                return Result.err(str(exc))\n")
     result.add("            if rc != 0:\n")
     result.add("                _async_unregister(token)\n")
-    result.add("                if rc == -6:\n")
+    result.add("                if rc == " & $ApiStatusAgain & ":\n")
     result.add(
       "                    # The semaphore bounds this instance to the window;\n"
     )
@@ -1160,7 +1160,7 @@ proc generateCborPyFile*(
     result.add("                    raise AsyncAgainError(\"async window full\")\n")
     result.add("                return Result.err(f\"framework error: {rc}\")\n")
     result.add("            status, resp = await fut\n")
-    result.add("        if status == -12:\n")
+    result.add("        if status == " & $ApiStatusTimeout & ":\n")
     result.add("            raise TimeoutError(\n")
     result.add(
       "                f\"" & methodName & " timed out after {timeout_ms} ms\"\n"
@@ -1353,7 +1353,7 @@ proc generateCborPyFile*(
       py.add("            out = ctypes.string_at(resp_buf, resp_len.value)\n")
       py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
       py.add("        if status != 0:\n")
-      py.add("            if status == -4 and out:\n")
+      py.add("            if status == " & $ApiStatusUnknownApi & " and out:\n")
       py.add(
         "                raise RuntimeError(out.decode(\"utf-8\", errors=\"replace\"))\n"
       )

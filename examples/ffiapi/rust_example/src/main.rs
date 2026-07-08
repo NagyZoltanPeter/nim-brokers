@@ -175,9 +175,11 @@ fn main() {
     // variants: AsyncError::Again (window full, mylib::ASYNC_QUEUE_DEPTH —
     // retry), AsyncError::TimedOut (-12), AsyncError::ShutDown (-11),
     // AsyncError::Provider(msg) for handler errors.
-    // Per-call deadlines: compose your runtime's timer, e.g.
-    //   tokio::time::timeout(Duration::from_millis(500), lib.get_device_async(id))
-    // — the library-default timeout still guards the in-flight slot regardless.
+    // Per-call deadline: pass `Some(ms)` as the trailing `timeout_ms` arg (the
+    // ABI carries it); `None` uses the library default
+    // (mylib::DEFAULT_ASYNC_TIMEOUT_MS). On expiry the call resolves to
+    // AsyncError::TimedOut (-12). You can still stack your runtime's own timer
+    // (e.g. tokio::time::timeout) on top for a client-side deadline.
     println!("--- Async device queries (get_device_async) ---");
     println!("  async window = {} in-flight", mylib::ASYNC_QUEUE_DEPTH);
     {
@@ -187,7 +189,7 @@ fn main() {
             .expect("tokio runtime");
         rt.block_on(async {
             for &qid in &ids {
-                match lib.get_device_async(qid).await {
+                match lib.get_device_async(qid, Some(500)).await {
                     Ok(d) => {
                         let state = if d.online { "online" } else { "offline" };
                         println!("  [async] id={qid} -> \"{}\" ({state})", d.name);
@@ -211,7 +213,7 @@ fn main() {
     if !ids.is_empty() {
         println!("--- Async query without tokio (block_on) ---");
         let qid = ids[0];
-        match futures::executor::block_on(lib.get_device_async(qid)) {
+        match futures::executor::block_on(lib.get_device_async(qid, None)) {
             Ok(d) => println!("  [block_on] id={qid} -> \"{}\"", d.name),
             Err(e) => println!("  [block_on] id={qid} -> error: {e}"),
         }

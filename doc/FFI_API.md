@@ -1371,7 +1371,7 @@ ABI is identical):
 
 | Wrapper | Async surface | Backpressure (`-6`) | Bridge |
 |---------|---------------|---------------------|--------|
-| **Rust** | `async fn <m>_async(&self,…) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`) | `Err(AsyncError::Again)` — matchable; `is_again()` | **runtime-agnostic** `futures_channel::oneshot` — works under tokio, smol, async-std, or `futures::executor::block_on`; no runtime dependency |
+| **Rust** | `async fn <m>_async(&self,…, timeout_ms: Option<u32>) -> std::result::Result<T, AsyncError>` (`.await`, composes with `?`; `timeout_ms` in ms, `None` = lib default) | `Err(AsyncError::Again)` — matchable; `is_again()` | **runtime-agnostic** `futures_channel::oneshot` — works under tokio, smol, async-std, or `futures::executor::block_on`; no runtime dependency |
 | **Go** | `<M>Context(ctx, args) (T, error)` — blocking, ctx-aware (the `database/sql QueryContext` idiom); `ctx` deadline → library timeout, `ctx` cancel → early `ctx.Err()`; fan-out via goroutines | returns `ErrAsyncAgain` (`errors.Is`-able) | buffered raw chan via `cgo.Handle`; decode inline on the caller's goroutine (no per-call goroutine) |
 | **Python** | `async def <m>_async(self,…, timeout: float \| None = None) -> Result[T]` (`await`; seconds, `None` = lib default, `inf` = infinite) | **awaits** an internal `asyncio.Semaphore(depth)` — `gather(*many)` pipelines past the window transparently; `AsyncAgainError` only for cross-process contention | `asyncio.Future` + `loop.call_soon_threadsafe` |
 

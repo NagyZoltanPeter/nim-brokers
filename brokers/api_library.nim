@@ -1251,6 +1251,29 @@ proc registerBrokerLibraryCborImpl(
         # us a raw request buffer over `arg.courier.chan` and blocks on a
         # response slot; we wake on the shared broker dispatch signal.
         # ----------------------------------------------------------------
+        # Shared by both courier handlers below: turn a resolved dispatch
+        # outcome into the (status, respBuf, respLen) triple the delivery paths
+        # hand back. `known == false` → -4 unknown apiName; `dispErr` → -10
+        # provider error; otherwise the CBOR bytes are copied into a fresh
+        # shared buffer (nil/0 for an empty payload). Timeout (-12, async-only)
+        # is decided by the async handler and never flows through here.
+        proc encodeApiResp(
+            apiName: string, known: bool, dispErr: bool, respBytes: seq[byte]
+        ): tuple[status: int32, respBuf: pointer, respLen: int32] {.gcsafe, raises: [].} =
+          if not known:
+            let em = "unknown apiName: " & apiName
+            let b = allocShared0(em.len)
+            if em.len > 0:
+              copyMem(b, unsafeAddr em[0], em.len)
+            return (ApiStatusUnknownApi, b, int32(em.len))
+          if dispErr:
+            return (ApiStatusProviderErr, nil, 0'i32)
+          if respBytes.len > 0:
+            let b = allocShared0(respBytes.len)
+            copyMem(b, unsafeAddr respBytes[0], respBytes.len)
+            return (ApiStatusOk, b, int32(respBytes.len))
+          return (ApiStatusOk, nil, 0'i32)
+
         proc handleCourierMsg(m: CborCallMsg) {.async: (raises: []), gcsafe.} =
           # Copy the request bytes off the shared buffer, then free it —
           # ownership of `m.reqBuf` transferred to us via the channel.
@@ -1260,9 +1283,6 @@ proc registerBrokerLibraryCborImpl(
           if not m.reqBuf.isNil:
             deallocShared(m.reqBuf)
           let apiName = $cast[cstring](addr m.apiName[0])
-          var respBuf: pointer = nil
-          var respLen: int32 = 0
-          var status: int32 = 0
           if apiName == `releaseApiNameLit`:
             # reduced-A: per-context teardown control op (from
             # `<lib>_releaseInstance`). Clears providers + listeners for the
@@ -1270,15 +1290,10 @@ proc registerBrokerLibraryCborImpl(
             `releaseCtxProcIdent`(BrokerContext(m.targetCtx))
             completeSlot(arg.courier, m.slotIdx.int, nil, 0'i32, 0'i32)
             return
-          if not `knownNamePredIdent`(apiName):
-            let em = "unknown apiName: " & apiName
-            let b = allocShared0(em.len)
-            if em.len > 0:
-              copyMem(b, unsafeAddr em[0], em.len)
-            respBuf = b
-            respLen = int32(em.len)
-            status = -4'i32
-          else:
+          let known = `knownNamePredIdent`(apiName)
+          var dispErr = false
+          var respBytes: seq[byte]
+          if known:
             # reduced-A: dispatch against the FULL ctx the caller addressed
             # (sub-instance ctx for create-instance subs; == arg.ctx otherwise),
             # so the broker provider keyed by the sub ctx is reached. Falls back
@@ -1291,14 +1306,11 @@ proc registerBrokerLibraryCborImpl(
             let dispRes = catch:
               await `dispatchProcIdent`(apiName, dispCtx, nimReq)
             if dispRes.isErr():
-              status = -10'i32
+              dispErr = true
             else:
-              let respBytes = dispRes.get()
-              if respBytes.len > 0:
-                let b = allocShared0(respBytes.len)
-                copyMem(b, unsafeAddr respBytes[0], respBytes.len)
-                respBuf = b
-                respLen = int32(respBytes.len)
+              respBytes = dispRes.get()
+          let (status, respBuf, respLen) =
+            encodeApiResp(apiName, known, dispErr, respBytes)
           completeSlot(arg.courier, m.slotIdx.int, respBuf, respLen, status)
 
         # Async sibling of `handleCourierMsg`. Same dispatch, but instead of
@@ -1317,18 +1329,11 @@ proc registerBrokerLibraryCborImpl(
           if not m.reqBuf.isNil:
             deallocShared(m.reqBuf)
           let apiName = $cast[cstring](addr m.apiName[0])
-          var respBuf: pointer = nil
-          var respLen: int32 = 0
-          var status: int32 = 0
-          if not `knownNamePredIdent`(apiName):
-            let em = "unknown apiName: " & apiName
-            let b = allocShared0(em.len)
-            if em.len > 0:
-              copyMem(b, unsafeAddr em[0], em.len)
-            respBuf = b
-            respLen = int32(em.len)
-            status = -4'i32
-          else:
+          let known = `knownNamePredIdent`(apiName)
+          var dispErr = false
+          var respBytes: seq[byte]
+          var timedOut = false
+          if known:
             let dispCtx =
               if m.targetCtx != 0'u32:
                 BrokerContext(m.targetCtx)
@@ -1345,7 +1350,6 @@ proc registerBrokerLibraryCborImpl(
             # coroutine with a mutually-exclusive outcome, exactly ONE response
             # is enqueued below; a late provider completion resolves a future
             # nobody reads and is discarded — the callback never double-fires.
-            var timedOut = false
             if m.timeoutMs != 0'u32:
               let timerFut = sleepAsync(milliseconds(m.timeoutMs.int64))
               let raceRes = catch:
@@ -1354,9 +1358,8 @@ proc registerBrokerLibraryCborImpl(
               if not timerFut.finished():
                 timerFut.cancelSoon()
             if timedOut:
-              # Budget exceeded: deliver -12 and best-effort-cancel the provider.
-              # We do NOT read dispFut — its (late) result is dropped.
-              status = -12'i32
+              # Budget exceeded: best-effort-cancel the provider. We do NOT read
+              # dispFut — its (late) result is dropped. Status is set to -12 below.
               dispFut.cancelSoon()
             else:
               # Completed in time, or infinite timeout: `await dispFut` returns
@@ -1364,14 +1367,19 @@ proc registerBrokerLibraryCborImpl(
               let dispRes = catch:
                 await dispFut
               if dispRes.isErr():
-                status = -10'i32
+                dispErr = true
               else:
-                let respBytes = dispRes.get()
-                if respBytes.len > 0:
-                  let b = allocShared0(respBytes.len)
-                  copyMem(b, unsafeAddr respBytes[0], respBytes.len)
-                  respBuf = b
-                  respLen = int32(respBytes.len)
+                respBytes = dispRes.get()
+          var status: int32 = 0
+          var respBuf: pointer = nil
+          var respLen: int32 = 0
+          if timedOut:
+            status = ApiStatusTimeout
+          else:
+            let enc = encodeApiResp(apiName, known, dispErr, respBytes)
+            status = enc.status
+            respBuf = enc.respBuf
+            respLen = enc.respLen
           var rmsg: CborRespMsg
           rmsg.cb = m.cb
           rmsg.userData = m.userData
@@ -1655,9 +1663,14 @@ proc registerBrokerLibraryCborImpl(
             while tryDequeueResp(rc, rm):
               if not rm.cb.isNil:
                 let cbTyped = cast[`responseCallbackTypeIdent`](rm.cb)
-                cbTyped(rm.userData, rm.reqId, -11'i32, nil, 0'i32)
+                cbTyped(rm.userData, rm.reqId, ApiStatusShutdown, nil, 0'i32)
               if not rm.buf.isNil:
                 deallocShared(rm.buf)
+              # Symmetry with `respCourierPoll`, which releases one depth
+              # reservation per delivered response. Harmless today (the courier
+              # is freed just below), but keeps `asyncDepth` a correct running
+              # sum if the courier ever outlives a single shutdown.
+              asyncDepthDec(entryToShutdown.arg.courier)
         # Part C — free the courier after both threads joined.
         freeCborCourier(entryToShutdown.arg.courier)
         # Part D-3 — free the event courier (drains any messages left
@@ -1745,7 +1758,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
 
         var msg: CborCallMsg
         if nameLen > 0:
@@ -1765,7 +1778,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
 
@@ -1859,7 +1872,7 @@ proc registerBrokerLibraryCborImpl(
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
             deallocShared(reqBuf)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
         return 0'i32
@@ -1897,7 +1910,7 @@ proc registerBrokerLibraryCborImpl(
         let slotIdx = claimSlot(courier)
         if slotIdx < 0:
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
-          return -6'i32
+          return ApiStatusAgain
         var msg: CborCallMsg
         const relName = `releaseApiNameLit`
         copyMem(addr msg.apiName[0], cstring(relName), relName.len)
@@ -1908,7 +1921,7 @@ proc registerBrokerLibraryCborImpl(
         if not tryEnqueue(addr courier.ring, msg):
           releaseSlot(courier, slotIdx)
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
-          return -6'i32
+          return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
         let res = waitSlot(courier, slotIdx)
@@ -2089,7 +2102,7 @@ proc registerBrokerLibraryCborImpl(
         try:
           jsonStr = toJsonString(`apiListIdent`)
         except CatchableError:
-          return -10'i32
+          return ApiStatusProviderErr
         if jsonStr.len > 0:
           let buf = allocShared0(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)
@@ -2115,7 +2128,7 @@ proc registerBrokerLibraryCborImpl(
         try:
           jsonStr = toJsonString(`descriptorIdent`)
         except CatchableError:
-          return -10'i32
+          return ApiStatusProviderErr
         if jsonStr.len > 0:
           let buf = allocShared0(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)

@@ -459,16 +459,19 @@ proc generateCborRustFile*(
   rs.add(
     "    let result: ::std::result::Result<Vec<u8>, AsyncError> = if status != 0 {\n"
   )
-  rs.add("        if status == -4 && !resp_buf.is_null() && resp_len > 0 {\n")
+  rs.add(
+    "        if status == " & $ApiStatusUnknownApi &
+      " && !resp_buf.is_null() && resp_len > 0 {\n"
+  )
   rs.add(
     "            let slice = unsafe { std::slice::from_raw_parts(resp_buf as *const u8, resp_len as usize) };\n"
   )
   rs.add(
     "            Err(AsyncError::Provider(String::from_utf8_lossy(slice).into_owned()))\n"
   )
-  rs.add("        } else if status == -12 {\n")
+  rs.add("        } else if status == " & $ApiStatusTimeout & " {\n")
   rs.add("            Err(AsyncError::TimedOut)\n")
-  rs.add("        } else if status == -11 {\n")
+  rs.add("        } else if status == " & $ApiStatusShutdown & " {\n")
   rs.add("            Err(AsyncError::ShutDown)\n")
   rs.add("        } else {\n")
   rs.add("            Err(AsyncError::Framework(status))\n")
@@ -491,7 +494,7 @@ proc generateCborRustFile*(
   # response envelope bytes (the per-method async fn decodes them into T).
   proc emitDoCallAsync(p: string): string {.compileTime.} =
     result.add(
-      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<Vec<u8>, AsyncError> {\n"
+      "    async fn do_call_async(&self, api_name: &str, req_payload: &[u8], timeout_ms: u32) -> ::std::result::Result<Vec<u8>, AsyncError> {\n"
     )
     result.add(
       "        if self.ctx == 0 { return Err(AsyncError::Provider(\"Library context is not created\".into())); }\n"
@@ -528,7 +531,7 @@ proc generateCborRustFile*(
     result.add("                in_buf,\n")
     result.add("                req_payload.len() as i32,\n")
     result.add("                0,\n")
-    result.add("                DEFAULT_ASYNC_TIMEOUT_MS,\n")
+    result.add("                timeout_ms,\n")
     result.add("                cbor_response_trampoline,\n")
     result.add("                boxed,\n")
     result.add("            )\n")
@@ -541,7 +544,9 @@ proc generateCborRustFile*(
     result.add(
       "            unsafe { drop(Box::from_raw(boxed as *mut CborAsyncSlot)); }\n"
     )
-    result.add("            if rc == -6 { return Err(AsyncError::Again); }\n")
+    result.add(
+      "            if rc == " & $ApiStatusAgain & " { return Err(AsyncError::Again); }\n"
+    )
     result.add("            return Err(AsyncError::Framework(rc));\n")
     result.add("        }\n")
     result.add("        match rx.await {\n")
@@ -891,7 +896,9 @@ proc generateCborRustFile*(
   rs.add("                " & p & "freeBuffer(out_buf);\n")
   rs.add("            }\n")
   rs.add("            if status != 0 {\n")
-  rs.add("                if status == -4 && !out.is_empty() {\n")
+  rs.add(
+    "                if status == " & $ApiStatusUnknownApi & " && !out.is_empty() {\n"
+  )
   rs.add(
     "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
   )
@@ -990,9 +997,14 @@ proc generateCborRustFile*(
     # Returns STD Result with the typed AsyncError (not the wrapper Result<T>):
     # composes with `?`/`.await?`, and EAGAIN/timeout/shutdown are matchable
     # variants instead of strings.
+    # Per-call timeout parity with the C++/Python/Go wrappers: the ABI carries
+    # a per-call `timeoutMs`, so expose it here as `Option<u32>` (ms). `None`
+    # falls back to the library default — the idiomatic Rust analogue of the
+    # defaulted C++ arg / Python `Optional[float]`.
     result.add(
       "    pub async fn " & methodName & "_async(" & sigParams &
-        ") -> ::std::result::Result<" & respRust & ", AsyncError> {\n"
+        ", timeout_ms: Option<u32>) -> ::std::result::Result<" & respRust &
+        ", AsyncError> {\n"
     )
     if e.argFields.len > 0:
       result.add(argsStructDecl)
@@ -1008,7 +1020,11 @@ proc generateCborRustFile*(
     else:
       result.add("        let buf: Vec<u8> = Vec::new();\n")
     result.add(
-      "        let raw = self.do_call_async(\"" & e.apiName & "\", &buf).await?;\n"
+      "        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_ASYNC_TIMEOUT_MS);\n"
+    )
+    result.add(
+      "        let raw = self.do_call_async(\"" & e.apiName &
+        "\", &buf, timeout_ms).await?;\n"
     )
     result.add("        if raw.is_empty() {\n")
     result.add(
@@ -1255,7 +1271,9 @@ proc generateCborRustFile*(
     rs.add("                " & p & "freeBuffer(out_buf);\n")
     rs.add("            }\n")
     rs.add("            if status != 0 {\n")
-    rs.add("                if status == -4 && !out.is_empty() {\n")
+    rs.add(
+      "                if status == " & $ApiStatusUnknownApi & " && !out.is_empty() {\n"
+    )
     rs.add(
       "                    return Err(String::from_utf8_lossy(&out).into_owned());\n"
     )
