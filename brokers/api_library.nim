@@ -2108,9 +2108,12 @@ proc registerBrokerLibraryCborImpl(
   var eventNames: seq[string] = @[]
   for e in eventEntries:
     eventNames.add(e.apiName)
+  var signalNames: seq[string] = @[]
+  for s in signalEntries:
+    signalNames.add(s.apiName)
   generateCborCHeaderFile(
     outDir, libName, config.version, requestNames, eventNames, config.asyncTimeoutMs,
-    config.asyncQueueDepth,
+    config.asyncQueueDepth, signalNames,
   )
   generateCborCppHeaderFile(
     outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,

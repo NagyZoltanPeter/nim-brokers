@@ -27,6 +27,7 @@ proc generateCborCHeaderFile*(
     eventApiNames: seq[string],
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
+    signalApiNames: seq[string] = @[],
 ) {.compileTime, raises: [].} =
   ## Writes the fixed-shape C header for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
@@ -124,6 +125,18 @@ proc generateCborCHeaderFile*(
   h.add(" *   -3 — reqLen is negative or exceeds 64 MiB\n")
   h.add(" *   -4 — apiName is unknown; *respBufOut holds a UTF-8 message\n")
   h.add(" *   -10 — internal dispatch failure\n")
+  h.add(" *\n")
+  h.add(" * SIGNALS (one-way, see the documented list below) also travel through\n")
+  h.add(" * " & p & "call but are slot-free: the payload is enqueued and the call\n")
+  h.add(" * returns immediately with NO response buffer (*respBufOut stays NULL).\n")
+  h.add(" * The complete status set for a signal is:\n")
+  h.add(" *   0   — accepted (a handler exists and the queue had room). This is a\n")
+  h.add(" *         best-effort acknowledgement, NOT a guarantee the handler ran.\n")
+  h.add(" *   -6  — EAGAIN: the courier queue is full (retry/throttle).\n")
+  h.add(" *   -10 — no handler installed for this signal.\n")
+  h.add(" * A malformed CBOR payload for a signal is logged library-side and\n")
+  h.add(" * dropped (still returns 0) — generated wrappers encode it correctly, so\n")
+  h.add(" * this only affects hand-written callers.\n")
   h.add(" * ---------------------------------------------------------------- */\n\n")
   h.add(
     "int32_t " & p & "call(uint32_t ctx,\n" &
@@ -156,6 +169,7 @@ proc generateCborCHeaderFile*(
   h.add(" *   -5 — unknown or torn-down ctx\n")
   h.add(" *   -6 — EAGAIN: too many async calls in flight (retry later)\n")
   h.add(" *   -7 — cb is NULL\n")
+  h.add(" *   -13 — apiName is a one-way signal; use " & p & "call instead.\n")
   h.add(" * On any negative return the callback does NOT fire.\n")
   h.add(" *\n")
   h.add(" * timeoutMs is dispatch-scoped: 0 = infinite (no timeout); N = N ms.\n")
@@ -243,7 +257,7 @@ proc generateCborCHeaderFile*(
   h.add("int32_t " & p & "listApis(void** respBufOut, int32_t* respLenOut);\n\n")
   h.add("int32_t " & p & "getSchema(void** respBufOut, int32_t* respLenOut);\n\n")
 
-  if requestApiNames.len > 0 or eventApiNames.len > 0:
+  if requestApiNames.len > 0 or eventApiNames.len > 0 or signalApiNames.len > 0:
     h.add("/* ----------------------------------------------------------------\n")
     h.add(" * Documented apiNames\n")
     h.add(" * ---------------------------------------------------------------- */\n\n")
@@ -255,6 +269,13 @@ proc generateCborCHeaderFile*(
     if eventApiNames.len > 0:
       h.add("/* Events (pass these as `eventName` to " & p & "subscribe):\n")
       for n in eventApiNames:
+        h.add(" *   \"" & n & "\"\n")
+      h.add(" */\n\n")
+    if signalApiNames.len > 0:
+      h.add(
+        "/* Signals (one-way; pass these as `apiName` to " & p & "call, no response):\n"
+      )
+      for n in signalApiNames:
         h.add(" *   \"" & n & "\"\n")
       h.add(" */\n\n")
 
