@@ -2122,7 +2122,7 @@ proc registerBrokerLibraryCborImpl(
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(
       outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-      config.asyncQueueDepth,
+      config.asyncQueueDepth, signalEntries,
     )
   when defined(BrokerFfiApiGenRust):
     generateCborRustFile(
