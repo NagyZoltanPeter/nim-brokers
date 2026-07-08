@@ -290,7 +290,7 @@ Info.clearProviders()
 
 ### SignalBroker
 
-Fire-and-forget, single-handler, no-response: EventBroker's dispatch shape (a sync call site that `asyncSpawn`s the handler, with no reply path) fused with RequestBroker's single-registry model and a `Result[void, string]` acceptance check. Exactly one handler reacts to a one-way notification, and the producer learns only whether the signal was *accepted* — never whether it was handled.
+Fire-and-forget request — an inverted EventBroker — for feeding a one-way notification signal into a module or library at the interface level. It is fully async, returns no value and no indication of whether processing succeeded; the only errors reported are the no-handler-installed case and back-pressure (queue-full) rejection.
 
 ```nim
 import brokers/signal_broker
@@ -883,18 +883,16 @@ Per-request (cross-thread only, transient — no shared-heap alloc per call):
 
 ### Comparison
 
-| | EventBroker | RequestBroker | EventBroker(mt) | RequestBroker(mt) |
-|---|---|---|---|---|
-| Storage | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars |
-| Shared memory | None | None | Bucket array + Lock + ring + slab (per listener-thread) | Bucket array + Lock + ring + slab + response-slot pool (per context) |
-| Dispatch primitive | direct asyncSpawn | direct call | Vyukov MPSC ring (cell idx) + refcounted slab cell | Vyukov MPSC ring (cell idx) + slab + response-slot pool |
-| Per-call cost | Zero | Zero | Zero shared-heap alloc; one slab encode + N ring enqueues | Zero shared-heap alloc; one slab encode + one pool slot reservation |
-| OS resources | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) |
-| Baseline per context | ~100 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) |
-| Overflow behaviour | n/a | n/a | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) |
-| Intentional leaks | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout |
-
-`SignalBroker(mt)` shares `EventBroker(mt)`'s storage shape — `createShared` bucket array + `Lock` + Vyukov MPSC ring + refcounted slab — but with a single handler per context (not a listener table) and an added lock-free handler-present `Atomic[int]` so `signal()` fast-fails "no handler" without taking the lock. On ring/slab overflow `signal()` returns `err("queue full")` (visible backpressure, never a silent drop).
+| | EventBroker | RequestBroker | SignalBroker | EventBroker(mt) | RequestBroker(mt) | SignalBroker(mt) |
+|---|---|---|---|---|---|---|
+| Storage | threadvar only | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars | createShared + threadvars |
+| Shared memory | None | None | None | Bucket array + Lock + ring + slab (per listener-thread) | Bucket array + Lock + ring + slab + response-slot pool (per context) | Bucket array + Lock + ring + slab + handler-present `Atomic` (per handler-thread) |
+| Dispatch primitive | direct asyncSpawn | direct call | direct asyncSpawn | Vyukov MPSC ring (cell idx) + refcounted slab cell | Vyukov MPSC ring (cell idx) + slab + response-slot pool | Vyukov MPSC ring (cell idx) + refcounted slab cell |
+| Per-call cost | Zero | Zero | Zero | Zero shared-heap alloc; one slab encode + N ring enqueues | Zero shared-heap alloc; one slab encode + one pool slot reservation | Zero shared-heap alloc; one slab encode + one ring enqueue (single target) |
+| OS resources | None | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) | **One** `ThreadSignalPtr` per thread (shared) |
+| Baseline per context | ~100 bytes | ~16 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) | Compile-time-sized: ring + slab (printed as hint) |
+| Overflow behaviour | n/a | n/a | n/a (no queue) | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) | enqueue failure → `signal()` returns `err("queue full")` (visible) |
+| Intentional leaks | None | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout | None — slab cells return via refcount |
 
 ## Platform & Nim Version Support
 

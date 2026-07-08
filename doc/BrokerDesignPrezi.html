@@ -987,6 +987,44 @@ CollectedStatus.clearProviders()
     <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Fire-and-forget &middot; One-way &middot; One handler &middot; Accept, don't confirm</p>
   </section>
 
+  <!-- At a glance -->
+  <section>
+    <h2>SignalBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li>A <strong>fire-and-forget request</strong> — an <em>inverted EventBroker</em>: a signal flows <strong>into</strong> a module, rather than an event flowing out of it</li>
+          <li class="fragment">Feeds a one-way notification signal into a module or library <strong>at the interface level</strong></li>
+          <li class="fragment">Fully async; returns <strong>no value</strong> and <strong>no indication</strong> of whether processing succeeded</li>
+          <li class="fragment">The only errors reported: <strong>no handler installed</strong>, or <strong>back-pressure</strong> (queue full) rejection</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Example use-cases</h3>
+        <ul>
+          <li>Non-blocking notification processing at library / module level</li>
+          <li class="fragment">Declaring, at the interface level, that a module <strong>consumes</strong> such signals — instead of reaching for external events</li>
+          <li class="fragment">Bursts of signals without blocking the sender
+            <ul>
+              <li>logging</li>
+              <li>registering changes</li>
+            </ul>
+          </li>
+          <li class="fragment">Signal/Slot-style composition (UI &harr; Model interactions)</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="fragment cols cols-3" style="margin-top:0.7em;">
+      <div class="callout good"><p><strong>Single handler</strong> — one consumer per context</p></div>
+      <div class="callout good"><p><strong>Sync call site</strong> — <code>signal()</code> is a plain proc, never awaited</p></div>
+      <div class="callout warn"><p><strong>Accept &ne; handled</strong> — <code>ok()</code> is best-effort</p></div>
+    </div>
+  </section>
+
   <!-- Design — code -->
   <section>
     <h2>SignalBroker — Code</h2>
