@@ -2117,7 +2117,7 @@ proc registerBrokerLibraryCborImpl(
   )
   generateCborCppHeaderFile(
     outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-    config.asyncQueueDepth,
+    config.asyncQueueDepth, signalEntries,
   )
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(
