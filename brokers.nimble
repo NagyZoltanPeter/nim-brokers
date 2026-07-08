@@ -563,8 +563,10 @@ task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and ru
   exec "test/ffibench/build/bench_event_driver"
 
 task perftest, "Run performance and stress tests":
-  let mtTests =
-    ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
+  let mtTests = [
+    "perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker",
+    "perf_test_multi_thread_signal_broker",
+  ]
   for f in mtTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
