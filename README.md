@@ -41,6 +41,7 @@ or with these slides: [Broker Design Presentation](https://nagyzoltanpeter.githu
     - [EventBroker](#eventbroker)
     - [RequestBroker](#requestbroker)
     - [MultiRequestBroker](#multirequestbroker)
+    - [SignalBroker](#signalbroker)
     - [BrokerContext](#brokercontext)
   - [Multi-thread support](#multi-thread-support)
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
@@ -286,6 +287,38 @@ Info.removeProvider(handle.get())
 # Remove all providers
 Info.clearProviders()
 ```
+
+### SignalBroker
+
+Fire-and-forget, single-handler, no-response: EventBroker's dispatch shape (a sync call site that `asyncSpawn`s the handler, with no reply path) fused with RequestBroker's single-registry model and a `Result[void, string]` acceptance check. Exactly one handler reacts to a one-way notification, and the producer learns only whether the signal was *accepted* — never whether it was handled.
+
+```nim
+import brokers/signal_broker
+
+SignalBroker:
+  type IngestSample = object
+    deviceId*: string
+    value*: float64
+
+# One handler — a second onSignal returns err. Handler exceptions are
+# swallowed (a chronicles warn); there is no reply path.
+discard IngestSample.onSignal(
+  proc(s: IngestSample) {.async: (raises: []).} =
+    echo s.deviceId, " = ", s.value
+)
+
+# signal() is a plain (non-async) proc — never await it.
+let r = IngestSample.signal(deviceId = "d1", value = 0.5)
+# Result[void, string]:
+#   ok()  = accepted (a handler exists + the queue had room) — NOT "handled"
+#   err() = "no signal handler installed" | "queue full"
+if r.isErr:
+  echo "not delivered: ", r.error
+
+await IngestSample.dropSignalHandler()
+```
+
+> `ok()` is a best-effort acknowledgement, not a delivery guarantee — for confirmation, use `RequestBroker` with a `void` response. `SignalBroker(mt)` and `SignalBroker(API)` provide the multi-thread and FFI variants, mirroring the other brokers.
 
 ### BrokerContext
 
@@ -860,6 +893,8 @@ Per-request (cross-thread only, transient — no shared-heap alloc per call):
 | Baseline per context | ~100 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) |
 | Overflow behaviour | n/a | n/a | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) |
 | Intentional leaks | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout |
+
+`SignalBroker(mt)` shares `EventBroker(mt)`'s storage shape — `createShared` bucket array + `Lock` + Vyukov MPSC ring + refcounted slab — but with a single handler per context (not a listener table) and an added lock-free handler-present `Atomic[int]` so `signal()` fast-fails "no handler" without taking the lock. On ring/slab overflow `signal()` returns `err("queue full")` (visible backpressure, never a silent drop).
 
 ## Platform & Nim Version Support
 
