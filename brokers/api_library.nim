@@ -2137,8 +2137,9 @@ proc registerBrokerLibraryCborImpl(
   )
 
   # Emit the CDDL schema and capture its text for the runtime descriptor.
-  let cddlText =
-    generateCborCddlFile(outDir, libName, entries, eventEntries, gApiTypeRegistry)
+  let cddlText = generateCborCddlFile(
+    outDir, libName, entries, eventEntries, gApiTypeRegistry, signalEntries
+  )
 
   # ------------------------------------------------------------------
   # Discovery API (Phase 6): runtime descriptor + `<lib>_listApis` /
@@ -2177,6 +2178,13 @@ proc registerBrokerLibraryCborImpl(
     buildSrc.add(
       "    ApiEventInfo(apiName: " & escape(e.apiName) & ", payloadType: " &
         escape(e.typeName) & "),\n"
+    )
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.signals = @[\n")
+  for s in signalEntries:
+    buildSrc.add(
+      "    ApiSignalInfo(apiName: " & escape(s.apiName) & ", payloadType: " &
+        escape(s.typeName) & "),\n"
     )
   buildSrc.add("  ]\n")
   buildSrc.add("  result.types = @[\n")
@@ -2219,6 +2227,10 @@ proc registerBrokerLibraryCborImpl(
   buildSrc.add("  result.events = @[\n")
   for e in eventEntries:
     buildSrc.add("    " & escape(e.apiName) & ",\n")
+  buildSrc.add("  ]\n")
+  buildSrc.add("  result.signals = @[\n")
+  for s in signalEntries:
+    buildSrc.add("    " & escape(s.apiName) & ",\n")
   buildSrc.add("  ]\n")
 
   try:

@@ -5,7 +5,7 @@
 ## Compiled in-process with `--nimMainPrefix:sigtest` so the generated C ABI
 ## exports (`sigtest_call`, `sigtest_createContext`, …) are callable directly.
 
-import std/[atomics, os]
+import std/[atomics, os, json, strutils]
 import results
 import testutils/unittests
 import brokers/[signal_broker, request_broker, broker_context, api_library]
@@ -176,3 +176,35 @@ suite "SignalBroker(API) — FFI _call (slot-free, one-way)":
     )
     check st == ApiStatusOneWay
     check sigtest_shutdown(ctx) == 0'i32
+
+  test "discovery: signals appear in _listApis and _getSchema":
+    var buf: pointer = nil
+    var len: int32 = 0
+    check sigtest_listApis(addr buf, addr len) == 0'i32
+    var jsonStr = newString(len.int)
+    if len > 0:
+      copyMem(addr jsonStr[0], buf, len.int)
+    sigtest_freeBuffer(buf)
+    let list = parseJson(jsonStr)
+    var sigNames: seq[string]
+    for s in list["signals"]:
+      sigNames.add(s.getStr())
+    check "ingest_sample" in sigNames
+    check "pulse_sig" in sigNames
+    check "unhandled" in sigNames
+
+    buf = nil
+    len = 0
+    check sigtest_getSchema(addr buf, addr len) == 0'i32
+    var schemaStr = newString(len.int)
+    if len > 0:
+      copyMem(addr schemaStr[0], buf, len.int)
+    sigtest_freeBuffer(buf)
+    let schema = parseJson(schemaStr)
+    var found = false
+    for s in schema["signals"]:
+      if s["apiName"].getStr() == "ingest_sample":
+        check s["payloadType"].getStr() == "IngestSample"
+        found = true
+    check found
+    check "IngestSampleSignal" in schema["cddl"].getStr()
