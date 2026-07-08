@@ -185,6 +185,23 @@ class TestPrimitiveBrokerTypes(unittest.TestCase):
         # dataclass.
         self.assertEqual(r.value, 42)  # provider returns value * 2
 
+    def test_signals(self):
+        # One-way signals (slot-free _call): object payload + scalar payload.
+        # Fire both, then read the recorded state back to verify delivery.
+        self.lib.ingest_signal(1, "hello", [10, 20, 30])
+        self.lib.scalar_signal(42)
+        time.sleep(0.05)
+        r = self.lib.last_signal_state()
+        self.assertTrue(r.is_ok(), r.error)
+        st = r.value
+        self.assertEqual(st.id, 1)
+        self.assertEqual(st.label, "hello")
+        self.assertEqual(st.valueCount, 3)
+        self.assertEqual(st.valueSum, 60)
+        self.assertEqual(st.scalarVal, 42)
+        self.assertEqual(st.objCount, 1)
+        self.assertEqual(st.scalarCount, 1)
+
     def test_simple_int_event(self):
         received = []
         ev = threading.Event()
