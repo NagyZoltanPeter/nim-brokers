@@ -244,6 +244,24 @@ def main() -> int:
                 )
         print()
 
+        print("--- Firing IngestReading signals (one-way, slot-free) ---")
+        lib.ingest_reading(42, 3.5)
+        lib.ingest_reading(42, 7.25)
+        time.sleep(0.05)  # let the async handler run on the processing thread
+        rb = lib.last_reading()
+        if not rb.is_ok():
+            raise SystemExit(f"FATAL: last_reading: {rb.error()}")
+        print(
+            f"  LastReading: deviceId={rb.value.deviceId} "
+            f"value={rb.value.value} count={rb.value.count}"
+        )
+        assert (
+            rb.value.count == 2
+            and rb.value.deviceId == 42
+            and rb.value.value == 7.25
+        ), "signal round-trip mismatch"
+        print("  Signal round-trip verified.\n")
+
         print("--- Unsubscribing all ---")
         lib.off_device_discovered()
         lib.off_device_status_changed()

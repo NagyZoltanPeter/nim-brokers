@@ -8,11 +8,12 @@ nim-brokers is a standalone Nim macro library (nimble package name: `brokers`) p
 
 The repository also contains a **Broker FFI API** generator for exposing broker-based APIs as a shared library consumable from C, C++, Python, Rust, and Go. The example library lives under `examples/ffiapi/nimlib/mylib.nim` and demonstrates generated lifecycle functions, request exports, event callback registration, a generated C++ wrapper, an optional generated Python ctypes wrapper, an optional generated Rust crate, and an optional generated Go cgo module.
 
-There are three broker macros, each with a single-thread and multi-thread variant:
+There are four broker macros; each (except MultiRequestBroker) has single-thread, multi-thread, and API variants:
 
 - **EventBroker** / **EventBroker(mt)** — Reactive pub/sub: many emitters to many listeners. Listeners are async procs registered via `TypeName.listen(...)`, events fired with `TypeName.emit(...)`.
 - **RequestBroker** / **RequestBroker(mt)** — Single-provider request/response. Supports both `async` (default) and `sync` modes via `RequestBroker(sync):`. A provider is registered with `TypeName.setProvider(...)`, requests made with `TypeName.request(...)`.
 - **MultiRequestBroker** — Multi-provider fan-out request/response (async only). Multiple providers register; `request()` calls all of them and aggregates results.
+- **SignalBroker** / **SignalBroker(mt)** — Fire-and-forget, single-handler, no-response: EventBroker's dispatch shape (sync call site + `asyncSpawn`, no reply path) fused with RequestBroker's single-registry and a `Result[void, string]` acceptance check. One handler installed via `TypeName.onSignal(...)`; producers call `TypeName.signal(...)` which returns `ok` (accepted — a handler exists and the queue had room, never "handled") or `err` (`"no signal handler installed"` / `"queue full"`). Handler errors are swallowed (chronicles warn) — for delivery confirmation use RequestBroker with a `void` response.
 
 All brokers support **BrokerContext** for scoping — allowing multiple independent broker instances (e.g. one per component or per thread). The default context (`DefaultBrokerContext`) is used when no context argument is supplied.
 
@@ -254,6 +255,14 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Fails the entire request if any provider fails.
 - Deduplicates identical handler references on registration.
 
+### SignalBroker specifics (`brokers/signal_broker.nim`, `brokers/internal/mt_signal_broker.nim`)
+
+- One-way, single handler, no reply path. Declared with an object / ref / POD / `void` payload (EventBroker-shaped surface — no proc-sugar arg-signatures).
+- `onSignal(handler)` installs the single handler (duplicate-guarded, mirrors `setProvider`); `signal(...)` is a **plain (non-async) proc** returning `Result[void, string]`. Value form + inline-field overloads (like `emit`) + a `void` pulse (`TypeName.signal()`).
+- `ok()` = **accepted** (best-effort snapshot: a handler exists + the queue had room), never "handled". `err` = definitely not delivered: `"no signal handler installed"` or `"queue full"`. Handler exceptions are swallowed with a chronicles warn.
+- `dropSignalHandler()` is async `Future[void]` (uniform with `dropListener`; suspension-free body). Mock/replace trio: `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler` (MT variants are owning-thread only).
+- **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` closes it → the poll fn hands it to the per-thread pending-free registry, freed at `teardownBrokerThread`.
+
 ### Multi-thread broker specifics (`brokers/internal/mt_event_broker.nim`, `brokers/internal/mt_request_broker.nim`)
 
 - Global bucket registry: `Lock`-protected shared array of buckets, each identified by `(brokerCtx, threadId, threadGen)`.
@@ -280,6 +289,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   - **delivery thread** — consumes the per-context event courier ring and invokes foreign callbacks. Spawned first so its broker dispatch signal is published before any emit can fire.
   - **processing thread** — runs `setupProviders(ctx)`, installs per-event listeners (same-thread fast path for the FFI lane), executes request providers, and produces event-courier messages on emit.
 - FFI subscribe / unsubscribe (`<lib>_subscribe` / `<lib>_unsubscribe`) write the shared `SubsRegistry` directly from the foreign caller's thread and bump a per-event `Atomic[int]` counter; the emit-side reads the counter lock-free to short-circuit the courier path when no foreign subscriber is registered. See `doc/CBOR_Round2_PartD_EventCourier.md` for the three-lane dispatch design and `doc/bench_baseline.md` § "Event dispatch — Part D-6" for per-emit costs.
+- `SignalBroker(API)` (`brokers/internal/api_signal_broker_cbor.nim`) rides `<lib>_call` on a **slot-free, one-way** path: the payload is enqueued onto the courier ring with a sentinel (no response slot, no round trip) and the call returns immediately. Both failure modes resolve on the foreign caller's thread — a lock-free handler-present atomic load (`signalHandlerPresent`) → `ApiStatusProviderErr` (-10) when no handler, or a courier-ring-full → `ApiStatusAgain` (-6); accepted → `ApiStatusOk` (0). `<lib>_callAsync` **rejects** a signal name with `ApiStatusOneWay` (-13): with enqueue-only `_call` a completion callback carries no new information. A CBOR decode failure in the signal adapter is logged (chronicles warn), not returned. Signals surface in discovery as a top-level `signals` list (`ApiSignalInfo`, the inverse of `events`) in `_listApis` / `_getSchema` / the CDDL. Wrappers emit a typed one-way method (C++ `Result<void>`, Python `-> None` raising, Rust `Result<(), String>`, Go `error`) — no async variant.
 - Generated C header: `<libName>.h` (pure C), C++ wrapper: `<libName>.hpp` (includes the `.h`).
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
 - Generated Rust wrapper support is optional and enabled with `-d:BrokerFfiApiGenRust`. It emits a complete Cargo crate `<libName>_rs/` (Cargo.toml + src/lib.rs) next to the `.so`. The crate declares the C ABI via hand-written `extern "C"` blocks (no bindgen / no clang dep) and exposes the same `Lib::new() / create_context() / <request>(args) -> Result<T, String> / on_<event> / off_<event> / shutdown / Drop` surface the C++ wrapper provides.
@@ -300,6 +310,7 @@ brokers/
   event_broker.nim          — Single-thread EventBroker macro (re-exports internal/mt_event_broker when --threads:on)
   request_broker.nim        — Single-thread RequestBroker macro (re-exports internal/mt_request_broker when --threads:on)
   multi_request_broker.nim  — Single-thread MultiRequestBroker macro
+  signal_broker.nim         — Single-thread SignalBroker macro (re-exports internal/mt_signal_broker when --threads:on)
   api_library.nim           — Shared-library lifecycle/runtime generator (`registerBrokerLibrary`)
   internal/
     api_common.nim          — Re-export hub for all codegen modules + legacy bridge + runtime memory helpers
@@ -319,6 +330,7 @@ brokers/
     api_cbor_descriptor.nim — Stable runtime descriptor types for the discovery API
     api_request_broker_cbor.nim — CBOR-mode RequestBroker(API) codegen + per-request adapter
     api_event_broker_cbor.nim   — CBOR-mode EventBroker(API) codegen + per-event entry registration
+    api_signal_broker_cbor.nim  — CBOR-mode SignalBroker(API) codegen + one-way signal adapter + entry registration
     api_codegen_cbor_h.nim   — Fixed-shape C header for CBOR-mode libraries
     api_codegen_cbor_hpp.nim — jsoncons-backed C++ wrapper (typed Lib class, traits)
     api_codegen_cbor_py.nim  — cbor2-backed Python wrapper (dataclasses, typed methods)
@@ -327,6 +339,7 @@ brokers/
     api_codegen_cbor_cddl.nim — CDDL schema emission for the CBOR FFI surface
     mt_event_broker.nim     — Multi-thread EventBroker(mt) macro
     mt_request_broker.nim   — Multi-thread RequestBroker(mt) macro
+    mt_signal_broker.nim    — Multi-thread SignalBroker(mt) macro
     mt_broker_common.nim    — Shared runtime helpers for MT brokers (thread ID, generation, blockingAwait)
     helper/
       broker_utils.nim      — Shared macro parsing utilities

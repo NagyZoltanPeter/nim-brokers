@@ -310,11 +310,12 @@
     <a href="#/2" style="text-decoration:none;"><span class="chip chip-blue" style="cursor:pointer;">EventBroker</span></a>
     <a href="#/3" style="text-decoration:none;"><span class="chip chip-green" style="cursor:pointer;">RequestBroker</span></a>
     <a href="#/4" style="text-decoration:none;"><span class="chip chip-orange" style="cursor:pointer;">MultiRequestBroker</span></a>
-    <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
-    <a href="#/6" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread Brokers</span></a>
+    <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);cursor:pointer;">SignalBroker</span></a>
+    <a href="#/6" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
+    <a href="#/7" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread Brokers</span></a>
   </div>
   <div style="display:flex; justify-content:center; margin-top:0.6em;">
-    <a href="#/9" style="text-decoration:none;"><span class="chip chip-api" style="cursor:pointer;">Broker FFI-API</span></a>
+    <a href="#/10" style="text-decoration:none;"><span class="chip chip-api" style="cursor:pointer;">Broker FFI-API</span></a>
   </div>
   <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section</p>
 </section>
@@ -975,13 +976,107 @@ CollectedStatus.clearProviders()
 </section><!-- /Section 4 -->
 
 <!-- ══════════════════════════════════════════════════
+     SECTION 4·5 — SIGNALBROKER (vertical stack)
+══════════════════════════════════════════════════ -->
+<section>
+
+  <!-- Section header -->
+  <section class="section-header">
+    <div class="num">05</div>
+    <h2 style="color:#b085f5;">SignalBroker</h2>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Fire-and-forget &middot; One-way &middot; One handler &middot; Accept, don't confirm</p>
+  </section>
+
+  <!-- At a glance -->
+  <section>
+    <h2>SignalBroker at a Glance</h2>
+
+    <div class="cols cols-2">
+      <div>
+        <h3>What it is</h3>
+        <ul>
+          <li>A <strong>fire-and-forget request</strong> — an <em>inverted EventBroker</em>: a signal flows <strong>into</strong> a module, rather than an event flowing out of it</li>
+          <li class="fragment">Feeds a one-way notification signal into a module or library <strong>at the interface level</strong></li>
+          <li class="fragment">Fully async; returns <strong>no value</strong> and <strong>no indication</strong> of whether processing succeeded</li>
+          <li class="fragment">The only errors reported: <strong>no handler installed</strong>, or <strong>back-pressure</strong> (queue full) rejection</li>
+        </ul>
+      </div>
+
+      <div class="fragment">
+        <h3>Example use-cases</h3>
+        <ul>
+          <li>Non-blocking notification processing at library / module level</li>
+          <li class="fragment">Declaring, at the interface level, that a module <strong>consumes</strong> such signals — instead of reaching for external events</li>
+          <li class="fragment">Bursts of signals without blocking the sender
+            <ul>
+              <li>logging</li>
+              <li>registering changes</li>
+            </ul>
+          </li>
+          <li class="fragment">Signal/Slot-style composition (UI &harr; Model interactions)</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="fragment cols cols-3" style="margin-top:0.7em;">
+      <div class="callout good"><p><strong>Single handler</strong> — one consumer per context</p></div>
+      <div class="callout good"><p><strong>Sync call site</strong> — <code>signal()</code> is a plain proc, never awaited</p></div>
+      <div class="callout warn"><p><strong>Accept &ne; handled</strong> — <code>ok()</code> is best-effort</p></div>
+    </div>
+  </section>
+
+  <!-- Design — code -->
+  <section>
+    <h2>SignalBroker — Code</h2>
+
+    <pre><code class="language-nim" data-trim data-line-numbers="1-4|6-10|12-15|17-18">
+SignalBroker:
+  type IngestSample* = object
+    deviceId*: string
+    value*: float64
+
+# One handler — a second onSignal errors:
+discard IngestSample.onSignal(
+  proc(s: IngestSample)
+      {.async: (raises: []).} =
+    echo s.deviceId, " = ", s.value)
+
+# signal() is a PLAIN proc — never await it:
+let r = IngestSample.signal(
+  deviceId = "d1", value = 0.5)
+# Result[void, string]
+
+if r.isErr:
+  echo "not delivered: ", r.error
+    </code></pre>
+  </section>
+
+  <!-- Semantics / use case -->
+  <section>
+    <h2>SignalBroker — Accept, Don't Confirm</h2>
+
+    <ul>
+      <li><code>ok()</code> means <strong>accepted</strong> — a handler exists <em>and</em> the queue had room. It is <em>never</em> a promise the handler ran.</li>
+      <li class="fragment"><code>err</code> is definitive: <code>"no signal handler installed"</code> or <code>"queue full"</code> &mdash; bursty senders throttle on the latter.</li>
+      <li class="fragment">Handler exceptions are swallowed (a chronicles <code>warn</code>) &mdash; there is no reply path.</li>
+      <li class="fragment"><span class="chip chip-blue">EventBroker</span>'s fire-and-forget dispatch fused with <span class="chip chip-green">RequestBroker</span>'s single registry &mdash; minus the response.</li>
+    </ul>
+
+    <div class="fragment callout warn" style="margin-top:0.7em;">
+      <p>Need delivery confirmation? Use <code>RequestBroker</code> with a <code>void</code> response instead.</p>
+    </div>
+  </section>
+
+</section><!-- /Section SignalBroker -->
+
+<!-- ══════════════════════════════════════════════════
      SECTION 5 — BROKERCONTEXT (vertical stack)
 ══════════════════════════════════════════════════ -->
 <section>
 
   <!-- 5.0  Section header -->
   <section class="section-header">
-    <div class="num">05</div>
+    <div class="num">06</div>
     <h2 style="color:var(--logos-text);">BrokerContext</h2>
     <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Instance isolation &middot; Multi-node &middot; Same thread, separate worlds</p>
   </section>
@@ -1123,7 +1218,7 @@ OnFilterSubscribeEvent.emit(
 
   <!-- 6.0  Section header -->
   <section class="section-header">
-    <div class="num">06</div>
+    <div class="num">07</div>
     <h2 style="color:var(--logos-red);">Multi-Thread Brokers</h2>
     <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Cross-thread messaging &middot; Same API &middot; Based on Efficient, Lock free MPSC Queue</p>
   </section>
@@ -1455,6 +1550,7 @@ RequestBroker(mt, queueDepth = 1024,
         <th><span class="chip chip-blue">EventBroker</span></th>
         <th><span class="chip chip-green">RequestBroker</span></th>
         <th><span class="chip chip-orange">MultiRequestBroker</span></th>
+        <th><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);">SignalBroker</span></th>
       </tr>
     </thead>
     <tbody>
@@ -1463,33 +1559,39 @@ RequestBroker(mt, queueDepth = 1024,
         <td>Reactive pub/sub</td>
         <td>Proactive req/resp</td>
         <td>Proactive fan-out</td>
+        <td>Fire-and-forget</td>
       </tr>
       <tr>
         <td>Direction</td>
         <td>N emitters &rarr; N listeners</td>
         <td>N requesters &rarr; 1 provider</td>
         <td>N requesters &rarr; N providers</td>
+        <td>N senders &rarr; 1 handler</td>
       </tr>
       <tr>
         <td>Return type</td>
         <td><code>void</code> per listener</td>
         <td><code>Result[T, string]</code></td>
         <td><code>Result[seq[T], string]</code></td>
+        <td><code>Result[void, string]</code> (accept)</td>
       </tr>
       <tr>
         <td>Mode</td>
         <td>Always async</td>
         <td>Async <em>or</em> Sync</td>
         <td>Always async</td>
+        <td>Sync call, async handler</td>
       </tr>
       <tr>
         <td>Providers / Listeners</td>
         <td>Unlimited, handle per reg</td>
         <td>Exactly 1 per context</td>
         <td>Unlimited, handle per reg</td>
+        <td>Exactly 1 per context</td>
       </tr>
       <tr>
         <td>Context-aware</td>
+        <td>Yes</td>
         <td>Yes</td>
         <td>Yes</td>
         <td>Yes</td>
@@ -1499,12 +1601,14 @@ RequestBroker(mt, queueDepth = 1024,
         <td>Yes</td>
         <td>Yes</td>
         <td>No</td>
+        <td>Yes</td>
       </tr>
       <tr>
         <td>Use when</td>
         <td>Something happened; notify who cares</td>
         <td>Query from one authoritative source</td>
         <td>Gather data from multiple subsystems</td>
+        <td>One-way ingest; accept, no reply</td>
       </tr>
     </tbody>
   </table>
@@ -1555,7 +1659,7 @@ RequestBroker(mt, queueDepth = 1024,
 
   <!-- 9.0  Section header -->
   <section class="section-header">
-    <div class="num">09</div>
+    <div class="num">10</div>
     <h2 style="color:var(--logos-blue);">Broker FFI-API</h2>
     <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; native C-ABI <em>or</em> CBOR &middot; stable C++ / Python / Rust / Go wrapper surface</p>
   </section>

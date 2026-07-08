@@ -365,6 +365,7 @@ proc generateCborPyFile*(
     mainClass: string = "",
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
+    signalEntries: seq[CborSignalEntry] = @[],
 ) {.compileTime, raises: [].} =
   ## Writes the Python wrapper module (.py) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
@@ -976,6 +977,39 @@ proc generateCborPyFile*(
   py.add("            raise RuntimeError(f\"framework error: {status}\")\n")
   py.add("        return cbor2.loads(out) if out else None\n\n")
 
+  # `_do_signal`: slot-free one-way dispatch through `_call`. No response is
+  # produced; status maps to None (accepted) or a distinguishable RuntimeError.
+  py.add("    def _do_signal(self, api_name: str, req_payload: bytes) -> None:\n")
+  py.add("        in_buf = None\n")
+  py.add("        if req_payload:\n")
+  py.add("            in_buf = _LIB." & p & "allocBuffer(len(req_payload))\n")
+  py.add("            if not in_buf:\n")
+  py.add("                raise RuntimeError(\"allocBuffer failed\")\n")
+  py.add("            ctypes.memmove(in_buf, req_payload, len(req_payload))\n")
+  py.add("        resp_buf = ctypes.c_void_p()\n")
+  py.add("        resp_len = ctypes.c_int32()\n")
+  py.add("        status = _LIB." & p & "call(\n")
+  py.add("            self._ctx,\n")
+  py.add("            api_name.encode(\"utf-8\"),\n")
+  py.add("            in_buf,\n")
+  py.add("            len(req_payload),\n")
+  py.add("            ctypes.byref(resp_buf),\n")
+  py.add("            ctypes.byref(resp_len),\n")
+  py.add("        )\n")
+  py.add("        if resp_buf and resp_len.value > 0:\n")
+  py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
+  py.add("        if status == 0:\n")
+  py.add("            return\n")
+  py.add(
+    "        if status == " & $ApiStatusAgain &
+      ":\n            raise RuntimeError(\"EAGAIN: signal queue full\")\n"
+  )
+  py.add(
+    "        if status == " & $ApiStatusProviderErr &
+      ":\n            raise RuntimeError(\"no signal handler installed\")\n"
+  )
+  py.add("        raise RuntimeError(f\"signal failed: {status}\")\n\n")
+
   # `_call_async`: fire-and-forget dispatch. Allocates the library input buffer
   # (the C ABI frees it), passes the correlation token as userData, and returns
   # the raw rc (0 queued; negative not queued — callback will not fire).
@@ -1190,6 +1224,47 @@ proc generateCborPyFile*(
       continue
     py.add(emitReqMethod(e))
     py.add(emitAsyncReqMethod(e))
+
+  # Per-signal one-way methods: `def <name>(self, fields...) -> None`, raising a
+  # distinguishable RuntimeError on backpressure / no-handler. No async sibling.
+  proc emitSignalMethod(s: CborSignalEntry): string =
+    if not isEmittablePayload(s.typeName):
+      return
+        "    # TODO: signal '" & s.apiName & "' payload '" & s.typeName &
+        "' is not a registered type.\n\n"
+    var fields: seq[ApiFieldDef]
+    if s.typeName in objectNames:
+      fields = lookupTypeEntry(s.typeName).fields
+    else:
+      fields = @[ApiFieldDef(name: "value", nimType: resolveUnderlyingType(s.typeName))]
+    for f in fields:
+      if not isPyMappable(f.nimType):
+        return
+          "    # TODO: signal '" & s.apiName &
+          "' has fields whose Nim types aren't yet mappable to Python.\n\n"
+    var sigParams = "self"
+    var dictParts = ""
+    for i, f in fields.pairs:
+      sigParams.add(", " & f.name & ": " & nimTypeToPyHint(f.nimType))
+      if i > 0:
+        dictParts.add(", ")
+      dictParts.add("\"" & f.name & "\": " & pyEncodeExpr(f.nimType, f.name))
+    result.add("    def " & s.apiName & "(" & sigParams & ") -> None:\n")
+    result.add("        if self._ctx == 0:\n")
+    result.add("            raise RuntimeError(\"Library context is not created\")\n")
+    if fields.len == 0:
+      result.add("        req_payload = b\"\"\n")
+    elif s.typeName in objectNames:
+      result.add("        req_payload = cbor2.dumps({" & dictParts & "})\n")
+    else:
+      result.add(
+        "        req_payload = cbor2.dumps(" &
+          pyEncodeExpr(fields[0].nimType, fields[0].name) & ")\n"
+      )
+    result.add("        self._do_signal(\"" & s.apiName & "\", req_payload)\n\n")
+
+  for s in signalEntries:
+    py.add(emitSignalMethod(s))
 
   # Per-event subscribe / unsubscribe (main-class events only).
   for ev in eventEntries:

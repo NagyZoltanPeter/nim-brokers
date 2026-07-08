@@ -302,6 +302,28 @@ fn test_primitive_int_result_request() {
     lib.shutdown();
 }
 
+// One-way signals (slot-free _call): object payload + scalar payload. Fire
+// both, then read the recorded state back to verify end-to-end delivery.
+fn test_signals() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    check!(lib.ingest_signal(1, "hello".to_string(), vec![10, 20, 30]).is_ok());
+    check!(lib.scalar_signal(42).is_ok());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let r = lib.last_signal_state();
+    check!(r.is_ok());
+    if let Some(st) = r.value() {
+        check!(st.id == 1);
+        check!(st.label == "hello");
+        check!(st.valueCount == 3);
+        check!(st.valueSum == 60);
+        check!(st.scalarVal == 42);
+        check!(st.objCount == 1);
+        check!(st.scalarCount == 1);
+    }
+    lib.shutdown();
+}
+
 fn test_primitive_simple_int_event() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -3126,6 +3148,7 @@ fn main() {
     run_test("test_events_off_stops_delivery", test_events_off_stops_delivery);
 
     run_test("test_primitive_int_result_request", test_primitive_int_result_request);
+    run_test("test_signals", test_signals);
     run_test("test_primitive_simple_int_event", test_primitive_simple_int_event);
     run_test("test_void_action_request", test_void_action_request);
     run_test("test_void_ping_event", test_void_ping_event);

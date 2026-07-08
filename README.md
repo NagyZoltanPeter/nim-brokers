@@ -41,6 +41,7 @@ or with these slides: [Broker Design Presentation](https://nagyzoltanpeter.githu
     - [EventBroker](#eventbroker)
     - [RequestBroker](#requestbroker)
     - [MultiRequestBroker](#multirequestbroker)
+    - [SignalBroker](#signalbroker)
     - [BrokerContext](#brokercontext)
   - [Multi-thread support](#multi-thread-support)
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
@@ -286,6 +287,38 @@ Info.removeProvider(handle.get())
 # Remove all providers
 Info.clearProviders()
 ```
+
+### SignalBroker
+
+Fire-and-forget request — an inverted EventBroker — for feeding a one-way notification signal into a module or library at the interface level. It is fully async, returns no value and no indication of whether processing succeeded; the only errors reported are the no-handler-installed case and back-pressure (queue-full) rejection.
+
+```nim
+import brokers/signal_broker
+
+SignalBroker:
+  type IngestSample = object
+    deviceId*: string
+    value*: float64
+
+# One handler — a second onSignal returns err. Handler exceptions are
+# swallowed (a chronicles warn); there is no reply path.
+discard IngestSample.onSignal(
+  proc(s: IngestSample) {.async: (raises: []).} =
+    echo s.deviceId, " = ", s.value
+)
+
+# signal() is a plain (non-async) proc — never await it.
+let r = IngestSample.signal(deviceId = "d1", value = 0.5)
+# Result[void, string]:
+#   ok()  = accepted (a handler exists + the queue had room) — NOT "handled"
+#   err() = "no signal handler installed" | "queue full"
+if r.isErr:
+  echo "not delivered: ", r.error
+
+await IngestSample.dropSignalHandler()
+```
+
+> `ok()` is a best-effort acknowledgement, not a delivery guarantee — for confirmation, use `RequestBroker` with a `void` response. `SignalBroker(mt)` and `SignalBroker(API)` provide the multi-thread and FFI variants, mirroring the other brokers.
 
 ### BrokerContext
 
@@ -850,16 +883,16 @@ Per-request (cross-thread only, transient — no shared-heap alloc per call):
 
 ### Comparison
 
-| | EventBroker | RequestBroker | EventBroker(mt) | RequestBroker(mt) |
-|---|---|---|---|---|
-| Storage | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars |
-| Shared memory | None | None | Bucket array + Lock + ring + slab (per listener-thread) | Bucket array + Lock + ring + slab + response-slot pool (per context) |
-| Dispatch primitive | direct asyncSpawn | direct call | Vyukov MPSC ring (cell idx) + refcounted slab cell | Vyukov MPSC ring (cell idx) + slab + response-slot pool |
-| Per-call cost | Zero | Zero | Zero shared-heap alloc; one slab encode + N ring enqueues | Zero shared-heap alloc; one slab encode + one pool slot reservation |
-| OS resources | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) |
-| Baseline per context | ~100 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) |
-| Overflow behaviour | n/a | n/a | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) |
-| Intentional leaks | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout |
+| | EventBroker | RequestBroker | SignalBroker | EventBroker(mt) | RequestBroker(mt) | SignalBroker(mt) |
+|---|---|---|---|---|---|---|
+| Storage | threadvar only | threadvar only | threadvar only | createShared + threadvars | createShared + threadvars | createShared + threadvars |
+| Shared memory | None | None | None | Bucket array + Lock + ring + slab (per listener-thread) | Bucket array + Lock + ring + slab + response-slot pool (per context) | Bucket array + Lock + ring + slab + handler-present `Atomic` (per handler-thread) |
+| Dispatch primitive | direct asyncSpawn | direct call | direct asyncSpawn | Vyukov MPSC ring (cell idx) + refcounted slab cell | Vyukov MPSC ring (cell idx) + slab + response-slot pool | Vyukov MPSC ring (cell idx) + refcounted slab cell |
+| Per-call cost | Zero | Zero | Zero | Zero shared-heap alloc; one slab encode + N ring enqueues | Zero shared-heap alloc; one slab encode + one pool slot reservation | Zero shared-heap alloc; one slab encode + one ring enqueue (single target) |
+| OS resources | None | None | None | **One** `ThreadSignalPtr` per thread (shared by all broker types) | **One** `ThreadSignalPtr` per thread (shared) | **One** `ThreadSignalPtr` per thread (shared) |
+| Baseline per context | ~100 bytes | ~16 bytes | ~16 bytes | Compile-time-sized: ring + slab (printed as hint) | Compile-time-sized: ring + slab + pool (printed as hint) | Compile-time-sized: ring + slab (printed as hint) |
+| Overflow behaviour | n/a | n/a | n/a (no queue) | enqueue failure → emitter sees `err`/drop (visible) | enqueue failure or pool exhaustion → `err` (visible) | enqueue failure → `signal()` returns `err("queue full")` (visible) |
+| Intentional leaks | None | None | None | None — slab cells return via refcount | None — pool slots are sealed + reclaimed on timeout | None — slab cells return via refcount |
 
 ## Platform & Nim Version Support
 

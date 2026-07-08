@@ -270,6 +270,26 @@ func test_primitive_int_result_request() {
 	lib.Close()
 }
 
+// One-way signals (slot-free _call): object payload + scalar payload. Fire
+// both, then read the recorded state back to verify end-to-end delivery.
+func test_signals() {
+	lib := newLib()
+	lib.CreateContext()
+	check(lib.IngestSignal(1, "hello", []int32{10, 20, 30}) == nil, "ingestSignal ok")
+	check(lib.ScalarSignal(42) == nil, "scalarSignal ok")
+	time.Sleep(50 * time.Millisecond)
+	st, err := lib.LastSignalState()
+	check(err == nil, "lastSignalState is_ok")
+	checkEq(st.Id, int32(1), "sig id")
+	checkEq(st.Label, "hello", "sig label")
+	checkEq(st.ValueCount, int32(3), "sig valueCount")
+	checkEq(st.ValueSum, int32(60), "sig valueSum")
+	checkEq(st.ScalarVal, int32(42), "sig scalarVal")
+	checkEq(st.ObjCount, int32(1), "sig objCount")
+	checkEq(st.ScalarCount, int32(1), "sig scalarCount")
+	lib.Close()
+}
+
 func test_primitive_simple_int_event() {
 	lib := newLib()
 	lib.CreateContext()
@@ -2615,6 +2635,7 @@ func main() {
 	runTest("test_events_off_stops_delivery", test_events_off_stops_delivery)
 
 	runTest("test_primitive_int_result_request", test_primitive_int_result_request)
+	runTest("test_signals", test_signals)
 	runTest("test_primitive_simple_int_event", test_primitive_simple_int_event)
 	runTest("test_void_action_request", test_void_action_request)
 	runTest("test_void_ping_event", test_void_ping_event)

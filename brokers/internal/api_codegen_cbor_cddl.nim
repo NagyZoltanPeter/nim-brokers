@@ -204,6 +204,7 @@ proc generateCborCddl*(
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
     typeRegistry: seq[ApiTypeEntry],
+    signalEntries: seq[CborSignalEntry] = @[],
 ): string {.compileTime.} =
   ## Pure-string assembly so the same blob can be both written to disk and
   ## embedded as a string literal in the generated runtime descriptor.
@@ -245,17 +246,28 @@ proc generateCborCddl*(
         upperCamel(e.apiName) & "Event = " & nimTypeToCddl(e.typeName) & "\n\n"
       )
 
+  if signalEntries.len > 0:
+    # One-way signals: only the consumed payload rule, no response envelope.
+    result.add("; ----- Signals (one-way, consumed by the library) ----------\n")
+    for s in signalEntries:
+      result.add("; signalName: \"" & s.apiName & "\"\n")
+      result.add(
+        upperCamel(s.apiName) & "Signal = " & nimTypeToCddl(s.typeName) & "\n\n"
+      )
+
 proc generateCborCddlFile*(
     outDir: string,
     libName: string,
     requestEntries: seq[CborRequestEntry],
     eventEntries: seq[CborEventEntry],
     typeRegistry: seq[ApiTypeEntry],
+    signalEntries: seq[CborSignalEntry] = @[],
 ): string {.compileTime, raises: [].} =
   ## Writes `<libName>.cddl` and returns the file's contents so the caller
   ## can embed the same string in the generated runtime discovery payload.
   ensureGeneratedOutputDir(outDir)
-  let body = generateCborCddl(libName, requestEntries, eventEntries, typeRegistry)
+  let body =
+    generateCborCddl(libName, requestEntries, eventEntries, typeRegistry, signalEntries)
   let path = cddlPath(outDir, libName)
   try:
     writeFile(path, body)

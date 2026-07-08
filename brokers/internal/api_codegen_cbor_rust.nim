@@ -231,6 +231,7 @@ proc generateCborRustFile*(
     mainClass: string = "",
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
+    signalEntries: seq[CborSignalEntry] = @[],
 ) {.compileTime, raises: [].} =
   ## Writes the Rust wrapper crate (Cargo.toml + src/lib.rs) for a
   ## CBOR-mode library under `<outDir>/<libName>_rs/`.
@@ -908,6 +909,58 @@ proc generateCborRustFile*(
   rs.add("            Ok(out)\n")
   rs.add("        }\n")
   rs.add("    }\n\n")
+
+  # Slot-free one-way signal dispatch through `_call`. No response envelope;
+  # status maps to Ok(()) or a distinguishable Err(String).
+  rs.add(
+    "    fn do_signal(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<(), String> {\n"
+  )
+  rs.add(
+    "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
+  )
+  rs.add("        unsafe {\n")
+  rs.add(
+    "            let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+  )
+  rs.add("            let in_buf: *const c_void = if req_payload.is_empty() {\n")
+  rs.add("                std::ptr::null()\n")
+  rs.add("            } else {\n")
+  rs.add("                let p = " & p & "allocBuffer(req_payload.len() as i32);\n")
+  rs.add(
+    "                if p.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+  )
+  rs.add(
+    "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), p as *mut u8, req_payload.len());\n"
+  )
+  rs.add("                p as *const c_void\n")
+  rs.add("            };\n")
+  rs.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
+  rs.add("            let mut out_len: i32 = 0;\n")
+  rs.add("            let status = " & p & "call(\n")
+  rs.add(
+    "                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n"
+  )
+  rs.add("                &mut out_buf as *mut _, &mut out_len as *mut _,\n")
+  rs.add("            );\n")
+  rs.add(
+    "            if !out_buf.is_null() && out_len > 0 { " & p &
+      "freeBuffer(out_buf); }\n"
+  )
+  rs.add("            match status {\n")
+  rs.add("                0 => Ok(()),\n")
+  rs.add(
+    "                " & $ApiStatusAgain &
+      " => Err(\"EAGAIN: signal queue full\".into()),\n"
+  )
+  rs.add(
+    "                " & $ApiStatusProviderErr &
+      " => Err(\"no signal handler installed\".into()),\n"
+  )
+  rs.add("                s => Err(format!(\"signal failed: {}\", s)),\n")
+  rs.add("            }\n")
+  rs.add("        }\n")
+  rs.add("    }\n\n")
+
   rs.add(emitDoCallAsync(p))
 
   # Per-request methods. Factored into a reusable emitter so the main Lib impl
@@ -1124,6 +1177,70 @@ proc generateCborRustFile*(
       rs.add(emitRustInstanceMethod(e))
     else:
       rs.add(emitRustReqMethod(e))
+
+  # Per-signal one-way methods: `pub fn <name>(&self, fields...) ->
+  # Result<(), String>`. No async sibling — signals are one-way.
+  proc emitRustSignalMethod(s: CborSignalEntry): string {.compileTime.} =
+    if not isEmittablePayload(s.typeName):
+      return
+        "    // TODO: signal '" & s.apiName & "' payload '" & s.typeName &
+        "' is not a registered type.\n\n"
+    var fields: seq[ApiFieldDef]
+    if s.typeName in objectNames:
+      fields = lookupTypeEntry(s.typeName).fields
+    else:
+      fields = @[ApiFieldDef(name: "value", nimType: resolveUnderlyingType(s.typeName))]
+    for f in fields:
+      if not isRustMappable(f.nimType):
+        return
+          "    // TODO: signal '" & s.apiName &
+          "' has fields whose Nim types aren't yet mappable to Rust.\n\n"
+    var sigParams = "&self"
+    for f in fields:
+      sigParams.add(", " & f.name & ": " & nimTypeToRustHint(f.nimType))
+    result.add("    #[allow(non_snake_case)]\n")
+    result.add(
+      "    pub fn " & s.apiName & "(" & sigParams &
+        ") -> ::std::result::Result<(), String> {\n"
+    )
+    if fields.len == 0:
+      result.add("        let buf: Vec<u8> = Vec::new();\n")
+    elif s.typeName in objectNames:
+      result.add("        #[derive(Serialize)]\n")
+      result.add("        #[allow(non_snake_case)]\n")
+      result.add("        struct __Sig {\n")
+      for f in fields:
+        let lowered = f.nimType.toLowerAscii().strip()
+        if lowered == "seq[byte]":
+          result.add("            #[serde(with = \"serde_bytes\")]\n")
+        elif lowered == "option[seq[byte]]":
+          result.add(
+            "            #[serde(with = \"::serde_bytes\", default, skip_serializing_if = \"Option::is_none\")]\n"
+          )
+        result.add(
+          "            " & f.name & ": " & nimTypeToRustHint(f.nimType) & ",\n"
+        )
+      result.add("        }\n")
+      result.add("        let sig = __Sig {\n")
+      for f in fields:
+        result.add("            " & f.name & ",\n")
+      result.add("        };\n")
+      result.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      result.add("        if let Err(e) = ciborium::into_writer(&sig, &mut buf) {\n")
+      result.add("            return Err(format!(\"cbor encode: {}\", e));\n")
+      result.add("        }\n")
+    else:
+      result.add("        let mut buf: Vec<u8> = Vec::new();\n")
+      result.add("        if let Err(e) = ciborium::into_writer(&value, &mut buf) {\n")
+      result.add("            return Err(format!(\"cbor encode: {}\", e));\n")
+      result.add("        }\n")
+    result.add("        self.do_signal(\"" & s.apiName & "\", &buf)\n")
+    result.add("    }\n\n")
+
+  if signalEntries.len > 0:
+    rs.add("    // ---- Signal methods ----\n\n")
+    for s in signalEntries:
+      rs.add(emitRustSignalMethod(s))
 
   # Per-event subscribe / unsubscribe.
   rs.add("    // ---- Event registration ----\n\n")

@@ -320,6 +320,36 @@ fn main() {
     }
     println!();
 
+    // --- One-way signal (IngestReading) + readback (LastReading) --------
+    println!("--- Firing IngestReading signals (one-way, slot-free) ---");
+    if let Err(e) = lib.ingest_reading(42, 3.5) {
+        eprintln!("FATAL: ingest_reading: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = lib.ingest_reading(42, 7.25) {
+        eprintln!("FATAL: ingest_reading: {}", e);
+        std::process::exit(1);
+    }
+    thread::sleep(Duration::from_millis(50));
+    let rb = lib.last_reading();
+    match rb.value() {
+        Some(v) => {
+            println!(
+                "  LastReading: deviceId={} value={} count={}",
+                v.deviceId, v.value, v.count
+            );
+            assert!(
+                v.count == 2 && v.deviceId == 42 && v.value == 7.25,
+                "signal round-trip mismatch"
+            );
+            println!("  Signal round-trip verified.\n");
+        }
+        None => {
+            eprintln!("FATAL: last_reading: {}", rb.error().unwrap_or("?"));
+            std::process::exit(1);
+        }
+    }
+
     // --- Unsubscribe all ------------------------------------------------
     println!("--- Unsubscribing all ---");
     lib.off_device_discovered(0); // 0 -> remove all

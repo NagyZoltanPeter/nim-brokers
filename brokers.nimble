@@ -317,8 +317,8 @@ task fetchVendor, "Initialize/update vendored third-party dependencies (git subm
 task test, "Run all single and multi-threaded broker tests":
   let tests = [
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
-    "test_request_broker_sync_void", "test_multi_request_broker", "test_broker_oop",
-    "test_broker_lifecycle", "test_broker_ctor_shapes",
+    "test_request_broker_sync_void", "test_multi_request_broker", "test_signal_broker",
+    "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
   ]
   for f in tests:
     for opt in [
@@ -331,8 +331,8 @@ task test, "Run all single and multi-threaded broker tests":
 
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
-    "test_multi_thread_broker_configs", "test_mt_large_payload",
-    "test_mt_drop_async_eager", "test_alloc_race_variants",
+    "test_multi_thread_signal_broker", "test_multi_thread_broker_configs",
+    "test_mt_large_payload", "test_mt_drop_async_eager", "test_alloc_race_variants",
   ]
   for f in mtTests:
     for opt in [
@@ -399,8 +399,10 @@ task testAllocRace,
   echo "TEARDOWN-GATE PASSED: 0 crashes across " & $(variants.len * trials) & " trials"
 
 task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
-  let rejects =
-    ["reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret"]
+  let rejects = [
+    "reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret",
+    "reject_signal_badmode",
+  ]
   for f in rejects:
     let (outp, code) = gorgeEx(
       "nim c --hints:off --path:. --outdir:build/reject test/reject/" & f & ".nim"
@@ -561,8 +563,10 @@ task runFfiBenchEvent, "Build benchlib (release/orc) + bench_event_driver and ru
   exec "test/ffibench/build/bench_event_driver"
 
 task perftest, "Run performance and stress tests":
-  let mtTests =
-    ["perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker"]
+  let mtTests = [
+    "perf_test_multi_thread_request_broker", "perf_test_multi_thread_event_broker",
+    "perf_test_multi_thread_signal_broker",
+  ]
   for f in mtTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc --threads:on",
@@ -591,6 +595,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   let apiTests = [
     ("test_api_library_init", "apitest"),
     ("test_api_callAsync", "acbtest"),
+    ("test_api_signal_broker", "sigtest"),
     ("test_api_event_teardown_isolation", "cbevt"),
     ("test_api_discovery", "apidisc"),
     ("test_broker_interface_api", "brokerifaceapi"),
@@ -1150,6 +1155,14 @@ task testMtBrokerConfigsAsanRefc,
   "Run multi-thread broker config showcase under AddressSanitizer (clang, refc, debug)":
   testAsan("refc", "test_multi_thread_broker_configs")
 
+task testMtSignalBrokerAsanOrc,
+  "Run multi-thread signal broker tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_signal_broker")
+
+task testMtSignalBrokerAsanRefc,
+  "Run multi-thread signal broker tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_multi_thread_signal_broker")
+
 # ---------------------------------------------------------------------------
 # ThreadSanitizer variants of the multi-thread broker tests. TSan is the
 # most relevant sanitizer for these: it validates the Channel[T] / shared
@@ -1180,6 +1193,14 @@ task testMtBrokerConfigsTsanRefc,
   "Run multi-thread broker config showcase under ThreadSanitizer (clang, refc, debug)":
   testSan("tsan", "refc", "test_multi_thread_broker_configs")
 
+task testMtSignalBrokerTsanOrc,
+  "Run multi-thread signal broker tests under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_multi_thread_signal_broker")
+
+task testMtSignalBrokerTsanRefc,
+  "Run multi-thread signal broker tests under ThreadSanitizer (clang, refc, debug)":
+  testSan("tsan", "refc", "test_multi_thread_signal_broker")
+
 # ---------------------------------------------------------------------------
 # Sanitizer coverage for the FFI event-teardown isolation regression test
 # (the cross-context subs-count fix). FFI build needs -d:BrokerFfiApi and a
@@ -1194,6 +1215,24 @@ task testApiTeardownAsanOrc,
 task testApiTeardownAsanRefc,
   "Run FFI event-teardown isolation test under ASan+UBSan (clang, refc, debug)":
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+
+const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
+
+task testApiSignalAsanOrc,
+  "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalAsanRefc,
+  "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalTsanOrc,
+  "Run FFI SignalBroker(API) slot-free _call test under ThreadSanitizer (clang, orc, debug)":
+  testSan("tsan", "orc", "test_api_signal_broker", signalApiTestExtra)
+
+task testApiSignalTsanRefc,
+  "Run FFI SignalBroker(API) slot-free _call test under ThreadSanitizer (clang, refc, debug)":
+  testSan("tsan", "refc", "test_api_signal_broker", signalApiTestExtra)
 
 task testApiTeardownTsanOrc,
   "Run FFI event-teardown isolation test under ThreadSanitizer (clang, orc, debug)":
@@ -1395,8 +1434,12 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testMtRequestBrokerAsanRefc"
   exec "nimble testMtBrokerConfigsAsanOrc"
   exec "nimble testMtBrokerConfigsAsanRefc"
+  exec "nimble testMtSignalBrokerAsanOrc"
+  exec "nimble testMtSignalBrokerAsanRefc"
   exec "nimble testApiTeardownAsanOrc"
   exec "nimble testApiTeardownAsanRefc"
+  exec "nimble testApiSignalAsanOrc"
+  exec "nimble testApiSignalAsanRefc"
 
 task allTsan,
   "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
@@ -1406,8 +1449,12 @@ task allTsan,
   exec "nimble testMtRequestBrokerTsanRefc"
   exec "nimble testMtBrokerConfigsTsanOrc"
   exec "nimble testMtBrokerConfigsTsanRefc"
+  exec "nimble testMtSignalBrokerTsanOrc"
+  exec "nimble testMtSignalBrokerTsanRefc"
   exec "nimble testApiTeardownTsanOrc"
   exec "nimble testApiTeardownTsanRefc"
+  exec "nimble testApiSignalTsanOrc"
+  exec "nimble testApiSignalTsanRefc"
 
 task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
   # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.

@@ -158,6 +158,33 @@ raw hazard, or `nimble probeWinTlsUninitOrc` to verify ORC is clean.
 The `memcheck_ci.yml` workflow exposes both as `workflow_dispatch`
 options; `teardown_verify.yml` exercises the broker teardown gate.
 
+### 2.3 SignalBroker: best-effort delivery on a teardown race
+
+`SignalBroker` accepts a `signal(...)` when a handler is present and the
+queue has room, returning `ok()`. That acceptance is a **snapshot**, not a
+guarantee the handler ran: the handler-present check and the enqueue are
+deliberately **not atomic** (and, in the MT/FFI lane, deliberately unlocked
+so the hot path stays lock-free). A concurrent `dropSignalHandler` — or a
+context shutdown — can invalidate the bucket after `signal()` already
+returned `ok()`, so an accepted signal can be silently dropped **during
+teardown**.
+
+This is by design: closing the window would mean holding the registry lock
+across the enqueue, serialising the very hot path the feature exists to keep
+fast. Note the race predates the lock-free design — the lock never covered
+handler *execution*, only the registry read, so the answer was always a
+snapshot.
+
+Consequences and guidance:
+
+- **`ok()` ≠ "handled"**, in every lane (even single-thread). If you need
+  delivery confirmation, use `RequestBroker` with a `void` response.
+- Callers must handle `err("queue full")` (FFI: `ApiStatusAgain`, -6) as
+  real backpressure — throttle or drop; the library will not buffer beyond
+  the configured ring/courier capacity.
+- Quiesce producers before tearing a context down if you need every
+  in-flight signal delivered.
+
 ---
 
 ## 3. Build notes (Windows toolchain)
