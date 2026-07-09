@@ -264,7 +264,7 @@ Info.clearProviders()
 
 ### SignalBroker
 
-Fire-and-forget request — an inverted EventBroker — for feeding a one-way notification signal into a module or library at the interface level. It is fully async, returns no value and no indication of whether processing succeeded; the only errors reported are the no-handler-installed case and back-pressure (queue-full) rejection.
+Fire-and-forget request — an inverted EventBroker — for feeding a one-way notification signal into a module or library at the interface level. The handler runs async, but `signal()` is a plain (non-async) proc returning `Result[void, string]`; it reports only acceptance/backpressure, not delivery success.
 
 ```nim
 import brokers/signal_broker
