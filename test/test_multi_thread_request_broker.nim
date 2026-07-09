@@ -783,3 +783,68 @@ suite "RequestBroker macro (multi-thread mode, sugar void result)":
     check gSugarVoidOk.load()
 
     SugarVoid.clearProvider()
+
+## ---------------------------------------------------------------------------
+## bind / rebind provider sugar (issue #42) — same-thread (owning) exercise
+## ---------------------------------------------------------------------------
+
+RequestBroker(mt):
+  type MtBindArg = object
+    v*: int
+
+  proc signature*(k: int): Future[Result[MtBindArg, string]] {.async.}
+
+RequestBroker(mt):
+  type MtBindDual = object
+    v*: int
+
+  proc signature*(): Future[Result[MtBindDual, string]] {.async.}
+  proc signature*(k: int): Future[Result[MtBindDual, string]] {.async.}
+
+type MtReqBindService = ref object
+  base: int
+
+proc mtProvideArg(
+    self: MtReqBindService, k: int
+): Future[Result[MtBindArg, string]] {.async.} =
+  ok(MtBindArg(v: self.base + k))
+
+proc mtMockArg(
+    self: MtReqBindService, k: int
+): Future[Result[MtBindArg, string]] {.async.} =
+  err("mock-fail")
+
+proc mtDualZero(self: MtReqBindService): Future[Result[MtBindDual, string]] {.async.} =
+  ok(MtBindDual(v: 100))
+
+proc mtDualArg(
+    self: MtReqBindService, k: int
+): Future[Result[MtBindDual, string]] {.async.} =
+  ok(MtBindDual(v: k))
+
+suite "RequestBroker(mt) bind/rebind sugar (issue #42)":
+  test "bindProvider + rebindProvider on the owning thread":
+    let self = MtReqBindService(base: 10)
+    check MtBindArg.bindProvider(self.mtProvideArg).isOk()
+    let r = waitFor MtBindArg.request(5)
+    check r.isOk()
+    check r.value.v == 15
+
+    check MtBindArg.rebindProvider(DefaultBrokerContext, self.mtMockArg).isOk()
+    let r2 = waitFor MtBindArg.request(5)
+    check r2.isErr()
+    check r2.error.contains("mock-fail")
+
+    MtBindArg.clearProvider()
+
+  test "bindProvider disambiguates arity on a dual-slot mt broker":
+    let self = MtReqBindService(base: 0)
+    check MtBindDual.bindProvider(self.mtDualZero).isOk()
+    check MtBindDual.bindProvider(self.mtDualArg).isOk()
+    let z = waitFor MtBindDual.request()
+    let a = waitFor MtBindDual.request(42)
+    check z.isOk()
+    check z.value.v == 100
+    check a.isOk()
+    check a.value.v == 42
+    MtBindDual.clearProvider()

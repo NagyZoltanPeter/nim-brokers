@@ -329,6 +329,28 @@ static void test_primitive_int_result_request() {
     lib.shutdown();
 }
 
+// One-way signals (slot-free _call): object payload + scalar payload. Fire
+// both, then read the recorded state back to verify end-to-end delivery.
+static void test_signals() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    auto s1 = lib.ingestSignal(1, "hello", {10, 20, 30});
+    CHECK(s1.isOk());
+    auto s2 = lib.scalarSignal(42);
+    CHECK(s2.isOk());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto r = lib.lastSignalState();
+    CHECK(r.isOk());
+    CHECK_EQ(r->id, 1);
+    CHECK_EQ(r->label, std::string("hello"));
+    CHECK_EQ(r->valueCount, 3);
+    CHECK_EQ(r->valueSum, 60);
+    CHECK_EQ(r->scalarVal, 42);
+    CHECK_EQ(r->objCount, 1);
+    CHECK_EQ(r->scalarCount, 1);
+    lib.shutdown();
+}
+
 static void test_primitive_simple_int_event() {
     Typemappingtestlib lib;
     lib.createContext();
@@ -2828,6 +2850,7 @@ int main() {
 
     printf("\n--- TestPrimitiveBrokerTypes ---\n");
     RUN(test_primitive_int_result_request);
+    RUN(test_signals);
     RUN(test_primitive_simple_int_event);
     RUN(test_void_action_request);
     RUN(test_void_ping_event);

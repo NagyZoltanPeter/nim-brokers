@@ -18,7 +18,8 @@
 {.push raises: [].}
 
 import std/sequtils
-import brokers/[event_broker, request_broker, broker_context, api_library]
+import
+  brokers/[event_broker, request_broker, signal_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # Shared item types (used in seq[T] request and result fields)
@@ -178,6 +179,28 @@ EventBroker(API):
     capabilities*: array[4, int32]
 
 # ---------------------------------------------------------------------------
+# Signal Broker (one-way, fire-and-forget — the library CONSUMES these)
+# ---------------------------------------------------------------------------
+
+## IngestReading: a foreign caller pushes a sensor reading into the library.
+## One-way — no response. The handler records it; `LastReading` reads it back so
+## the example can verify the signal was delivered end-to-end.
+SignalBroker(API):
+  type IngestReading = object
+    deviceId*: int64
+    value*: float64
+
+## LastReading: readback of the most recent IngestReading signal (+ a running
+## count), so a one-way signal is observable through the request surface.
+RequestBroker(API):
+  type LastReading = object
+    deviceId*: int64
+    value*: float64
+    count*: int32
+
+  proc signature*(): Future[Result[LastReading, string]] {.async.}
+
+# ---------------------------------------------------------------------------
 # Library internals (provider implementations)
 # ---------------------------------------------------------------------------
 
@@ -188,6 +211,9 @@ type Device = object
   address: string
   online: bool
 
+var gLastReadingDeviceId {.threadvar.}: int64
+var gLastReadingValue {.threadvar.}: float64
+var gReadingCount {.threadvar.}: int32
 var gDevices {.threadvar.}: seq[Device]
 var gNextDeviceId {.threadvar.}: int64
 var gNextSensorId {.threadvar.}: int32
@@ -427,6 +453,32 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
       "failed to register GetDeviceCapabilities provider: " &
         getDeviceCapabilitiesProviderRes.error()
     )
+
+  # IngestReading signal handler — records the reading so LastReading can read
+  # it back. One-way: no response is produced.
+  let ingestReadingRes = IngestReading.onSignal(
+    ctx,
+    proc(s: IngestReading) {.async: (raises: []).} =
+      gLastReadingDeviceId = s.deviceId
+      gLastReadingValue = s.value
+      gReadingCount += 1,
+  )
+  if ingestReadingRes.isErr():
+    return err("failed to register IngestReading handler: " & ingestReadingRes.error())
+
+  # LastReading provider — reads back the most recent IngestReading signal.
+  let lastReadingProviderRes = LastReading.setProvider(
+    ctx,
+    proc(): Future[Result[LastReading, string]] {.closure, async.} =
+      ok(
+        LastReading(
+          deviceId: gLastReadingDeviceId, value: gLastReadingValue, count: gReadingCount
+        )
+      ),
+  )
+  if lastReadingProviderRes.isErr():
+    return
+      err("failed to register LastReading provider: " & lastReadingProviderRes.error())
 
   ok()
 

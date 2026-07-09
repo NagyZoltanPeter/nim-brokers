@@ -97,32 +97,93 @@ under refc on Windows across every Nim version we test (2.2.4,
 The hazard is real, structural, and unfixable from our side without
 an upstream chronos rewrite of the Windows wait primitive.
 
-**But broker / FFI code under refc on Windows is green.** The
-channel-dispatch refactor + the courier rework moved every Nim
-allocator interaction off the wait-thread callback path. The
-callback now does pure atomic state-machine work; allocations happen
-on broker-owned threads (processing / delivery) that go through
-proper Nim thread init. The full CI matrix (`nimble test`,
-`testApi`, all four `runTypeMapTestLib*`, all four `runFfiExample*`)
-is green under Windows + refc + Nim 2.2.4 + Nim 2.2.10.
+**Broker / FFI code DID trip a related teardown variant of this
+hazard until the `teardownBrokerThread` fix.** A 2026-07 CI
+investigation (repeated-run harness, ~30 % crash rate per execution on
+GitHub win runners, `0xC0000005`) showed the historical
+"win + Nim 2.2.4 first-run CI flake" was in fact this mechanism firing
+at **worker-thread exit**, on *every* Nim 2.2.x, hidden on other
+versions only by single-shot CI sampling:
 
-**Recommendation.** Use the brokers and the FFI API freely on Windows
-under either `--mm:orc` or `--mm:refc` — both are CI-green. But:
+- A worker thread that used the MT brokers leaves `brokerDispatchLoop`
+  suspended in `await signal.wait()`; on Windows that wait is a live
+  `RegisterWaitForSingleObject` registration holding a **GC-heap
+  `ref PostCallbackData`**.
+- refc frees the whole thread heap at thread exit
+  (`deallocOsPages()`); a later `setEvent` / handle reuse makes the OS
+  wait-thread callback dereference unmapped pages. ORC survives
+  because it skips `deallocOsPages` (the state leaks in still-mapped
+  memory).
+- A second, **general** (all-platform) variant existed: raw
+  `ThreadSignalPtr` pointers in shared buckets / request messages
+  could be fired by other threads after the owner closed and freed the
+  signal — on POSIX a silent stray `write()` to a possibly-reused fd.
+
+**The fix (teardown-sequence, 2026-07):**
+
+- `BrokerSignalShared` — a type-stable, close-guarded shared wrapper
+  (closed-bit + in-flight-firer refcount, recycled on a process
+  freelist) replaces every raw `ThreadSignalPtr` handed across
+  threads. Firing after close is a no-op; wrapper memory is never
+  unmapped. Identical semantics under refc and orc, all platforms.
+- `teardownBrokerThread()` (in `brokers/internal/mt_broker_common.nim`)
+  runs stop-dispatch-loop → close signal wrapper →
+  `drainPendingRingFrees` → close chronos dispatcher handle, **before**
+  the thread's refc heap dies. It is registered automatically via
+  `onThreadDestruction` for Nim-created threads; **foreign/FFI threads
+  and the main thread must call it explicitly** (Nim's destruction
+  handlers never run for them).
+- Regression gate: `nimble testAllocRace` (40 repeated trials per
+  single-ingredient reproducer variant, refc + release) and the
+  dispatch-only `teardown_verify.yml` workflow.
+
+**Recommendation.** Use the brokers and the FFI API on Windows under
+either `--mm:orc` or `--mm:refc`. But:
 
 - **Do not call `Nim` allocators from your own
   `RegisterWaitForSingleObject` callbacks under refc.** This is the
-  hazard the probe demonstrates; broker code happens to not do it,
-  but unrelated app code that does will crash the same way.
+  hazard the probe demonstrates; broker code no longer does it, but
+  unrelated app code that does will crash the same way.
+- **Threads not created by Nim (FFI callers) that used broker APIs
+  must call `teardownBrokerThread()` before their final return.**
 - **Prefer `--mm:orc`** if you want full peace of mind.
-- The `skipRefcOnWindows` predicate in `brokers.nimble` is currently
-  *disabled* (commit `a10ccff` on PR #17 — commented-out but kept).
-  If a future regression somehow re-exposes the hazard via broker
-  code, restoring the skip is a one-line revert.
+- The historical `skipRefcOnWindows` predicate in `brokers.nimble`
+  was **removed entirely**: the teardown-sequence fix addresses the
+  broker-path crash it used to paper over, and the `testAllocRace`
+  gate on the Windows CI cells fails loudly if it ever regresses.
+  refc and orc now run the identical test matrix on every platform.
 
 Run `nimble probeWinTlsUninitRefc` on a Windows host to reproduce the
 raw hazard, or `nimble probeWinTlsUninitOrc` to verify ORC is clean.
 The `memcheck_ci.yml` workflow exposes both as `workflow_dispatch`
-options.
+options; `teardown_verify.yml` exercises the broker teardown gate.
+
+### 2.3 SignalBroker: best-effort delivery on a teardown race
+
+`SignalBroker` accepts a `signal(...)` when a handler is present and the
+queue has room, returning `ok()`. That acceptance is a **snapshot**, not a
+guarantee the handler ran: the handler-present check and the enqueue are
+deliberately **not atomic** (and, in the MT/FFI lane, deliberately unlocked
+so the hot path stays lock-free). A concurrent `dropSignalHandler` — or a
+context shutdown — can invalidate the bucket after `signal()` already
+returned `ok()`, so an accepted signal can be silently dropped **during
+teardown**.
+
+This is by design: closing the window would mean holding the registry lock
+across the enqueue, serialising the very hot path the feature exists to keep
+fast. Note the race predates the lock-free design — the lock never covered
+handler *execution*, only the registry read, so the answer was always a
+snapshot.
+
+Consequences and guidance:
+
+- **`ok()` ≠ "handled"**, in every lane (even single-thread). If you need
+  delivery confirmation, use `RequestBroker` with a `void` response.
+- Callers must handle `err("queue full")` (FFI: `ApiStatusAgain`, -6) as
+  real backpressure — throttle or drop; the library will not buffer beyond
+  the configured ring/courier capacity.
+- Quiesce producers before tearing a context down if you need every
+  in-flight signal delivered.
 
 ---
 

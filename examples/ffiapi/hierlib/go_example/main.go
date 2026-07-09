@@ -29,6 +29,23 @@ func main() {
 		panic(fmt.Sprint("echo_len: ", el, " ", err))
 	}
 
+	// One-way signal (fire-and-forget, no response): nudge the value; poll
+	// GetValue for the observable effect once the handler has run.
+	if err := lib.NudgeSignal(10); err != nil {
+		panic(fmt.Sprint("nudge_signal: ", err))
+	}
+	sigDeadline := time.Now().Add(2 * time.Second)
+	for {
+		v, err := lib.GetValue()
+		if err == nil && int32(v) == 17 {
+			break
+		}
+		if time.Now().After(sigDeadline) {
+			panic(fmt.Sprint("signal delivery: ", v, " ", err))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	var received int32 = -1
 	h := lib.OnTick(func(n int32) { atomic.StoreInt32(&received, n) })
 	if h == 0 {
@@ -65,6 +82,23 @@ func main() {
 	}
 	if a, err := widget.Area(); err != nil || int32(a) != 225 {
 		panic(fmt.Sprint("widget.Area after scale: ", a, " ", err))
+	}
+
+	// Sub-interface one-way signal: routes to THIS widget by its ctx
+	// (size 15 -> 20 -> area 400). Poll Area for the async one-way delivery.
+	if err := widget.ResizeSignal(5); err != nil {
+		panic(fmt.Sprint("resize_signal: ", err))
+	}
+	wsd := time.Now().Add(2 * time.Second)
+	for {
+		a, err := widget.Area()
+		if err == nil && int32(a) == 400 {
+			break
+		}
+		if time.Now().After(wsd) {
+			panic(fmt.Sprint("widget signal delivery: ", a, " ", err))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// A second, independent widget (own instanceCtx, same library).

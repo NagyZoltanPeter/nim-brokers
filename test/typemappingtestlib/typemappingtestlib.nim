@@ -18,7 +18,8 @@
 {.push raises: [].}
 
 import std/[options, tables, algorithm, strutils, hashes]
-import brokers/[event_broker, request_broker, broker_context, api_library]
+import
+  brokers/[event_broker, request_broker, signal_broker, broker_context, api_library]
 
 # ---------------------------------------------------------------------------
 # Shared types — exercising enum, distinct, and seq[object]
@@ -185,6 +186,38 @@ RequestBroker(API):
   type IntResultRequest = int32
 
   proc signature*(value: int32): Future[Result[IntResultRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# Signal Brokers — one-way, slot-free `_call` coverage across all wrappers
+# ---------------------------------------------------------------------------
+
+## IngestSignal: composite object payload — exercises scalar + string + seq
+## through the one-way signal path.
+SignalBroker(API):
+  type IngestSignal = object
+    id*: int32
+    label*: string
+    values*: seq[int32]
+
+## ScalarSignal: bare-scalar (distinct) payload — exercises the scalar signal
+## wrapper method in every language.
+SignalBroker(API):
+  type ScalarSignal = int32
+
+## LastSignalState: readback of the recorded signal state, so the one-way
+## signals are observable through the request surface. The harnesses fire the
+## signals then request this to assert delivery + wire fidelity.
+RequestBroker(API):
+  type LastSignalState = object
+    id*: int32
+    label*: string
+    valueCount*: int32
+    valueSum*: int32
+    scalarVal*: int32
+    objCount*: int32
+    scalarCount*: int32
+
+  proc signature*(): Future[Result[LastSignalState, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Request Brokers — seq[T] result coverage
@@ -754,10 +787,57 @@ var gLabel {.threadvar.}: string
 var gCounter {.threadvar.}: int32
 var gProviderCtx {.threadvar.}: BrokerContext
 
+# Signal recording state — written by the signal handlers, read back via the
+# LastSignalState request so the harnesses can verify one-way delivery.
+var gSigId {.threadvar.}: int32
+var gSigLabel {.threadvar.}: string
+var gSigValueCount {.threadvar.}: int32
+var gSigValueSum {.threadvar.}: int32
+var gSigScalarVal {.threadvar.}: int32
+var gSigObjCount {.threadvar.}: int32
+var gSigScalarCount {.threadvar.}: int32
+
 proc setupProviders(ctx: BrokerContext) =
   gProviderCtx = ctx
   gCounter = 0
   gLabel = ""
+
+  # --- Signal handlers + readback provider (one-way signal coverage) ---
+  discard IngestSignal.onSignal(
+    ctx,
+    proc(s: IngestSignal) {.async: (raises: []).} =
+      gSigId = s.id
+      gSigLabel = s.label
+      gSigValueCount = int32(s.values.len)
+      var sum: int32 = 0
+      for v in s.values:
+        sum += v
+      gSigValueSum = sum
+      gSigObjCount += 1,
+  )
+
+  discard ScalarSignal.onSignal(
+    ctx,
+    proc(s: ScalarSignal) {.async: (raises: []).} =
+      gSigScalarVal = int32(s)
+      gSigScalarCount += 1,
+  )
+
+  discard LastSignalState.setProvider(
+    ctx,
+    proc(): Future[Result[LastSignalState, string]] {.closure, async.} =
+      ok(
+        LastSignalState(
+          id: gSigId,
+          label: gSigLabel,
+          valueCount: gSigValueCount,
+          valueSum: gSigValueSum,
+          scalarVal: gSigScalarVal,
+          objCount: gSigObjCount,
+          scalarCount: gSigScalarCount,
+        )
+      ),
+  )
 
   # --- Original providers ---
 

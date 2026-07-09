@@ -291,7 +291,10 @@ proc generateMtRequestBroker*(
   )
   msgRecList.add(
     newTree(
-      nnkIdentDefs, ident("requesterSignal"), ident("ThreadSignalPtr"), newEmptyNode()
+      nnkIdentDefs,
+      ident("requesterSignal"),
+      newTree(nnkPtrTy, ident("BrokerSignalShared")),
+      newEmptyNode(),
     )
   )
   typeSection.add(
@@ -328,7 +331,10 @@ proc generateMtRequestBroker*(
   )
   bucketRecList.add(
     newTree(
-      nnkIdentDefs, ident("providerSignal"), ident("ThreadSignalPtr"), newEmptyNode()
+      nnkIdentDefs,
+      ident("providerSignal"),
+      newTree(nnkPtrTy, ident("BrokerSignalShared")),
+      newEmptyNode(),
     )
   )
   bucketRecList.add(
@@ -508,7 +514,7 @@ proc generateMtRequestBroker*(
       proc `sendReplyIdent`(
           pool: ptr ResponseSlotPool,
           slotIdx: uint32,
-          requesterSignal: ThreadSignalPtr,
+          requesterSignal: ptr BrokerSignalShared,
           resp: Result[`payloadType`, string],
       ) {.gcsafe, raises: [].} =
         if pool.isNil or slotIdx == EmptyIdx:
@@ -921,7 +927,7 @@ proc generateMtRequestBroker*(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
-          providerSignal: ThreadSignalPtr,
+          providerSignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
       ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
         ensureBrokerDispatchStarted()
@@ -1052,7 +1058,7 @@ proc generateMtRequestBroker*(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
-          providerSignal: ThreadSignalPtr,
+          providerSignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         let slotIdx = pool[].claim(`shardHintIdent`())
@@ -1151,7 +1157,7 @@ proc generateMtRequestBroker*(
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
-          var providerSignal: ThreadSignalPtr
+          var providerSignal: ptr BrokerSignalShared
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -1220,7 +1226,7 @@ proc generateMtRequestBroker*(
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
-          var providerSignal: ThreadSignalPtr
+          var providerSignal: ptr BrokerSignalShared
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -1315,7 +1321,7 @@ proc generateMtRequestBroker*(
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
-      var providerSignal: ThreadSignalPtr
+      var providerSignal: ptr BrokerSignalShared
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -1437,7 +1443,7 @@ proc generateMtRequestBroker*(
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
-      var providerSignal: ThreadSignalPtr
+      var providerSignal: ptr BrokerSignalShared
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -1549,7 +1555,7 @@ proc generateMtRequestBroker*(
   let clearBody = quote:
     `initProcIdent`()
     var ring: ptr VyukovMpscRing[uint32]
-    var providerSignal: ThreadSignalPtr
+    var providerSignal: ptr BrokerSignalShared
     var isProviderThread = false
     let myThreadGen = currentMtThreadGen()
     withLock(`globalLockIdent`):
@@ -1758,6 +1764,39 @@ proc generateMtRequestBroker*(
             else:
               clearProvider(t, brokerCtx)
 
+    )
+
+  # ── bind / rebind provider sugar (issue #42) ──────────────────────
+  # Sugar over setProvider / replaceProvider for class-method providers. MT is
+  # always async; the trampoline carries the provider proc type's `{.async.}`
+  # pragma. Owning-thread semantics of setProvider/replaceProvider are unchanged
+  # (the sugar only synthesises the closure the user would write by hand).
+  block:
+    let providerPragma = procTyPragma(makeProcType(returnType, @[]))
+    var slots: seq[BindSlot] = @[]
+    if not argSig.isNil():
+      slots.add(
+        BindSlot(
+          params: cloneParams(argParams),
+          returnType: copyNimTree(returnType),
+          pragma: providerPragma,
+        )
+      )
+    if not zeroArgSig.isNil():
+      slots.add(
+        BindSlot(
+          params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+        )
+      )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "setProvider", "bindProvider", slots, awaitCall = true
+      )
+    )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "replaceProvider", "rebindProvider", slots, awaitCall = true
+      )
     )
 
   when defined(brokerDebug):

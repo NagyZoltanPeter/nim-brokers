@@ -25,6 +25,13 @@ BrokerInterface(API, IWidget):
   RequestBroker:
     proc scale(factor: int32): Future[Result[int32, string]] {.async.}
 
+  # Sub-interface one-way signal: nudges this widget's size. Over FFI it routes
+  # to THIS widget instance by its BrokerContext (the wrapper emits it on the
+  # Widget sub-class, not the main Hier class). Observable via area().
+  SignalBroker:
+    type ResizeSignal = object
+      delta: int32
+
 BrokerInterface(API, IHier):
   EventBroker:
     type Tick = object
@@ -44,6 +51,13 @@ BrokerInterface(API, IHier):
 
   RequestBroker:
     proc fireTick(n: int32): Future[Result[int32, string]] {.async.}
+
+  # One-way signal (fire-and-forget, slot-free `_call`): a foreign caller nudges
+  # the value; the effect is observable through `getValue`. Demonstrates a
+  # SignalBroker over FFI declared inside a BrokerInterface(API).
+  SignalBroker:
+    type NudgeSignal = object
+      by: int32
 
   RequestBroker:
     type InitializeRequest = object
@@ -75,6 +89,13 @@ BrokerImplement WidgetImpl of IWidget:
     self.size = self.size * factor
     ok(self.size)
 
+  # Signal handler — bound to `ResizeSignal` by the `on<Signal>` name. One-way:
+  # mutates this instance's size, observable via area().
+  method onResizeSignal(
+      self: WidgetImpl, s: ResizeSignal
+  ): Future[void] {.async: (raises: []), gcsafe.} =
+    self.size += s.delta
+
 type HierImpl = ref object of IHier
   value: int32
 
@@ -103,6 +124,13 @@ BrokerImplement HierImpl of IHier:
     # Emit an event through the instance-scoped facade (injects self.brokerCtx).
     self.emit(Tick, Tick(n: n))
     ok(n)
+
+  # Signal handler — bound to `NudgeSignal` by the `on<Signal>` name. One-way:
+  # no response; the mutation is observable via getValue.
+  method onNudgeSignal(
+      self: HierImpl, s: NudgeSignal
+  ): Future[void] {.async: (raises: []), gcsafe.} =
+    self.value += s.by
 
   method initializeRequest(
       self: HierImpl, configPath: string

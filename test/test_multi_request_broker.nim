@@ -341,3 +341,37 @@ suite "MultiRequestBroker":
     check withInput.isErr()
 
     DualResponse.clearProviders()
+
+## ---------------------------------------------------------------------------
+## bind provider sugar (issue #42) — additive, no rebind
+## ---------------------------------------------------------------------------
+
+MultiRequestBroker:
+  type BindScore = object
+    s*: int
+
+  proc signature*(): Future[Result[BindScore, string]] {.async.}
+
+type MultiBindService = ref object
+  base: int
+
+proc scoreA(self: MultiBindService): Future[Result[BindScore, string]] {.async.} =
+  ok(BindScore(s: self.base + 1))
+
+proc scoreB(self: MultiBindService): Future[Result[BindScore, string]] {.async.} =
+  ok(BindScore(s: self.base + 2))
+
+suite "MultiRequestBroker bindProvider sugar (issue #42)":
+  test "bindProvider registers class-method providers additively":
+    let a = MultiBindService(base: 10)
+    let b = MultiBindService(base: 20)
+    check BindScore.bindProvider(a.scoreA).isOk()
+    check BindScore.bindProvider(b.scoreB).isOk()
+
+    let res = waitFor BindScore.request()
+    check res.isOk()
+    check res.value.len == 2
+    check BindScore(s: 11) in res.value
+    check BindScore(s: 22) in res.value
+
+    BindScore.clearProviders()

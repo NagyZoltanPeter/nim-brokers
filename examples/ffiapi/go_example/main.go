@@ -10,9 +10,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -120,6 +122,43 @@ func main() {
 	}
 	fmt.Println()
 
+	// --- Concurrent ctx-aware queries (GetDeviceContext) ---------------
+	// GetDeviceContext follows the database/sql QueryContext idiom: a blocking,
+	// ctx-aware call riding the non-blocking async ABI. The ctx deadline maps to
+	// the library timeout; ctx cancel returns ctx.Err() early (the in-flight
+	// request completes server-side and is reclaimed — no leak). Fan-out is
+	// plain Go: one goroutine per call. mylib.ErrAsyncAgain (errors.Is-able)
+	// signals a full window (mylib.AsyncQueueDepth in flight).
+	fmt.Println("--- Concurrent device queries (GetDeviceContext) ---")
+	fmt.Printf("  async window = %d in-flight\n", mylib.AsyncQueueDepth)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var wg sync.WaitGroup
+		var mu sync.Mutex // serialize prints
+		for _, qid := range ids {
+			wg.Add(1)
+			go func(qid int64) {
+				defer wg.Done()
+				d, err := lib.GetDeviceContext(ctx, qid)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					fmt.Printf("  [ctx] id=%d -> error: %v\n", qid, err)
+					return
+				}
+				state := "offline"
+				if d.Online {
+					state = "online"
+				}
+				fmt.Printf("  [ctx] id=%d -> %q (%s)\n", qid, d.Name, state)
+			}(qid)
+		}
+		wg.Wait()
+		fmt.Println("  All concurrent queries completed.")
+	}
+	fmt.Println()
+
 	// --- Query one device (cpp picks ids[2] = Edge-Switch-B) -----------
 	if len(ids) > 2 {
 		qid := ids[2]
@@ -211,6 +250,31 @@ func main() {
 				d.DeviceId, d.Name, d.DeviceType, d.Address, state)
 		}
 	}
+	fmt.Println()
+
+	// --- One-way signal (IngestReading) + readback (LastReading) --------
+	fmt.Println("--- Firing IngestReading signals (one-way, slot-free) ---")
+	if err := lib.IngestReading(42, 3.5); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: IngestReading: %v\n", err)
+		os.Exit(1)
+	}
+	if err := lib.IngestReading(42, 7.25); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: IngestReading: %v\n", err)
+		os.Exit(1)
+	}
+	time.Sleep(50 * time.Millisecond)
+	rb, rbErr := lib.LastReading()
+	if rbErr != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: LastReading: %v\n", rbErr)
+		os.Exit(1)
+	}
+	fmt.Printf("  LastReading: deviceId=%d value=%g count=%d\n",
+		rb.DeviceId, rb.Value, rb.Count)
+	if rb.Count != 2 || rb.DeviceId != 42 || rb.Value != 7.25 {
+		fmt.Fprintf(os.Stderr, "FATAL: signal round-trip mismatch: %+v\n", rb)
+		os.Exit(1)
+	}
+	fmt.Println("  Signal round-trip verified.")
 	fmt.Println()
 
 	// --- Unsubscribe all ------------------------------------------------

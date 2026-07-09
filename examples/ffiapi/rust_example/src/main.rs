@@ -168,6 +168,58 @@ fn main() {
     }
     println!();
 
+    // --- Async queries (tokio .await) -----------------------------------
+    // get_device_async() returns a std Result<T, AsyncError> resolved on the
+    // library's delivery thread via a runtime-agnostic futures-channel oneshot
+    // — it composes with `?`, and backpressure/timeout/shutdown are MATCHABLE
+    // variants: AsyncError::Again (window full, mylib::ASYNC_QUEUE_DEPTH —
+    // retry), AsyncError::TimedOut (-12), AsyncError::ShutDown (-11),
+    // AsyncError::Provider(msg) for handler errors.
+    // Per-call deadline: pass `Some(ms)` as the trailing `timeout_ms` arg (the
+    // ABI carries it); `None` uses the library default
+    // (mylib::DEFAULT_ASYNC_TIMEOUT_MS). On expiry the call resolves to
+    // AsyncError::TimedOut (-12). You can still stack your runtime's own timer
+    // (e.g. tokio::time::timeout) on top for a client-side deadline.
+    println!("--- Async device queries (get_device_async) ---");
+    println!("  async window = {} in-flight", mylib::ASYNC_QUEUE_DEPTH);
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            for &qid in &ids {
+                match lib.get_device_async(qid, Some(500)).await {
+                    Ok(d) => {
+                        let state = if d.online { "online" } else { "offline" };
+                        println!("  [async] id={qid} -> \"{}\" ({state})", d.name);
+                    }
+                    Err(mylib::AsyncError::Again) => {
+                        // Window full — a real caller backs off and retries.
+                        println!("  [async] id={qid} -> window full (retry later)");
+                    }
+                    Err(e) => println!("  [async] id={qid} -> error: {e}"),
+                }
+            }
+        });
+        println!("  All async queries completed.");
+    }
+    println!();
+
+    // --- Async without tokio (futures::executor::block_on) --------------
+    // The generated crate depends only on futures-channel: the same _async
+    // methods run under ANY executor. Prove it with futures' minimal block_on
+    // — no tokio runtime in sight.
+    if !ids.is_empty() {
+        println!("--- Async query without tokio (block_on) ---");
+        let qid = ids[0];
+        match futures::executor::block_on(lib.get_device_async(qid, None)) {
+            Ok(d) => println!("  [block_on] id={qid} -> \"{}\"", d.name),
+            Err(e) => println!("  [block_on] id={qid} -> error: {e}"),
+        }
+        println!();
+    }
+
     // --- Query one (cpp picks ids[2]) ----------------------------------
     if ids.len() > 2 {
         let qid = ids[2];
@@ -267,6 +319,36 @@ fn main() {
         }
     }
     println!();
+
+    // --- One-way signal (IngestReading) + readback (LastReading) --------
+    println!("--- Firing IngestReading signals (one-way, slot-free) ---");
+    if let Err(e) = lib.ingest_reading(42, 3.5) {
+        eprintln!("FATAL: ingest_reading: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = lib.ingest_reading(42, 7.25) {
+        eprintln!("FATAL: ingest_reading: {}", e);
+        std::process::exit(1);
+    }
+    thread::sleep(Duration::from_millis(50));
+    let rb = lib.last_reading();
+    match rb.value() {
+        Some(v) => {
+            println!(
+                "  LastReading: deviceId={} value={} count={}",
+                v.deviceId, v.value, v.count
+            );
+            assert!(
+                v.count == 2 && v.deviceId == 42 && v.value == 7.25,
+                "signal round-trip mismatch"
+            );
+            println!("  Signal round-trip verified.\n");
+        }
+        None => {
+            eprintln!("FATAL: last_reading: {}", rb.error().unwrap_or("?"));
+            std::process::exit(1);
+        }
+    }
 
     // --- Unsubscribe all ------------------------------------------------
     println!("--- Unsubscribing all ---");

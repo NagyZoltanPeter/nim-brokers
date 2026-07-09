@@ -12,6 +12,7 @@ Demonstrates the generated Python wrapper API on the mylib library:
 The same shape works for native- and CBOR-mode builds of the library.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -24,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _BUILD_DIR = os.environ.get("MYLIB_BUILD_DIR", "build")
 sys.path.insert(0, str(ROOT / "nimlib" / _BUILD_DIR))
 
-from mylib import AddDeviceSpec, Mylib  # noqa: E402
+from mylib import ASYNC_QUEUE_DEPTH, AddDeviceSpec, Mylib  # noqa: E402
 
 
 _EXPECTED_VERSION = "1.0.0"
@@ -137,6 +138,43 @@ def main() -> int:
             )
         print()
 
+        # --- Async device queries (asyncio) ---------------------------
+        # Each get_device_async returns a Result[GetDevice] resolved on the
+        # library's delivery thread; asyncio.gather pipelines them.
+        # Backpressure is transparent: an internal Semaphore(ASYNC_QUEUE_DEPTH)
+        # makes calls past the window AWAIT a free slot instead of erroring —
+        # gather over any number of calls just works (proved by the burst
+        # below). `timeout` is asyncio-style seconds (None = lib default);
+        # a library-side timeout raises TimeoutError, like asyncio.wait_for.
+        print("--- Async device queries (asyncio) ---")
+        print(f"  async window = {ASYNC_QUEUE_DEPTH} in-flight")
+
+        async def _run_async() -> None:
+            results = await asyncio.gather(
+                *(lib.get_device_async(q, timeout=2.0) for q in ids)
+            )
+            for q, res in zip(ids, results):
+                if res.is_ok():
+                    state = "online" if res.value.online else "offline"
+                    print(f'  [async] id={q} -> "{res.value.name}" ({state})')
+                else:
+                    print(f"  [async] id={q} -> error: {res.error}")
+
+            # Burst PAST the window: 3x depth concurrent awaits. Without the
+            # internal semaphore this would raise AsyncAgainError; with it the
+            # excess calls simply wait for slots.
+            burst = ASYNC_QUEUE_DEPTH * 3
+            burst_ids = [ids[i % len(ids)] for i in range(burst)]
+            burst_res = await asyncio.gather(
+                *(lib.get_device_async(q) for q in burst_ids)
+            )
+            ok = sum(1 for r in burst_res if r.is_ok())
+            print(f"  burst: {ok}/{burst} ok (window={ASYNC_QUEUE_DEPTH}, no EAGAIN)")
+
+        asyncio.run(_run_async())
+        print("  All async queries completed.")
+        print()
+
         if len(ids) > 2:
             qid = ids[2]
             print(f"--- Query device id={qid} ---")
@@ -205,6 +243,24 @@ def main() -> int:
                     f"type={d.deviceType:<10} addr={d.address:<16} {state}"
                 )
         print()
+
+        print("--- Firing IngestReading signals (one-way, slot-free) ---")
+        lib.ingest_reading(42, 3.5)
+        lib.ingest_reading(42, 7.25)
+        time.sleep(0.05)  # let the async handler run on the processing thread
+        rb = lib.last_reading()
+        if not rb.is_ok():
+            raise SystemExit(f"FATAL: last_reading: {rb.error()}")
+        print(
+            f"  LastReading: deviceId={rb.value.deviceId} "
+            f"value={rb.value.value} count={rb.value.count}"
+        )
+        assert (
+            rb.value.count == 2
+            and rb.value.deviceId == 42
+            and rb.value.value == 7.25
+        ), "signal round-trip mismatch"
+        print("  Signal round-trip verified.\n")
 
         print("--- Unsubscribing all ---")
         lib.off_device_discovered()

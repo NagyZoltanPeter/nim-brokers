@@ -740,6 +740,33 @@ macro MultiRequestBroker*(body: untyped): untyped =
 
       )
 
+  # ── bind provider sugar (issue #42) ───────────────────────────────
+  # Additive `bindProvider` = sugar for the additive `setProvider`. No rebind
+  # (MultiRequestBroker providers are additive — there is no replace verb).
+  # Always async; the trampoline carries the provider proc type's pragma.
+  block:
+    let providerPragma = procTyPragma(makeProcType(returnType, @[]))
+    var slots: seq[BindSlot] = @[]
+    if not argSig.isNil():
+      slots.add(
+        BindSlot(
+          params: cloneParams(argParams),
+          returnType: copyNimTree(returnType),
+          pragma: providerPragma,
+        )
+      )
+    if not zeroArgSig.isNil():
+      slots.add(
+        BindSlot(
+          params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+        )
+      )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "setProvider", "bindProvider", slots, awaitCall = true
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("MultiRequestBroker", sanitized, result)
     when defined(brokerDebugStdout):
