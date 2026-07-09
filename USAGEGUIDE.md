@@ -61,7 +61,7 @@ nimble alltests
 
 ## Debug
 
-nim-brokers is macro-heavy - better say it generates all the boilerplate around your interfaces and dispatch machinery.
+nim-brokers is macro-heavy — it's better to say it generates all the boilerplate around your interfaces and dispatch machinery.
 To inspect the Nim code that the broker macros (and `registerBrokerLibrary`) emit, compile any project that
 uses them with `-d:brokerDebug`:
 
