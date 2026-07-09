@@ -225,7 +225,7 @@ RequestBroker(sync):
 ```
 Macro will extend the generated `PlusOp` RequestBroker - name is derived from the proc name.
 
- RequestBroker support two differnet call signatures in the same broker definition. The signature procs can be overloaded by arity and parameter types, and the generated `request()` proc will dispatch to the correct provider based on the call-site arguments.
+`RequestBroker` supports two different call signatures in the same broker definition. The `signature` procs can be overloaded by arity and parameter types, and the generated `request()` proc will dispatch to the correct provider based on the call-site arguments.
 > If no `signature` proc is declared, a zero-argument form is generated automatically.
 
 ### MultiRequestBroker
