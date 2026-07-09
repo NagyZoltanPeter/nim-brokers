@@ -71,12 +71,9 @@ Each library context spawns two threads:
 | Processing thread | Hosts request providers and game logic. All Captain mutations happen here on the chronos event loop. |
 | Delivery thread | Hosts the event listener registration provider. Receives cross-thread events and calls C callbacks into Python. |
 
-Both threads share the same `BrokerContext`. MT EventBroker routes events by
-context — `emit(ctx, event)` on the processing thread reaches listeners on the
-delivery thread via `AsyncChannel`.
+Both threads share the same `BrokerContext`. MT EventBroker routes events by context — `emit(ctx, event)` on the processing thread reaches listeners on the delivery thread via MPSC queue.
 
-Because the framework guarantees one processing thread per context, no locking
-is required on the Captain.
+Because the framework guarantees one processing thread per context, no locking is required on the Captain.
 
 ## Control And Event Flow
 
