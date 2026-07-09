@@ -45,6 +45,13 @@ BrokerInterface(API, IHier):
   RequestBroker:
     proc fireTick(n: int32): Future[Result[int32, string]] {.async.}
 
+  # One-way signal (fire-and-forget, slot-free `_call`): a foreign caller nudges
+  # the value; the effect is observable through `getValue`. Demonstrates a
+  # SignalBroker over FFI declared inside a BrokerInterface(API).
+  SignalBroker:
+    type NudgeSignal = object
+      by: int32
+
   RequestBroker:
     type InitializeRequest = object
       ok*: bool
@@ -103,6 +110,13 @@ BrokerImplement HierImpl of IHier:
     # Emit an event through the instance-scoped facade (injects self.brokerCtx).
     self.emit(Tick, Tick(n: n))
     ok(n)
+
+  # Signal handler — bound to `NudgeSignal` by the `on<Signal>` name. One-way:
+  # no response; the mutation is observable via getValue.
+  method onNudgeSignal(
+      self: HierImpl, s: NudgeSignal
+  ): Future[void] {.async: (raises: []), gcsafe.} =
+    self.value += s.by
 
   method initializeRequest(
       self: HierImpl, configPath: string

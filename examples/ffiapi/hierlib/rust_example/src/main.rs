@@ -21,6 +21,15 @@ fn main() {
     assert_eq!(*lib.get_value().value().unwrap(), 7);
     assert_eq!(*lib.echo_len("abcd".to_string()).value().unwrap(), 4);
 
+    // One-way signal (fire-and-forget, no response): nudge the value; poll
+    // get_value for the observable effect once the handler has run.
+    lib.nudge_signal(10).expect("nudge_signal");
+    let sig_deadline = Instant::now() + Duration::from_secs(2);
+    while *lib.get_value().value().unwrap() == 7 && Instant::now() < sig_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(*lib.get_value().value().unwrap(), 17);
+
     let received = Arc::new(AtomicI32::new(-1));
     let r2 = received.clone();
     let handle = lib.on_tick(move |n| r2.store(n, Ordering::SeqCst));

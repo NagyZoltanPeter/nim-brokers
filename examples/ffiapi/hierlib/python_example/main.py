@@ -2,8 +2,9 @@
 
 Exercises the full surface generated from a main BrokerInterface(API) plus a
 sub-interface (reduced-A): library lifecycle (create_context / shutdown),
-requests (get_value / echo_len / initialize_request), an event emitted through
-the interface facade (fire_tick -> Tick -> on_tick callback), and a
+requests (get_value / echo_len / initialize_request), a one-way signal
+(nudge_signal -> NudgeSignal handler, observed via get_value), an event emitted
+through the interface facade (fire_tick -> Tick -> on_tick callback), and a
 create-instance request (make_widget -> Widget) whose typed sub-wrapper routes
 its own calls (area / scale) and is released via close().
 """
@@ -29,6 +30,15 @@ def main() -> None:
     assert lib.initialize_request("cfg").is_ok(), "initialize_request"
     assert int(lib.get_value().value) == 7, "get_value"
     assert int(lib.echo_len("abcd").value) == 4, "echo_len"
+
+    # One-way signal (fire-and-forget, no response): nudge the value. The handler
+    # runs on the processing thread, so the mutation is observable through
+    # get_value once delivered — poll for it (like the event below).
+    lib.nudge_signal(by=10)
+    deadline = time.time() + 2.0
+    while int(lib.get_value().value) == 7 and time.time() < deadline:
+        time.sleep(0.01)
+    assert int(lib.get_value().value) == 17, ("signal delivery", lib.get_value())
 
     received = []
     handle = lib.on_tick(lambda owner, n: received.append(int(n)))

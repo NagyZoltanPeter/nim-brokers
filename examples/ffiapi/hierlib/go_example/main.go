@@ -29,6 +29,23 @@ func main() {
 		panic(fmt.Sprint("echo_len: ", el, " ", err))
 	}
 
+	// One-way signal (fire-and-forget, no response): nudge the value; poll
+	// GetValue for the observable effect once the handler has run.
+	if err := lib.NudgeSignal(10); err != nil {
+		panic(fmt.Sprint("nudge_signal: ", err))
+	}
+	sigDeadline := time.Now().Add(2 * time.Second)
+	for {
+		v, err := lib.GetValue()
+		if err == nil && int32(v) == 17 {
+			break
+		}
+		if time.Now().After(sigDeadline) {
+			panic(fmt.Sprint("signal delivery: ", v, " ", err))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	var received int32 = -1
 	h := lib.OnTick(func(n int32) { atomic.StoreInt32(&received, n) })
 	if h == 0 {
