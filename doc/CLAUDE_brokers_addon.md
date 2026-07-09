@@ -15,15 +15,21 @@ type *is* the channel — you call class-method-style on the typedesc: `T.emit`,
 | `EventBroker` | pub/sub, many→many, fire-and-forget | `T.emit(...)` | `T.listen(handler)` |
 | `RequestBroker` | request/response, **single** provider | `T.setProvider(handler)` | `T.request(...)` |
 | `MultiRequestBroker` | request/response, **many** providers, fan-out | `T.setProvider(handler)` (N×) | `T.request(...)` |
+| `SignalBroker` | one-way notification, **single** handler, no reply | `T.signal(...)` | `T.onSignal(handler)` |
 
 `(mt)` suffix → multi-thread variant (cross-thread dispatch). `(sync)` on
 RequestBroker → blocking, non-async. `(API)` → FFI shared-library surface.
+
+Any provider/handler that is a **class method** (`self.foo`) can be installed
+with the `bind*` / `rebind*` sugar instead of a hand-written forwarding closure —
+see "Binding class-method providers" below.
 
 Import only what you use:
 ```nim
 import brokers/event_broker
 import brokers/request_broker
 import brokers/multi_request_broker
+import brokers/signal_broker
 import brokers/broker_context   # only if you need explicit contexts
 ```
 
@@ -160,6 +166,77 @@ Quote.clearProviders()                  # remove all
 
 ---
 
+## SignalBroker — one-way notification, single handler
+
+Fire-and-forget into a module: an **inverted EventBroker** (single handler, no
+reply path). `signal()` is a **plain (non-async) proc** returning
+`Result[void, string]`; it does not tell you whether the handler *succeeded* —
+only whether it was **accepted**. Handler exceptions are swallowed (chronicles
+`warn`). For delivery confirmation, use `RequestBroker` with a `void` response.
+
+```nim
+import chronos, brokers/signal_broker
+
+SignalBroker:
+  type IngestSample = object
+    deviceId*: string
+    value*: float64
+
+# ONE handler (a second onSignal returns err). Handler is async, raises: [].
+discard IngestSample.onSignal(
+  proc(s: IngestSample) {.async: (raises: []).} =
+    info "sample", dev = s.deviceId, v = s.value)
+
+let r = IngestSample.signal(IngestSample(deviceId: "d1", value: 0.5))  # by value
+discard IngestSample.signal(deviceId = "d2", value = 1.25)             # by fields
+# r: Result[void, string]
+#   ok()  = ACCEPTED (a handler exists + queue had room) — NOT "handled"
+#   err() = "no signal handler installed" | "queue full"
+
+await IngestSample.dropSignalHandler()   # async Future[void] — await it
+```
+
+- `signal()` is **sync**, never `await` it. `dropSignalHandler()` is **async**.
+- `type Foo = void` → payload-less pulse: `Foo.signal()` / `onSignal(proc() ...)`.
+- Mock/replace trio (owning-thread only on `(mt)`): `replaceSignalHandler`,
+  `getCurrentSignalHandler`, `withMockSignalHandler(ctx, mock): body`.
+- `(mt)` and `(API)` variants mirror the other brokers (one handler per context).
+
+---
+
+## Binding class-method providers — `bind*` / `rebind*` (v3.1)
+
+Nim has no bound-method values (`self.send` is not a closure), so installing a
+class method as a provider/handler normally needs a hand-written trampoline. The
+`bind*` sugar synthesises it — **identical codegen, identical `self` capture**.
+Passing a plain closure works too, so it is a strict superset of the typed verbs
+(`setProvider` / `listen` / `onSignal` stay untouched).
+
+```nim
+# before — hand-written forwarding closure
+MessagingSend.setProvider(self.brokerCtx,
+  proc(e: MessageEnvelope): Future[Result[RequestId, string]] {.async.} =
+    await self.send(e))
+
+# after — the sugar generates exactly that trampoline
+MessagingSend.bindProvider(self.brokerCtx, self.send)
+```
+
+| Broker | install sugar | replace sugar |
+|--------|---------------|---------------|
+| `RequestBroker` / `(mt)` | `bindProvider` | `rebindProvider` |
+| `MultiRequestBroker` | `bindProvider` (additive) | — |
+| `EventBroker` / `(mt)` | `bindListener` (returns the listen handle) | — |
+| `SignalBroker` / `(mt)` | `bindSignalHandler` | `rebindSignalHandler` |
+
+- Each verb has a **ctx-form** (`bindProvider(ctx, m)`) and a **no-ctx-form**
+  (`bindProvider(m)` → thread-global context).
+- Dual-slot RequestBrokers (zero-arg **and** arg signatures) disambiguate by
+  arity automatically.
+- Works on the `(API)` lane too — usable inside `setupProviders(ctx)`.
+
+---
+
 ## BrokerContext — scoping / multi-instance
 
 Every API takes an **optional first `BrokerContext` arg**. Omit it → the
@@ -222,8 +299,10 @@ proc worker() {.thread.} =
 | Ask one authority for an answer | `RequestBroker` |
 | Blocking call, no async context | `RequestBroker(sync)` |
 | Ask everyone, aggregate replies | `MultiRequestBroker` |
-| Same pattern across OS threads | add `(mt)`, `--threads:on`, await `emit` |
+| One-way notify a single handler, no reply | `SignalBroker` |
+| Same pattern across OS threads | add `(mt)`, `--threads:on` (call surface unchanged) |
 | Multiple isolated instances | pass a `BrokerContext` first arg |
+| Install a class method (`self.foo`) as provider/handler | `bind*` / `rebind*` sugar |
 | Expose to C/C++/Python/Rust/Go | `(API)` + `registerBrokerLibrary` (see AGENTS.md) |
 
 ## Gotchas
@@ -240,10 +319,11 @@ proc worker() {.thread.} =
 
 ## FFI API `(API)` — expose brokers as a C/C++/Python/Rust/Go shared library
 
-Add `(API)` to `RequestBroker`/`EventBroker`. Same declaration syntax — it
-additionally generates a fixed C ABI and typed foreign wrappers. Wire format is
-CBOR; wrappers carry the typed surface. Build with `-d:BrokerFfiApi --threads:on
---app:lib`.
+Add `(API)` to `RequestBroker` / `EventBroker` / `SignalBroker`. Same declaration
+syntax — it additionally generates a fixed C ABI and typed foreign wrappers. Wire
+format is CBOR; wrappers carry the typed surface. Build with `-d:BrokerFfiApi
+--threads:on --app:lib`. (`SignalBroker(API)` rides `_call` one-way — enqueue
+only, no response slot; `_callAsync` rejects it with `ApiStatusOneWay`.)
 
 ```nim
 {.push raises: [].}
@@ -296,10 +376,12 @@ nim c -d:BrokerFfiApi --threads:on --app:lib --path:. \
   --outdir:build --nimMainPrefix:mylib mylib.nim
 ```
 
-What you get — a fixed **11-function C ABI** per library: `_version`,
+What you get — a fixed **12-function C ABI** per library: `_version`,
 `_initialize` (once per process), `_createContext` (per instance), `_shutdown(ctx)`,
-`_allocBuffer`, `_freeBuffer`, `_call`, `_subscribe`, `_unsubscribe`, `_listApis`,
-`_getSchema`. `<lib>.h` (C) and `<lib>.hpp` (C++) are always emitted.
+`_allocBuffer`, `_freeBuffer`, `_call` (sync round-trip), `_callAsync`
+(non-blocking, callback-completed), `_subscribe`, `_unsubscribe`, `_listApis`,
+`_getSchema`. `<lib>.h` (C) and `<lib>.hpp` (C++) are always emitted. Wire format
+is CBOR (the historical native C-ABI codegen was retired in 3.0.0).
 
 | Flag | Emits | Notes |
 |------|-------|-------|
