@@ -203,6 +203,13 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
           copyNimTree(stmt.body),
         )
         result.add(sigImpl)
+        for (_, existingSigType, _) in signalMethods:
+          if existingSigType == sigTypeName:
+            macros.error(
+              "duplicate signal handler for '" & sigTypeName &
+                "' (choose either `<Signal>` or `on<Signal>`)",
+              stmt,
+            )
         signalMethods.add((verb, sigTypeName, sigVoid))
         continue
       let payload = extractResultOk(ret, async)
