@@ -48,7 +48,7 @@ nimble install brokers
 Or add to your `.nimble` file (check the latest version on [Nimble](https://nimble.directory/pkg/brokers)):
 
 ```nim
-requires "brokers >= 3.1.4"
+requires "brokers >= 3.2.0"
 ```
 
 ## Testing

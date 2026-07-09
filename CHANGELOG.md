@@ -3,6 +3,123 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.2.0] — 2026-07-09
+
+**New `SignalBroker` primitive (fire-and-forget, single-handler, no-reply) across
+all lanes, an asynchronous FFI request path (`<lib>_callAsync`), `bind`/`rebind`
+provider sugar for class-method providers, and the multi-thread teardown-UAF fix
+that greens `--mm:refc` on Windows.** This is a feature release: it adds a fourth
+broker shape, a non-blocking FFI call gate with idiomatic async wrappers in all
+four foreign languages, and closes the last Windows/refc sanitizer gap. No
+breaking changes to the existing single-thread, multi-thread, or FFI surfaces.
+
+### Added — `SignalBroker` / `SignalBroker(mt)` / `SignalBroker(API)`
+
+- **A new one-way, single-handler broker** fusing EventBroker's dispatch shape
+  (sync call site + `asyncSpawn`, no reply path) with RequestBroker's
+  single-registry ownership and a `Result[void, string]` acceptance check.
+  Declared with an `object` / `ref` / POD / `void` payload. One handler is
+  installed via `TypeName.onSignal(handler)` (duplicate-guarded, mirrors
+  `setProvider`); producers call `TypeName.signal(...)` — a **plain non-async
+  proc** returning `Result[void, string]`. Value form, inline-field overloads
+  (like `emit`), and a `void` pulse (`TypeName.signal()`) are all generated.
+  - `ok()` means **accepted** (best-effort snapshot: a handler exists and the
+    queue had room), never "handled". `err` is definitely-not-delivered:
+    `"no signal handler installed"` or `"queue full"`. Handler exceptions are
+    swallowed with a chronicles warn — for delivery confirmation use a
+    RequestBroker with a `void` response.
+  - `dropSignalHandler()` is async `Future[void]` (uniform with `dropListener`,
+    suspension-free body). Mock/replace trio: `replaceSignalHandler` /
+    `getCurrentSignalHandler` / `withMockSignalHandler` (MT variants are
+    owning-thread only).
+- **Single-thread lane** (`brokers/signal_broker.nim`) and **multi-thread lane**
+  (`brokers/internal/mt_signal_broker.nim`): the MT lane reuses EventBroker(mt)'s
+  global refcounted slab + per-bucket Vyukov ring transport and
+  RequestBroker(mt)'s single-registry ownership. Same-thread `signal` → direct
+  `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free
+  `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter
+  (`signalHandlerPresent`). The owning thread allocs the ring; `dropSignalHandler`
+  closes it and the poll fn hands it to the per-thread pending-free registry,
+  freed at `teardownBrokerThread`.
+- **FFI `SignalBroker(API)` lane** (`brokers/internal/api_signal_broker_cbor.nim`)
+  rides `<lib>_call` on a **slot-free, one-way** path: the payload is enqueued
+  onto the courier ring with a sentinel (no response slot, no round trip) and the
+  call returns immediately. Both failure modes resolve on the caller's thread — a
+  lock-free `signalHandlerPresent` load → `ApiStatusProviderErr` (-10) when no
+  handler, or a courier-ring-full → `ApiStatusAgain` (-6); accepted →
+  `ApiStatusOk` (0). `<lib>_callAsync` **rejects** a signal name with
+  `ApiStatusOneWay` (-13). A CBOR decode failure in the adapter is logged, not
+  returned.
+- **Discovery + wrappers.** Signals surface as a top-level `signals` list
+  (`ApiSignalInfo`, the inverse of `events`) in `_listApis` / `_getSchema` / the
+  CDDL and in the generated C header. Each foreign wrapper emits a typed one-way
+  method with **no async variant** — C++ `Result<void>`, Python `-> None`
+  (raising), Rust `Result<(), String>`, Go `error`. Full four-language parity is
+  gated by the typemappingtestlib signal matrix.
+- **`BrokerInterface` / `BrokerImplement` support** for `SignalBroker(API)` on
+  both the main interface and sub-interfaces, including sub-interface FFI signal
+  routing.
+- New tests: `test_signal_broker`, `test_multi_thread_signal_broker`,
+  `test_api_signal_broker`, `test_broker_interface_signal`,
+  `perf_test_multi_thread_signal_broker`, four `reject/reject_signal_*` guards
+  (bad mode / bad shape / no handler / duplicate handler), plus ASan/TSan tasks
+  for the MT and FFI signal lanes.
+
+### Added — asynchronous FFI request path (`<lib>_callAsync`)
+
+- **A non-blocking request gate** alongside the blocking `<lib>_call`. `_callAsync`
+  submits a request and returns immediately with an `ApiStatus`; the response is
+  delivered later through the async response callback. Backed by a configurable
+  async window (in-flight cap) with an **EAGAIN-friendly contract** —
+  `ApiStatusAgain` (-6) when the window is saturated — plus a **per-request
+  timeout**.
+- **Idiomatic async wrappers in every foreign language**, each mapping to the
+  host's native async idiom rather than a raw callback:
+  - **C++** — a `std::future`-returning sibling for each async method.
+  - **Rust** — a typed `AsyncError` + `std::result::Result`, no `tokio`
+    dependency, with a per-call timeout exposed on the generated `_async` method.
+  - **Go** — `context.Context`-aware methods with semaphore backpressure.
+  - **Python** — `async def` methods over the callback bridge.
+- Response status codes are single-sourced, and dispatch-result encoding is shared
+  across the courier handlers. New `test_api_callAsync` exercises the full path.
+
+### Added — `bind` / `rebind` provider sugar (#42, #43)
+
+- **Class-method providers can now be wired with `bind` / `rebind` sugar** instead
+  of hand-writing the closure that captures `self`. Simplifies registering a
+  `BrokerImplement` method as a RequestBroker provider.
+
+### Fixed — multi-thread teardown use-after-free (#38, #39)
+
+- **Ordered per-thread teardown + close-safe shared signals** eliminate the
+  Windows/`--mm:refc` teardown UAF (a race between broker-signal teardown,
+  setProvider registration seqs, and refc `deallocOsPages`). The fix pairs a
+  `BrokerSignalShared` refcount with `teardownBrokerThread` ordering and is
+  regression-gated by the new `nimble testAllocRace` task on the Windows CI cells.
+- **The `skipRefcOnWindows` carve-out is removed entirely** — Windows + refc is now
+  CI-green across the parity matrix. See `doc/LIMITATION.md` §2.2 and
+  `doc/design/TEARDOWN_UAF_FINDINGS.md` for the mechanism and the remaining
+  app-level caveat.
+- Sanitizer matrix (ASan/LSan/TSan) is green on Windows and Linux; residual
+  benign reports (ORC `registerCycle` roots buffer, `setProvider` registration
+  seqs, event-poll bookkeeping seq) are suppressed via `tools/sanitizers/lsan.supp`.
+
+### Changed — performance (#35)
+
+- **The default-context RequestBroker forwarder returns the inner `Future`
+  directly** instead of allocating a wrapper Future — one fewer allocation per
+  default-context request.
+- New in-process and FFI-overhead perf harnesses (`test/ffibench/perf_inproc.nim`,
+  `perf_overhead.nim`, `perf_phases.nim`) plus a `perftestInproc` task measure
+  broker dispatch overhead vs. a direct call and serial-vs-pipelined request
+  throughput.
+
+### Documentation
+
+- New **broker cookbook** and **USAGEGUIDE**, README refreshed with a SignalBroker
+  section and `bind` sugar, FFI prezi updated to CBOR-only, and the torpedo
+  `DESIGN.md` refreshed.
+
 ## [3.1.4] — 2026-06-19
 
 **`BrokerImplement` constructors gain result-shape parity with `new` and adopt
