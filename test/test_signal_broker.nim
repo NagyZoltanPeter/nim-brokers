@@ -192,3 +192,39 @@ suite "SignalBroker (single-thread)":
     ):
       check IngestSample.hasSignalHandler()
     check not IngestSample.hasSignalHandler()
+
+## ---------------------------------------------------------------------------
+## bind / rebind signal-handler sugar (issue #42)
+## ---------------------------------------------------------------------------
+
+SignalBroker:
+  type BindSig = object
+    v*: int
+
+type SigBindService = ref object
+  seen: int
+
+proc onBindSig(self: SigBindService, s: BindSig) {.async: (raises: []).} =
+  self.seen = s.v
+
+proc onBindSigMock(self: SigBindService, s: BindSig) {.async: (raises: []).} =
+  self.seen = -s.v
+
+suite "SignalBroker bind/rebind sugar (issue #42)":
+  teardown:
+    waitFor BindSig.dropSignalHandler()
+
+  test "bindSignalHandler installs a class-method handler":
+    let self = SigBindService()
+    check BindSig.bindSignalHandler(self.onBindSig).isOk()
+    check BindSig.signal(BindSig(v: 5)).isOk()
+    drain()
+    check self.seen == 5
+
+  test "rebindSignalHandler swaps to a mock":
+    let self = SigBindService()
+    check BindSig.bindSignalHandler(self.onBindSig).isOk()
+    check BindSig.rebindSignalHandler(DefaultBrokerContext, self.onBindSigMock).isOk()
+    check BindSig.signal(BindSig(v: 7)).isOk()
+    drain()
+    check self.seen == -7

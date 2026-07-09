@@ -306,3 +306,43 @@ suite "EventBroker (void / payload-less event)":
 
     check ctxHits == 1
     check defaultHits == 0
+
+## ---------------------------------------------------------------------------
+## bind listener sugar (issue #42)
+## ---------------------------------------------------------------------------
+
+EventBroker:
+  type BindEvent = object
+    n*: int
+
+type EvtBindService = ref object
+  seen: int
+
+proc onBindEvent(self: EvtBindService, e: BindEvent) {.async: (raises: []).} =
+  self.seen = e.n
+
+suite "EventBroker bindListener sugar (issue #42)":
+  asyncTest "bindListener installs a class-method listener":
+    let self = EvtBindService()
+    let h = BindEvent.bindListener(self.onBindEvent)
+    check h.isOk()
+
+    BindEvent.emit(BindEvent(n: 9))
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+    check self.seen == 9
+
+    await BindEvent.dropAllListeners()
+
+  asyncTest "bindListener with an explicit broker context":
+    let self = EvtBindService()
+    let ctx = NewBrokerContext()
+    let h = BindEvent.bindListener(ctx, self.onBindEvent)
+    check h.isOk()
+
+    BindEvent.emit(ctx, BindEvent(n: 4))
+    waitForListeners()
+    await sleepAsync(5.milliseconds)
+    check self.seen == 4
+
+    await BindEvent.dropAllListeners(ctx)

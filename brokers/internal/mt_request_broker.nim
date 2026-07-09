@@ -1766,6 +1766,39 @@ proc generateMtRequestBroker*(
 
     )
 
+  # ── bind / rebind provider sugar (issue #42) ──────────────────────
+  # Sugar over setProvider / replaceProvider for class-method providers. MT is
+  # always async; the trampoline carries the provider proc type's `{.async.}`
+  # pragma. Owning-thread semantics of setProvider/replaceProvider are unchanged
+  # (the sugar only synthesises the closure the user would write by hand).
+  block:
+    let providerPragma = procTyPragma(makeProcType(returnType, @[]))
+    var slots: seq[BindSlot] = @[]
+    if not argSig.isNil():
+      slots.add(
+        BindSlot(
+          params: cloneParams(argParams),
+          returnType: copyNimTree(returnType),
+          pragma: providerPragma,
+        )
+      )
+    if not zeroArgSig.isNil():
+      slots.add(
+        BindSlot(
+          params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+        )
+      )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "setProvider", "bindProvider", slots, awaitCall = true
+      )
+    )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "replaceProvider", "rebindProvider", slots, awaitCall = true
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

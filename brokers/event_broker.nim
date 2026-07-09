@@ -558,6 +558,22 @@ proc generateEventBroker(body: NimNode): NimNode =
     )
     result.add(typedescEmitProcCtx)
 
+  # ── bind listener sugar (issue #42) ───────────────────────────────
+  # `bindListener` = sugar for `listen`; returns the same listener handle. No
+  # rebind (events are additive — mock = dropAllListeners + listen). The
+  # trampoline carries the listener proc type's `{.async: (raises: []), gcsafe.}`
+  # pragma and forwards the whole event value (or nothing, for a void event).
+  block:
+    var slot = BindSlot(returnType: futureVoidTy(), pragma: procTyPragma(handlerProcTy))
+    if isVoid:
+      slot.params = @[]
+    else:
+      slot.params =
+        @[newTree(nnkIdentDefs, ident("event"), copyNimTree(typeIdent), newEmptyNode())]
+    result.add(
+      buildBindTemplates(typeIdent, "listen", "bindListener", @[slot], awaitCall = true)
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBroker", sanitized, result)
     when defined(brokerDebugStdout):

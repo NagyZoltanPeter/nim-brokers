@@ -741,6 +741,34 @@ proc generateMtSignalBroker*(
 
   )
 
+  # ── bind / rebind signal-handler sugar (issue #42) ────────────────
+  # `bindSignalHandler` = sugar for `onSignal`, `rebindSignalHandler` = sugar for
+  # `replaceSignalHandler` (owning-thread only, same as the verbs they wrap).
+  block:
+    var slot = BindSlot(returnType: futureVoidTy(), pragma: procTyPragma(handlerProcTy))
+    if isVoid:
+      slot.params = @[]
+    else:
+      slot.params = @[
+        newTree(
+          nnkIdentDefs, ident("signalValue"), copyNimTree(typeIdent), newEmptyNode()
+        )
+      ]
+    result.add(
+      buildBindTemplates(
+        typeIdent, "onSignal", "bindSignalHandler", @[slot], awaitCall = true
+      )
+    )
+    result.add(
+      buildBindTemplates(
+        typeIdent,
+        "replaceSignalHandler",
+        "rebindSignalHandler",
+        @[slot],
+        awaitCall = true,
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("SignalBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

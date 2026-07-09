@@ -188,3 +188,36 @@ suite "SignalBroker(mt) — cross thread":
     waitFor sleepAsync(chronos.milliseconds(300))
     gDone.store(true)
     joinThread(th)
+
+## ---------------------------------------------------------------------------
+## bind / rebind signal-handler sugar (issue #42) — same-thread (owning)
+## ---------------------------------------------------------------------------
+
+SignalBroker(mt):
+  type MtBindSig = object
+    v*: int
+
+type MtSigBindService = ref object
+  seen: int
+
+proc onMtBindSig(self: MtSigBindService, s: MtBindSig) {.async: (raises: []).} =
+  self.seen = s.v
+
+proc onMtBindSigMock(self: MtSigBindService, s: MtBindSig) {.async: (raises: []).} =
+  self.seen = -s.v
+
+suite "SignalBroker(mt) bind/rebind sugar (issue #42)":
+  teardown:
+    waitFor MtBindSig.dropSignalHandler()
+
+  test "bindSignalHandler + rebindSignalHandler on the owning thread":
+    let self = MtSigBindService()
+    check MtBindSig.bindSignalHandler(self.onMtBindSig).isOk()
+    check MtBindSig.signal(MtBindSig(v: 8)).isOk()
+    drain()
+    check self.seen == 8
+
+    check MtBindSig.rebindSignalHandler(DefaultBrokerContext, self.onMtBindSigMock).isOk()
+    check MtBindSig.signal(MtBindSig(v: 3)).isOk()
+    drain()
+    check self.seen == -3

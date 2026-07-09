@@ -1087,6 +1087,38 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
 
     )
 
+  # ── bind / rebind provider sugar (issue #42) ──────────────────────
+  # `bindProvider` = sugar for `setProvider`, `rebindProvider` = sugar for
+  # `replaceProvider`; both forward a class method (`self.send`) without the
+  # hand-written trampoline closure. The generated trampoline carries the
+  # provider proc type's exact pragma so it stays assignable.
+  block:
+    let awaitCall = mode != rbSync
+    let providerPragma = procTyPragma(makeProcType(returnType, @[], mode))
+    var slots: seq[BindSlot] = @[]
+    if not argSig.isNil():
+      slots.add(
+        BindSlot(
+          params: cloneParams(argParams),
+          returnType: copyNimTree(returnType),
+          pragma: providerPragma,
+        )
+      )
+    if not zeroArgSig.isNil():
+      slots.add(
+        BindSlot(
+          params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+        )
+      )
+    result.add(
+      buildBindTemplates(typeIdent, "setProvider", "bindProvider", slots, awaitCall)
+    )
+    result.add(
+      buildBindTemplates(
+        typeIdent, "replaceProvider", "rebindProvider", slots, awaitCall
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)
     when defined(brokerDebugStdout):
