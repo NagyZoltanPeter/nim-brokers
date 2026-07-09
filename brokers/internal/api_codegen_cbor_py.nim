@@ -847,6 +847,12 @@ proc generateCborPyFile*(
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
 
+  proc ownsSigMain(s: CborSignalEntry): bool =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningSignalType(s.typeName)
+    o.len == 0 or o == mainClass
+
   py.add("    def __init__(self) -> None:\n")
   py.add("        _LIB." & p & "initialize()\n")
   py.add("        self._ctx: int = 0\n")
@@ -1264,6 +1270,8 @@ proc generateCborPyFile*(
     result.add("        self._do_signal(\"" & s.apiName & "\", req_payload)\n\n")
 
   for s in signalEntries:
+    if not ownsSigMain(s):
+      continue
     py.add(emitSignalMethod(s))
 
   # Per-event subscribe / unsubscribe (main-class events only).
@@ -1453,6 +1461,46 @@ proc generateCborPyFile*(
       py.add("            _ASYNC_RESPONSE_CB,\n")
       py.add("            ctypes.c_void_p(token),\n")
       py.add("        )\n\n")
+      # Sub-interface one-way signals (routed by self._ctx — the sub-instance
+      # ctx — so the handler installed under that ctx runs). Emit the _do_signal
+      # helper only when this sub-interface owns at least one signal.
+      var ifaceSigs: seq[CborSignalEntry] = @[]
+      for s in signalEntries:
+        if interfaceOwningSignalType(s.typeName) == ifaceName:
+          ifaceSigs.add(s)
+      if ifaceSigs.len > 0:
+        py.add("    def _do_signal(self, api_name: str, req_payload: bytes) -> None:\n")
+        py.add("        in_buf = None\n")
+        py.add("        if req_payload:\n")
+        py.add("            in_buf = _LIB." & p & "allocBuffer(len(req_payload))\n")
+        py.add("            if not in_buf:\n")
+        py.add("                raise RuntimeError(\"allocBuffer failed\")\n")
+        py.add("            ctypes.memmove(in_buf, req_payload, len(req_payload))\n")
+        py.add("        resp_buf = ctypes.c_void_p()\n")
+        py.add("        resp_len = ctypes.c_int32()\n")
+        py.add("        status = _LIB." & p & "call(\n")
+        py.add("            self._ctx,\n")
+        py.add("            api_name.encode(\"utf-8\"),\n")
+        py.add("            in_buf,\n")
+        py.add("            len(req_payload),\n")
+        py.add("            ctypes.byref(resp_buf),\n")
+        py.add("            ctypes.byref(resp_len),\n")
+        py.add("        )\n")
+        py.add("        if resp_buf and resp_len.value > 0:\n")
+        py.add("            _LIB." & p & "freeBuffer(resp_buf)\n")
+        py.add("        if status == 0:\n")
+        py.add("            return\n")
+        py.add(
+          "        if status == " & $ApiStatusAgain &
+            ":\n            raise RuntimeError(\"EAGAIN: signal queue full\")\n"
+        )
+        py.add(
+          "        if status == " & $ApiStatusProviderErr &
+            ":\n            raise RuntimeError(\"no signal handler installed\")\n"
+        )
+        py.add("        raise RuntimeError(f\"signal failed: {status}\")\n\n")
+      for s in ifaceSigs:
+        py.add(emitSignalMethod(s))
       for e in ifaceReqs:
         py.add(emitReqMethod(e))
         py.add(emitAsyncReqMethod(e))

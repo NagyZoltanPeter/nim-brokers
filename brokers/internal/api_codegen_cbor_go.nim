@@ -278,6 +278,12 @@ proc generateCborGoFile*(
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
 
+  proc ownsSigMain(s: CborSignalEntry): bool {.compileTime.} =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningSignalType(s.typeName)
+    o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   if mainClass.len > 0:
     for e in requestEntries:
@@ -628,46 +634,55 @@ proc generateCborGoFile*(
   g.add("}\n\n")
 
   # signalCall: slot-free one-way dispatch through `_call`. No response; status
-  # maps to nil (accepted) or a distinguishable error.
-  g.add("// signalCall dispatches a one-way signal (no response envelope).\n")
-  g.add(
-    "func (l *" & className & ") signalCall(apiName string, args interface{}) error {\n"
-  )
-  g.add("\tif l.ctx == 0 { return errors.New(\"library context is not created\") }\n")
-  g.add("\tvar inBytes []byte\n")
-  g.add("\tif args != nil {\n")
-  g.add("\t\tvar err error\n")
-  g.add("\t\tinBytes, err = cbor.Marshal(args)\n")
-  g.add("\t\tif err != nil { return err }\n")
-  g.add("\t}\n")
-  g.add("\tcName := C.CString(apiName)\n")
-  g.add("\tdefer C.free(unsafe.Pointer(cName))\n")
-  g.add("\tvar inPtr unsafe.Pointer\n")
-  g.add("\tif len(inBytes) > 0 {\n")
-  g.add("\t\tinPtr = C." & p & "allocBuffer(C.int32_t(len(inBytes)))\n")
-  g.add("\t\tif inPtr == nil { return errors.New(\"allocBuffer failed\") }\n")
-  g.add("\t\tC.memcpy(inPtr, unsafe.Pointer(&inBytes[0]), C.size_t(len(inBytes)))\n")
-  g.add("\t}\n")
-  g.add("\tvar outBuf unsafe.Pointer\n")
-  g.add("\tvar outLen C.int32_t\n")
-  g.add(
-    "\trc := C." & p &
-      "call(l.ctx, cName, inPtr, C.int32_t(len(inBytes)), &outBuf, &outLen)\n"
-  )
-  g.add("\tif outBuf != nil { C." & p & "freeBuffer(outBuf) }\n")
-  g.add("\tswitch int32(rc) {\n")
-  g.add("\tcase 0:\n\t\treturn nil\n")
-  g.add(
-    "\tcase " & $ApiStatusAgain &
-      ":\n\t\treturn errors.New(\"EAGAIN: signal queue full\")\n"
-  )
-  g.add(
-    "\tcase " & $ApiStatusProviderErr &
-      ":\n\t\treturn errors.New(\"no signal handler installed\")\n"
-  )
-  g.add("\tdefault:\n\t\treturn fmt.Errorf(\"signal failed: %d\", int32(rc))\n")
-  g.add("\t}\n")
-  g.add("}\n\n")
+  # maps to nil (accepted) or a distinguishable error. Emitted for the main class
+  # and for each sub-interface that owns a signal (both keyed by l.ctx, so a
+  # sub-interface signal routes to that sub-instance's ctx).
+  proc emitGoSignalCall(recv: string): string {.compileTime.} =
+    result.add("// signalCall dispatches a one-way signal (no response envelope).\n")
+    result.add(
+      "func (l *" & recv & ") signalCall(apiName string, args interface{}) error {\n"
+    )
+    result.add(
+      "\tif l.ctx == 0 { return errors.New(\"library context is not created\") }\n"
+    )
+    result.add("\tvar inBytes []byte\n")
+    result.add("\tif args != nil {\n")
+    result.add("\t\tvar err error\n")
+    result.add("\t\tinBytes, err = cbor.Marshal(args)\n")
+    result.add("\t\tif err != nil { return err }\n")
+    result.add("\t}\n")
+    result.add("\tcName := C.CString(apiName)\n")
+    result.add("\tdefer C.free(unsafe.Pointer(cName))\n")
+    result.add("\tvar inPtr unsafe.Pointer\n")
+    result.add("\tif len(inBytes) > 0 {\n")
+    result.add("\t\tinPtr = C." & p & "allocBuffer(C.int32_t(len(inBytes)))\n")
+    result.add("\t\tif inPtr == nil { return errors.New(\"allocBuffer failed\") }\n")
+    result.add(
+      "\t\tC.memcpy(inPtr, unsafe.Pointer(&inBytes[0]), C.size_t(len(inBytes)))\n"
+    )
+    result.add("\t}\n")
+    result.add("\tvar outBuf unsafe.Pointer\n")
+    result.add("\tvar outLen C.int32_t\n")
+    result.add(
+      "\trc := C." & p &
+        "call(l.ctx, cName, inPtr, C.int32_t(len(inBytes)), &outBuf, &outLen)\n"
+    )
+    result.add("\tif outBuf != nil { C." & p & "freeBuffer(outBuf) }\n")
+    result.add("\tswitch int32(rc) {\n")
+    result.add("\tcase 0:\n\t\treturn nil\n")
+    result.add(
+      "\tcase " & $ApiStatusAgain &
+        ":\n\t\treturn errors.New(\"EAGAIN: signal queue full\")\n"
+    )
+    result.add(
+      "\tcase " & $ApiStatusProviderErr &
+        ":\n\t\treturn errors.New(\"no signal handler installed\")\n"
+    )
+    result.add("\tdefault:\n\t\treturn fmt.Errorf(\"signal failed: %d\", int32(rc))\n")
+    result.add("\t}\n")
+    result.add("}\n\n")
+
+  g.add(emitGoSignalCall(className))
 
   # ---- Async request plumbing (goroutine + channel per call) --------------
   g.add("// AsyncQueueDepth is the max concurrent in-flight <Method>Async calls\n")
@@ -948,7 +963,7 @@ proc generateCborGoFile*(
       g.add(emitGoContextMethod(e, className))
 
   # ---- Per-signal one-way methods: `func (l *Lib) <Name>(fields...) error` --
-  proc emitGoSignalMethod(s: CborSignalEntry): string {.compileTime.} =
+  proc emitGoSignalMethod(s: CborSignalEntry, recv: string): string {.compileTime.} =
     if not (s.typeName in objectNames or isScalarPayload(s.typeName)):
       return
         "// TODO: signal '" & s.apiName & "' payload '" & s.typeName &
@@ -971,9 +986,7 @@ proc generateCborGoFile*(
         sigParams.add(", ")
       sigParams.add(goSafeParam(f.name) & " " & nimTypeToGoCborHint(f.nimType))
       first = false
-    result.add(
-      "func (l *" & className & ") " & methodName & "(" & sigParams & ") error {\n"
-    )
+    result.add("func (l *" & recv & ") " & methodName & "(" & sigParams & ") error {\n")
     if fields.len == 0:
       result.add("\treturn l.signalCall(\"" & s.apiName & "\", nil)\n")
     elif s.typeName in objectNames:
@@ -998,7 +1011,9 @@ proc generateCborGoFile*(
     result.add("}\n\n")
 
   for s in signalEntries:
-    g.add(emitGoSignalMethod(s))
+    if not ownsSigMain(s):
+      continue
+    g.add(emitGoSignalMethod(s, className))
 
   # ---- Single CBOR event trampoline + per-event On/Off ---------------------
   if eventEntries.len > 0:
@@ -1170,6 +1185,16 @@ proc generateCborGoFile*(
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         g.add(emitGoReqMethod(e, sub))
         g.add(emitGoContextMethod(e, sub))
+    # Sub-interface one-way signals (routed by l.ctx — this instance). Emit
+    # signalCall only when this sub-interface owns at least one signal.
+    var ifaceSigs: seq[CborSignalEntry] = @[]
+    for s in signalEntries:
+      if interfaceOwningSignalType(s.typeName) == ifaceName:
+        ifaceSigs.add(s)
+    if ifaceSigs.len > 0:
+      g.add(emitGoSignalCall(sub))
+      for s in ifaceSigs:
+        g.add(emitGoSignalMethod(s, sub))
     # Sub-interface event methods (subscribe/unsubscribe keyed by l.ctx).
     for ev in eventEntries:
       if interfaceOwningEventType(ev.typeName) != ifaceName:

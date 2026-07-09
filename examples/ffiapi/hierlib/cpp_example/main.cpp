@@ -20,6 +20,16 @@ int main() {
   assert(lib.getValue().value() == 7);
   assert(lib.echoLen("abcd").value() == 4);
 
+  // One-way signal (fire-and-forget, no response): nudge the value. The handler
+  // runs on the processing thread, so poll getValue for the observable effect.
+  assert(lib.nudgeSignal(10).isOk());
+  {
+    auto sigDl = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (lib.getValue().value() == 7 && std::chrono::steady_clock::now() < sigDl)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(lib.getValue().value() == 17);
+
   std::atomic<int> received{-1};
   auto handle = lib.onTick([&](Hierlib&, int32_t n) { received.store(n); });
   assert(handle != 0);
@@ -43,6 +53,16 @@ int main() {
     assert(widget.area().value() == 25);
     assert(widget.scale(3).value() == 15);
     assert(widget.area().value() == 225);
+
+    // Sub-interface one-way signal: routes to THIS widget by its ctx
+    // (size 15 -> 20 -> area 400). Poll area for the async one-way delivery.
+    assert(widget.resizeSignal(5).isOk());
+    {
+      auto sd = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (widget.area().value() == 225 && std::chrono::steady_clock::now() < sd)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(widget.area().value() == 400);
 
     // A second, independent widget (own instanceCtx, same library).
     auto w2 = lib.makeWidget(2);

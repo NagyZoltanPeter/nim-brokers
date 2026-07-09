@@ -520,6 +520,12 @@ proc generateCborCppHeaderFile*(
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
 
+  proc ownsSigMain(s: CborSignalEntry): bool {.compileTime.} =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningSignalType(s.typeName)
+    o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   var anyInstanceReturn = false
   if mainClass.len > 0:
@@ -1032,26 +1038,102 @@ proc generateCborCppHeaderFile*(
       result.params.add(nimTypeToCppType(f.nimType) & " " & f.name)
       first = false
 
-  for s in signalEntries:
+  # Signal method DECLARATION (class-independent) — shared by the main class and
+  # each sub-interface class (a sub-interface signal is emitted on its sub class).
+  proc emitSignalDecl(s: CborSignalEntry): string {.compileTime.} =
     let methodName = snakeToLowerCamel(s.apiName)
     if not (
       isVoidPayload(s.typeName) or isObjectSignal(s.typeName) or
       isScalarPayload(s.typeName)
     ):
-      h.add(
+      return
         "  // TODO: signal '" & s.apiName & "' payload '" & s.typeName &
-          "' is not yet emitted as a typed C++ signal method.\n"
-      )
-      continue
+        "' is not yet emitted as a typed C++ signal method.\n"
     let sp = signalSigParams(s.typeName)
     if not sp.mappable:
-      h.add(
+      return
         "  // TODO: signal '" & s.apiName &
-          "' has fields whose Nim types aren't yet mappable to C++.\n"
+        "' has fields whose Nim types aren't yet mappable to C++.\n"
+    "  Result<void> " & methodName & "(" & sp.params & ");\n"
+
+  # Signal method DEFINITION for class `clsName` (main or a sub class). Both use
+  # a `ctx_` member + `detail::rawCallOwned(ctx_, …)`, so the body is identical
+  # apart from the `clsName::` qualifier — for a sub class `ctx_` is the
+  # sub-instance ctx, so the signal routes to that instance's handler.
+  proc emitSignalImpl(s: CborSignalEntry, clsName: string): string {.compileTime.} =
+    if not (
+      isVoidPayload(s.typeName) or isObjectSignal(s.typeName) or
+      isScalarPayload(s.typeName)
+    ):
+      return ""
+    let sp = signalSigParams(s.typeName)
+    if not sp.mappable:
+      return ""
+    let methodName = snakeToLowerCamel(s.apiName)
+    result.add(
+      "inline Result<void> " & clsName & "::" & methodName & "(" & sp.params & ") {\n"
+    )
+    if isVoidPayload(s.typeName):
+      result.add("  std::string lastError;\n")
+      result.add(
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & s.apiName &
+          "\", nullptr, 0);\n"
       )
+    else:
+      if isObjectSignal(s.typeName):
+        result.add("  " & s.typeName & " __p;\n")
+        for f in effectiveFields(s.typeName):
+          result.add("  __p." & f.name & " = " & f.name & ";\n")
+      else:
+        result.add("  const auto& __p = value;\n")
+      result.add("  std::size_t cborLen = 0;\n")
+      result.add("  try { cborLen = detail::cborEncodedSize(__p); }\n")
+      result.add(
+        "  catch (const std::exception& ex) { return Result<void>::err(std::string(\"size pass failed: \") + ex.what()); }\n"
+      )
+      result.add(
+        "  void* inBuf = (cborLen > 0) ? " & p &
+          "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
+      )
+      result.add(
+        "  if (cborLen > 0 && !inBuf) return Result<void>::err(\"allocBuffer failed\");\n"
+      )
+      result.add("  try {\n")
+      result.add(
+        "    if (cborLen > 0) detail::cborEncodeInto(__p, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
+      )
+      result.add("  } catch (const std::exception& ex) {\n")
+      result.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
+      result.add(
+        "    return Result<void>::err(std::string(\"encode pass failed: \") + ex.what());\n"
+      )
+      result.add("  }\n")
+      result.add("  std::string lastError;\n")
+      result.add(
+        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & s.apiName &
+          "\", inBuf, cborLen);\n"
+      )
+    result.add("  if (status == 0) return Result<void>::ok();\n")
+    result.add(
+      "  if (status == " & $ApiStatusAgain &
+        ") return Result<void>::err(\"EAGAIN: signal queue full\");\n"
+    )
+    result.add(
+      "  if (status == " & $ApiStatusProviderErr &
+        ") return Result<void>::err(\"no signal handler installed\");\n"
+    )
+    result.add(
+      "  return Result<void>::err(lastError.empty() ? (std::string(\"signal failed: rc=\") + std::to_string(status)) : lastError);\n"
+    )
+    result.add("}\n\n")
+
+  var mainSigCount = 0
+  for s in signalEntries:
+    if not ownsSigMain(s):
       continue
-    h.add("  Result<void> " & methodName & "(" & sp.params & ");\n")
-  if signalEntries.len > 0:
+    inc mainSigCount
+    h.add(emitSignalDecl(s))
+  if mainSigCount > 0:
     h.add("\n")
 
   # Per-event Callback aliases + on/off declarations. The public alias is
@@ -1275,6 +1357,10 @@ proc generateCborCppHeaderFile*(
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         h.add(emitSubReqDecl(e))
+    # Signal method declarations (one-way; routed by this instance's ctx_).
+    for s in signalEntries:
+      if interfaceOwningSignalType(s.typeName) == ifaceName:
+        h.add(emitSignalDecl(s))
     # Event callback aliases + on/off declarations.
     for ev in subEvts:
       let camelBase = snakeToLowerCamel(ev.apiName)
@@ -1778,6 +1864,10 @@ proc generateCborCppHeaderFile*(
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         h.add(emitSubReqImpl(e, sub))
+    # Signal method implementations (route to this instance via ctx_).
+    for s in signalEntries:
+      if interfaceOwningSignalType(s.typeName) == ifaceName:
+        h.add(emitSignalImpl(s, sub))
     # Event on/off implementations.
     for ev in subEvts:
       let camelBase = snakeToLowerCamel(ev.apiName)
@@ -2128,73 +2218,9 @@ proc generateCborCppHeaderFile*(
 
   # ---- Per-signal method implementations (one-way, slot-free `_call`) ----
   for s in signalEntries:
-    if not (
-      isVoidPayload(s.typeName) or isObjectSignal(s.typeName) or
-      isScalarPayload(s.typeName)
-    ):
+    if not ownsSigMain(s):
       continue
-    let sp = signalSigParams(s.typeName)
-    if not sp.mappable:
-      continue
-    let methodName = snakeToLowerCamel(s.apiName)
-    h.add(
-      "inline Result<void> " & className & "::" & methodName & "(" & sp.params & ") {\n"
-    )
-    if isVoidPayload(s.typeName):
-      h.add("  std::string lastError;\n")
-      h.add(
-        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & s.apiName &
-          "\", nullptr, 0);\n"
-      )
-    else:
-      if isObjectSignal(s.typeName):
-        h.add("  " & s.typeName & " __p;\n")
-        for f in effectiveFields(s.typeName):
-          h.add("  __p." & f.name & " = " & f.name & ";\n")
-      else:
-        # Scalar / distinct payload: encode the bare value (the wire form the
-        # Nim adapter's `cborDecode(reqBuf, <Type>)` expects).
-        h.add("  const auto& __p = value;\n")
-      h.add("  std::size_t cborLen = 0;\n")
-      h.add("  try { cborLen = detail::cborEncodedSize(__p); }\n")
-      h.add(
-        "  catch (const std::exception& ex) { return Result<void>::err(std::string(\"size pass failed: \") + ex.what()); }\n"
-      )
-      h.add(
-        "  void* inBuf = (cborLen > 0) ? " & p &
-          "allocBuffer(static_cast<int32_t>(cborLen)) : nullptr;\n"
-      )
-      h.add(
-        "  if (cborLen > 0 && !inBuf) return Result<void>::err(\"allocBuffer failed\");\n"
-      )
-      h.add("  try {\n")
-      h.add(
-        "    if (cborLen > 0) detail::cborEncodeInto(__p, static_cast<std::uint8_t*>(inBuf), cborLen);\n"
-      )
-      h.add("  } catch (const std::exception& ex) {\n")
-      h.add("    if (inBuf) { " & p & "freeBuffer(inBuf); }\n")
-      h.add(
-        "    return Result<void>::err(std::string(\"encode pass failed: \") + ex.what());\n"
-      )
-      h.add("  }\n")
-      h.add("  std::string lastError;\n")
-      h.add(
-        "  auto [status, resp] = detail::rawCallOwned(ctx_, lastError, \"" & s.apiName &
-          "\", inBuf, cborLen);\n"
-      )
-    h.add("  if (status == 0) return Result<void>::ok();\n")
-    h.add(
-      "  if (status == " & $ApiStatusAgain &
-        ") return Result<void>::err(\"EAGAIN: signal queue full\");\n"
-    )
-    h.add(
-      "  if (status == " & $ApiStatusProviderErr &
-        ") return Result<void>::err(\"no signal handler installed\");\n"
-    )
-    h.add(
-      "  return Result<void>::err(lastError.empty() ? (std::string(\"signal failed: rc=\") + std::to_string(status)) : lastError);\n"
-    )
-    h.add("}\n\n")
+    h.add(emitSignalImpl(s, className))
 
   # ---- Per-event on/off implementations (delegate to dispatcher) ----
   for ev in mainEvents:
