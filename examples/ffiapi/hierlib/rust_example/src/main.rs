@@ -54,6 +54,15 @@ fn main() {
         assert_eq!(*widget.scale(3).value().unwrap(), 15);
         assert_eq!(*widget.area().value().unwrap(), 225);
 
+        // Sub-interface one-way signal: routes to THIS widget by its ctx
+        // (size 15 -> 20 -> area 400). Poll area for the async delivery.
+        widget.resize_signal(5).expect("resize_signal");
+        let sig_dl = Instant::now() + Duration::from_secs(2);
+        while *widget.area().value().unwrap() == 225 && Instant::now() < sig_dl {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*widget.area().value().unwrap(), 400);
+
         // A second, independent widget (own instanceCtx, same library).
         let w2 = lib.make_widget(2).into_result().expect("make_widget 2");
         assert_eq!(*w2.area().value().unwrap(), 4);

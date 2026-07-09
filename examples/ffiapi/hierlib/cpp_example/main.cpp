@@ -54,6 +54,16 @@ int main() {
     assert(widget.scale(3).value() == 15);
     assert(widget.area().value() == 225);
 
+    // Sub-interface one-way signal: routes to THIS widget by its ctx
+    // (size 15 -> 20 -> area 400). Poll area for the async one-way delivery.
+    assert(widget.resizeSignal(5).isOk());
+    {
+      auto sd = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (widget.area().value() == 225 && std::chrono::steady_clock::now() < sd)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(widget.area().value() == 400);
+
     // A second, independent widget (own instanceCtx, same library).
     auto w2 = lib.makeWidget(2);
     assert(w2.isOk());

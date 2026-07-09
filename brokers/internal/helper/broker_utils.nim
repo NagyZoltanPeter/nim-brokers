@@ -669,19 +669,26 @@ type ApiInterfaceEntry* = object
   name*: string
   requestTypes*: seq[string] ## sanitized request broker type names
   eventTypes*: seq[string] ## event payload type names
+  signalTypes*: seq[string] ## sanitized signal broker type names
 
 var gApiInterfaces {.compileTime.}: seq[ApiInterfaceEntry] = @[]
 
 proc registerApiInterface*(
-    name: string, requestTypes, eventTypes: seq[string]
+    name: string, requestTypes, eventTypes, signalTypes: seq[string]
 ) {.compileTime.} =
   for i in 0 ..< gApiInterfaces.len:
     if gApiInterfaces[i].name == name:
       gApiInterfaces[i].requestTypes = requestTypes
       gApiInterfaces[i].eventTypes = eventTypes
+      gApiInterfaces[i].signalTypes = signalTypes
       return
   gApiInterfaces.add(
-    ApiInterfaceEntry(name: name, requestTypes: requestTypes, eventTypes: eventTypes)
+    ApiInterfaceEntry(
+      name: name,
+      requestTypes: requestTypes,
+      eventTypes: eventTypes,
+      signalTypes: signalTypes,
+    )
   )
 
 proc apiInterfaces*(): seq[ApiInterfaceEntry] {.compileTime.} =
@@ -709,5 +716,13 @@ proc interfaceOwningEventType*(typeName: string): string {.compileTime.} =
   for it in gApiInterfaces:
     for et in it.eventTypes:
       if et == typeName:
+        owners.add(it.name)
+  owners.join(", ")
+
+proc interfaceOwningSignalType*(typeName: string): string {.compileTime.} =
+  var owners: seq[string] = @[]
+  for it in gApiInterfaces:
+    for st in it.signalTypes:
+      if st == typeName:
         owners.add(it.name)
   owners.join(", ")

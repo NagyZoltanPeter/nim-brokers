@@ -84,6 +84,23 @@ func main() {
 		panic(fmt.Sprint("widget.Area after scale: ", a, " ", err))
 	}
 
+	// Sub-interface one-way signal: routes to THIS widget by its ctx
+	// (size 15 -> 20 -> area 400). Poll Area for the async one-way delivery.
+	if err := widget.ResizeSignal(5); err != nil {
+		panic(fmt.Sprint("resize_signal: ", err))
+	}
+	wsd := time.Now().Add(2 * time.Second)
+	for {
+		a, err := widget.Area()
+		if err == nil && int32(a) == 400 {
+			break
+		}
+		if time.Now().After(wsd) {
+			panic(fmt.Sprint("widget signal delivery: ", a, " ", err))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// A second, independent widget (own instanceCtx, same library).
 	w2, err := lib.MakeWidget(2)
 	if err != nil {

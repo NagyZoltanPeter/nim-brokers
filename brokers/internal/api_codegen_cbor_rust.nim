@@ -252,6 +252,12 @@ proc generateCborRustFile*(
     let o = interfaceOwningEventType(ev.typeName)
     o.len == 0 or o == mainClass
 
+  proc ownsSigMain(s: CborSignalEntry): bool {.compileTime.} =
+    if mainClass.len == 0:
+      return true
+    let o = interfaceOwningSignalType(s.typeName)
+    o.len == 0 or o == mainClass
+
   var subInterfaceNames: seq[string] = @[]
   if mainClass.len > 0:
     for e in requestEntries:
@@ -487,6 +493,61 @@ proc generateCborRustFile*(
   rs.add("    };\n")
   rs.add("    let _ = sender.send(result);\n")
   rs.add("}\n\n")
+
+  # Shared `do_signal` body (used by the main Lib impl and each sub-impl that
+  # owns a signal — both have a private `ctx: u32`, so a sub-interface signal
+  # routes to that sub-instance's ctx). Slot-free one-way `_call`.
+  proc emitRustDoSignal(p: string): string {.compileTime.} =
+    result.add(
+      "    fn do_signal(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<(), String> {\n"
+    )
+    result.add(
+      "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
+    )
+    result.add("        unsafe {\n")
+    result.add(
+      "            let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
+    )
+    result.add("            let in_buf: *const c_void = if req_payload.is_empty() {\n")
+    result.add("                std::ptr::null()\n")
+    result.add("            } else {\n")
+    result.add(
+      "                let p = " & p & "allocBuffer(req_payload.len() as i32);\n"
+    )
+    result.add(
+      "                if p.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
+    )
+    result.add(
+      "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), p as *mut u8, req_payload.len());\n"
+    )
+    result.add("                p as *const c_void\n")
+    result.add("            };\n")
+    result.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
+    result.add("            let mut out_len: i32 = 0;\n")
+    result.add("            let status = " & p & "call(\n")
+    result.add(
+      "                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n"
+    )
+    result.add("                &mut out_buf as *mut _, &mut out_len as *mut _,\n")
+    result.add("            );\n")
+    result.add(
+      "            if !out_buf.is_null() && out_len > 0 { " & p &
+        "freeBuffer(out_buf); }\n"
+    )
+    result.add("            match status {\n")
+    result.add("                0 => Ok(()),\n")
+    result.add(
+      "                " & $ApiStatusAgain &
+        " => Err(\"EAGAIN: signal queue full\".into()),\n"
+    )
+    result.add(
+      "                " & $ApiStatusProviderErr &
+        " => Err(\"no signal handler installed\".into()),\n"
+    )
+    result.add("                s => Err(format!(\"signal failed: {}\", s)),\n")
+    result.add("            }\n")
+    result.add("        }\n")
+    result.add("    }\n\n")
 
   # Shared `do_call_async` body (used by the main Lib impl and each sub-impl —
   # both have a private `ctx: u32`). Encodes nothing; takes raw request bytes,
@@ -910,56 +971,8 @@ proc generateCborRustFile*(
   rs.add("        }\n")
   rs.add("    }\n\n")
 
-  # Slot-free one-way signal dispatch through `_call`. No response envelope;
-  # status maps to Ok(()) or a distinguishable Err(String).
-  rs.add(
-    "    fn do_signal(&self, api_name: &str, req_payload: &[u8]) -> ::std::result::Result<(), String> {\n"
-  )
-  rs.add(
-    "        if self.ctx == 0 { return Err(\"Library context is not created\".into()); }\n"
-  )
-  rs.add("        unsafe {\n")
-  rs.add(
-    "            let cname = CString::new(api_name).map_err(|e| e.to_string())?;\n"
-  )
-  rs.add("            let in_buf: *const c_void = if req_payload.is_empty() {\n")
-  rs.add("                std::ptr::null()\n")
-  rs.add("            } else {\n")
-  rs.add("                let p = " & p & "allocBuffer(req_payload.len() as i32);\n")
-  rs.add(
-    "                if p.is_null() { return Err(\"allocBuffer failed\".into()); }\n"
-  )
-  rs.add(
-    "                std::ptr::copy_nonoverlapping(req_payload.as_ptr(), p as *mut u8, req_payload.len());\n"
-  )
-  rs.add("                p as *const c_void\n")
-  rs.add("            };\n")
-  rs.add("            let mut out_buf: *mut c_void = std::ptr::null_mut();\n")
-  rs.add("            let mut out_len: i32 = 0;\n")
-  rs.add("            let status = " & p & "call(\n")
-  rs.add(
-    "                self.ctx, cname.as_ptr(), in_buf, req_payload.len() as i32,\n"
-  )
-  rs.add("                &mut out_buf as *mut _, &mut out_len as *mut _,\n")
-  rs.add("            );\n")
-  rs.add(
-    "            if !out_buf.is_null() && out_len > 0 { " & p &
-      "freeBuffer(out_buf); }\n"
-  )
-  rs.add("            match status {\n")
-  rs.add("                0 => Ok(()),\n")
-  rs.add(
-    "                " & $ApiStatusAgain &
-      " => Err(\"EAGAIN: signal queue full\".into()),\n"
-  )
-  rs.add(
-    "                " & $ApiStatusProviderErr &
-      " => Err(\"no signal handler installed\".into()),\n"
-  )
-  rs.add("                s => Err(format!(\"signal failed: {}\", s)),\n")
-  rs.add("            }\n")
-  rs.add("        }\n")
-  rs.add("    }\n\n")
+  # Slot-free one-way signal dispatch through `_call` (shared with sub-impls).
+  rs.add(emitRustDoSignal(p))
 
   rs.add(emitDoCallAsync(p))
 
@@ -1237,9 +1250,13 @@ proc generateCborRustFile*(
     result.add("        self.do_signal(\"" & s.apiName & "\", &buf)\n")
     result.add("    }\n\n")
 
-  if signalEntries.len > 0:
+  var mainSigs: seq[CborSignalEntry] = @[]
+  for s in signalEntries:
+    if ownsSigMain(s):
+      mainSigs.add(s)
+  if mainSigs.len > 0:
     rs.add("    // ---- Signal methods ----\n\n")
-    for s in signalEntries:
+    for s in mainSigs:
       rs.add(emitRustSignalMethod(s))
 
   # Per-event subscribe / unsubscribe.
@@ -1401,6 +1418,16 @@ proc generateCborRustFile*(
     rs.add("        }\n")
     rs.add("    }\n\n")
     rs.add(emitDoCallAsync(p))
+    # Sub-interface one-way signals (routed by self.ctx — this instance). Emit
+    # do_signal only when this sub-interface owns at least one signal.
+    var ifaceSigs: seq[CborSignalEntry] = @[]
+    for s in signalEntries:
+      if interfaceOwningSignalType(s.typeName) == ifaceName:
+        ifaceSigs.add(s)
+    if ifaceSigs.len > 0:
+      rs.add(emitRustDoSignal(p))
+      for s in ifaceSigs:
+        rs.add(emitRustSignalMethod(s))
     for e in requestEntries:
       if interfaceOwningRequestType(e.responseTypeName) == ifaceName:
         rs.add(emitRustReqMethod(e))

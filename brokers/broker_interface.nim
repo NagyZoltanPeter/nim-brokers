@@ -125,6 +125,7 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   #    interface is `(API)`), and generate abstract methods for requests.
   var eventNames: seq[string] = @[]
   var signalNames: seq[(string, bool)] = @[] # (SignalBroker type name, isVoid)
+  var signalApiTypes: seq[string] = @[] # sanitized signal type names (A1, FFI)
   var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
   var requestVerbs: seq[(string, string)] = @[] # (verb, sanitized type name)
   for stmt in body:
@@ -182,6 +183,9 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       # its handler with the right (zero-arg vs payload) shape.
       let sigParsed = parseSingleTypeDef(innerBody, "BrokerInterface SignalBroker")
       signalNames.add(($sigParsed.typeIdent, sigParsed.isVoid))
+      # Sanitized name matches CborSignalEntry.typeName, so FFI wrapper codegen
+      # can partition signals per interface (sub-interface signals -> sub class).
+      signalApiTypes.add(sanitizeIdentName(sigParsed.typeIdent))
 
   # Publish this interface's event types for BrokerImplement teardown (B2).
   registerInterfaceEvents(ifaceNameStr, eventNames)
@@ -196,7 +200,7 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   # registerBrokerLibrary can designate a main class and partition the per-
   # interface wrapper surface. Plain (non-API) interfaces are not FFI-exposed.
   if isApi:
-    registerApiInterface(ifaceNameStr, requestTypes, eventNames)
+    registerApiInterface(ifaceNameStr, requestTypes, eventNames, signalApiTypes)
 
   # 3. Generic instance-scoped event facade — forwards any event typedesc to
   #    the underlying ctx-based broker API using `self.brokerCtx`.

@@ -63,7 +63,16 @@ def main() -> None:
     assert int(widget.scale(3).value) == 15, "widget.scale"
     assert int(widget.area().value) == 225, "widget.area after scale"
 
-    # A second widget is independent (own instanceCtx, same library).
+    # Sub-interface one-way signal: routes to THIS widget instance by its ctx
+    # (size 15 -> 20 -> area 400). Poll area for the async one-way delivery.
+    widget.resize_signal(delta=5)
+    sd = time.time() + 2.0
+    while int(widget.area().value) == 225 and time.time() < sd:
+        time.sleep(0.01)
+    assert int(widget.area().value) == 400, ("widget signal", widget.area())
+
+    # A second widget is independent (own instanceCtx, same library) — the
+    # signal above did not touch it.
     with lib.make_widget(2).value as widget2:
         assert int(widget2.area().value) == 4, "widget2.area"
 
