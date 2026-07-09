@@ -478,3 +478,29 @@ suite "EventBroker macro (multi-thread mode, void / payload-less)":
     MtVoidSignal.emit(MtVoidSignal())
     await sleepAsync(chronos.milliseconds(20))
     check gVoidHits.load() == 1
+
+## ---------------------------------------------------------------------------
+## bind listener sugar (issue #42) — same-thread (owning) exercise
+## ---------------------------------------------------------------------------
+
+EventBroker(mt):
+  type MtBindEvent = object
+    n*: int
+
+type MtEvtBindService = ref object
+  seen: int
+
+proc onMtBindEvent(self: MtEvtBindService, e: MtBindEvent) {.async: (raises: []).} =
+  self.seen = e.n
+
+suite "EventBroker(mt) bindListener sugar (issue #42)":
+  asyncTest "bindListener installs a class-method listener (same thread)":
+    let self = MtEvtBindService()
+    let h = MtBindEvent.bindListener(self.onMtBindEvent)
+    check h.isOk()
+
+    MtBindEvent.emit(MtBindEvent(n: 21))
+    await sleepAsync(chronos.milliseconds(20))
+    check self.seen == 21
+
+    await MtBindEvent.dropAllListeners()

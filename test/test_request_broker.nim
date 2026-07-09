@@ -842,3 +842,115 @@ suite "RequestBroker macro (proc-sugar void payload)":
     check res.error == "flag was false"
 
     SugarVoidSync.clearProvider()
+
+## ---------------------------------------------------------------------------
+## bind / rebind provider sugar (issue #42)
+## ---------------------------------------------------------------------------
+
+RequestBroker:
+  type BindZero = object
+    v*: int
+
+  proc signature*(): Future[Result[BindZero, string]] {.async.}
+
+RequestBroker:
+  type BindArg = object
+    v*: int
+
+  proc signature*(k: int): Future[Result[BindArg, string]] {.async.}
+
+RequestBroker:
+  type BindDual = object
+    v*: int
+
+  proc signature*(): Future[Result[BindDual, string]] {.async.}
+  proc signature*(k: int): Future[Result[BindDual, string]] {.async.}
+
+RequestBroker(sync):
+  type BindSync = object
+    v*: int
+
+  proc signature*(k: int): Result[BindSync, string]
+
+type ReqBindService = ref object
+  base: int
+
+proc provideZero(self: ReqBindService): Future[Result[BindZero, string]] {.async.} =
+  ok(BindZero(v: self.base))
+
+proc provideArg(
+    self: ReqBindService, k: int
+): Future[Result[BindArg, string]] {.async.} =
+  ok(BindArg(v: self.base + k))
+
+proc mockZero(self: ReqBindService): Future[Result[BindZero, string]] {.async.} =
+  ok(BindZero(v: -1))
+
+proc failZero(self: ReqBindService): Future[Result[BindZero, string]] {.async.} =
+  err("boom")
+
+proc provideDualZero(self: ReqBindService): Future[Result[BindDual, string]] {.async.} =
+  ok(BindDual(v: 100))
+
+proc provideDualArg(
+    self: ReqBindService, k: int
+): Future[Result[BindDual, string]] {.async.} =
+  ok(BindDual(v: k))
+
+proc provideSync(self: ReqBindService, k: int): Result[BindSync, string] =
+  ok(BindSync(v: self.base * k))
+
+suite "RequestBroker bind/rebind sugar (issue #42)":
+  test "bindProvider installs a class-method provider (zero-arg)":
+    let self = ReqBindService(base: 7)
+    check BindZero.bindProvider(self.provideZero).isOk()
+    let r = waitFor BindZero.request()
+    check r.isOk()
+    check r.value.v == 7
+    BindZero.clearProvider()
+
+  test "bindProvider installs a class-method provider (arg)":
+    let self = ReqBindService(base: 10)
+    check BindArg.bindProvider(self.provideArg).isOk()
+    let r = waitFor BindArg.request(5)
+    check r.isOk()
+    check r.value.v == 15
+    BindArg.clearProvider()
+
+  test "rebindProvider swaps to a mock":
+    let self = ReqBindService(base: 1)
+    check BindZero.bindProvider(self.provideZero).isOk()
+    check BindZero.rebindProvider(DefaultBrokerContext, self.mockZero).isOk()
+    let r = waitFor BindZero.request()
+    check r.isOk()
+    check r.value.v == -1
+    BindZero.clearProvider()
+
+  test "rebindProvider mock error path":
+    let self = ReqBindService(base: 1)
+    check BindZero.bindProvider(self.provideZero).isOk()
+    check BindZero.rebindProvider(DefaultBrokerContext, self.failZero).isOk()
+    let r = waitFor BindZero.request()
+    check r.isErr()
+    check r.error.contains("boom")
+    BindZero.clearProvider()
+
+  test "bindProvider disambiguates arity on a dual-slot broker":
+    let self = ReqBindService(base: 0)
+    check BindDual.bindProvider(self.provideDualZero).isOk()
+    check BindDual.bindProvider(self.provideDualArg).isOk()
+    let z = waitFor BindDual.request()
+    let a = waitFor BindDual.request(42)
+    check z.isOk()
+    check z.value.v == 100
+    check a.isOk()
+    check a.value.v == 42
+    BindDual.clearProvider()
+
+  test "bindProvider works in sync mode":
+    let self = ReqBindService(base: 3)
+    check BindSync.bindProvider(self.provideSync).isOk()
+    let r = BindSync.request(4)
+    check r.isOk()
+    check r.value.v == 12
+    BindSync.clearProvider()

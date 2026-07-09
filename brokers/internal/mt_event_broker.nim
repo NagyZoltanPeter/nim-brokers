@@ -954,6 +954,23 @@ proc generateMtEventBroker*(
 
   )
 
+  # ── bind listener sugar (issue #42) ───────────────────────────────
+  # `bindListener` = sugar for `listen`. The MT listener proc type always takes
+  # the event value (`proc(event: T): Future[void] {.async: (raises: []),
+  # gcsafe.}`), so the trampoline forwards it unconditionally.
+  block:
+    let listenerProcTy = quote:
+      proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
+    let slot = BindSlot(
+      params:
+        @[newTree(nnkIdentDefs, ident("event"), copyNimTree(typeIdent), newEmptyNode())],
+      returnType: futureVoidTy(),
+      pragma: procTyPragma(listenerProcTy),
+    )
+    result.add(
+      buildBindTemplates(typeIdent, "listen", "bindListener", @[slot], awaitCall = true)
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

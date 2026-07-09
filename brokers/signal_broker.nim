@@ -474,6 +474,35 @@ proc generateSignalBroker(body: NimNode): NimNode =
         )
       )
 
+  # ── bind / rebind signal-handler sugar (issue #42) ────────────────
+  # `bindSignalHandler` = sugar for `onSignal`, `rebindSignalHandler` = sugar for
+  # `replaceSignalHandler`. Single handler slot; the trampoline carries the
+  # handler proc type's pragma and forwards the signal value (or nothing, void).
+  block:
+    var slot = BindSlot(returnType: futureVoidTy(), pragma: procTyPragma(handlerProcTy))
+    if isVoid:
+      slot.params = @[]
+    else:
+      slot.params = @[
+        newTree(
+          nnkIdentDefs, ident("signalValue"), copyNimTree(typeIdent), newEmptyNode()
+        )
+      ]
+    result.add(
+      buildBindTemplates(
+        typeIdent, "onSignal", "bindSignalHandler", @[slot], awaitCall = true
+      )
+    )
+    result.add(
+      buildBindTemplates(
+        typeIdent,
+        "replaceSignalHandler",
+        "rebindSignalHandler",
+        @[slot],
+        awaitCall = true,
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("SignalBroker", sanitized, result)
     when defined(brokerDebugStdout):

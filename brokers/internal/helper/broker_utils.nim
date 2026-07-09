@@ -96,6 +96,146 @@ proc collectParamNames*(params: seq[NimNode]): seq[NimNode] =
         continue
       result.add(ident($nameNode))
 
+# ── bind / rebind provider sugar ──────────────────────────────────────────
+# Shared codegen for the `bind<Noun>` / `rebind<Noun>` templates (issue #42).
+# Nim has no bound-method values (`self.send` is not a closure), so the sugar
+# synthesises — via a generated `template` — the exact forwarding closure the
+# user would otherwise write by hand. Purely syntactic: identical codegen,
+# identical `self` capture, no new refc/ORC exposure.
+
+proc procTyPragma*(procTy: NimNode): NimNode =
+  ## Extract the pragma node from a proc-type / proc-def node so a synthesised
+  ## trampoline can carry the *exact* pragma of the slot it fills (matching
+  ## calling convention + effects, so the closure is assignable). Returns an
+  ## empty node if none is present.
+  for child in procTy:
+    if child.kind == nnkPragma:
+      return copyNimTree(child)
+  newEmptyNode()
+
+proc futureVoidTy*(): NimNode =
+  ## `Future[void]` — the return type of listener / signal-handler trampolines.
+  ## Built by hand (not `quote`) so the source stays parseable by nph.
+  newTree(nnkBracketExpr, ident("Future"), ident("void"))
+
+proc makeForwardingLambda*(
+    params: seq[NimNode], returnType, pragma: NimNode, awaitCall: bool
+): NimNode =
+  ## Anonymous trampoline `proc(<params>): <returnType> {.<pragma>.} =
+  ## [await] boundCall(<param names>)`. `boundCall` is left as a bare ident so
+  ## it binds to the enclosing bind/rebind template's `boundCall` parameter at
+  ## instantiation — `boundCall(x)` then expands to `self.method(x)`.
+  var formal = newTree(nnkFormalParams, copyNimTree(returnType))
+  for p in params:
+    formal.add(copyNimTree(p))
+  var call = newCall(ident("boundCall"))
+  for n in collectParamNames(params):
+    call.add(n)
+  let inner =
+    if awaitCall:
+      newTree(nnkCommand, ident("await"), call)
+    else:
+      call
+  newTree(
+    nnkLambda,
+    newEmptyNode(),
+    newEmptyNode(),
+    newEmptyNode(),
+    formal,
+    copyNimTree(pragma),
+    newEmptyNode(),
+    newStmtList(inner),
+  )
+
+type BindSlot* = object ## One provider/handler arity a bind/rebind template can target.
+  params*: seq[NimNode] ## trampoline params (empty for zero-arg / void slots)
+  returnType*: NimNode
+  pragma*: NimNode
+
+proc bindTemplateDef(sugar, typeIdent, body: NimNode, withCtx: bool): NimNode =
+  ## `template <sugar>*(_: typedesc[T][; brokerCtx: BrokerContext];
+  ##                    boundCall: untyped): untyped = body`
+  var formal = newTree(nnkFormalParams, ident("untyped"))
+  formal.add(
+    newTree(
+      nnkIdentDefs,
+      ident("_"),
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
+      newEmptyNode(),
+    )
+  )
+  if withCtx:
+    # `brokerCtx` is deliberately `untyped`, not `BrokerContext`: overloading
+    # `bind<Noun>` on arity (2-arg no-ctx vs 3-arg ctx) with a *typed* param in
+    # the ctx form makes Nim sem-check the bound-method argument (`self.send`)
+    # against `BrokerContext` while scoring the losing candidate — and a bare
+    # method reference cannot be sem-checked as a value (it is not a closure),
+    # yielding a spurious "undeclared field" error. Keeping it `untyped` makes
+    # overload resolution arity-only.
+    formal.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("untyped"), newEmptyNode())
+    )
+  formal.add(
+    newTree(nnkIdentDefs, ident("boundCall"), ident("untyped"), newEmptyNode())
+  )
+  newTree(
+    nnkTemplateDef,
+    postfix(copyNimTree(sugar), "*"),
+    newEmptyNode(),
+    newEmptyNode(),
+    formal,
+    newEmptyNode(),
+    newEmptyNode(),
+    copyNimTree(body),
+  )
+
+proc buildBindTemplates*(
+    typeIdent: NimNode,
+    verbName, sugarName: string,
+    slots: seq[BindSlot],
+    awaitCall: bool,
+): NimNode =
+  ## Emit the ctx-form + no-ctx-form bind/rebind sugar templates. Each forwards
+  ## to `verbName(T, brokerCtx, <trampoline>)`. With more than one slot the
+  ## ctx-form disambiguates arity via `when compiles` (first slot whose
+  ## trampoline sem-checks wins; the last slot is the unconditional `else`), so
+  ## a broker declaring both a zero-arg and an arg signature keeps that
+  ## capability without a second call-site name.
+  result = newStmtList()
+  let verb = ident(verbName)
+  let sugar = ident(sugarName)
+
+  proc slotCall(slot: BindSlot): NimNode =
+    newCall(
+      copyNimTree(verb),
+      copyNimTree(typeIdent),
+      ident("brokerCtx"),
+      makeForwardingLambda(slot.params, slot.returnType, slot.pragma, awaitCall),
+    )
+
+  var ctxBody: NimNode
+  if slots.len == 1:
+    ctxBody = newStmtList(slotCall(slots[0]))
+  else:
+    var whenStmt = newTree(nnkWhenStmt)
+    for i in 0 ..< slots.len - 1:
+      let cond = newCall(ident("compiles"), slotCall(slots[i]))
+      whenStmt.add(newTree(nnkElifBranch, cond, newStmtList(slotCall(slots[i]))))
+    whenStmt.add(newTree(nnkElse, newStmtList(slotCall(slots[^1]))))
+    ctxBody = newStmtList(whenStmt)
+
+  result.add(bindTemplateDef(sugar, typeIdent, ctxBody, withCtx = true))
+
+  let delegate = newStmtList(
+    newCall(
+      copyNimTree(sugar),
+      copyNimTree(typeIdent),
+      ident("DefaultBrokerContext"),
+      ident("boundCall"),
+    )
+  )
+  result.add(bindTemplateDef(sugar, typeIdent, delegate, withCtx = false))
+
 proc parseOneTypeDef(
     def: NimNode,
     macroName: string,
