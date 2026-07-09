@@ -33,11 +33,11 @@
 import std/[macros, strutils, atomics]
 import chronos, results
 import ./broker_context
-import ./request_broker, ./event_broker
+import ./request_broker, ./event_broker, ./signal_broker
 import ./internal/helper/broker_utils
 import ./internal/broker_debug
 
-export chronos, results, broker_context, request_broker, event_broker
+export chronos, results, broker_context, request_broker, event_broker, signal_broker
 
 proc canonPragma(async: bool): NimNode {.compileTime.} =
   ## Canonical override pragma matching the BrokerInterface abstract base
@@ -52,6 +52,12 @@ proc canonPragma(async: bool): NimNode {.compileTime.} =
 proc isAsyncRet(ret: NimNode): bool {.compileTime.} =
   ret.kind == nnkBracketExpr and ret.len >= 1 and ret[0].kind == nnkIdent and
     ret[0].eqIdent("Future")
+
+proc isFutureVoid(ret: NimNode): bool {.compileTime.} =
+  ## `Future[void]` — the shape of a SignalBroker handler override (no reply
+  ## path), as opposed to a request method's `Future[Result[T, string]]`.
+  ret.kind == nnkBracketExpr and ret.len == 2 and ret[0].eqIdent("Future") and
+    ret[1].kind == nnkIdent and ret[1].eqIdent("void")
 
 proc baseName(n: NimNode): NimNode {.compileTime.} =
   if n.kind == nnkPostfix:
@@ -93,6 +99,13 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   let postInitName = ident(implStr & "PostInit")
   # (verb, brokerName, argParams, payloadRepr, async)
   var methods: seq[(string, string, seq[NimNode], string, bool)] = @[]
+  # (handlerName, signalTypeName, isVoid) — SignalBroker handler overrides.
+  var signalMethods: seq[(string, string, bool)] = @[]
+
+  # Signals this interface declares: (typeName, isVoid). A signal handler in the
+  # body binds to one of these by NAME — method name `<Signal>` or `on<Signal>`
+  # (the same name-based binding a RequestBroker verb uses), never by param type.
+  let ifaceSignals = interfaceSignals(ifaceStr)
 
   for stmt in body:
     case stmt.kind
@@ -134,6 +147,64 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
       let p = stmt.params
       let ret = p[0]
       let async = isAsyncRet(ret)
+      # SignalBroker handler: `Future[void]` return. Bound to a declared signal
+      # by NAME — exactly like a RequestBroker verb binds to its `method`: the
+      # method name must be the signal broker name `<Signal>` (exact) or
+      # `on<Signal>`. NOT bound by parameter type. Emit a private `<name>Impl`
+      # raw body (canonical signal-handler pragma) and record it for onSignal
+      # wiring; the request path below is skipped.
+      if isFutureVoid(ret):
+        var sigTypeName = ""
+        var sigVoid = false
+        for (name, isVoidSig) in ifaceSignals:
+          if verb == name or verb == "on" & name:
+            sigTypeName = name
+            sigVoid = isVoidSig
+            break
+        if sigTypeName.len == 0:
+          macros.error(
+            "signal handler `" & verb &
+              "` (returns Future[void]) does not name any SignalBroker declared in " &
+              ifaceStr & " — name it `<Signal>` or `on<Signal>`",
+            stmt,
+          )
+        # Shape must match the signal's payload kind: a void (pulse) signal takes
+        # no payload; a payload signal takes exactly one arg of the signal type.
+        if sigVoid:
+          if p.len != 2:
+            macros.error(
+              "signal handler `" & verb & "` for void (pulse) signal `" & sigTypeName &
+                "` must take no payload: `method " & verb & "(self: " & implStr &
+                "): Future[void]`",
+              stmt,
+            )
+        else:
+          if p.len != 3:
+            macros.error(
+              "signal handler `" & verb & "` for signal `" & sigTypeName &
+                "` must take the payload: `method " & verb & "(self: " & implStr &
+                ", s: " & sigTypeName & "): Future[void]`",
+              stmt,
+            )
+          let paramType = p[2][^2].repr.strip()
+          if paramType != sigTypeName:
+            macros.error(
+              "signal handler `" & verb & "` for signal `" & sigTypeName &
+                "` must take a `" & sigTypeName & "` payload (got `" & paramType & "`)",
+              stmt,
+            )
+        let sigImpl = nnkProcDef.newTree(
+          ident(verb & "Impl"),
+          newEmptyNode(),
+          newEmptyNode(),
+          copyNimTree(stmt.params),
+          canonPragma(true), # {.async: (raises: []), gcsafe.}
+          newEmptyNode(),
+          copyNimTree(stmt.body),
+        )
+        result.add(sigImpl)
+        signalMethods.add((verb, sigTypeName, sigVoid))
+        continue
       let payload = extractResultOk(ret, async)
       if payload.isNil:
         macros.error(
@@ -184,6 +255,26 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
           "' (request type " & typeName & ") declared in " & ifaceStr
       )
 
+  # Same fulfillment check for signals: every SignalBroker declared in the
+  # interface must have a `Future[void]` handler override (matched above).
+  for (sig, isVoidSig) in ifaceSignals:
+    var found = false
+    for (handlerName, sigType, hVoid) in signalMethods:
+      if sigType == sig:
+        found = true
+        break
+    if not found:
+      let hint =
+        if isVoidSig:
+          "method on" & sig & "(self: " & implStr & "): Future[void]"
+        else:
+          "method on" & sig & "(self: " & implStr & ", s: " & sig & "): Future[void]"
+      macros.error(
+        "BrokerImplement " & implStr & ": missing signal handler override for '" &
+          sig & "' declared in " & ifaceStr & " (add `" & hint &
+          " {.async: (raises: []), gcsafe.}`)"
+      )
+
   let setupName = ident(implStr & "SetupProviders")
 
   # setupProviders — register a per-instance provider closure per request that
@@ -191,8 +282,26 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   # call site of the raw body; the public entry point is the interface's
   # tunneling proc, so all calls route through the broker.
   var setupSrc = "proc " & $setupName & "(self: " & implStr & ") {.gcsafe.} =\n"
-  if methods.len == 0:
+  if methods.len == 0 and signalMethods.len == 0:
     setupSrc.add("  discard\n")
+  # Signal handlers: install the single per-instance handler that dispatches to
+  # the raw `<name>Impl` body. The closure pragma matches the SignalBroker's
+  # generated handler proc type (`{.async: (raises: []), gcsafe.}`). A void
+  # (pulse) signal has a zero-arg handler; a payload signal takes `signalValue`.
+  for (handlerName, sigType, isVoidSig) in signalMethods:
+    if isVoidSig:
+      setupSrc.add(
+        "  discard " & sigType &
+          ".onSignal(self.brokerCtx, proc(): Future[void] " &
+          "{.async: (raises: []), gcsafe.} =\n    await self." & handlerName &
+          "Impl())\n"
+      )
+    else:
+      setupSrc.add(
+        "  discard " & sigType & ".onSignal(self.brokerCtx, proc(signalValue: " &
+          sigType & "): Future[void] {.async: (raises: []), gcsafe.} =\n    await self." &
+          handlerName & "Impl(signalValue))\n"
+      )
   for (verb, brokerName, margs, payload, async) in methods:
     var paramDecls = ""
     var argNames = ""
@@ -359,6 +468,11 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   closeSrc.add("  if self.brokerCtx == DefaultBrokerContext: return\n")
   for (verb, brokerName, margs, payload, async) in methods:
     closeSrc.add("  " & brokerName & ".clearProvider(self.brokerCtx)\n")
+  # Drop this instance's signal handlers. dropSignalHandler is async but its body
+  # is suspension-free, so a discarded Future still clears eagerly (mirrors the
+  # event dropAllListeners handling below).
+  for (handlerName, sigType, isVoidSig) in signalMethods:
+    closeSrc.add("  discard " & sigType & ".dropSignalHandler(self.brokerCtx)\n")
   # B2: also drop this instance's event listeners. The interface published its
   # event types via the compile-time registry; guard with `when compiles` so it
   # works whether the event broker is single-thread / mt / API.

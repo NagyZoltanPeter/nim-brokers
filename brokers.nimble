@@ -319,6 +319,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
     "test_request_broker_sync_void", "test_multi_request_broker", "test_signal_broker",
     "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
+    "test_broker_interface_signal",
   ]
   for f in tests:
     for opt in [
@@ -401,7 +402,7 @@ task testAllocRace,
 task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT compile":
   let rejects = [
     "reject_mismatch", "reject_mixedname", "reject_dupzero", "reject_badret",
-    "reject_signal_badmode",
+    "reject_signal_badmode", "reject_signal_nohandler", "reject_signal_badshape",
   ]
   for f in rejects:
     let (outp, code) = gorgeEx(

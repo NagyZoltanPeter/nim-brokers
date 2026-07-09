@@ -608,6 +608,32 @@ proc interfaceEvents*(iface: string): seq[string] {.compileTime.} =
   @[]
 
 # ---------------------------------------------------------------------------
+# Compile-time registry of interface signal types (SignalBroker sub-blocks).
+# BrokerImplement reads them to (a) validate every declared signal has a
+# handler override, install the per-instance handler, and (b) drop the handler
+# in the generated `close()`. Mirrors the event registry above.
+# ---------------------------------------------------------------------------
+
+# Each entry: (signalTypeName, isVoid) — isVoid marks a payload-less pulse
+# (`type X = void`), whose handler is zero-arg (`proc(): Future[void]`).
+var gInterfaceSignals {.compileTime.}: seq[(string, seq[(string, bool)])] = @[]
+
+proc registerInterfaceSignals*(
+    iface: string, signals: seq[(string, bool)]
+) {.compileTime.} =
+  for i in 0 ..< gInterfaceSignals.len:
+    if gInterfaceSignals[i][0] == iface:
+      gInterfaceSignals[i][1] = signals
+      return
+  gInterfaceSignals.add((iface, signals))
+
+proc interfaceSignals*(iface: string): seq[(string, bool)] {.compileTime.} =
+  for it in gInterfaceSignals:
+    if it[0] == iface:
+      return it[1]
+  @[]
+
+# ---------------------------------------------------------------------------
 # Compile-time registry of interface request verbs.
 # Records, per interface, the verb name and the associated request type name.
 # Used by BrokerImplement to validate that all declared requests are overridden.

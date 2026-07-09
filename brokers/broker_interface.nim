@@ -30,11 +30,11 @@
 import std/[macros, strutils]
 import chronos, results
 import ./broker_context
-import ./request_broker, ./event_broker
+import ./request_broker, ./event_broker, ./signal_broker
 import ./internal/helper/broker_utils
 import ./internal/broker_debug
 
-export chronos, results, broker_context, request_broker, event_broker
+export chronos, results, broker_context, request_broker, event_broker, signal_broker
 
 proc isApiArg(n: NimNode): bool =
   n.kind == nnkIdent and n.eqIdent("API")
@@ -124,13 +124,15 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
   #    interface is `(API)`), and generate abstract methods for requests.
   var eventNames: seq[string] = @[]
+  var signalNames: seq[(string, bool)] = @[] # (SignalBroker type name, isVoid)
   var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
   var requestVerbs: seq[(string, string)] = @[] # (verb, sanitized type name)
   for stmt in body:
     let headName = brokerHeadName(stmt)
-    if headName notin ["EventBroker", "RequestBroker"]:
+    if headName notin ["EventBroker", "RequestBroker", "SignalBroker"]:
       macros.error(
-        "BrokerInterface body may only contain `EventBroker:` / `RequestBroker:` blocks",
+        "BrokerInterface body may only contain `EventBroker:` / `RequestBroker:` / " &
+          "`SignalBroker:` blocks",
         stmt,
       )
     let innerBody = stmt[^1]
@@ -175,9 +177,17 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       # Record the event type so BrokerImplement.close() can drop listeners.
       let evParsed = parseSingleTypeDef(innerBody, "BrokerInterface EventBroker")
       eventNames.add($evParsed.typeIdent)
+    elif headName == "SignalBroker":
+      # Record the signal type (+ void-ness) so BrokerImplement can install/drop
+      # its handler with the right (zero-arg vs payload) shape.
+      let sigParsed = parseSingleTypeDef(innerBody, "BrokerInterface SignalBroker")
+      signalNames.add(($sigParsed.typeIdent, sigParsed.isVoid))
 
   # Publish this interface's event types for BrokerImplement teardown (B2).
   registerInterfaceEvents(ifaceNameStr, eventNames)
+
+  # Publish this interface's signal types for BrokerImplement handler wiring.
+  registerInterfaceSignals(ifaceNameStr, signalNames)
 
   # Publish this interface's request verbs for BrokerImplement fulfillment check.
   registerInterfaceVerbs(ifaceNameStr, requestVerbs)
@@ -202,6 +212,27 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
         t.dropListener(self.brokerCtx, handle)
 
   )
+
+  # Per-signal-type producer facade `self.signal(SigType, …)`. Generated one per
+  # declared signal (not a generic template) so a void pulse gets a zero-arg
+  # overload and a payload signal a varargs overload without the two colliding on
+  # an empty argument list.
+  for (sigName, sigVoid) in signalNames:
+    if sigVoid:
+      result.add(
+        parseStmt(
+          "template signal*(self: " & ifaceNameStr & ", _: typedesc[" & sigName &
+            "]): untyped =\n  " & sigName & ".signal(self.brokerCtx)\n"
+        )
+      )
+    else:
+      result.add(
+        parseStmt(
+          "template signal*(self: " & ifaceNameStr & ", _: typedesc[" & sigName &
+            "], args: varargs[untyped]): untyped =\n  " & sigName &
+            ".signal(self.brokerCtx, args)\n"
+        )
+      )
 
   # 4. Factory / dependency-injection. A consumer depends only on the interface
   #    module; an implementer installs a constructor via `provideFactory`
