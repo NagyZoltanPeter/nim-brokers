@@ -270,8 +270,8 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
         else:
           "method on" & sig & "(self: " & implStr & ", s: " & sig & "): Future[void]"
       macros.error(
-        "BrokerImplement " & implStr & ": missing signal handler override for '" &
-          sig & "' declared in " & ifaceStr & " (add `" & hint &
+        "BrokerImplement " & implStr & ": missing signal handler override for '" & sig &
+          "' declared in " & ifaceStr & " (add `" & hint &
           " {.async: (raises: []), gcsafe.}`)"
       )
 
@@ -291,15 +291,14 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   for (handlerName, sigType, isVoidSig) in signalMethods:
     if isVoidSig:
       setupSrc.add(
-        "  discard " & sigType &
-          ".onSignal(self.brokerCtx, proc(): Future[void] " &
+        "  discard " & sigType & ".onSignal(self.brokerCtx, proc(): Future[void] " &
           "{.async: (raises: []), gcsafe.} =\n    await self." & handlerName &
           "Impl())\n"
       )
     else:
       setupSrc.add(
-        "  discard " & sigType & ".onSignal(self.brokerCtx, proc(signalValue: " &
-          sigType & "): Future[void] {.async: (raises: []), gcsafe.} =\n    await self." &
+        "  discard " & sigType & ".onSignal(self.brokerCtx, proc(signalValue: " & sigType &
+          "): Future[void] {.async: (raises: []), gcsafe.} =\n    await self." &
           handlerName & "Impl(signalValue))\n"
       )
   for (verb, brokerName, margs, payload, async) in methods:

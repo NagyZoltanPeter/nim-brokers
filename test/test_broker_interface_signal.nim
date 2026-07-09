@@ -3,8 +3,8 @@
 ## Tests for SignalBroker support inside the hierarchical / OOP broker layer:
 ## a `SignalBroker:` block declared in a `BrokerInterface`, fulfilled by handler
 ## `method` overrides in a `BrokerImplement` derived type. Covers both a PAYLOAD
-## signal (matched to its handler by parameter type) and a VOID (pulse) signal
-## (matched by the `on<Signal>` method-name convention), alongside a coexisting
+## and a VOID (pulse) signal — each bound to its handler BY NAME (method named
+## `<Signal>` or `on<Signal>`, like a RequestBroker verb), alongside a coexisting
 ## RequestBroker and EventBroker. Plain (non-API) interface — single thread.
 
 import testutils/unittests
@@ -78,7 +78,8 @@ suite "BrokerInterface + SignalBroker: coexistence with request/event":
       Announced,
       proc(ev: Announced): Future[void] {.async: (raises: []), gcsafe.} =
         if not fut.finished:
-          fut.complete(ev.what),
+          fut.complete(ev.what)
+      ,
     )
     w.emit(Announced, Announced(what: "hi"))
     check (waitFor fut) == "hi"
