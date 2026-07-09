@@ -1661,7 +1661,7 @@ RequestBroker(mt, queueDepth = 1024,
   <section class="section-header">
     <div class="num">10</div>
     <h2 style="color:var(--logos-blue);">Broker FFI-API</h2>
-    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; native C-ABI <em>or</em> CBOR &middot; stable C++ / Python / Rust / Go wrapper surface</p>
+    <p style="color:var(--logos-muted); text-align:center; font-size:0.8em;">Typed shared-library surface &middot; one fixed CBOR ABI &middot; stable C++ / Python / Rust / Go wrapper surface</p>
   </section>
 
   <!-- 9.1  The Concept -->
@@ -1703,8 +1703,8 @@ RequestBroker(mt, queueDepth = 1024,
       <div>
         <h3>Use brokers as the library contract</h3>
         <ul>
-          <li><code>RequestBroker(API)</code> turns typed requests into exported C ABI functions</li>
-          <li class="fragment"><code>EventBroker(API)</code> turns typed events into callback registration functions</li>
+          <li><code>RequestBroker(API)</code> turns typed requests into CBOR-dispatched calls behind the fixed <code>_call</code> / <code>_callAsync</code> ABI</li>
+          <li class="fragment"><code>EventBroker(API)</code> turns typed events into <code>_subscribe</code> callback registrations</li>
           <li class="fragment"><code>registerBrokerLibrary</code> adds lifecycle, context management, header generation, and wrapper generation</li>
           <li class="fragment">The Nim implementation stays decoupled internally while foreign callers see a stable library interface</li>
         </ul>
@@ -1731,7 +1731,7 @@ RequestBroker(mt, queueDepth = 1024,
     <h2>Threading Model of a Created Library Context</h2>
 
     <div style="display:grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap:0.6em; align-items:center; margin-top:0.7em;">
-      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_createContext()<br/>blocking request calls</small></div>
+      <div class="diag-box accent">Foreign caller<br><small style="color:var(--logos-muted);">mylib_createContext()<br/>sync _call &middot; async _callAsync</small></div>
       <div class="arrow">&rarr;</div>
       <div class="diag-box">Delivery thread<br><small style="color:var(--logos-muted);">owns listener registration<br/>runs foreign callbacks</small></div>
       <div class="arrow">&larr;&rarr;</div>
@@ -1756,7 +1756,7 @@ RequestBroker(mt, queueDepth = 1024,
         <ul>
           <li>Request providers always run on the <strong>processing thread</strong></li>
           <li>Foreign event callbacks always run on the <strong>delivery thread</strong></li>
-          <li>Generated C/C++/Python request calls block until the provider finishes</li>
+          <li><code>_call</code> blocks the caller until the provider finishes; <code>_callAsync</code> returns immediately and completes via the async response callback &mdash; the caller thread is never blocked</li>
           <li>Events cross from Nim emitters to the delivery thread before invoking the FFI callback</li>
         </ul>
       </div>
@@ -1873,39 +1873,35 @@ lib.shutdown();
         </ul>
 
         <div class="callout warn" style="margin-top:0.7em;">
-          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread, while <code>initializeRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> synchronously wait for provider work on the processing thread.</p>
+          <p><strong>Threading implication:</strong> the callback above runs on the delivery thread. The synchronous <code>initializeRequest()</code>, <code>addDevice()</code>, and <code>listDevices()</code> calls wait for provider work on the processing thread; their async counterparts (over <code>_callAsync</code>) return immediately and deliver the result through a completion callback instead.</p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- 9.5b  Two ABI modes + wrapper parity -->
+  <!-- 9.5b  Fixed CBOR ABI + wrapper parity -->
   <section>
-    <h2>Two ABI Modes &middot; One Wrapper Surface</h2>
+    <h2>One Fixed CBOR ABI &middot; One Wrapper Surface</h2>
 
     <div class="cols cols-2" style="margin-top:0.5em; align-items:start;">
       <div>
-        <h3>Pick the ABI shape at compile time</h3>
-        <table style="margin-top:0.4em; font-size:0.78em;">
+        <h3>A single 12-function C ABI</h3>
+        <p style="font-size:0.78em; color:var(--logos-muted); margin:0.2em 0 0.4em 0;">The library exports the same fixed set regardless of how the API evolves &mdash; adding a request or event never changes the ABI, only the CBOR payloads.</p>
+        <table style="margin-top:0.2em; font-size:0.72em;">
           <thead>
-            <tr><th>Mode</th><th>Compile flag</th><th>Surface</th></tr>
+            <tr><th>Group</th><th>Functions</th></tr>
           </thead>
           <tbody>
-            <tr>
-              <td><strong>Native C-ABI</strong></td>
-              <td><code>-d:BrokerFfiApiNative</code></td>
-              <td>Per-request typed C functions, per-event typed callback typedefs, owner-aware free helpers</td>
-            </tr>
-            <tr>
-              <td><strong>CBOR</strong></td>
-              <td><code>-d:BrokerFfiApiCBOR</code></td>
-              <td>Fixed 11-function ABI (<code>_call</code> / <code>_subscribe</code> / <code>_getSchema</code> &hellip;); payloads are CBOR blobs decoded inside the wrapper</td>
-            </tr>
+            <tr><td>Lifecycle</td><td><code>_version</code> &middot; <code>_initialize</code> &middot; <code>_createContext</code> &middot; <code>_shutdown</code></td></tr>
+            <tr><td>Buffers</td><td><code>_allocBuffer</code> &middot; <code>_freeBuffer</code></td></tr>
+            <tr><td>Requests</td><td><code>_call</code> (sync) &middot; <code>_callAsync</code> (non-blocking)</td></tr>
+            <tr><td>Events</td><td><code>_subscribe</code> &middot; <code>_unsubscribe</code></td></tr>
+            <tr><td>Discovery</td><td><code>_listApis</code> &middot; <code>_getSchema</code></td></tr>
           </tbody>
         </table>
 
-        <div class="callout" style="margin-top:0.7em;">
-          <p><strong>Same Nim sources, same wrappers.</strong> Switching mode rebuilds the library and the generated bindings — consumer code does not change.</p>
+        <div class="callout" style="margin-top:0.6em;">
+          <p><strong>The historical native C-ABI codegen was retired in 3.0.0.</strong> CBOR is now the only wire format &mdash; one shape to maintain, generate, and test.</p>
         </div>
       </div>
 
@@ -1913,24 +1909,24 @@ lib.shutdown();
         <h3>Stable wrapper surface across languages</h3>
         <table style="margin-top:0.4em; font-size:0.78em;">
           <thead>
-            <tr><th>Wrapper</th><th>Idiom</th><th>Native</th><th>CBOR</th></tr>
+            <tr><th>Wrapper</th><th>Idiom</th></tr>
           </thead>
           <tbody>
-            <tr><td>C++</td><td><code>Lib::request() -&gt; Result&lt;T&gt;</code>, lambdas with <code>Lib&amp; owner</code></td><td>&#10003;</td><td>&#10003;</td></tr>
-            <tr><td>Python</td><td>ctypes / cbor2; dataclasses, typed methods</td><td>&#10003;</td><td>&#10003;</td></tr>
-            <tr><td>Rust</td><td><code>Lib::request() -&gt; Result&lt;T,String&gt;</code>, <code>Drop</code>, <code>Arc&lt;dyn Fn&gt;</code> handlers</td><td>&#10003;</td><td>&#10003;</td></tr>
-            <tr><td>Go</td><td><code>(T, error)</code>, <code>Close()</code> + finalizer, handler maps under <code>sync.Mutex</code></td><td>&#10003;</td><td>&#10003;</td></tr>
+            <tr><td>C++</td><td><code>Lib::request() -&gt; Result&lt;T&gt;</code>, lambdas with <code>Lib&amp; owner</code></td></tr>
+            <tr><td>Python</td><td>ctypes / cbor2; dataclasses, typed methods</td></tr>
+            <tr><td>Rust</td><td><code>Lib::request() -&gt; Result&lt;T,String&gt;</code>, <code>Drop</code>, <code>Arc&lt;dyn Fn&gt;</code> handlers</td></tr>
+            <tr><td>Go</td><td><code>(T, error)</code>, <code>Close()</code> + finalizer, handler maps under <code>sync.Mutex</code></td></tr>
           </tbody>
         </table>
 
         <div class="callout good" style="margin-top:0.7em;">
-          <p><strong>Parity test harness:</strong> <code>typemappingtestlib</code> runs the same matrix (primitives, enums, distinct, <code>seq</code>, <code>array</code>, nested objects) through every wrapper in both modes &mdash; CI keeps the surface honest.</p>
+          <p><strong>Parity test harness:</strong> <code>typemappingtestlib</code> runs the same matrix (primitives, enums, distinct, <code>seq</code>, <code>array</code>, nested objects) through every wrapper &mdash; CI keeps the surface honest.</p>
         </div>
       </div>
     </div>
 
     <div class="callout warn" style="margin-top:0.7em;">
-      <p><strong>When to choose which:</strong> native gives the smallest call overhead and zero-copy scalars; CBOR gives a fixed ABI (no header churn when the API evolves), self-describing payloads, and a discovery API for tooling and plugins.</p>
+      <p><strong>Why a fixed ABI wins:</strong> no header churn when the API evolves, self-describing CBOR payloads, and a built-in discovery API (<code>_listApis</code> / <code>_getSchema</code>) for tooling and plugins. Each wrapper decodes CBOR into idiomatic typed values &mdash; the foreign consumer never sees the wire format.</p>
     </div>
   </section>
 
@@ -1939,7 +1935,7 @@ lib.shutdown();
     <h2>Layered Architecture</h2>
 
     <p style="color:var(--logos-muted); text-align:center; font-size:0.72em; margin:0.2em 0 0.6em 0;">
-      One Nim source &rarr; choose a C ABI flavor at build time &rarr; wrappers expose <em>one</em> idiomatic surface per language, regardless of mode.
+      One Nim source &rarr; one fixed CBOR ABI &rarr; wrappers expose <em>one</em> idiomatic surface per language.
     </p>
 
     <!-- Row 1: Consumer apps -->
@@ -1952,7 +1948,7 @@ lib.shutdown();
       <div class="diag-box" style="font-size:0.72em; padding:0.4em;">Go app</div>
     </div>
 
-    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.2em 0;">&darr; &nbsp; consumer code unchanged across ABI modes &nbsp; &darr;</div>
+    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.2em 0;">&darr; &nbsp; each wrapper decodes CBOR into idiomatic typed values &nbsp; &darr;</div>
 
     <!-- Row 2: Wrappers (C++/Py/Rs/Go) — C consumes the .h directly -->
     <div style="display:grid; grid-template-columns:1fr 1fr 4fr; gap:0.4em; align-items:stretch;">
@@ -1966,18 +1962,12 @@ lib.shutdown();
       </div>
     </div>
 
-    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.3em 0;">&darr; &nbsp; <strong>build-time choice of C ABI</strong> &nbsp; &darr;</div>
+    <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.3em 0;">&darr;</div>
 
-    <!-- Row 3: Two ABI modes -->
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6em;">
-      <div class="diag-box" style="background:#fef3c7; border-color:#b45309; color:#b45309; font-size:0.78em; padding:0.5em;">
-        <strong>Native ABI</strong><br>
-        <small>typed C functions &middot; one export per request/event &middot; <em>&lt;lib&gt;.h</em></small>
-      </div>
-      <div class="diag-box" style="background:#fef3c7; border-color:#b45309; color:#b45309; font-size:0.78em; padding:0.5em;">
-        <strong>CBOR ABI</strong><br>
-        <small>fixed 11-function ABI &middot; CBOR-encoded payloads &middot; <em>&lt;lib&gt;.h</em> (CBOR shape)</small>
-      </div>
+    <!-- Row 3: The one fixed CBOR ABI -->
+    <div class="diag-box" style="background:#fef3c7; border-color:#b45309; color:#b45309; font-size:0.78em; padding:0.5em;">
+      <strong>CBOR ABI &mdash; the single wire format</strong><br>
+      <small>fixed 12-function ABI (<code>_call</code> / <code>_callAsync</code> / <code>_subscribe</code> / <code>_getSchema</code> &hellip;) &middot; CBOR-encoded payloads &middot; <em>&lt;lib&gt;.h</em></small>
     </div>
 
     <div style="text-align:center; color:var(--logos-muted); font-size:0.7em; margin:0.3em 0;">&darr;</div>
@@ -1989,7 +1979,7 @@ lib.shutdown();
     </div>
 
     <div class="callout good" style="margin-top:0.5em;">
-      <p style="font-size:0.78em;"><strong>Invariant:</strong> 1 Nim source &middot; 1 C ABI per build &middot; 1 wrapper per language &middot; consumer code compiles unchanged against either build.</p>
+      <p style="font-size:0.78em;"><strong>Invariant:</strong> 1 Nim source &middot; 1 fixed CBOR ABI &middot; 1 wrapper per language &middot; the ABI stays stable as the API grows.</p>
     </div>
   </section>
 
@@ -2001,7 +1991,7 @@ lib.shutdown();
       <div>
         <pre><code class="language-sh" data-trim>
 nim c \
-  -d:BrokerFfiApiNative \   # or -d:BrokerFfiApiCBOR
+  -d:BrokerFfiApi \        # enables the CBOR FFI codegen
   -d:BrokerFfiApiGenPy \    # opt-in: Python ctypes wrapper
   -d:BrokerFfiApiGenRust \  # opt-in: Rust Cargo crate
   -d:BrokerFfiApiGenGo \    # opt-in: Go cgo module
@@ -2014,14 +2004,14 @@ nim c \
         </code></pre>
 
         <div class="callout" style="margin-top:0.6em;">
-          <p>Pick one ABI mode — <code>-d:BrokerFfiApiNative</code> or <code>-d:BrokerFfiApiCBOR</code>. C and C++ headers are emitted in both; Python / Rust / Go are opt-in via <code>-d:BrokerFfiApiGen{Py,Rust,Go}</code>.</p>
+          <p><code>-d:BrokerFfiApi</code> selects the CBOR FFI codegen (the only mode &mdash; native was retired in 3.0.0). C and C++ headers are always emitted; Python / Rust / Go are opt-in via <code>-d:BrokerFfiApiGen{Py,Rust,Go}</code>.</p>
         </div>
       </div>
 
       <div>
         <h3>Required knobs</h3>
         <ul>
-          <li><code>-d:BrokerFfiApiNative</code> <em>or</em> <code>-d:BrokerFfiApiCBOR</code> selects the ABI mode</li>
+          <li><code>-d:BrokerFfiApi</code> enables the CBOR FFI codegen</li>
           <li><code>--threads:on</code> enables the delivery and processing thread runtime</li>
           <li><code>--app:lib</code> builds a shared library instead of an executable</li>
           <li><code>--nimMainPrefix:mylib</code> must match <code>name: "mylib"</code> in <code>registerBrokerLibrary</code></li>
