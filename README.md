@@ -19,7 +19,7 @@ Built on [chronos](https://github.com/status-im/nim-chronos) and [results](https
 &nbsp;·&nbsp; [![DeepWiki](https://img.shields.io/badge/DeepWiki-NagyZoltanPeter%2Fnim--brokers-blue.svg)](https://deepwiki.com/NagyZoltanPeter/nim-brokers)
 &nbsp;·&nbsp; **[Broker Presentation slides](https://nagyzoltanpeter.github.io/nim-brokers/BrokerDesignPrezi.html)**
 &nbsp;·&nbsp; **[Full Usage Guide → USAGEGUIDE.md](USAGEGUIDE.md)**
-
+&nbsp;·&nbsp; **[Cookbook with examples → doc/COOKBOOK.md](doc/COOKBOOK.md)**
 > Per-release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## The pain it removes
@@ -133,7 +133,8 @@ always async. Full syntax, all variants, and worked examples are in the
 - **[USAGEGUIDE.md](USAGEGUIDE.md)** — full reference: every broker variant,
   the OOP/DI layer, multi-thread tuning, the FFI API, and memory footprints.
 - [Broker FFI API](doc/FFI_API.md) · [Type-support matrix](doc/TYPESUPPORT.md) ·
-  [OOP Brokers](doc/OOP_Brokers.md) · [MT config & tuning](doc/MT_BROKER_CONFIG.md)
+  [OOP Brokers](doc/OOP_Brokers.md) · [MT config & tuning](doc/MT_BROKER_CONFIG.md) · [Cookbook with examples](doc/COOKBOOK.md)
+- [AI Coding agent skill](doc/CLAUDE_brokers_addon.md) <= Add this to your AGENTS/CLAUDE.md
 
 
 ## Platform & Nim version support
