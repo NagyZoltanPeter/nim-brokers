@@ -17,9 +17,13 @@ Built on [chronos](https://github.com/status-im/nim-chronos) and [results](https
 #### Deep dive here:
 
 &nbsp;·&nbsp; [![DeepWiki](https://img.shields.io/badge/DeepWiki-NagyZoltanPeter%2Fnim--brokers-blue.svg)](https://deepwiki.com/NagyZoltanPeter/nim-brokers)
+
 &nbsp;·&nbsp; **[Broker Presentation slides](https://nagyzoltanpeter.github.io/nim-brokers/BrokerDesignPrezi.html)**
+
 &nbsp;·&nbsp; **[Full Usage Guide → USAGEGUIDE.md](USAGEGUIDE.md)**
+
 &nbsp;·&nbsp; **[Cookbook with examples → doc/COOKBOOK.md](doc/COOKBOOK.md)**
+
 > Per-release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## The pain it removes
