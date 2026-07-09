@@ -61,6 +61,8 @@ No `{.base.}` methods, no manual vtable, no service locator. The consumer depend
 on `IGreeter`; the implementation is registered at runtime and swappable per
 instance.
 
+> **Note:** Every broker can be use as per-broker interface, untied from the BrokerInterface / BrokerImplement pattern. 
+
 ## Pay only for the axis you compile in
 
 The same broker declaration reaches as far as you compile it — you don't rewrite
@@ -68,14 +70,14 @@ the interface to cross a boundary, you tag it:
 
 | Axis | Tag | What you get |
 |------|-----|--------------|
-| **In-process** | *(none)* | Zero-cost direct dispatch on one chronos loop. |
+| **Single-thread** | *(none)* | Zero-cost direct dispatch on one chronos loop. |
 | **Cross-thread** | `(mt)` | Lock-free MPSC ring + slab, one shared signal per thread. Same call shape. |
 | **Cross-language** | `(API)` | A shared library with a fixed CBOR ABI and generated **C / C++ / Python / Rust / Go** wrappers. |
 
 ```nim
-RequestBroker:         type Weather = object  # in-proc
+RequestBroker:         type Weather = object  # single-thread async/sync execution.
 RequestBroker(mt):     type Weather = object  # now cross-thread — same call sites
-RequestBroker(API):    type Weather = object  # now a multi-language shared library
+RequestBroker(API):    type Weather = object  # cross-thread + now a multi-language shared library
 ```
 
 Author the API once in Nim; the generator emits `libmylib`, the header, and
@@ -88,9 +90,9 @@ requests, with no hand-written FFI plumbing.
 | Broker | Shape | One-liner |
 |--------|-------|-----------|
 | **EventBroker** | pub/sub, many→many | fire-and-forget events; `listen` / `emit`. |
-| **RequestBroker** | request/response, 1 provider | typed `request()` to a swappable provider; async **or** sync. |
-| **MultiRequestBroker** | request/response, N providers | fan out to all providers, aggregate results. |
-| **SignalBroker** | one-way, 1 handler | fire-and-forget signal with accept/backpressure result. |
+| **RequestBroker** | request/response, 1 provider, many→one | typed `request()` to a swappable provider; async **or** sync. |
+| **MultiRequestBroker** | request/response, N providers, many→many | fan out to all providers, aggregate results. |
+| **SignalBroker** | one-way, 1 handler, many→one | fire-and-forget signal with accept/backpressure result. |
 
 ```nim
 # EventBroker — reactive pub/sub
