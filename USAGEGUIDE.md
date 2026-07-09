@@ -647,7 +647,7 @@ Every library collapses to the same fixed 12-function C ABI (`_version`,
 plus an event-callback and an async-response-callback typedef, with CBOR as the
 on-wire format. Wrappers carry the typed surface and decode / encode through
 language-specific CBOR libraries like `jsoncons` (C++), `cbor2` (Python),
-`ciborium` (Rust), or `github.com/fxamacker/cbor` (Go). Buffer ownership rule:
+`ciborium` (Rust), or `github.com/fxamacker/cbor/v2` (Go). Buffer ownership rule:
 every `void*` crossing the ABI is allocated by Nim and freed by Nim.
 
 C++ wrapper is always generated; Python / Rust / Go wrappers are opt-in
