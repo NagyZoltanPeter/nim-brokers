@@ -240,6 +240,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `dropListener` removes a listener from the table. Already-spawned in-flight futures for the current emit cycle will still complete (snapshot was taken before drop).
 - `dropAllListeners` clears all listeners for a context. Same in-flight behavior as `dropListener`.
 - **Uniform call shape across lanes** (single-thread / `(mt)` / `(API)`): `emit` is always sync `void` (fire-and-forget — never `await`/`waitFor` it), and `dropListener` / `dropAllListeners` are always async `Future[void]` (`await` them, or `discard`/`waitFor` in sync/`{.thread.}` contexts). The MT/API drop bodies are suspension-free, so a discarded Future still clears listeners eagerly. `clearProvider` stays sync in every lane. See `doc/design/DROP_ASYNC_EMIT_SYNC_PLAN.md`.
+- **`listenIt` body sugar** (all lanes): `TypeName.listenIt[(ctx)]: body` registers a listener whose block is the real listener proc body with the event value injected as `it` (nothing injected for `void` event types). Returns `listen`'s `Result[<T>Listener, string]`; `await` is allowed, `raises: []` is enforced as for a hand-written listener. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 
 ### RequestBroker specifics
 
@@ -247,6 +248,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `RequestBroker(sync):` generates synchronous procs (`{.gcsafe, raises: [].}`) instead of async ones.
 - Provider exceptions are caught and returned as `err(...)`.
 - `clearProvider` removes the provider. In-flight requests that already hold a reference to the provider closure will complete naturally; the caller gets the result or error.
+- **`provideIt` / `reprovideIt` body sugar** (all lanes): `TypeName.provideIt[(ctx)]: body` registers a provider whose block is the real provider proc body with the declared signature arg names injected (`provideIt` → `setProvider`, keeps the "already set" guard; `reprovideIt` → `replaceProvider`, replace-or-insert). The body must produce a value on every path — `return ok(...)`/`err(...)`, `result = ...`, or a trailing `Result` expression — otherwise it is a **compile error** (`providerBody` check; a fall-through would silently answer `err("")`). Two accepted limits: a `block` containing `break` is conservatively non-terminal, and noreturn calls (`quit`, `raiseAssert`) are not recognized as terminal. Dual-slot brokers get `provideItNoArgs` / `reprovideItNoArgs` for the zero-arg slot. Sync mode: same sugar, body cannot `await`. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 
 ### MultiRequestBroker specifics
 
@@ -254,6 +256,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Multiple providers per signature; `request()` fans out to all via `allFinished`.
 - Fails the entire request if any provider fails.
 - Deduplicates identical handler references on registration.
+- **`provideIt` body sugar** (issue #46 follow-up): `TypeName.provideIt[(ctx)]: body` is body sugar over the additive `setProvider` — the block is the real provider proc body with the declared signature arg names injected, and it returns `setProvider`'s `Result[<T>ProviderHandle, string]` (keep the handle for `removeProvider`). **No `reprovideIt`** — providers are additive, there is no replace verb; each `provideIt` *adds* a provider (the generated closure is a fresh reference, so it never dedups). Dual-slot brokers get `provideItNoArgs` for the zero-arg slot. Same `providerBody` fall-through compile check as RequestBroker. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 
 ### SignalBroker specifics (`brokers/signal_broker.nim`, `brokers/internal/mt_signal_broker.nim`)
 
@@ -261,6 +264,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `onSignal(handler)` installs the single handler (duplicate-guarded, mirrors `setProvider`); `signal(...)` is a **plain (non-async) proc** returning `Result[void, string]`. Value form + inline-field overloads (like `emit`) + a `void` pulse (`TypeName.signal()`).
 - `ok()` = **accepted** (best-effort snapshot: a handler exists + the queue had room), never "handled". `err` = definitely not delivered: `"no signal handler installed"` or `"queue full"`. Handler exceptions are swallowed with a chronicles warn.
 - `dropSignalHandler()` is async `Future[void]` (uniform with `dropListener`; suspension-free body). Mock/replace trio: `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler` (MT variants are owning-thread only).
+- **`onSignalIt` body sugar** (all lanes): `TypeName.onSignalIt[(ctx)]: body` installs the handler with the signal value injected as `it` (nothing for `void` payloads); duplicate-guard and return value are `onSignal`'s. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 - **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` closes it → the poll fn hands it to the per-thread pending-free registry, freed at `teardownBrokerThread`.
 
 ### Multi-thread broker specifics (`brokers/internal/mt_event_broker.nim`, `brokers/internal/mt_request_broker.nim`)

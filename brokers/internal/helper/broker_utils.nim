@@ -152,9 +152,11 @@ type BindSlot* = object ## One provider/handler arity a bind/rebind template can
   returnType*: NimNode
   pragma*: NimNode
 
-proc bindTemplateDef(sugar, typeIdent, body: NimNode, withCtx: bool): NimNode =
+proc bindTemplateDef(
+    sugar, typeIdent, body: NimNode, withCtx: bool, payloadName: string = "boundCall"
+): NimNode =
   ## `template <sugar>*(_: typedesc[T][; brokerCtx: BrokerContext];
-  ##                    boundCall: untyped): untyped = body`
+  ##                    <payloadName>: untyped): untyped = body`
   var formal = newTree(nnkFormalParams, ident("untyped"))
   formal.add(
     newTree(
@@ -176,7 +178,7 @@ proc bindTemplateDef(sugar, typeIdent, body: NimNode, withCtx: bool): NimNode =
       newTree(nnkIdentDefs, ident("brokerCtx"), ident("untyped"), newEmptyNode())
     )
   formal.add(
-    newTree(nnkIdentDefs, ident("boundCall"), ident("untyped"), newEmptyNode())
+    newTree(nnkIdentDefs, ident(payloadName), ident("untyped"), newEmptyNode())
   )
   newTree(
     nnkTemplateDef,
@@ -235,6 +237,209 @@ proc buildBindTemplates*(
     )
   )
   result.add(bindTemplateDef(sugar, typeIdent, delegate, withCtx = false))
+
+# Shared codegen for the `provideIt` / `reprovideIt` body sugar. The sugar
+# splices the user's block as the REAL provider proc body (`return`,
+# `result =` and trailing expressions all work), with the declared signature
+# arg names injected as zero-arg alias templates. `providerBody` closes the
+# one hole real-body semantics open: a body that falls off the end would
+# silently return `default(Result)` == err("") — it turns that into a
+# positioned compile error instead.
+
+proc containsBreakStmt(n: NimNode): bool =
+  ## True when `n` contains a `break` that could escape `n` itself — breaks
+  ## inside nested `for`/`while` loops are local and don't count.
+  if n.kind == nnkBreakStmt:
+    return true
+  for c in n:
+    if c.kind notin {nnkForStmt, nnkWhileStmt} and containsBreakStmt(c):
+      return true
+  false
+
+proc isTerminalProviderStmt(n: NimNode): bool =
+  ## Conservative "this statement always produces the provider's result or
+  ## diverts control": `return` / `raise` / `result = ...` / a break-free
+  ## `block` with terminal body / a branching statement whose EVERY branch is
+  ## terminal (an `if`/`when` also needs an `else`). A statement list is
+  ## terminal when ANY top-level child is: top-level code is straight-line, so
+  ## control either reaches that child or was diverted by an earlier one.
+  case n.kind
+  of nnkReturnStmt, nnkRaiseStmt:
+    true
+  of nnkAsgn:
+    n[0].kind == nnkIdent and n[0].eqIdent("result")
+  of nnkStmtList, nnkStmtListExpr:
+    for c in n:
+      if isTerminalProviderStmt(c):
+        return true
+    false
+  of nnkIfStmt, nnkWhenStmt:
+    var hasElse = false
+    for br in n:
+      case br.kind
+      of nnkElifBranch:
+        if not isTerminalProviderStmt(br[1]):
+          return false
+      of nnkElse:
+        hasElse = true
+        if not isTerminalProviderStmt(br[0]):
+          return false
+      else:
+        discard
+    hasElse
+  of nnkCaseStmt:
+    for i in 1 ..< n.len:
+      let br = n[i]
+      case br.kind
+      of nnkOfBranch, nnkElifBranch:
+        if not isTerminalProviderStmt(br[^1]):
+          return false
+      of nnkElse:
+        if not isTerminalProviderStmt(br[0]):
+          return false
+      else:
+        discard
+    true
+  of nnkTryStmt:
+    if not isTerminalProviderStmt(n[0]):
+      return false
+    for i in 1 ..< n.len:
+      if n[i].kind == nnkExceptBranch and not isTerminalProviderStmt(n[i][^1]):
+        return false
+    true
+  of nnkBlockStmt:
+    not containsBreakStmt(n[1]) and isTerminalProviderStmt(n[1])
+  else:
+    false
+
+const definitelyVoidStmtKinds = {
+  nnkForStmt, nnkWhileStmt, nnkDiscardStmt, nnkVarSection, nnkLetSection,
+  nnkConstSection, nnkTypeSection, nnkProcDef, nnkFuncDef, nnkTemplateDef,
+  nnkIteratorDef, nnkMacroDef, nnkConverterDef, nnkImportStmt, nnkExportStmt, nnkPragma,
+  nnkDefer, nnkMixinStmt, nnkBindStmt, nnkBreakStmt, nnkContinueStmt, nnkYieldStmt,
+}
+
+macro providerBody*(sugarName: static string, body: untyped): untyped =
+  ## Guard a provideIt/reprovideIt body against silent fall-through:
+  ## 1. a body with a top-level terminal statement is spliced unchanged;
+  ## 2. a body ending in a definitely-void statement is a compile error;
+  ## 3. anything else ending the body is treated as the intended trailing
+  ##    expression and pinned via `result = <expr>` so the type checker must
+  ##    match it against the provider's Result type (e.g. a final `echo` can
+  ##    no longer compile).
+  var stmts =
+    if body.kind in {nnkStmtList, nnkStmtListExpr}:
+      copyNimTree(body)
+    else:
+      newStmtList(copyNimTree(body))
+  if stmts.len == 0:
+    error(sugarName & " body is empty — it must produce a Result value", body)
+  if isTerminalProviderStmt(stmts):
+    return stmts
+  let last = stmts[^1]
+  if last.kind in definitelyVoidStmtKinds:
+    error(
+      sugarName & " body must produce a value on every path: end with `return ok(...)`/" &
+        "`return err(...)`, assign to `result`, or end with a Result expression " &
+        "(a final if/case/try needs every branch to do so). Otherwise the " &
+        "provider would silently answer err(\"\").",
+      last,
+    )
+  if last.kind in {nnkIfStmt, nnkWhenStmt}:
+    var hasElse = false
+    for br in last:
+      if br.kind == nnkElse:
+        hasElse = true
+    if not hasElse:
+      error(
+        sugarName & " body ends in an `if` without an `else`: the missing branch would " &
+          "silently answer err(\"\"). Add an `else` (or a fallback `return`) " &
+          "so every path produces a value.",
+        last,
+      )
+  stmts[^1] = newTree(nnkAsgn, ident("result"), last)
+  stmts
+
+proc paramBaseIdent(n: NimNode): NimNode =
+  ## Bare name ident of a formal-parameter name node.
+  case n.kind
+  of nnkPostfix, nnkPragmaExpr:
+    paramBaseIdent(n[0])
+  else:
+    n
+
+proc makeProviderBodyLambda(
+    params: seq[NimNode], returnType, pragma: NimNode, sugarName: string
+): NimNode =
+  ## Anonymous provider `proc(<renamed params>): <returnType> {.<pragma>.}`
+  ## whose body re-injects each declared arg name as a zero-arg alias template
+  ## (`{.inject.}` on lambda params does not survive template hygiene) and
+  ## routes the user's block through `providerBody`. `body` is left as a bare
+  ## ident so it binds to the enclosing sugar template's `body` parameter.
+  var formal = newTree(nnkFormalParams, copyNimTree(returnType))
+  var stmts = newStmtList()
+  for p in params:
+    let ty = p[p.len - 2]
+    var def = newTree(nnkIdentDefs)
+    for i in 0 ..< p.len - 2:
+      let orig = paramBaseIdent(p[i])
+      let renamed = ident($orig & "BrokerArg")
+      def.add(renamed)
+      stmts.add(
+        newTree(
+          nnkTemplateDef,
+          copyNimTree(orig),
+          newEmptyNode(),
+          newEmptyNode(),
+          newTree(nnkFormalParams, copyNimTree(ty)),
+          newTree(nnkPragma, ident("inject"), ident("used")),
+          newEmptyNode(),
+          newStmtList(renamed),
+        )
+      )
+    def.add(copyNimTree(ty))
+    def.add(newEmptyNode())
+    formal.add(def)
+  stmts.add(newCall(ident("providerBody"), newLit(sugarName), ident("body")))
+  newTree(
+    nnkLambda,
+    newEmptyNode(),
+    newEmptyNode(),
+    newEmptyNode(),
+    formal,
+    copyNimTree(pragma),
+    newEmptyNode(),
+    stmts,
+  )
+
+proc buildProvideTemplates*(
+    typeIdent: NimNode, verbName, sugarName: string, slot: BindSlot
+): NimNode =
+  ## Emit the ctx-form + no-ctx-form `provideIt`-style sugar templates for one
+  ## provider slot, forwarding to `verbName(T, brokerCtx, <provider lambda>)`.
+  ## Unlike bind/rebind sugar the payload parameter is a `body` block, so slot
+  ## selection cannot use `when compiles` (an args-free body is valid for both
+  ## slots) — dual-slot brokers get distinct sugar names instead.
+  result = newStmtList()
+  let sugar = ident(sugarName)
+  let lam = makeProviderBodyLambda(slot.params, slot.returnType, slot.pragma, sugarName)
+  let ctxBody = newStmtList(
+    newCall(ident(verbName), copyNimTree(typeIdent), ident("brokerCtx"), lam)
+  )
+  result.add(
+    bindTemplateDef(sugar, typeIdent, ctxBody, withCtx = true, payloadName = "body")
+  )
+  let delegate = newStmtList(
+    newCall(
+      copyNimTree(sugar),
+      copyNimTree(typeIdent),
+      ident("DefaultBrokerContext"),
+      ident("body"),
+    )
+  )
+  result.add(
+    bindTemplateDef(sugar, typeIdent, delegate, withCtx = false, payloadName = "body")
+  )
 
 proc parseOneTypeDef(
     def: NimNode,

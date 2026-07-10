@@ -31,6 +31,9 @@ import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
 import ./broker_debug
 export
   results, chronos, chronicles, broker_context, mt_broker_common, mt_config, options
+# The generated provideIt/reprovideIt templates expand `providerBody` at the
+# user's call site, so the checker macro must be visible there.
+export providerBody
 
 # Capacity defaults moved to `mt_config.nim` and re-exported via the
 # `mt_config` module so existing references to `DefaultMtReq*` constants
@@ -1798,6 +1801,35 @@ proc generateMtRequestBroker*(
         typeIdent, "replaceProvider", "rebindProvider", slots, awaitCall = true
       )
     )
+
+  # ── provideIt / reprovideIt body sugar ─────────────────────────────
+  # Same surface as the single-thread lane (see request_broker.nim). Owning-
+  # thread semantics of setProvider/replaceProvider are unchanged — the sugar
+  # only synthesises the closure the user would write by hand, and
+  # `providerBody` rejects bodies that could silently fall through to err("").
+  block:
+    let providerPragma = procTyPragma(makeProcType(returnType, @[]))
+    let dualSlot = (not argSig.isNil()) and (not zeroArgSig.isNil())
+    if not argSig.isNil():
+      let slot = BindSlot(
+        params: cloneParams(argParams),
+        returnType: copyNimTree(returnType),
+        pragma: providerPragma,
+      )
+      result.add(buildProvideTemplates(typeIdent, "setProvider", "provideIt", slot))
+      result.add(
+        buildProvideTemplates(typeIdent, "replaceProvider", "reprovideIt", slot)
+      )
+    if not zeroArgSig.isNil():
+      let slot = BindSlot(
+        params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+      )
+      let provideName = if dualSlot: "provideItNoArgs" else: "provideIt"
+      let reprovideName = if dualSlot: "reprovideItNoArgs" else: "reprovideIt"
+      result.add(buildProvideTemplates(typeIdent, "setProvider", provideName, slot))
+      result.add(
+        buildProvideTemplates(typeIdent, "replaceProvider", reprovideName, slot)
+      )
 
   when defined(brokerDebug):
     writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)

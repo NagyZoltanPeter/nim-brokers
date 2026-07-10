@@ -12,15 +12,18 @@ the elevator pitch see the [README](../README.md).
 
 - [EventBroker](#eventbroker)
   - [Declare and listen](#declare-and-listen)
+  - [listenIt — listener body sugar](#listenit--listener-body-sugar)
   - [Emit — by value and by fields](#emit--by-value-and-by-fields)
   - [Drop listeners](#drop-listeners)
 - [RequestBroker](#requestbroker)
   - [Declare and provide](#declare-and-provide)
+  - [provideIt / reprovideIt — provider body sugar](#provideit--reprovideit--provider-body-sugar)
   - [Proc-sugar declaration](#proc-sugar-declaration)
   - [Sync mode (no event loop)](#sync-mode-no-event-loop)
   - [Bind a class method as provider](#bind-a-class-method-as-provider)
 - [SignalBroker](#signalbroker)
   - [One-way notification](#one-way-notification)
+  - [onSignalIt — handler body sugar](#onsignalit--handler-body-sugar)
   - [Payload-less pulse](#payload-less-pulse)
 - [MultiRequestBroker](#multirequestbroker)
   - [Fan-out to many providers](#fan-out-to-many-providers)
@@ -55,6 +58,23 @@ EventBroker:
 let h = UserLoggedIn.listen(
   proc(evt: UserLoggedIn): Future[void] {.async: (raises: []).} =
     echo "login: ", evt.name)
+```
+
+### listenIt — listener body sugar
+
+```nim
+# Same registration without the lambda boilerplate: the block IS the listener
+# body, the event value is injected as `it`. Returns listen's Result.
+let h2 = UserLoggedIn.listenIt:
+  echo "login: ", it.name, " (#", it.userId, ")"
+
+# Scoped to a context; the body may await (raises: [] applies as usual).
+let h3 = UserLoggedIn.listenIt(myCtx):
+  await sleepAsync(chronos.milliseconds(1))   # wrap cancellable awaits in try
+  echo "scoped: ", it.name
+
+# void event types inject nothing — the block is just the body.
+# Works in every lane: single-thread, (mt), (API).
 ```
 
 ### Emit — by value and by fields
@@ -103,6 +123,32 @@ discard FetchUser.setProvider(
 let r = await FetchUser.request(42)   # Result[FetchUser, string]
 echo r.get().name                     # "u42"
 FetchUser.clearProvider()
+```
+
+### provideIt / reprovideIt — provider body sugar
+
+```nim
+# The block is the provider's REAL proc body — the declared signature arg
+# names (`id` here) are injected; return / result= / trailing expression all
+# work, and async-mode bodies may await.
+discard FetchUser.provideIt:          # -> setProvider (keeps "already set" guard)
+  if id < 0:
+    return err("bad id: " & $id)
+  return ok(FetchUser(name: "u" & $id))
+
+discard FetchUser.reprovideIt:        # -> replaceProvider (swap, no guard)
+  ok(FetchUser(name: "v2-u" & $id))   # trailing expression works too
+
+# Fool-proof: a body that could fall through without producing a value is a
+# COMPILE error (it would silently answer err("")). These do not compile:
+#   FetchUser.provideIt: echo "side effect only"     # void trailing call
+#   FetchUser.provideIt:
+#     if id > 0: return ok(...)                      # if without else
+#
+# Dual-slot brokers (zero-arg + args signatures) name the slots explicitly:
+#   provideIt / reprovideIt           -> args slot
+#   provideItNoArgs / reprovideItNoArgs -> zero-arg slot
+# Sync mode: same sugar, body cannot await. Works in every lane.
 ```
 
 ### Proc-sugar declaration
@@ -178,6 +224,16 @@ if r.isErr: echo "not delivered: ", r.error
 await IngestSample.dropSignalHandler()   # async — await it
 ```
 
+### onSignalIt — handler body sugar
+
+```nim
+# Same as listenIt, for the single signal handler: the block is the handler
+# body, the signal value is injected as `it`. onSignal's duplicate guard and
+# Result[void, string] return are unchanged.
+discard IngestSample.onSignalIt:
+  echo it.deviceId, " = ", it.value
+```
+
 ### Payload-less pulse
 
 ```nim
@@ -185,6 +241,7 @@ SignalBroker:
   type Wakeup = void          # no payload
 
 discard Wakeup.onSignal(proc() {.async: (raises: []).} = echo "tick")
+discard Wakeup.onSignalIt: echo "tick (sugar)"   # void payload: nothing injected
 discard Wakeup.signal()       # fire the pulse
 ```
 
@@ -212,6 +269,25 @@ discard Quote.setProvider(proc(s: string): Future[Result[Quote, string]] {.async
 
 let all = await Quote.request("BTC")   # Result[seq[Quote], string]; len == 2
 echo all.get().len                     # any provider failing fails the whole request
+```
+
+### provideIt — provider body sugar (adds, not replaces)
+
+```nim
+# Same body sugar as RequestBroker, but here every provideIt ADDS a provider
+# (there is no reprovideIt — MultiRequestBroker has no replace verb). The
+# declared arg `sym` is injected; it returns setProvider's handle.
+let h1 = Quote.provideIt:
+  ok(Quote(price: 100))
+let h2 = Quote.provideIt:            # a second provider — NOT a replacement
+  if sym.len == 0:
+    return err("empty symbol")
+  return ok(Quote(price: 101))
+
+# request() fans out to both; drop just one by its handle:
+Quote.removeProvider(h1.get())
+# Dual-slot brokers: provideIt = args slot, provideItNoArgs = zero-arg slot.
+# Fall-through bodies are a compile error, same as RequestBroker's provideIt.
 ```
 
 ---
