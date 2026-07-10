@@ -425,6 +425,8 @@ suite "MultiRequestBroker provideIt sugar":
     check ha.isOk()
 
     let zero = waitFor SugarScore.request()
+    check zero.isOk()
     check zero.value == @[SugarScore(s: 1)]
     let withArg = waitFor SugarScore.request(8)
+    check withArg.isOk()
     check withArg.value == @[SugarScore(s: 10)]

@@ -65,12 +65,16 @@ suite "handler sugar on multi-thread brokers (same-thread lane)":
       return ok(SugarMtReply(text: prefix & "-" & $n))
 
     check p.isOk()
-    check (waitFor SugarMtReply.request("job", 3)).value.text == "job-3"
+    let served = waitFor SugarMtReply.request("job", 3)
+    check served.isOk()
+    check served.value.text == "job-3"
     check (waitFor SugarMtReply.request("job", -1)).isErr()
 
     let r = SugarMtReply.reprovideIt:
       ok(SugarMtReply(text: prefix & "+" & $n))
 
     check r.isOk()
-    check (waitFor SugarMtReply.request("job", 3)).value.text == "job+3"
+    let reserved = waitFor SugarMtReply.request("job", 3)
+    check reserved.isOk()
+    check reserved.value.text == "job+3"
     SugarMtReply.clearProvider()
