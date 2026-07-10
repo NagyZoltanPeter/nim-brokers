@@ -375,3 +375,56 @@ suite "MultiRequestBroker bindProvider sugar (issue #42)":
     check BindScore(s: 22) in res.value
 
     BindScore.clearProviders()
+
+MultiRequestBroker:
+  type SugarScore = object
+    s*: int
+
+  proc signatureBase*(): Future[Result[SugarScore, string]] {.async.}
+  proc signatureWith*(bonus: int): Future[Result[SugarScore, string]] {.async.}
+
+suite "MultiRequestBroker provideIt sugar":
+  teardown:
+    SugarScore.clearProviders()
+
+  test "provideIt adds providers additively; injected args; returns a handle":
+    # args slot: `bonus` is injected; the body is the real provider proc body
+    let h1 = SugarScore.provideIt:
+      if bonus < 0:
+        return err("negative bonus")
+      return ok(SugarScore(s: 100 + bonus))
+
+    check h1.isOk()
+
+    # a second provideIt ADDS another provider (fresh closure, no dedup)
+    let h2 = SugarScore.provideIt:
+      ok(SugarScore(s: 200 + bonus))
+
+    check h2.isOk()
+
+    let res = waitFor SugarScore.request(5)
+    check res.isOk()
+    check res.value.len == 2
+    check SugarScore(s: 105) in res.value
+    check SugarScore(s: 205) in res.value
+
+    # the returned handle removes exactly one provider
+    SugarScore.removeProvider(h1.get())
+    let res2 = waitFor SugarScore.request(5)
+    check res2.isOk()
+    check res2.value == @[SugarScore(s: 205)]
+
+  test "provideItNoArgs targets the zero-arg slot on a dual-slot broker":
+    let hz = SugarScore.provideItNoArgs:
+      ok(SugarScore(s: 1))
+
+    check hz.isOk()
+    let ha = SugarScore.provideIt:
+      ok(SugarScore(s: 2 + bonus))
+
+    check ha.isOk()
+
+    let zero = waitFor SugarScore.request()
+    check zero.value == @[SugarScore(s: 1)]
+    let withArg = waitFor SugarScore.request(8)
+    check withArg.value == @[SugarScore(s: 10)]

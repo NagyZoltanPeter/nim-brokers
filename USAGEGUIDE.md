@@ -326,6 +326,31 @@ Info.removeProvider(handle.get())
 Info.clearProviders()
 ```
 
+#### provideIt sugar
+
+`provideIt` is the same body sugar as `RequestBroker.provideIt` — the block is
+the provider's real proc body with the declared signature arg names injected —
+but adapted to the additive model: **every `provideIt` adds a provider** (there
+is **no `reprovideIt`**, because MultiRequestBroker has no replace verb), and it
+returns `setProvider`'s `Result[<Broker>ProviderHandle, string]` so you keep the
+handle for `removeProvider`.
+
+```nim
+let h1 = Info.provideIt:
+  ok(Info(label: "from-module-a"))
+let h2 = Info.provideIt:            # a SECOND provider, not a replacement
+  ok(Info(label: "from-module-b"))
+
+let responses = await Info.request()   # both fan out; len == 2
+Info.removeProvider(h1.get())          # drop exactly one by handle
+```
+
+Dual-slot brokers get `provideItNoArgs` for the zero-arg slot. As with
+RequestBroker, a body that could silently fall through to `err("")` is a
+compile error (the `providerBody` check is shared). Because each `provideIt`
+expands to a fresh distinct closure, two identical-looking blocks register two
+providers — the reference-dedup only collapses the *same* handler value.
+
 ### SignalBroker
 
 Fire-and-forget request — an inverted EventBroker — for feeding a one-way notification signal into a module or library at the interface level. The handler runs async, but `signal()` is a plain (non-async) proc returning `Result[void, string]`; it reports only acceptance/backpressure, not delivery success.

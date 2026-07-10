@@ -256,6 +256,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Multiple providers per signature; `request()` fans out to all via `allFinished`.
 - Fails the entire request if any provider fails.
 - Deduplicates identical handler references on registration.
+- **`provideIt` body sugar** (issue #46 follow-up): `TypeName.provideIt[(ctx)]: body` is body sugar over the additive `setProvider` — the block is the real provider proc body with the declared signature arg names injected, and it returns `setProvider`'s `Result[<T>ProviderHandle, string]` (keep the handle for `removeProvider`). **No `reprovideIt`** — providers are additive, there is no replace verb; each `provideIt` *adds* a provider (the generated closure is a fresh reference, so it never dedups). Dual-slot brokers get `provideItNoArgs` for the zero-arg slot. Same `providerBody` fall-through compile check as RequestBroker. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 
 ### SignalBroker specifics (`brokers/signal_broker.nim`, `brokers/internal/mt_signal_broker.nim`)
 

@@ -271,6 +271,25 @@ let all = await Quote.request("BTC")   # Result[seq[Quote], string]; len == 2
 echo all.get().len                     # any provider failing fails the whole request
 ```
 
+### provideIt — provider body sugar (adds, not replaces)
+
+```nim
+# Same body sugar as RequestBroker, but here every provideIt ADDS a provider
+# (there is no reprovideIt — MultiRequestBroker has no replace verb). The
+# declared arg `sym` is injected; it returns setProvider's handle.
+let h1 = Quote.provideIt:
+  ok(Quote(price: 100))
+let h2 = Quote.provideIt:            # a second provider — NOT a replacement
+  if sym.len == 0:
+    return err("empty symbol")
+  return ok(Quote(price: 101))
+
+# request() fans out to both; drop just one by its handle:
+Quote.removeProvider(h1.get())
+# Dual-slot brokers: provideIt = args slot, provideItNoArgs = zero-arg slot.
+# Fall-through bodies are a compile error, same as RequestBroker's provideIt.
+```
+
 ---
 
 ## BrokerContext

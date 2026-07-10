@@ -236,11 +236,24 @@ don't fit the per-broker files) added to the test task list in
   iterate both). No behavioral change is expected in any existing test —
   the sugar is purely additive codegen.
 
+## MultiRequestBroker (added in the same PR)
+
+`provideIt` was extended to MultiRequestBroker, reusing `buildProvideTemplates`
++ `providerBody` verbatim, emitted next to its existing `bindProvider` block.
+Differences from RequestBroker, forced by the additive fan-out model:
+
+- **No `reprovideIt`** — there is no `replaceProvider`; providers are additive
+  and removed by handle (`removeProvider`). Mirrors the pre-existing
+  `bindProvider`-without-`rebindProvider` decision.
+- Returns `setProvider`'s `Result[<T>ProviderHandle, string]` (the handle), not
+  `Result[void, string]`.
+- Each `provideIt` **adds** a provider; the generated closure is a fresh
+  reference, so the reference-dedup never collapses two blocks.
+- Async-only (no sync-body branch). Dual-slot naming unchanged
+  (`provideIt` / `provideItNoArgs`).
+
 ## Explicitly out of scope
 
-- **MultiRequestBroker** `provideIt`-style sugar (`addProvider` has
-  different semantics — multi-registration, dedup); candidate follow-up
-  using the same `providerBody` checker.
 - A `providerBody`-grade fall-through check for `listenIt`/`onSignalIt`
   bodies (they are `void`; nothing to forget).
 - FFI wrapper generation — foreign-language surfaces are unaffected.
