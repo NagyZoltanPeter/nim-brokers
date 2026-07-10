@@ -175,6 +175,9 @@ when compileOption("threads") and defined(BrokerFfiApi):
   export api_request_broker_cbor
 
 export results, chronos, keepItIf, broker_context, options
+# The generated provideIt/reprovideIt templates expand `providerBody` at the
+# user's call site, so the checker macro must be visible there.
+export providerBody
 
 proc errorFuture[T](message: string): Future[Result[T, string]] {.inline.} =
   ## Build a future that is already completed with an error result.
@@ -1118,6 +1121,36 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
         typeIdent, "replaceProvider", "rebindProvider", slots, awaitCall
       )
     )
+
+  # ── provideIt / reprovideIt body sugar ─────────────────────────────
+  # The block is the provider's real proc body with the declared signature arg
+  # names injected; `providerBody` rejects bodies that could silently fall
+  # through to err(""). Dual-slot brokers get distinct names per slot
+  # (`provideIt` = args slot, `provideItNoArgs` = zero-arg slot) — no
+  # `when compiles` slot-guessing, since an args-free body is valid for both.
+  block:
+    let providerPragma = procTyPragma(makeProcType(returnType, @[], mode))
+    let dualSlot = (not argSig.isNil()) and (not zeroArgSig.isNil())
+    if not argSig.isNil():
+      let slot = BindSlot(
+        params: cloneParams(argParams),
+        returnType: copyNimTree(returnType),
+        pragma: providerPragma,
+      )
+      result.add(buildProvideTemplates(typeIdent, "setProvider", "provideIt", slot))
+      result.add(
+        buildProvideTemplates(typeIdent, "replaceProvider", "reprovideIt", slot)
+      )
+    if not zeroArgSig.isNil():
+      let slot = BindSlot(
+        params: @[], returnType: copyNimTree(returnType), pragma: providerPragma
+      )
+      let provideName = if dualSlot: "provideItNoArgs" else: "provideIt"
+      let reprovideName = if dualSlot: "reprovideItNoArgs" else: "reprovideIt"
+      result.add(buildProvideTemplates(typeIdent, "setProvider", provideName, slot))
+      result.add(
+        buildProvideTemplates(typeIdent, "replaceProvider", reprovideName, slot)
+      )
 
   when defined(brokerDebug):
     writeBrokerDebug("RequestBroker", typeDisplayName, result, header = "mode=" & $mode)

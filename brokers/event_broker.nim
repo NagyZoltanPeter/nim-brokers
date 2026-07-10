@@ -648,3 +648,45 @@ macro EventBroker*(args: varargs[untyped]): untyped =
         split.kwargs[0],
       )
     generateEventBroker(body)
+
+# ── listenIt body sugar ──────────────────────────────────────────────
+# Generic over every EventBroker lane (single-thread / mt / API): the template
+# simply forwards to whatever `listen` overload is in scope at the call site.
+# Purely syntactic — identical codegen to the hand-written listener lambda, no
+# new refc/ORC exposure. The extra params stay `untyped` for the same
+# overload-resolution reason documented at `bindTemplateDef`.
+
+template listenIt*(T: typedesc, brokerCtx: untyped, body: untyped): untyped =
+  ## Sugar over `listen(T, brokerCtx, handler)`: the block is the listener's
+  ## real proc body with the event value injected as `it` (nothing is injected
+  ## for `void` event types). `await` is allowed; `raises: []` is enforced
+  ## exactly as for a hand-written listener. Returns `listen`'s Result.
+  mixin listen
+  when compiles(
+    listen(
+      T,
+      brokerCtx,
+      proc(): Future[void] {.async: (raises: []), gcsafe.} =
+        discard,
+    )
+  ):
+    listen(
+      T,
+      brokerCtx,
+      proc(): Future[void] {.async: (raises: []), gcsafe.} =
+        body,
+    )
+  else:
+    listen(
+      T,
+      brokerCtx,
+      proc(brokerEvent: T): Future[void] {.async: (raises: []), gcsafe.} =
+        template it(): T {.inject, used.} =
+          brokerEvent
+
+        body,
+    )
+
+template listenIt*(T: typedesc, body: untyped): untyped =
+  ## `listenIt` on the default broker context.
+  listenIt(T, DefaultBrokerContext, body)

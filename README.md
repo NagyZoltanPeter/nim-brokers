@@ -103,17 +103,22 @@ requests, with no hand-written FFI plumbing.
 EventBroker:
   type GreetingEvent = object
     text*: string
-discard GreetingEvent.listen(proc(e: GreetingEvent): Future[void] {.async: (raises: []).} = echo e.text)
-GreetingEvent.emit(text = "hello")     # sync, fire-and-forget
+discard GreetingEvent.listenIt: echo it.text   # block = listener body, event injected as `it`
+GreetingEvent.emit(text = "hello")             # sync, fire-and-forget
 ```
 
 ```nim
 # RequestBroker — single-provider request/response (sync mode shown)
 RequestBroker(sync):
   proc PlusOp*(a: int, b: int): Result[int, string]
-PlusOp.setProvider(proc(a, b: int): Result[int, string] = ok(a + b))
+discard PlusOp.provideIt: ok(a + b)    # block = provider body, args injected
 echo PlusOp.request(2, 3).get()        # 5
 ```
+
+Prefer the explicit form? `listen` / `setProvider` / `onSignal` take the
+hand-written handler proc; the `*It` sugar just generates the same closure —
+and `provideIt` bodies that could silently fall through to `err("")` are a
+compile error.
 
 Every broker has single-thread, `(mt)`, and `(API)` variants (except
 MultiRequestBroker), can be scoped to a `BrokerContext` for isolation, and keeps

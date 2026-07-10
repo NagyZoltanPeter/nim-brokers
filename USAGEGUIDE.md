@@ -15,9 +15,12 @@ footprints. For the short overview start at the [README](README.md).
       - [Examples](#examples)
   - [Types of Brokers](#types-of-brokers)
     - [EventBroker](#eventbroker)
+      - [listenIt sugar](#listenit-sugar)
     - [RequestBroker](#requestbroker)
+      - [provideIt / reprovideIt sugar](#provideit--reprovideit-sugar)
     - [MultiRequestBroker](#multirequestbroker)
     - [SignalBroker](#signalbroker)
+      - [onSignalIt sugar](#onsignalit-sugar)
     - [BrokerContext](#brokercontext)
     - [BrokerInterface \& BrokerImplement (OOP / DI)](#brokerinterface--brokerimplement-oop--di)
   - [Multi-thread support](#multi-thread-support)
@@ -167,6 +170,25 @@ await GreetingEvent.dropAllListeners()
 > `Future[void]` in **every** lane (single-thread, `(mt)`, `(API)`) — the call
 > shape never changes with the broker tag.
 
+#### listenIt sugar
+
+`listenIt` removes the listener-lambda boilerplate: the block is the listener's
+real proc body with the event value injected as `it` (nothing is injected for
+`void` event types). It works in every lane and returns exactly what `listen`
+returns.
+
+```nim
+let handle = GreetingEvent.listenIt:
+  echo it.text
+
+# explicit broker context form
+let scoped = GreetingEvent.listenIt(myCtx):
+  echo "scoped: ", it.text
+```
+
+The body keeps full handler semantics: `await` is allowed and `raises: []` is
+enforced exactly as for a hand-written listener.
+
 ### RequestBroker
 
 Single-provider request/response: one provider registers; callers make typed requests. Supports both **async** (default) and **sync** modes.
@@ -227,6 +249,48 @@ The macro extends the generated `PlusOp` RequestBroker — the broker name is de
 
 `RequestBroker` supports two different call signatures in the same broker definition. The `signature` procs can be overloaded by arity and parameter types, and the generated `request()` proc will dispatch to the correct provider based on the call-site arguments.
 > If no `signature` proc is declared, a zero-argument form is generated automatically.
+
+#### provideIt / reprovideIt sugar
+
+`provideIt` removes the provider-lambda boilerplate: the block is the
+provider's real proc body with the declared signature arg names injected.
+`provideIt` forwards to `setProvider` (keeps the "already set" guard);
+`reprovideIt` forwards to `replaceProvider` (replace-or-insert, no guard).
+Both work in every lane (async / sync / `(mt)` / `(API)`) and return
+`Result[void, string]`.
+
+```nim
+RequestBroker(sync):
+  proc Transform*(input: string, len: int): Result[seq[byte], string]
+
+# `input` and `len` are injected; return / result= / trailing expression all work
+discard Transform.provideIt:
+  if len <= 0:
+    return err("len must be positive, got " & $len)
+  var acc: seq[byte]
+  for i in 0 ..< min(len, input.len):
+    acc.add(byte(input[i]))
+  return ok(acc)
+
+# swap the implementation without clearProvider
+discard Transform.reprovideIt:
+  ok(newSeq[byte](len))
+```
+
+The body must **produce a value on every path** — end with
+`return ok(...)`/`return err(...)`, assign to `result`, or end with a `Result`
+expression (a final `if`/`case`/`try` needs every branch to do so). A body
+that could silently fall through is a **compile error** with a positioned
+message, because the implicit `default(Result)` would answer `err("")`.
+Two conservative limits: a `block` containing `break` doesn't count as
+terminal, and noreturn calls (`quit`, `raiseAssert`) aren't recognized — add
+an explicit `return` in those rare shapes.
+
+A broker declaring **both** a zero-arg and an args signature gets distinct
+names per slot: `provideIt`/`reprovideIt` register the args slot,
+`provideItNoArgs`/`reprovideItNoArgs` the zero-arg slot (an args-free body
+would be valid for both, so the sugar never guesses). Async-mode bodies may
+`await`; sync-mode bodies cannot.
 
 ### MultiRequestBroker
 
@@ -293,6 +357,20 @@ await IngestSample.dropSignalHandler()
 ```
 
 > `ok()` is a best-effort acknowledgement, not a delivery guarantee — for confirmation, use `RequestBroker` with a `void` response. `SignalBroker(mt)` and `SignalBroker(API)` provide the multi-thread and FFI variants, mirroring the other brokers.
+
+#### onSignalIt sugar
+
+`onSignalIt` mirrors `listenIt` for the signal handler: the block is the
+handler's real proc body with the signal value injected as `it` (nothing for
+`void` payloads). Duplicate-guard and return value are `onSignal`'s.
+
+```nim
+discard IngestSample.onSignalIt:
+  echo it.deviceId, " = ", it.value
+
+discard Pulse.onSignalIt:   # SignalBroker: type Pulse = void
+  echo "tick"
+```
 
 ### BrokerContext
 
