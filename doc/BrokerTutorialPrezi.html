@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>nim-brokers — Tutorial</title>
+
+  <!-- RevealJS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/theme/black.min.css" />
+  <!-- highlight.js theme -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+
+  <style>
+    /* ── Logos brand palette ───────────────────────── */
+    :root {
+      --logos-bg:          #08090c;
+      --logos-surface:     #111318;
+      --logos-surface2:    #1b1d26;
+      --logos-border:      #252830;
+      --logos-blue:        #5c9cf5;
+      --logos-blue-dim:    #3a6dcc;
+      --logos-green:       #64f4ac;
+      --logos-green-dim:   #3ab87a;
+      --logos-orange:      #f9882a;
+      --logos-red:         #f45c74;
+      --logos-text:        #e8eaf0;
+      --logos-muted:       #7a7f91;
+      --logos-code-bg:     #131520;
+      --logos-hl:          rgba(92,156,245,0.15);
+    }
+
+    /* Override reveal defaults — scale-friendly sizing */
+    .reveal-viewport { background: var(--logos-bg) !important; }
+    .reveal .slides section { text-align: left; }
+    .reveal .slides { font-size: 62.5%; }
+    .reveal { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; color: var(--logos-text); }
+    .reveal h1, .reveal h2, .reveal h3, .reveal h4 {
+      color: #ffffff;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-transform: none;
+    }
+    .reveal h1 { font-size: 2em; line-height: 1.1; }
+    .reveal h2 { font-size: 1.4em; border-bottom: 1px solid var(--logos-border); padding-bottom: 0.2em; margin-bottom: 0.5em; }
+    .reveal h3 { font-size: 1.05em; color: var(--logos-blue); margin-bottom: 0.3em; }
+    .reveal p, .reveal li { font-size: 0.78em; line-height: 1.55; color: var(--logos-text); }
+    .reveal ul { margin-left: 1em; }
+    .reveal ul li { margin-bottom: 0.2em; }
+
+    /* ── Code blocks — projector-friendly ── */
+    .reveal pre {
+      background: var(--logos-code-bg) !important;
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      margin: 0.35em auto;
+      width: 100%;
+      font-size: 0.88em !important;
+    }
+    .reveal pre code {
+      background: transparent !important;
+      padding: 0.6em 0.8em !important;
+      max-height: none;
+      overflow: visible !important;
+    }
+    /* Scroll bar styling (for the rare overflow) */
+    .reveal pre code::-webkit-scrollbar { width: 4px; height: 4px; }
+    .reveal pre code::-webkit-scrollbar-track { background: transparent; }
+    .reveal pre code::-webkit-scrollbar-thumb { background: var(--logos-border); border-radius: 2px; }
+
+    /* Utility chips / badges */
+    .chip {
+      display: inline-block;
+      padding: 0.18em 0.6em;
+      border-radius: 4px;
+      font-size: 0.65em;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      vertical-align: middle;
+      margin-right: 0.3em;
+    }
+    .chip-blue   { background: rgba(92,156,245,0.18); color: var(--logos-blue); border: 1px solid var(--logos-blue-dim); }
+    .chip-green  { background: rgba(100,244,172,0.12); color: var(--logos-green); border: 1px solid var(--logos-green-dim); }
+    .chip-orange { background: rgba(249,136,42,0.18); color: var(--logos-orange); border: 1px solid #b35f10; }
+    .chip-red    { background: rgba(244,92,116,0.15); color: var(--logos-red); border: 1px solid #a02040; }
+    .chip-api    { background: rgba(92,156,245,0.10); color: #b6d2ff; border: 1px solid var(--logos-blue); }
+
+    /* Callout boxes */
+    .callout {
+      background: var(--logos-surface);
+      border-left: 3px solid var(--logos-blue);
+      border-radius: 0 6px 6px 0;
+      padding: 0.45em 0.7em;
+      margin: 0.4em 0;
+      font-size: 0.72em;
+    }
+    .callout.warn  { border-color: var(--logos-orange); }
+    .callout.good  { border-color: var(--logos-green); }
+    .callout.bad   { border-color: var(--logos-red); }
+    .callout p { margin: 0; font-size: 1em; }
+
+    /* Two-column layout */
+    .cols { display: grid; gap: 1.2em; align-items: start; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .col-6040 { grid-template-columns: 0.6fr 0.4fr; }
+    .col-4060 { grid-template-columns: 0.4fr 0.6fr; }
+
+    /* Title slide */
+    .title-slide { text-align: center !important; }
+    .title-slide h1 { font-size: 2.2em; margin-bottom: 0.3em; }
+    .title-slide .subtitle {
+      font-size: 0.95em;
+      color: var(--logos-muted);
+      margin-bottom: 1.2em;
+    }
+    .logos-wordmark {
+      font-weight: 800; font-size: 1.1em; letter-spacing: 0.12em;
+      color: var(--logos-text); text-transform: uppercase;
+      line-height: 1.3;
+      overflow: visible;
+    }
+    .logos-wordmark .wm-lambda {
+      text-transform: none;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+      display: inline;
+    }
+    .section-header {
+      text-align: center !important;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%;
+    }
+    .section-header .num {
+      font-size: 4em; font-weight: 900; color: var(--logos-border);
+      line-height: 1; margin-bottom: 0.1em;
+    }
+    .section-header h2 { border: none; font-size: 1.7em; }
+
+    /* Diagram boxes */
+    .diag-box {
+      background: var(--logos-surface2);
+      border: 1px solid var(--logos-border);
+      border-radius: 6px;
+      padding: 0.5em 0.8em;
+      text-align: center;
+      font-size: 0.62em;
+      color: var(--logos-text);
+    }
+    .diag-box.accent { border-color: var(--logos-blue); color: var(--logos-blue); }
+    .diag-box.green  { border-color: var(--logos-green); color: var(--logos-green); }
+    .diag-box.bad    { border-color: var(--logos-red);   color: var(--logos-red); }
+
+    .arrow {
+      text-align: center; font-size: 1.2em; color: var(--logos-muted);
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* Highlight lines inside code */
+    .hl-line { background: var(--logos-hl); }
+
+    /* Table */
+    .reveal table {
+      font-size: 0.62em;
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .reveal table th {
+      background: var(--logos-surface2);
+      color: var(--logos-blue);
+      padding: 0.5em 0.8em;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--logos-border);
+    }
+    .reveal table td {
+      padding: 0.4em 0.8em;
+      border-bottom: 1px solid var(--logos-border);
+      color: var(--logos-text);
+    }
+    .reveal table tr:last-child td { border-bottom: none; }
+
+    /* Fragment transitions */
+    .reveal .fragment { opacity: 0; transition: opacity 0.4s; }
+    .reveal .fragment.visible { opacity: 1; }
+    .reveal .fragment.highlight-blue { color: var(--logos-blue) !important; }
+    .reveal .fragment.highlight-green { color: var(--logos-green) !important; }
+
+    /* File path label */
+    .filepath {
+      font-family: monospace;
+      font-size: 0.6em;
+      color: var(--logos-muted);
+      margin-bottom: 0.15em;
+      display: block;
+    }
+
+    /* Inline code */
+    .reveal code:not(pre code) {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background: var(--logos-surface2);
+      color: var(--logos-green);
+      padding: 0.1em 0.3em;
+      border-radius: 3px;
+      font-size: 0.85em;
+    }
+
+    /* Slide number / progress */
+    .reveal .progress { height: 2px; color: var(--logos-blue); }
+    .reveal .slide-number {
+      background: transparent;
+      color: var(--logos-muted);
+      font-size: 0.6em;
+    }
+
+    /* ── Persistent footer ── */
+    .slide-footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      background: linear-gradient(180deg, transparent 0%, rgba(8,9,12,0.9) 35%);
+      z-index: 30;
+      pointer-events: none;
+    }
+    .slide-footer .footer-inner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      opacity: 0.7;
+    }
+    .slide-footer .footer-lambda {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--logos-blue);
+      line-height: 1;
+    }
+    .slide-footer .footer-text {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--logos-text);
+      letter-spacing: 0.06em;
+    }
+    /* ── Top-right domain badge ── */
+    .top-right-domain {
+      position: fixed;
+      top: 16px;
+      right: 24px;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--logos-muted);
+      letter-spacing: 0.04em;
+      opacity: 0.7;
+      z-index: 30;
+      pointer-events: none;
+    }
+
+    /* auto-animate highlights */
+    [data-id="code-highlight"] {
+      transition: all 0.5s ease;
+    }
+
+    /* Vertical-nav hint arrow */
+    .reveal .controls .navigate-down { color: var(--logos-blue); }
+  </style>
+</head>
+<body>
+
+<!-- ── Top-right domain ── -->
+<div class="top-right-domain">Tutorial</div>
+
+<!-- ── Persistent footer ── -->
+<div class="slide-footer">
+  <div class="footer-inner">
+    <span class="footer-lambda">&lambda;</span>
+    <span class="footer-text">Logos · nim-brokers</span>
+  </div>
+</div>
+
+<div class="reveal">
+<div class="slides">
+
+<!-- ══════════════ TITLE ══════════════ -->
+<section class="title-slide">
+  <div style="margin-bottom:0.6em">
+    <div class="logos-wordmark" style="letter-spacing:0.18em; color: var(--logos-blue);"><span class="wm-lambda">&lambda;</span>ogos · nim-brokers</div>
+  </div>
+  <h1>nim-brokers - Tutorial</h1>
+  <div style="text-align:center; margin-bottom:1em;">
+    <code style="color:var(--logos-green); font-size:0.78em;">
+      <a href="https://github.com/NagyZoltanPeter/nim-brokers"
+          style="color:var(--logos-green); text-decoration:underline;">
+          NagyZoltanPeter/nim-brokers
+      </a>
+    </code>
+  </div>
+  <p class="subtitle">Declare the interface once - use it anywhere — the tag decides the reach</p>
+  <div style="display:flex; justify-content:center; gap:0.8em; margin-top:1em; flex-wrap:wrap;">
+    <a href="#/2" style="text-decoration:none;"><span class="chip chip-blue" style="cursor:pointer;">EventBroker</span></a>
+    <a href="#/3" style="text-decoration:none;"><span class="chip chip-green" style="cursor:pointer;">RequestBroker</span></a>
+    <a href="#/4" style="text-decoration:none;"><span class="chip chip-orange" style="cursor:pointer;">MultiRequestBroker</span></a>
+    <a href="#/5" style="text-decoration:none;"><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);cursor:pointer;">SignalBroker</span></a>
+    <a href="#/6" style="text-decoration:none;"><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);cursor:pointer;">BrokerContext</span></a>
+  </div>
+  <div style="display:flex; justify-content:center; gap:0.8em; margin-top:0.6em; flex-wrap:wrap;">
+    <a href="#/7" style="text-decoration:none;"><span class="chip chip-blue" style="cursor:pointer;">Interface / Implement</span></a>
+    <a href="#/8" style="text-decoration:none;"><span class="chip chip-red" style="cursor:pointer;">Multi-Thread</span></a>
+    <a href="#/9" style="text-decoration:none;"><span class="chip chip-api" style="cursor:pointer;">FFI Connection</span></a>
+  </div>
+  <p style="color:var(--logos-muted); font-size:0.6em; margin-top:1.6em;">Use <strong>&larr; &rarr;</strong> for sections &nbsp;·&nbsp; <strong>&uarr; &darr;</strong> for slides within a section &nbsp;·&nbsp; ~60 min</p>
+</section>
+
+<!-- ══════════════ SECTION 01 · FRAMING ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">01</p>
+    <h2>Why Brokers</h2>
+    <p style="color:var(--logos-muted);">The pain inventory — and the one idea that replaces it</p>
+  </div>
+  <aside class="notes">Warm-up: everyone in the room has written at least three of these by hand.</aside>
+</section>
+
+<section>
+  <h2>Every project hand-rolls the same plumbing</h2>
+  <div class="cols cols-2">
+    <div>
+      <div class="callout bad"><p><strong>Callback tables wired at init</strong> — producer imports its consumers, ordering &amp; removal are your problem.</p></div>
+      <div class="callout bad"><p><strong><code>{.base.}</code> method vtables</strong> — interface + subtype + factory + mock plumbing, per component.</p></div>
+      <div class="callout bad"><p><strong><code>Channel[T]</code> wiring</strong> — request/response channel pairs, wake-ups, deep copies, per thread boundary.</p></div>
+      <div class="callout bad"><p><strong>FFI trampolines</strong> — hand-written C ABI, marshaling, callback shims, per language.</p></div>
+    </div>
+    <div>
+      <p style="margin-top:0.2em;"><strong>nim-brokers:</strong> one declared, compile-time-checked, fully typed contract — the library generates the plumbing.</p>
+      <pre><code class="language-nim" data-trim>
+RequestBroker:        # in-proc: direct dispatch
+RequestBroker(mt):    # cross-thread: lock-free ring
+RequestBroker(API):   # cross-language: CBOR shared lib
+</code></pre>
+      <div class="callout good"><p><strong>Same declaration, same call sites.</strong> You choose the reach by adding a tag — and pay only for the axis you compile in.</p></div>
+      <p class="text-muted" style="font-size:0.62em;">Built on chronos + results.</p>
+    </div>
+  </div>
+  <aside class="notes">Left column maps 1:1 to the sections of this training. Right: the whole pitch in 3 lines.</aside>
+</section>
+
+<section>
+  <h2>Mental model — 4 shapes × 3 lanes</h2>
+  <table>
+    <tr><th>Broker</th><th>Shape</th><th>One-liner</th><th>Lanes</th></tr>
+    <tr><td><span class="chip chip-blue">EventBroker</span></td><td>pub/sub, many→many</td><td>fire-and-forget events; <code>listen</code> / <code>emit</code></td><td>ST · mt · API</td></tr>
+    <tr><td><span class="chip chip-green">RequestBroker</span></td><td>req/resp, many→<strong>1</strong> provider</td><td>typed <code>request()</code> to a swappable provider; async <strong>or</strong> sync</td><td>ST · mt · API</td></tr>
+    <tr><td><span class="chip chip-orange">MultiRequestBroker</span></td><td>req/resp, many→<strong>N</strong> providers</td><td>fan out, aggregate results</td><td>ST only</td></tr>
+    <tr><td><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);">SignalBroker</span></td><td>one-way, many→<strong>1</strong> handler</td><td>fire-and-forget with accept/backpressure result</td><td>ST · mt · API</td></tr>
+  </table>
+  <div class="callout" style="margin-top:0.8em;"><p><strong>The invariant to remember:</strong> the call shape is identical in every lane — <code>emit</code> / <code>signal</code> are always <strong>sync</strong>, <code>request</code> is async (or declared sync), <code>drop*</code> is always <strong>async</strong>. The same source compiles with or without the tag.</p></div>
+  <aside class="notes">This invariant is why the (mt) section later is short: nothing new to learn at the call site.</aside>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 02 · EVENTBROKER ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">02</p>
+    <h2 style="color:var(--logos-blue);">EventBroker</h2>
+    <p style="color:var(--logos-muted);">pub/sub · many emitters → many listeners · fire-and-forget</p>
+  </div>
+</section>
+
+<section>
+  <h2>Use case: the producer must not import its consumers</h2>
+  <p>Running example — a telemetry pipeline: a sensor driver produces readings; a dashboard, a logger, later a network relay all react.</p>
+  <div class="cols cols-3" style="margin-top:0.6em;">
+    <div class="diag-box accent"><p style="margin:0;">driver.nim<br><span style="color:var(--logos-muted);">emit</span></p></div>
+    <div class="arrow"><p>→ &nbsp;SensorReading&nbsp; →</p></div>
+    <div class="diag-box green"><p style="margin:0;">dashboard.nim · logger.nim · relay.nim<br><span style="color:var(--logos-muted);">listen</span></p></div>
+  </div>
+  <ul style="margin-top:0.8em;">
+    <li>Adding a consumer touches <strong>only the consumer's module</strong>.</li>
+    <li>No init-time wiring, no shared registry object, no ownership question.</li>
+    <li>Everything runs on the one chronos loop you already have.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>From this code… to that code</h2>
+  <div class="cols cols-2">
+    <div>
+      <span class="filepath">before — callback table, wired at init</span>
+      <pre><code class="language-nim" data-trim>
+# driver.nim owns its consumers' hooks
+type SensorDriver = ref object
+  onReading: seq[proc(id: string,
+                      c: float) {.gcsafe.}]
+
+# main.nim — wiring, ordering, removal:
+# all manual, all coupled
+driver.onReading.add(dashboard.update)
+driver.onReading.add(logger.record)
+</code></pre>
+      <div class="callout bad"><p>New consumer ⇒ edit driver <em>and</em> main. Exceptions in one hook kill the loop for the rest.</p></div>
+    </div>
+    <div>
+      <span class="filepath">after — declared event, self-registered listeners</span>
+      <pre><code class="language-nim" data-trim>
+# telemetry_events.nim — the contract
+EventBroker:
+  type SensorReading = object
+    sensorId*: string
+    valueC*: float
+
+# dashboard.nim — subscribes itself
+discard SensorReading.listenIt:
+  updateGauge(it.sensorId, it.valueC)
+
+# driver.nim — imports nobody
+SensorReading.emit(sensorId = "t1",
+                   valueC = 21.5)
+</code></pre>
+      <div class="callout good"><p><code>listenIt</code>: the block <em>is</em> the listener body, event injected as <code>it</code>. Emit by value or by fields.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>EventBroker — the rules</h2>
+  <ul>
+    <li><code>emit</code> is <strong>sync <code>void</code></strong>: it snapshots the listener set and <code>asyncSpawn</code>s each — <strong>never <code>await</code> it</strong>.</li>
+    <li>Listener signature: <code>proc(evt: T): Future[void] {.async: (raises: []).}</code> — handle your own errors.</li>
+    <li><code>listen</code> / <code>listenIt</code> return <code>Result[ListenerHandle, string]</code> — keep the handle to drop later.</li>
+    <li><code>drop*</code> is <strong>async in every lane</strong> — <code>await</code> it; dropping cancels the listener's in-flight work.</li>
+  </ul>
+  <pre><code class="language-nim" data-trim>
+let h = SensorReading.listenIt:
+  await store(it)                     # bodies may await
+
+SensorReading.emit(sensorId = "t1", valueC = 21.5)
+await sleepAsync(0)                   # test idiom: yield once so handlers run
+
+await SensorReading.dropListener(h.get())
+await SensorReading.dropAllListeners()
+</code></pre>
+  <p class="text-muted" style="font-size:0.62em;">Full reference: USAGEGUIDE.md § EventBroker · COOKBOOK.md § EventBroker</p>
+  <aside class="notes">The sync-emit / async-drop asymmetry is deliberate — it holds in mt and API lanes too.</aside>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 03 · REQUESTBROKER ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">03</p>
+    <h2 style="color:var(--logos-green);">RequestBroker</h2>
+    <p style="color:var(--logos-muted);">request/response · many callers → one swappable provider</p>
+  </div>
+</section>
+
+<section>
+  <h2>One provider, typed, swappable — the DI seed</h2>
+  <pre><code class="language-nim" data-trim>
+# contract — visible to callers and provider alike
+RequestBroker:
+  type Calibration = object
+    offset*: float
+  proc signature*(sensorId: string): Future[Result[Calibration, string]] {.async.}
+
+# storage.nim — the provider (exactly one per signature)
+discard Calibration.provideIt:                # declared arg names injected
+  ok(Calibration(offset: lookupOffset(sensorId)))
+
+# driver.nim — the consumer; no import of storage
+let cal = await Calibration.request("t1")
+
+# swap in place — tests, hot reconfig — no clearProvider dance
+discard Calibration.reprovideIt:
+  ok(Calibration(offset: 0.0))
+</code></pre>
+  <div class="callout"><p>A second <code>setProvider</code> returns <code>err</code> — replacement is explicit (<code>reprovideIt</code> / <code>replaceProvider</code>). Prefer explicit procs? <code>setProvider</code> takes a hand-written closure; the <code>*It</code> sugar generates the same thing.</p></div>
+</section>
+
+<section>
+  <h2>Sync mode &amp; fool-proof provider bodies</h2>
+  <div class="cols cols-2">
+    <div>
+      <span class="filepath">RequestBroker(sync) — no event loop needed</span>
+      <pre><code class="language-nim" data-trim>
+RequestBroker(sync):
+  proc plusOne(x: int): Result[int, string]
+  # proc-sugar: broker = PlusOne,
+  # request() returns the RAW payload
+
+discard PlusOne.setProvider(
+  proc(x: int): Result[int, string] =
+    ok(x + 1))
+
+echo PlusOne.request(41).get()  # 42, blocks
+</code></pre>
+      <p style="font-size:0.68em;">No <code>Future</code>, no <code>{.async.}</code> — usable from plain sync code.</p>
+    </div>
+    <div>
+      <span class="filepath">these do NOT compile — by design</span>
+      <pre><code class="language-nim" data-trim>
+RequestBroker:
+  type FetchUser = object
+    name*: string
+  proc signature*(id: int):
+    Future[Result[FetchUser, string]] {.async.}
+
+# a body that could fall through would
+# silently answer err("") — so it's a
+# COMPILE error instead:
+
+FetchUser.provideIt:
+  echo "side effect only"   # void trailing call
+
+FetchUser.provideIt:
+  if id &gt; 0:                # if without else
+    return ok(FetchUser(name: "u" &amp; $id))
+</code></pre>
+      <div class="callout good"><p><code>return</code> / <code>result=</code> / trailing expression all work — but every path must produce a value.</p></div>
+    </div>
+  </div>
+  <aside class="notes">The compile-error guarantee is a favorite: an entire class of silent runtime bugs moved to compile time.</aside>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 04 · MULTIREQUESTBROKER ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">04</p>
+    <h2 style="color:var(--logos-orange);">MultiRequestBroker</h2>
+    <p style="color:var(--logos-muted);">request/response fanned out to N providers · results aggregated</p>
+  </div>
+</section>
+
+<section>
+  <h2>Fan-out: health probes, plugin queries, capability discovery</h2>
+  <pre><code class="language-nim" data-trim>
+MultiRequestBroker:
+  type Health = object
+    subsystem*: string
+    healthy*: bool
+  proc signature*(deep: bool): Future[Result[Health, string]] {.async.}
+
+# every provideIt ADDS a provider (no replace verb here)
+let h1 = Health.provideIt: ok(Health(subsystem: "net",  healthy: netUp()))
+let h2 = Health.provideIt: ok(Health(subsystem: "disk", healthy: diskOk(deep)))
+
+let all = await Health.request(true)    # Result[seq[Health], string] — len == 2
+Health.removeProvider(h1.get())         # drop one by handle
+</code></pre>
+  <div class="callout warn"><p><strong>Any provider failing fails the whole request.</strong> Model per-provider failure inside the payload if partial results must survive.</p></div>
+  <p class="text-muted" style="font-size:0.62em;">Single-thread lane only — no (mt)/(API) variant.</p>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 05 · SIGNALBROKER ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">05</p>
+    <h2 style="color:#b085f5;">SignalBroker</h2>
+    <p style="color:var(--logos-muted);">one-way notification · single handler · backpressure made visible</p>
+  </div>
+</section>
+
+<section>
+  <h2>"Was it accepted?" — not "was it handled?"</h2>
+  <pre><code class="language-nim" data-trim>
+SignalBroker:
+  type FlushHint = object
+    reason*: string
+
+discard FlushHint.onSignalIt:          # ONE handler; a second onSignal =&gt; err
+  await persister.flush()              # exceptions swallowed (warn) — no reply path
+
+let r = FlushHint.signal(reason = "buffer 90%")   # plain proc — NEVER await it
+if r.isErr:
+  metrics.inc("flush_dropped")         # backpressure is a visible branch
+</code></pre>
+  <div class="cols cols-2" style="margin-top:0.4em;">
+    <div class="callout warn"><p><code>ok()</code> = <strong>accepted</strong> — a handler exists <em>and</em> the queue had room. It does <strong>not</strong> mean handled.</p></div>
+    <div class="callout"><p><code>err()</code> = <code>"no signal handler installed"</code> | <code>"queue full"</code>. Payload-less pulse: <code>type Wakeup = void</code> · <code>Wakeup.signal()</code>.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Which shape do I reach for?</h2>
+  <table>
+    <tr><th>You need…</th><th>Reach for</th><th>Caller gets back</th></tr>
+    <tr><td>N reactions, fire-and-forget</td><td><span class="chip chip-blue">EventBroker</span></td><td>nothing (<code>emit</code> is void)</td></tr>
+    <tr><td>an answer from the one responsible component</td><td><span class="chip chip-green">RequestBroker</span></td><td><code>Result[T, string]</code></td></tr>
+    <tr><td>answers from every registered component</td><td><span class="chip chip-orange">MultiRequestBroker</span></td><td><code>Result[seq[T], string]</code></td></tr>
+    <tr><td>"did it get through?" without a reply</td><td><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);">SignalBroker</span></td><td>accept / backpressure <code>Result[void, string]</code></td></tr>
+  </table>
+  <div class="callout" style="margin-top:0.7em;"><p>Rule of thumb: start with <strong>EventBroker</strong> for facts that happened, <strong>RequestBroker</strong> for questions. Signal &amp; MultiRequest are the specialists.</p></div>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 06 · BROKERCONTEXT ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">06</p>
+    <h2>BrokerContext</h2>
+    <p style="color:var(--logos-muted);">isolation without declaring new broker types</p>
+  </div>
+</section>
+
+<section>
+  <h2>A <code>distinct uint32</code> that multiplexes broker instances</h2>
+  <pre><code class="language-nim" data-trim>
+let ctxA = NewBrokerContext()   # globally unique (atomic counter, thread-safe)
+let ctxB = NewBrokerContext()
+
+discard SensorReading.listenIt(ctxA): recordTenantA(it)
+discard SensorReading.listenIt(ctxB): recordTenantB(it)
+
+SensorReading.emit(ctxA, SensorReading(sensorId: "t1", valueC: 20.0))
+# only ctxA's listener fires — ctxB is fully isolated
+
+await SensorReading.dropAllListeners(ctxA)
+</code></pre>
+  <ul>
+    <li>Every broker API takes an <strong>optional first context arg</strong>; omitted → thread-global <code>DefaultBrokerContext</code>.</li>
+    <li>Per-tenant, per-component, <strong>per-test</strong> isolation — same broker type, zero extra declarations.</li>
+    <li>Foundation for what comes later: BrokerInterface gives every <em>instance</em> its own context.</li>
+  </ul>
+  <aside class="notes">Cheap: it's a tag into per-context buckets, not a new object graph.</aside>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 07 · BROKERINTERFACE / BROKERIMPLEMENT ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">07</p>
+    <h2 style="color:var(--logos-blue);">BrokerInterface / BrokerImplement</h2>
+    <p style="color:var(--logos-muted);">the OOP/DI layer — a contract of brokers, per-instance isolation</p>
+  </div>
+</section>
+
+<section>
+  <h2>From hand-rolled vtable… to a declared contract</h2>
+  <div class="cols cols-2">
+    <div>
+      <span class="filepath">before — the usual Nim answer</span>
+      <pre><code class="language-nim" data-trim>
+type Greeter = ref object of RootObj
+method greet(g: Greeter, name: string):
+    Future[Result[string, string]] {.base.} =
+  doAssert false, "override me"
+
+type GreeterImpl = ref object of Greeter
+# ...plus: factory, registry lookup,
+# and mock plumbing rebuilt per test
+</code></pre>
+      <div class="callout bad"><p>Runtime "override me" traps · consumers bound to the concrete type at wiring sites · mocking needs a DI framework or a service locator.</p></div>
+    </div>
+    <div>
+      <span class="filepath">after — brokers grouped behind an interface</span>
+      <pre><code class="language-nim" data-trim>
+BrokerInterface(IGreeter):
+  RequestBroker:
+    proc greet(name: string):
+      Future[Result[string, string]] {.async.}
+</code></pre>
+      <ul>
+        <li>The contract is <strong>compile-time checked</strong> — an implementation missing a method doesn't build.</li>
+        <li>Each instance gets <strong>its own <code>BrokerContext</code></strong> — full isolation (section 06 pays off).</li>
+        <li>Calls <strong>tunnel through the broker</strong> — everything from section 03 applies.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Implement, use — and mock without a framework</h2>
+  <pre><code class="language-nim" data-trim>
+type GreeterImpl = ref object of IGreeter
+  prefix: string
+
+BrokerImplement GreeterImpl of IGreeter:
+  proc new(T: typedesc[GreeterImpl], prefix: string): GreeterImpl =
+    GreeterImpl(prefix: prefix)
+  method greet(self: GreeterImpl, name: string): Future[Result[string, string]] {.async.} =
+    ok(self.prefix &amp; name)
+
+let g = GreeterImpl.create(prefix = "hello ")
+assert (waitFor g.greet("alice")).value == "hello alice"
+
+# the call tunnels through the broker — so a scoped mock is honored
+# even for the DIRECT method call:
+Greet.withMockProvider(g.brokerCtx,
+  proc(name: string): Future[Result[string, string]] {.async.} =
+    ok("MOCK&lt;" &amp; name &amp; "&gt;")):
+  assert (waitFor g.greet("alice")).value == "MOCK&lt;alice&gt;"
+</code></pre>
+  <div class="callout good"><p>Consumers depend only on <code>IGreeter</code>. Implementation registered at runtime, swappable per instance — DI without a container. Every broker also works standalone; the interface layer is opt-in.</p></div>
+  <aside class="notes">Emphasize withMockProvider intercepting even instance.method() — because dispatch goes broker-first.</aside>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 08 · MULTI-THREAD ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">08</p>
+    <h2 style="color:var(--logos-red);">Multi-Thread Brokers</h2>
+    <p style="color:var(--logos-muted);">the same interface across thread boundaries — one tag away</p>
+  </div>
+</section>
+
+<section>
+  <h2>The transition is one token</h2>
+  <pre><code class="language-nim" data-trim>
+RequestBroker:          # single-thread: direct dispatch on one chronos loop
+RequestBroker(mt):      # cross-thread: lock-free ring — CALL SITES UNCHANGED
+</code></pre>
+  <ul>
+    <li>Compile with <code>--threads:on</code> and <code>--mm:orc</code> or <code>--mm:refc</code>.</li>
+    <li><strong>When you want it:</strong> provider lives on a dedicated thread (main/UI loop) and workers query it · typed decoupled interface across threads without channel plumbing · sandboxed <code>BrokerContext</code>s served by different threads.</li>
+    <li>The invariant holds: <code>emit</code>/<code>signal</code> sync, <code>drop*</code> async — the same source compiles in both lanes.</li>
+  </ul>
+  <div class="callout good"><p>Migration story: start single-thread; when a component earns its own thread, add <code>(mt)</code> and move it — consumers don't notice.</p></div>
+</section>
+
+<section>
+  <h2>Under the hood (v2): ring + slab + pool</h2>
+  <div class="cols cols-3" style="margin-bottom:0.5em;">
+    <div class="diag-box"><p style="margin:0;">caller thread<br><span style="color:var(--logos-muted);">encode into slab cell</span></p></div>
+    <div class="diag-box accent"><p style="margin:0;">Vyukov MPSC ring<br><span style="color:var(--logos-muted);">carries the cell index</span></p></div>
+    <div class="diag-box green"><p style="margin:0;">provider thread<br><span style="color:var(--logos-muted);">woken by shared ThreadSignalPtr, decodes in place</span></p></div>
+  </div>
+  <ul>
+    <li><strong>No <code>Channel[T]</code> on the hot path</strong> — pre-allocated payload slab + (for requests) a response-slot pool; zero per-call shared-heap allocation.</li>
+    <li>One shared <code>ThreadSignalPtr</code> per thread — all broker types on a thread share it; zero OS fds per broker type.</li>
+    <li><strong>Same-thread calls bypass the ring entirely</strong> — near-zero overhead.</li>
+    <li>Everything is sized at <strong>compile time</strong> (type-driven defaults, overridable).</li>
+  </ul>
+  <div class="callout"><p>vs. the v1.x <code>Channel[T]</code> design: up to <strong>7.4× throughput</strong> / <strong>270× lower latency</strong> (refc); EventBroker fan-out ≈ <strong>788 K evt/s</strong> refc / <strong>511 K evt/s</strong> orc (5×500×512 B bench). Details: doc/MT_BROKER_REFACTOR_RETROSPECTIVE.md · <code>nimble perftest</code>.</p></div>
+</section>
+
+<section>
+  <h2>RequestBroker(mt) — provider on main, workers ask</h2>
+  <pre><code class="language-nim" data-trim>
+RequestBroker(mt):
+  type Weather = object
+    city*: string
+    tempC*: float
+  proc signature*(city: string): Future[Result[Weather, string]] {.async.}
+
+proc worker() {.thread.} =
+  let res = waitFor Weather.request("Berlin")   # ANY thread may ask
+  doAssert res.isOk()
+
+proc main() {.async.} =
+  doAssert Weather.setProvider(                 # provider runs on THIS thread
+    proc(city: string): Future[Result[Weather, string]] {.async.} =
+      ok(Weather(city: city, tempC: 21.5))
+  ).isOk()
+  var t: Thread[void]
+  t.createThread(worker)
+  # ... join, then: Weather.clearProvider()
+</code></pre>
+  <p style="font-size:0.68em;">Exactly the section-03 shape — the request line did not change.</p>
+</section>
+
+<section>
+  <h2>RequestBroker(mt) — operational rules</h2>
+  <ul>
+    <li>The provider runs on the thread that called <code>setProvider</code> and serves requests <strong>sequentially</strong> on its event loop — throughput is bounded by handler time.</li>
+    <li><strong>Cross-thread timeout</strong> — default 5 s; unresponsive provider ⇒ <code>err</code>, not a hang:</li>
+  </ul>
+  <pre><code class="language-nim" data-trim>
+Weather.setRequestTimeout(chronos.seconds(2))
+echo Weather.requestTimeout()          # 2 seconds — same-thread calls unaffected
+</code></pre>
+  <ul>
+    <li>Same-thread path = direct provider call through threadvar state — zero ring/slab traffic.</li>
+  </ul>
+  <div class="callout warn"><p><strong>New visible failure mode:</strong> the bounded ring / response pool can return <code>err(...)</code> on overflow — unlike an unbounded <code>Channel[T]</code> that grows silently. Handle it, and size for bursts (next slides).</p></div>
+</section>
+
+<section>
+  <h2>EventBroker(mt) — broadcast without copies</h2>
+  <ul>
+    <li>Listeners register on <strong>any</strong> thread; emitters emit from <strong>any</strong> thread. Same-thread delivery skips the ring (<code>asyncSpawn</code>).</li>
+    <li>Cross-thread fan-out: the event is encoded <strong>once</strong> into a slab cell, refcounted to <code>N_listeners</code>, then one ring enqueue + one signal per listener <em>thread</em> — <strong>no per-listener payload copy</strong>.</li>
+    <li><code>emit()</code> stays sync void — marshal + enqueue happen before it returns.</li>
+  </ul>
+  <div class="cols cols-2" style="margin-top:0.4em;">
+    <div class="callout warn"><p><code>dropListener</code> must be called from the <strong>registering thread</strong> (enforced at runtime).</p></div>
+    <div class="callout"><p><code>dropAllListeners</code> works from <strong>any</strong> thread — sends shutdown to all listener threads and drains in-flight tasks.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Tuning: size it at the declaration</h2>
+  <pre><code class="language-nim" data-trim>
+# Wide ring + slab for bursty broadcast — built-in preset:
+EventBroker(mt, preset = fastBurst, maxPayloadBytes = 1024):
+  type WireEvent = object
+    payload*: seq[byte]
+
+# Memory-constrained, fully manual:
+RequestBroker(mt, queueDepth = 16, responseSlots = 8, maxResponseBytes = 512):
+  type LedState = object
+  proc query*(id: uint8): Future[Result[LedState, string]] {.async.}
+</code></pre>
+  <ul>
+    <li>Defaults are <strong>type-driven</strong> — sensible sizes derived from the payload shape.</li>
+    <li>Every MT callsite emits a <strong>compile-time hint</strong>: resolved capacities, their origin (<code>default</code> / <code>kwarg</code> / <code>preset:&lt;n&gt;</code> / <code>auto:&lt;reason&gt;</code>) and an <strong>idle-RAM estimate</strong> — you see at build time what the broker reserves.</li>
+  </ul>
+  <p class="text-muted" style="font-size:0.62em;">Full knob/preset/failure-mode reference: doc/MT_BROKER_CONFIG.md</p>
+</section>
+
+<section>
+  <h2>MT checklist — the six things people get wrong</h2>
+  <ul>
+    <li><code>--threads:on</code> + <code>--mm:orc|refc</code>; prefer <code>-d:release</code> + orc for throughput.</li>
+    <li><code>emit</code>/<code>signal</code> stay <strong>sync</strong> — never await; <code>drop*</code> stays <strong>async</strong> — always await (or <code>waitFor</code> from <code>{.thread.}</code> procs).</li>
+    <li>Overflow of a bounded ring/pool is an <code>err</code> — <strong>branch on it</strong>; don't discard blindly.</li>
+    <li>Keep the provider thread's loop responsive — it serves sequentially.</li>
+    <li><code>dropListener</code> from the registering thread; <code>dropAllListeners</code> from anywhere.</li>
+    <li>Bursty or large payloads? Set <code>preset</code>/<code>queueDepth</code>/<code>maxPayloadBytes</code> — read the compile-time hint line.</li>
+  </ul>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 09 · FFI CONNECTION ══════════════ -->
+<section>
+
+<section>
+  <div class="section-header">
+    <p class="num">09</p>
+    <h2 style="color:#b6d2ff;">The FFI Connection</h2>
+    <p style="color:var(--logos-muted);">how (API) turns the same declaration into a multi-language library — connection facility only</p>
+  </div>
+  <aside class="notes">Scope: how the boundary works. Authoring bindings, codegen options, wrapper details = separate training.</aside>
+</section>
+
+<section>
+  <h2>(API) = the MT broker + a generated language boundary</h2>
+  <pre><code class="language-nim" data-trim>
+RequestBroker(API):     # on the Nim side: just a normal multi-thread broker
+  type Weather = object ...
+</code></pre>
+  <ul>
+    <li><code>registerBrokerLibrary</code> generates the lifecycle exports, context registry, startup threads — and the wrapper artifacts.</li>
+    <li>You get: <code>libmylib</code> + C header over a <strong>fixed 12-function CBOR C ABI</strong> + idiomatic <strong>C++ / Python / Rust / Go</strong> wrappers — typed <code>Result</code>/error surfaces, no hand-written FFI plumbing.</li>
+    <li>Requests and events tunnel over extensible CBOR — the same contract you declared in Nim.</li>
+    <li>MultiRequestBroker has no API lane; SignalBroker(API) is one-way (see call modes).</li>
+  </ul>
+  <div class="callout good"><p>Author the API <strong>once, in Nim</strong>. Foreign callers see a native-feeling, memory-safe library.</p></div>
+</section>
+
+<section>
+  <h2>Author once — <code>BrokerInterface(API, IWeather)</code></h2>
+  <div class="cols col-6040">
+    <div>
+      <pre><code class="language-nim" data-trim>
+type Forecast* = object       # plain type — auto-registered on reference
+  day*: string
+  tempC*: float64
+  outlook*: string
+
+BrokerInterface(API, IWeather):   # (API) propagates to every inner broker
+  EventBroker:
+    type StormWarning = object
+      region*: string
+      severity*: int32
+
+  RequestBroker:
+    proc getDayForecast(day: string):
+      Future[Result[Forecast, string]] {.async.}
+
+  RequestBroker:
+    proc getCurrentTempC(city: string):
+      Future[Result[float64, string]] {.async.}
+
+# + WeatherImpl = ref object of IWeather &amp; BrokerImplement (section 07),
+#   then — last in the module:
+registerBrokerLibrary:
+  name: "weather"
+  version: "1.0.0"
+  ...
+</code></pre>
+    </div>
+    <div>
+      <ul>
+        <li>Exactly the section-07 OOP model — <code>BrokerImplement</code> provides the methods; <code>createUnderContext</code> adopts the FFI-allocated context.</li>
+        <li>The main interface becomes <strong>the library class</strong> (<code>Weather</code>) in every generated wrapper.</li>
+        <li>One event + two requests here ⇒ per language: one <em>on/off</em> registration pair + two typed request methods.</li>
+      </ul>
+      <div class="callout"><p>The OOP structure is an <strong>authoring</strong> concern — foreign consumers see the same typed surface whether the Nim side uses flat brokers or interfaces.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>…generated four times — same contract, native dialects</h2>
+  <div class="cols cols-2" style="gap:0.6em;">
+    <div>
+      <span class="filepath">C++ — owner-aware, non-copyable</span>
+      <pre style="font-size:0.66em !important;"><code class="language-cpp" data-trim>
+class Weather {
+  Result&lt;Forecast&gt; getDayForecast(std::string_view day);
+  Result&lt;double&gt;   getCurrentTempC(std::string_view city);
+  // + getDayForecastAsync(day, cb) / getDayForecastFuture(day)
+
+  EventHandle onStormWarning(std::function&lt;void(
+    Weather&amp; owner, std::string_view region, int32_t severity)&gt; cb);
+  void offStormWarning(EventHandle h = 0);   // 0 = remove all
+};
+</code></pre>
+    </div>
+    <div>
+      <span class="filepath">Python — Result with .is_ok() / .value / .error</span>
+      <pre style="font-size:0.66em !important;"><code class="language-python" data-trim>
+class Weather:
+    def get_day_forecast(self, day) -&gt; Result
+    def get_current_temp_c(self, city) -&gt; Result
+    # + get_day_forecast_async(day, cb)
+
+    def on_storm_warning(self, cb) -&gt; int   # cb(owner, region, severity)
+    def off_storm_warning(self, handle=0)   # 0 = remove all
+</code></pre>
+    </div>
+    <div>
+      <span class="filepath">Rust — Result&lt;T&gt;, closures, optional async</span>
+      <pre style="font-size:0.66em !important;"><code class="language-rust" data-trim>
+impl Weather {
+    pub fn get_day_forecast(&amp;self, day: &amp;str) -&gt; Result&lt;Forecast&gt;;
+    pub fn get_current_temp_c(&amp;self, city: &amp;str) -&gt; Result&lt;f64&gt;;
+    // + get_day_forecast_async(day, timeout).await
+
+    pub fn on_storm_warning(&amp;self,
+        cb: impl Fn(String, i32) + Send + 'static) -&gt; EventHandle;
+    pub fn off_storm_warning(&amp;self, h: EventHandle);  // 0 = remove all
+}
+</code></pre>
+    </div>
+    <div>
+      <span class="filepath">Go — idiomatic (T, error)</span>
+      <pre style="font-size:0.66em !important;"><code class="language-go" data-trim>
+func (w *Weather) GetDayForecast(day string) (Forecast, error)
+func (w *Weather) GetCurrentTempC(city string) (float64, error)
+// + GetDayForecastContext(ctx, day)
+
+func (w *Weather) OnStormWarning(
+    cb func(region string, severity int32)) EventHandle
+func (w *Weather) OffStormWarning(h EventHandle)  // 0 = remove all
+</code></pre>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:0.3em;"><p>Naming, error style, callbacks — all idiomatic per language (extract; see the shipped wrappers in <code>examples/ffiapi</code>). Callbacks are delivered on the library's <strong>delivery thread</strong>; C++/Python callbacks receive the owner as first argument.</p></div>
+</section>
+
+<section>
+  <h2>Runtime model &amp; call modes</h2>
+  <div class="cols cols-2">
+    <div>
+      <h3>Per-context runtime</h3>
+      <ul>
+        <li><code>mylib_createContext()</code> — creates one broker-backed context, does one-time runtime init internally.</li>
+        <li>Two threads per context: <strong>processing</strong> (request providers) + <strong>delivery</strong> (listener registration, foreign-language callbacks).</li>
+        <li><code>InitializeRequest</code> / <code>ShutdownRequest</code> — post-create configuration and orderly teardown, as ordinary broker requests.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Two ways to call in</h3>
+      <ul>
+        <li><code>_call</code> — synchronous round-trip; blocks until the provider answers with the CBOR response.</li>
+        <li><code>_callAsync</code> — enqueue and return; result arrives via the async response callback. Caller thread never blocks.</li>
+        <li>Exception: <code>SignalBroker(API)</code> rides <code>_call</code> enqueue-only and rejects <code>_callAsync</code>.</li>
+      </ul>
+      <div class="callout"><p>Event callbacks carry <code>ctx</code> + opaque <code>userData</code>; the C++ wrapper adds an owner-aware dispatcher, swallows callback exceptions at the boundary, and is non-copyable so callback identity stays stable.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Where to go from here</h2>
+  <ul>
+    <li><code>examples/ffiapi</code> — minimal end-to-end library with C++ / Python / Rust / Go clients.</li>
+    <li><code>examples/torpedo</code> — a full game engine as a Nim library, four language frontends.</li>
+    <li><code>examples/persistence</code> — a persistence service across the boundary.</li>
+    <li>Reference: <code>doc/FFI_API.md</code> · type support matrix: <code>doc/TYPESUPPORT.md</code>.</li>
+  </ul>
+  <div class="callout"><p>Bindings authoring, schema evolution and wrapper internals are deliberately out of scope today — that's its own session.</p></div>
+</section>
+
+</section>
+
+<!-- ══════════════ SECTION 10 · WRAP ══════════════ -->
+<section>
+
+<section>
+  <h2>Take-away — declare once, use anywhere, tag the reach</h2>
+  <table>
+    <tr><th>Reach for…</th><th>when…</th><th>tag</th></tr>
+    <tr><td><span class="chip chip-blue">EventBroker</span></td><td>facts happened, N modules react, producer stays decoupled</td><td rowspan="2" style="vertical-align:middle;"><em>(none)</em> → <code>(mt)</code> → <code>(API)</code></td></tr>
+    <tr><td><span class="chip chip-green">RequestBroker</span></td><td>a question with one responsible, swappable answerer (async or sync)</td></tr>
+    <tr><td><span class="chip chip-orange">MultiRequestBroker</span></td><td>ask everyone, aggregate</td><td>single-thread</td></tr>
+    <tr><td><span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);">SignalBroker</span></td><td>one-way with visible backpressure</td><td><em>(none)</em> → <code>(mt)</code> → <code>(API)</code></td></tr>
+    <tr><td><span class="chip" style="background:rgba(255,255,255,0.07);color:#fff;border:1px solid var(--logos-border);">BrokerContext</span></td><td>isolation: tenants, components, tests</td><td>all lanes</td></tr>
+    <tr><td><span class="chip chip-blue">Interface / Implement</span></td><td>a contract of brokers per component instance — DI without a container</td><td>—</td></tr>
+  </table>
+  <p style="margin-top:0.7em; font-size:0.7em;">Everything else is documented — go deep on demand:
+  <a href="https://github.com/NagyZoltanPeter/nim-brokers/blob/master/USAGEGUIDE.md" style="color:var(--logos-blue);">USAGEGUIDE.md</a> ·
+  <a href="https://github.com/NagyZoltanPeter/nim-brokers/blob/master/doc/COOKBOOK.md" style="color:var(--logos-blue);">doc/COOKBOOK.md</a> ·
+  <a href="https://github.com/NagyZoltanPeter/nim-brokers/blob/master/doc/MT_BROKER_CONFIG.md" style="color:var(--logos-blue);">doc/MT_BROKER_CONFIG.md</a> ·
+  <a href="https://github.com/NagyZoltanPeter/nim-brokers/blob/master/doc/FFI_API.md" style="color:var(--logos-blue);">doc/FFI_API.md</a> ·
+  <a href="https://deepwiki.com/NagyZoltanPeter/nim-brokers" style="color:var(--logos-blue);">DeepWiki</a> ·
+  debug dumps: <code>-d:brokerDebug</code> <a href="https://github.com/NagyZoltanPeter/nim-brokers/blob/master/USAGEGUIDE.md#debug" style="color:var(--logos-blue);">(see USAGEGUIDE § Debug)</a></p>
+  <p style="text-align:center; margin-top:0.9em;"><span class="logos-wordmark" style="font-size:0.9em;"><span class="wm-lambda">&lambda;</span>&nbsp;Thank you — questions?</span></p>
+</section>
+
+</section>
+
+</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/reveal.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/highlight/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/5.1.0/plugin/notes/notes.min.js"></script>
+
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c.v',
+    progress: true,
+    transition: 'fade',
+    transitionSpeed: 'fast',
+    backgroundTransition: 'none',
+    autoAnimateEasing: 'ease',
+    autoAnimateDuration: 0.5,
+    autoAnimateUnmatched: false,
+    width: 1400,
+    height: 900,
+    margin: 0.04,
+    minScale: 0.1,
+    maxScale: 3.0,
+    // Vertical navigation — arrow keys for sections + sub-slides
+    navigationMode: 'default',
+    plugins: [ RevealHighlight, RevealNotes ],
+    highlight: {
+      beforeHighlight: (hljs) => {
+        // Register Nim syntax
+        hljs.registerLanguage('nim', function(hljs) {
+          const KEYWORDS = {
+            keyword:
+              'addr and as asm bind block break case cast concept const continue ' +
+              'converter defer discard distinct div do elif else end enum except ' +
+              'export finally for from func generic if import in include interface ' +
+              'is isnot iterator let macro method mixin mod nil not notin object of ' +
+              'or out proc ptr raise ref return shl shr static template try tuple ' +
+              'type using var when while xor yield',
+            built_in:
+              'int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 ' +
+              'float float32 float64 bool char string seq array openarray ' +
+              'Future Result err ok async await asyncSpawn',
+            literal: 'true false nil'
+          };
+          return {
+            name: 'Nim',
+            aliases: ['nim'],
+            keywords: KEYWORDS,
+            contains: [
+              hljs.HASH_COMMENT_MODE,
+              { className: 'string', begin: '"', end: '"', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'string', begin: '\'', end: '\'', contains: [hljs.BACKSLASH_ESCAPE] },
+              { className: 'number', begin: '\\b\\d[\\d_]*(\\.\\d[\\d_]*)?([eE][+-]?\\d+)?\\b' },
+              { className: 'comment', begin: '#\\[', end: '\\]#', relevance: 10 },
+              {
+                className: 'type',
+                begin: '\\b[A-Z][a-zA-Z0-9_]*\\b',
+                relevance: 0
+              },
+            ]
+          };
+        });
+      }
+    }
+  });
+</script>
+</body>
+</html>

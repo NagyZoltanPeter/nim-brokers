@@ -3,6 +3,48 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [3.3.0] — 2026-07-14
+
+**Handler body sugar across all lanes: `listenIt` / `onSignalIt` / `provideIt` /
+`reprovideIt`, plus a new broker tutorial presentation.** An additive release —
+no runtime behavior changes, no breaking changes. Each sugar macro wraps the
+existing registration proc, letting a handler be written as an inline block
+instead of a separately-declared proc.
+
+### Added — handler body sugar
+
+- **`TypeName.listenIt[(ctx)]: body`** (EventBroker, all lanes) registers a
+  listener whose block is the real listener proc body, with the event value
+  injected as `it` (nothing injected for `void` event types). Returns `listen`'s
+  `Result[<T>Listener, string]`; `await` is allowed and `raises: []` is enforced
+  as for a hand-written listener.
+- **`TypeName.onSignalIt[(ctx)]: body`** (SignalBroker, all lanes) installs the
+  single handler with the signal value injected as `it` (nothing for `void`
+  payloads); duplicate-guard and return value are `onSignal`'s.
+- **`TypeName.provideIt[(ctx)]: body`** / **`reprovideIt`** (RequestBroker, all
+  lanes) register a provider whose block is the real provider proc body with the
+  declared signature arg names injected. `provideIt` → `setProvider` (keeps the
+  "already set" guard); `reprovideIt` → `replaceProvider` (replace-or-insert).
+  Dual-slot brokers also get `provideItNoArgs` / `reprovideItNoArgs`. In sync
+  mode the body cannot `await`.
+- **`TypeName.provideIt` on MultiRequestBroker** — body sugar over the additive
+  `setProvider`, returning its `Result[<T>ProviderHandle, string]` (keep the
+  handle for `removeProvider`). No `reprovideIt` (providers are additive, no
+  replace verb); each `provideIt` adds a fresh provider.
+- **Compile-time fall-through guard** (`providerBody`): a `provideIt` /
+  `reprovideIt` body must produce a value on every path (`return ok(...)`/`err(...)`,
+  `result = ...`, or a trailing `Result` expression) — otherwise it is a compile
+  error rather than a silent `err("")`. A `block` containing `break` and noreturn
+  calls (`quit`, `raiseAssert`) are conservatively treated as non-terminal.
+- New tests: `test_handler_sugar`, `test_multi_thread_handler_sugar`, and five
+  `reject/reject_provideit_*` compile-failure guards. Cookbook recipes added in
+  `doc/COOKBOOK.md`; design in `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
+
+### Added — docs
+
+- **`doc/BrokerTutorialPrezi.html`** — a standalone slide-deck tutorial walking
+  through the broker primitives and their usage.
+
 ## [3.2.0] — 2026-07-09
 
 **New `SignalBroker` primitive (fire-and-forget, single-handler, no-reply) across
@@ -854,6 +896,12 @@ wrappers.**
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[3.3.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
+[3.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.2.0
+[3.1.4]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.4
+[3.1.3]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.3
+[3.1.2]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.2
+[3.1.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.1
 [3.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.0
 [3.0.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.0.0
 [2.1.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v2.1.0
