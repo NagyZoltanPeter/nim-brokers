@@ -329,6 +329,29 @@ RequestBroker(API):
 
   proc signature*(present: bool): Future[Result[OptObjRequest, string]] {.async.}
 
+## Opt[T] parity probes (results' `Opt[T] = Result[T, void]`). These MUST map
+## and ride the wire byte-for-byte identically to the `Option[T]` variants
+## above — same CDDL (`T / null`), same std::optional / Optional / Option<T> /
+## *T in every wrapper, same present/absent CBOR. Covers scalar, variable-shape
+## (string) and registered-object inner types.
+RequestBroker(API):
+  type OptWrapScalarRequest* = object
+    value*: Opt[int32]
+
+  proc signature*(present: bool): Future[Result[OptWrapScalarRequest, string]] {.async.}
+
+RequestBroker(API):
+  type OptWrapStringRequest* = object
+    value*: Opt[string]
+
+  proc signature*(present: bool): Future[Result[OptWrapStringRequest, string]] {.async.}
+
+RequestBroker(API):
+  type OptWrapObjRequest* = object
+    value*: Opt[Tag]
+
+  proc signature*(present: bool): Future[Result[OptWrapObjRequest, string]] {.async.}
+
 ## Distinct-over-seq probe. Registered by the type resolver to keep the
 ## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
 ## time, but NOT used in any active broker signature: per-wrapper
@@ -1069,6 +1092,37 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptObjRequest(value: some(Tag(key: "ok", value: "yes"))))
       else:
         return ok(OptObjRequest(value: none(Tag))),
+  )
+
+  discard OptWrapScalarRequest.setProvider(
+    ctx,
+    proc(
+        present: bool
+    ): Future[Result[OptWrapScalarRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapScalarRequest(value: Opt.some(42'i32)))
+      else:
+        return ok(OptWrapScalarRequest(value: Opt.none(int32))),
+  )
+
+  discard OptWrapStringRequest.setProvider(
+    ctx,
+    proc(
+        present: bool
+    ): Future[Result[OptWrapStringRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapStringRequest(value: Opt.some("hello")))
+      else:
+        return ok(OptWrapStringRequest(value: Opt.none(string))),
+  )
+
+  discard OptWrapObjRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptWrapObjRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapObjRequest(value: Opt.some(Tag(key: "ok", value: "yes"))))
+      else:
+        return ok(OptWrapObjRequest(value: Opt.none(Tag))),
   )
 
   discard ObjParamRequest.setProvider(

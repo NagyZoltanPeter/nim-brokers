@@ -204,6 +204,24 @@ proc arrayElemTypeName*(nimType: NimNode): string {.compileTime.} =
   $nimType[2]
 
 # ---------------------------------------------------------------------------
+# Opt[T] <-> Option[T] spelling
+# ---------------------------------------------------------------------------
+
+proc canonOptHead*(s: string): string {.compileTime.} =
+  ## Canonicalize a leading `Opt[...]` head (results' `Opt[T] = Result[T, void]`)
+  ## to `Option[...]` so every Option-aware string mapper (C++, Python, Rust,
+  ## Go, CDDL) treats `Opt[T]` identically to `Option[T]`. Head-only by design:
+  ## each consumer is a recursive-descent parser that re-normalizes the inner
+  ## type on the next level, so `seq[Opt[int]]`, `Table[K, Opt[V]]`,
+  ## `Opt[seq[byte]]` are all covered without a nested rewrite. The match is
+  ## exact (`Opt[`), so `MyOpt[int]` / `Options[int]` are left untouched.
+  let t = s.strip()
+  if t.len > 4 and t[0 .. 3] == "Opt[" and t[^1] == ']':
+    "Option[" & t[4 .. ^1]
+  else:
+    t
+
+# ---------------------------------------------------------------------------
 # Field construction helpers
 # ---------------------------------------------------------------------------
 

@@ -120,8 +120,8 @@ proc registerCborPrimitiveType*(
     # (`seq[T]`, `array[N, T]`, …). Store the bracket type verbatim as the
     # underlying; the per-language mapper resolves `seq[string]` /
     # `seq[ContentTopic]` to `std::vector<...>` / `list[...]` / `Vec<...>` /
-    # `[]...` at codegen. A container whose element doesn't map stays
-    # TODO-stubbed (the mapper returns "").
+    # `[]...` at codegen. A container whose element doesn't map is a hard
+    # codegen error (fields/methods are never silently dropped).
     registerTypeEntry(
       makeAliasEntry(typeName, parsed.objectDef[0].repr.strip(), atkDistinct)
     )

@@ -59,10 +59,10 @@ const rustPrimMap = {
 }.toTable
 
 proc isRustPrimitive(nimType: string): bool {.compileTime.} =
-  nimType.strip() in rustPrimMap
+  nimType.strip().canonOptHead() in rustPrimMap
 
 proc primRustHint(nimType: string): string {.compileTime.} =
-  rustPrimMap.getOrDefault(nimType.strip(), "")
+  rustPrimMap.getOrDefault(nimType.strip().canonOptHead(), "")
 
 proc unwrapBracket(s, head: string): string {.compileTime.} =
   let t = s.strip()
@@ -94,7 +94,7 @@ proc parseTableParams(s: string): (string, string) {.compileTime.} =
 
 proc nimTypeToRustHint*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → Rust type. Falls back to "" for types we can't yet map.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if isRustPrimitive(t):
     return primRustHint(t)
@@ -152,7 +152,7 @@ proc nimTypeToRustDefaultHint*(nimType: string): string {.compileTime.} =
   ## (used in `Default::default()` derivations — the generated structs
   ## use `#[derive(Default)]` so this is mainly informational, but
   ## emitted as part of TODO comments).
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   case t
   of "bool":
@@ -189,7 +189,7 @@ proc rustTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
   ## `String` — i.e. an int / enum / distinct-of-int key that must be
   ## converted to/from the text key on the wire via the `cbor_strkey_map`
   ## serde helper. (string / char keys map to `String` and need no helper.)
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if not (lower.startsWith("table[") and lower.endsWith("]")):
     return false
@@ -793,10 +793,14 @@ proc generateCborRustFile*(
     for f in entry.fields:
       let hint = nimTypeToRustHint(f.nimType)
       if hint.len == 0:
-        rs.add("    // TODO: Nim type '" & f.nimType & "' not yet mappable\n")
-        continue
+        error(
+          "FFI Rust codegen: field '" & f.name & "' of type '" & name &
+            "' has Nim type '" & f.nimType &
+            "' with no Rust mapping. Fields are never silently dropped — add a " &
+            "mapping or change the field type."
+        )
       # Map seq[byte] to serde_bytes::ByteBuf for compact CBOR encoding.
-      let useByteBuf = f.nimType.strip().toLowerAscii() == "seq[byte]"
+      let useByteBuf = f.nimType.strip().canonOptHead().toLowerAscii() == "seq[byte]"
       if useByteBuf:
         rs.add("    #[serde(with = \"serde_bytes\")]\n")
       elif rustTableNeedsKeyConv(f.nimType):
@@ -987,9 +991,12 @@ proc generateCborRustFile*(
         "' is not a registered object type.\n\n"
     for (n, t) in e.argFields:
       if not isRustMappable(t):
-        return
-          "    // TODO: '" & e.apiName &
-          "' has parameters whose Nim types aren't yet mappable to Rust.\n\n"
+        error(
+          "FFI Rust codegen: method '" & e.apiName & "' parameter '" & n &
+            "' has Nim type '" & t &
+            "' with no Rust mapping. Methods are never silently dropped — add " &
+            "a mapping or change the parameter type."
+        )
     let methodName = e.apiName
     var sigParams = "&self"
     var argsStructDecl = ""
@@ -1127,7 +1134,12 @@ proc generateCborRustFile*(
   proc emitRustInstanceMethod(e: CborRequestEntry): string {.compileTime.} =
     for (n, t) in e.argFields:
       if not isRustMappable(t):
-        return "    // TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+        error(
+          "FFI Rust codegen: method '" & e.apiName & "' parameter '" & n &
+            "' has Nim type '" & t &
+            "' with no Rust mapping. Methods are never silently dropped — add " &
+            "a mapping or change the parameter type."
+        )
     let sub = rustSubStructName(e.returnsInterface)
     var sigParams = "&self"
     var argsStructInit = ""

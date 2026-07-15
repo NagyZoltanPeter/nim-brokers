@@ -305,7 +305,7 @@ proc collectIfCustom(node: NimNode, acc: var seq[NimNode]) {.compileTime.} =
       discard
   elif node.kind == nnkBracketExpr and node.len >= 2:
     let head = $node[0]
-    if head == "seq" or head == "Option":
+    if head == "seq" or head == "Option" or head == "Opt":
       collectIfCustom(node[^1], acc)
     elif head == "array" and node.len == 3:
       collectIfCustom(node[2], acc)
@@ -497,7 +497,7 @@ proc scanTypeNode(ft: NimNode, result: var seq[NimNode]) {.compileTime.} =
   # seq[T] / Option[T] — recurse into the element so `Option[Alias]`,
   # `seq[Option[T]]`, `seq[seq[T]]` all surface their custom element.
   if ft.kind == nnkBracketExpr and ft.len >= 2 and
-      ($ft[0] == "seq" or $ft[0] == "Option"):
+      ($ft[0] == "seq" or $ft[0] == "Option" or $ft[0] == "Opt"):
     scanTypeNode(ft[^1], result)
   # array[N, T]
   elif ft.kind == nnkBracketExpr and ft.len == 3 and $ft[0] == "array":

@@ -44,10 +44,10 @@ const goPrimMap = {
 }.toTable
 
 proc isGoPrimitive(nimType: string): bool {.compileTime.} =
-  nimType.strip() in goPrimMap
+  nimType.strip().canonOptHead() in goPrimMap
 
 proc primGoHint(nimType: string): string {.compileTime.} =
-  goPrimMap.getOrDefault(nimType.strip(), "")
+  goPrimMap.getOrDefault(nimType.strip().canonOptHead(), "")
 
 proc unwrapBracket(s, head: string): string {.compileTime.} =
   let t = s.strip()
@@ -79,7 +79,7 @@ proc parseTableParams(s: string): (string, string) {.compileTime.} =
 
 proc nimTypeToGoCborHint*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → Go type for CBOR mode. Returns "" when unmappable.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if isGoPrimitive(t):
     return primGoHint(t)
@@ -146,7 +146,7 @@ proc goTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
   ## True for a Table[K, V] whose Go key type is not `string` (int / enum /
   ## distinct-of-int). Such fields ride the wire as text-keyed maps and need
   ## conversion in the owning struct's Marshal/UnmarshalCBOR.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if not (lower.startsWith("table[") and lower.endsWith("]")):
     return false
@@ -155,11 +155,11 @@ proc goTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
   kg.len > 0 and kg != "string"
 
 proc goTableKeyType*(nimType: string): string {.compileTime.} =
-  let (k, _) = parseTableParams(nimType.strip())
+  let (k, _) = parseTableParams(nimType.strip().canonOptHead())
   nimTypeToGoCborHint(k)
 
 proc goTableValType*(nimType: string): string {.compileTime.} =
-  let (_, v) = parseTableParams(nimType.strip())
+  let (_, v) = parseTableParams(nimType.strip().canonOptHead())
   nimTypeToGoCborHint(v)
 
 proc goWireStructField*(f: ApiFieldDef): string {.compileTime.} =
@@ -475,8 +475,12 @@ proc generateCborGoFile*(
     for f in entry.fields:
       let hint = nimTypeToGoCborHint(f.nimType)
       if hint.len == 0:
-        g.add("\t// TODO: Nim type '" & f.nimType & "' not yet mappable\n")
-        continue
+        error(
+          "FFI Go codegen: field '" & f.name & "' of type '" & name & "' has Nim type '" &
+            f.nimType &
+            "' with no Go mapping. Fields are never silently dropped — add a " &
+            "mapping or change the field type."
+        )
       let fx = goExportedField(f.name)
       g.add("\t" & fx & " " & hint & " `cbor:\"" & f.name & "\"`\n")
       anyField = true

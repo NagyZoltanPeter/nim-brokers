@@ -61,10 +61,10 @@ const pyPrimMap = {
 }.toTable
 
 proc isPrimitive(nimType: string): bool {.compileTime.} =
-  nimType.strip() in pyPrimMap
+  nimType.strip().canonOptHead() in pyPrimMap
 
 proc primPyHint(nimType: string): string {.compileTime.} =
-  pyPrimMap.getOrDefault(nimType.strip(), "")
+  pyPrimMap.getOrDefault(nimType.strip().canonOptHead(), "")
 
 proc unwrapBracket(s, head: string): string {.compileTime.} =
   ## "seq[X]" + "seq" -> "X"
@@ -100,7 +100,7 @@ proc parseTableParams*(s: string): (string, string) {.compileTime.} =
 proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
   ## Recursive Nim → Python type hint. Falls back to "" for types we
   ## don't yet know how to map (the caller emits a TODO).
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return primPyHint(t)
@@ -160,7 +160,7 @@ proc nimTypeToPyDefault*(nimType: string): string {.compileTime.} =
   ## Default value literal for a dataclass field. Collections use
   ## `field(default_factory=list)`; objects/enums use `None` (callers
   ## construct lazily — dataclass init still needs a callable default).
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   case t
   of "bool":
@@ -222,7 +222,7 @@ proc pyDecodeExpr(nimType, src: string): string {.compileTime.} =
   ## Python expression that decodes the value at `src` (a Python
   ## expression yielding the raw cbor2 result) into the in-memory
   ## representation of `nimType`.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if lower.startsWith("table[") and lower.endsWith("]"):
     # Keys arrive as CBOR text strings; rebuild the declared key type.
@@ -281,7 +281,7 @@ proc pyEncodeExpr(nimType, src: string): string {.compileTime.} =
   ## Python expression that encodes the value at `src` into the
   ## CBOR-friendly representation expected by the Nim provider for
   ## `nimType`.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if isPrimitive(t):
     return src
@@ -752,8 +752,12 @@ proc generateCborPyFile*(
     for f in entry.fields:
       let hint = nimTypeToPyHint(f.nimType)
       if hint.len == 0:
-        py.add("    # TODO: Nim type '" & f.nimType & "' not yet mappable\n")
-        continue
+        error(
+          "FFI Python codegen: field '" & f.name & "' of type '" & name &
+            "' has Nim type '" & f.nimType &
+            "' with no Python mapping. Fields are never silently dropped — add " &
+            "a mapping or change the field type."
+        )
       py.add(
         "    " & f.name & ": " & hint & " = " & nimTypeToPyDefault(f.nimType) & "\n"
       )
@@ -1053,7 +1057,11 @@ proc generateCborPyFile*(
         break
     if e.returnsInterface.len > 0:
       if not argsMappable:
-        return "    # TODO: '" & e.apiName & "' has unmappable parameter types.\n\n"
+        error(
+          "FFI Python codegen: method '" & e.apiName &
+            "' has parameter types with no Python mapping. Methods are never " &
+            "silently dropped — add a mapping or change the parameter types."
+        )
       let sub = subClassName(e.returnsInterface)
       var sigParams = "self"
       var argsDictBuilder = "{}"
@@ -1092,9 +1100,11 @@ proc generateCborPyFile*(
         "    # TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
         "' is not a registered object type.\n\n"
     if not argsMappable:
-      return
-        "    # TODO: '" & e.apiName &
-        "' has parameters whose Nim types aren't yet mappable to Python.\n\n"
+      error(
+        "FFI Python codegen: method '" & e.apiName &
+          "' has parameter types with no Python mapping. Methods are never " &
+          "silently dropped — add a mapping or change the parameter types."
+      )
     let methodName = e.apiName
     var sigParams = "self"
     var argsDictBuilder = "{}"

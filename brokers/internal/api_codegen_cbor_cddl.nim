@@ -72,7 +72,7 @@ proc nimTypeToCddl*(nimType: string): string {.compileTime.} =
   ## Maps a Nim type spelling to a CDDL fragment. Falls back to a rule
   ## reference (the type name itself) for registered objects/enums; the
   ## caller is responsible for emitting that rule elsewhere in the file.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
 
   case lower
