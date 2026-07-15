@@ -1224,6 +1224,38 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertIsNone(received[0])
         self.lib.off_opt_byte_seq_event(h)
 
+    # ----- Opt[seq[byte]] in an event payload (parity with Option) -----
+
+    def test_opt_wrap_byte_seq_event_present(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_wrap_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, True)
+        self.assertTrue(evt.wait(2.0))
+        v = received[0]
+        self.assertIsNotNone(v)
+        self.assertEqual(bytes(v) if isinstance(v, list) else v, bytes([1, 2, 3, 4]))
+        self.lib.off_opt_wrap_byte_seq_event(h)
+
+    def test_opt_wrap_byte_seq_event_absent(self):
+        received: list = []
+        evt = threading.Event()
+
+        def cb(_lib, value):
+            received.append(value)
+            evt.set()
+
+        h = self.lib.on_opt_wrap_byte_seq_event(cb)
+        self.lib.trigger_byte_events_request(0, False)
+        self.assertTrue(evt.wait(2.0))
+        self.assertIsNone(received[0])
+        self.lib.off_opt_wrap_byte_seq_event(h)
+
     # ----- Option[seq[byte]] as an input param -----
 
     def test_opt_byte_param_present(self):

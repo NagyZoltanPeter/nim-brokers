@@ -98,6 +98,8 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
 | `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ |
 | `array[N, string]` | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ |
 | `array[N, Object]` | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ |
+| `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ ⁹ | ✅ ⁹ | ✅ ⁹ | ✅ ⁹ |
+| `Opt[T]` (results — full parity with `Option[T]`) | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ |
 
 ## Footnotes
 
@@ -162,11 +164,24 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
    `OptWrapObjRequest` brokers (`Opt[int32]` / `Opt[string]` / `Opt[Tag]`) —
    `opt_wrap_*` assertions in the Python parity suite plus the Nim parity
    suite, with all four `runTypeMapTestLibCbor*` matrices building and running
-   the generated wrappers green. The parameter and event positions inherit the
-   identical canonicalized codegen + runtime path. Nesting composes: `seq[Opt[T]]`,
-   `Opt[seq[byte]]`, `Table[K, Opt[V]]`, and `array[N, Opt[T]]` all resolve
-   through the same recursion. (`Opt[T]` is the only supported optional besides
-   `Option[T]`; both share every green cell above.)
+   the generated wrappers green. Directly validated as an **event payload**
+   field by `OptWrapByteSeqEvent` (`Opt[seq[byte]]`, the parity twin of
+   `OptByteSeqEvent`) — `test_opt_wrap_byte_seq_event*` in all four foreign
+   harnesses plus the Nim parity suite. The parameter position inherits the
+   identical canonicalized codegen + runtime path. Nesting composes:
+   `seq[Opt[T]]`, `Opt[seq[byte]]`, `Table[K, Opt[V]]`, and `array[N, Opt[T]]`
+   all resolve through the same recursion. (`Opt[T]` is the only supported
+   optional besides `Option[T]`; both share every green cell above.)
+
+9. **`Option[T]` in event payloads** works end-to-end on all wrappers.
+   Validated by `test_opt_byte_seq_event*` against `OptByteSeqEvent`
+   (`Option[seq[byte]]`), which the wrappers deliver to the `on_<event>`
+   closure as `std::optional<Bytes>` / `Optional[bytes]` / `Option<Vec<u8>>` /
+   `*[]byte`, present and absent. The three event-callback codegen helpers
+   (`eventCallbackParamType` / `eventCallbackArgExpr` /
+   `eventCallbackInvokeSetup`) share the same `option[` branch as the
+   result/param mappers, so the other inner shapes (scalar / string /
+   `seq[primitive]` / Object) map by the identical path.
 
 ## Recommended idioms
 

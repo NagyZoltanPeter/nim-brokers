@@ -2705,6 +2705,45 @@ static void test_opt_byte_seq_event_absent() {
     lib.shutdown();
 }
 
+// Opt[seq[byte]] in an event payload — parity with Option[seq[byte]].
+static void test_opt_wrap_byte_seq_event() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptWrapByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, true);  // present -> some([1,2,3,4])
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    auto present = received.at(0);
+    CHECK(present.has_value());
+    CHECK_EQ(present->size(), 4u);
+    CHECK_EQ((*present)[0], 1u);
+    CHECK_EQ((*present)[3], 4u);
+    lib.offOptWrapByteSeqEvent(h);
+    lib.shutdown();
+}
+
+static void test_opt_wrap_byte_seq_event_absent() {
+    Typemappingtestlib lib;
+    lib.createContext();
+    SafeList<std::optional<Bytes>> received;
+    auto h = lib.onOptWrapByteSeqEvent(
+        [&received](Typemappingtestlib&, std::optional<Bytes> value) {
+            received.push(std::move(value));
+        });
+    CHECK_NE(h, 0ull);
+    lib.triggerByteEventsRequest(0, false);  // absent -> none
+    waitFor([&] { return received.size() >= 1; });
+    CHECK_EQ(received.size(), 1u);
+    CHECK(!received.at(0).has_value());
+    lib.offOptWrapByteSeqEvent(h);
+    lib.shutdown();
+}
+
 // Option[seq[byte]] as an INPUT param — present and absent.
 static void test_opt_byte_param_present() {
     Typemappingtestlib lib;
@@ -3009,6 +3048,8 @@ int main() {
     RUN(test_byte_seq_event);
     RUN(test_opt_byte_seq_event);
     RUN(test_opt_byte_seq_event_absent);
+    RUN(test_opt_wrap_byte_seq_event);
+    RUN(test_opt_wrap_byte_seq_event_absent);
     RUN(test_opt_byte_param_present);
     RUN(test_opt_byte_param_absent);
     RUN(test_proc_sugar_alias_payload);

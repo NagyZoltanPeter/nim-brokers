@@ -496,6 +496,43 @@ suite "typemappingtestlib_cbor parity":
     check dec2.value.value.isNone()
     discard typemappingtestlib_shutdown(ctx)
 
+  test "Opt[seq[byte]] event payload — present + absent (OptWrapByteSeqEvent)":
+    resetSlots()
+    let ctx = setupCtx()
+    discard subscribe(ctx, "opt_wrap_byte_seq_event")
+    type Args = object
+      size*: int32
+      present*: bool
+
+    # present -> Opt.some(@[1,2,3,4])
+    let (st, _) = callApi(
+      ctx,
+      "trigger_byte_events_request",
+      cborEncode(Args(size: 0'i32, present: true)).value,
+    )
+    check st == 0'i32
+    let evt = waitForEvent("opt_wrap_byte_seq_event")
+    check evt.len > 0
+    let evtDec = cborDecode(evt, OptWrapByteSeqEvent)
+    check evtDec.isOk()
+    check evtDec.value.value.isSome()
+    check evtDec.value.value.get() == @[byte 1, 2, 3, 4]
+    resetSlots()
+
+    # absent -> Opt.none
+    let (st2, _) = callApi(
+      ctx,
+      "trigger_byte_events_request",
+      cborEncode(Args(size: 0'i32, present: false)).value,
+    )
+    check st2 == 0'i32
+    let evt2 = waitForEvent("opt_wrap_byte_seq_event")
+    check evt2.len > 0
+    let evtDec2 = cborDecode(evt2, OptWrapByteSeqEvent)
+    check evtDec2.isOk()
+    check evtDec2.value.value.isNone()
+    discard typemappingtestlib_shutdown(ctx)
+
   test "Option[seq[byte]] result — present":
     # Probe for Option[T] over the FFI surface. Native codegen rejects
     # Option[T] outright; the broker is gated to CBOR mode.

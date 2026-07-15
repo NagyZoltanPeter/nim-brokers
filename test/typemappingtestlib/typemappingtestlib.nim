@@ -672,8 +672,16 @@ EventBroker(API):
   type OptByteSeqEvent* = object
     value*: Option[seq[byte]]
 
-## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]) and
-## OptByteSeqEvent(some([1,2,3,4]) when present else none).
+## OptWrapByteSeqEvent — Opt[seq[byte]] (results) in an event payload. Must ride
+## the wire byte-for-byte identically to OptByteSeqEvent and deliver the same
+## optional shape (std::optional / Optional / Option / *T) in every wrapper.
+EventBroker(API):
+  type OptWrapByteSeqEvent* = object
+    value*: Opt[seq[byte]]
+
+## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]),
+## OptByteSeqEvent(some([1,2,3,4]) when present else none), and the
+## Opt[seq[byte]] parity twin OptWrapByteSeqEvent with the same payload.
 RequestBroker(API):
   type TriggerByteEventsRequest* = object
     fired*: int32
@@ -1394,7 +1402,13 @@ proc setupProviders(ctx: BrokerContext) =
         else:
           none(seq[byte])
       OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
-      return ok(TriggerByteEventsRequest(fired: 2)),
+      let optWrapVal =
+        if present:
+          Opt.some(@[byte 1, 2, 3, 4])
+        else:
+          Opt.none(seq[byte])
+      OptWrapByteSeqEvent.emit(gProviderCtx, OptWrapByteSeqEvent(value: optWrapVal))
+      return ok(TriggerByteEventsRequest(fired: 3)),
   )
 
   discard OptByteParamRequest.setProvider(

@@ -2504,6 +2504,43 @@ func test_opt_byte_seq_event_absent() {
 	lib.Close()
 }
 
+// Opt[seq[byte]] in an event payload — parity with Option[seq[byte]].
+func test_opt_wrap_byte_seq_event_present() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[*[]byte]{}
+	h := lib.OnOptWrapByteSeqEvent(func(value *[]byte) {
+		evts.push(value)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerByteEventsRequest(0, true)
+	waitFor(func() bool { return evts.size() >= 1 })
+	v := evts.at(0)
+	check(v != nil, "value present")
+	if v != nil {
+		checkEq(len(*v), 4, "len")
+		checkEq((*v)[0], byte(1), "byte[0]")
+		checkEq((*v)[3], byte(4), "byte[3]")
+	}
+	lib.OffOptWrapByteSeqEvent(h)
+	lib.Close()
+}
+
+func test_opt_wrap_byte_seq_event_absent() {
+	lib := newLib()
+	lib.CreateContext()
+	evts := &safeList[*[]byte]{}
+	h := lib.OnOptWrapByteSeqEvent(func(value *[]byte) {
+		evts.push(value)
+	})
+	checkNe(h, uint64(0), "handle != 0")
+	lib.TriggerByteEventsRequest(0, false)
+	waitFor(func() bool { return evts.size() >= 1 })
+	check(evts.at(0) == nil, "value absent")
+	lib.OffOptWrapByteSeqEvent(h)
+	lib.Close()
+}
+
 func test_opt_byte_param_present() {
 	lib := newLib()
 	lib.CreateContext()
@@ -2786,6 +2823,8 @@ func main() {
 	runTest("test_byte_seq_event", test_byte_seq_event)
 	runTest("test_opt_byte_seq_event_present", test_opt_byte_seq_event_present)
 	runTest("test_opt_byte_seq_event_absent", test_opt_byte_seq_event_absent)
+	runTest("test_opt_wrap_byte_seq_event_present", test_opt_wrap_byte_seq_event_present)
+	runTest("test_opt_wrap_byte_seq_event_absent", test_opt_wrap_byte_seq_event_absent)
 	runTest("test_opt_byte_param_present", test_opt_byte_param_present)
 	runTest("test_opt_byte_param_absent", test_opt_byte_param_absent)
 	runTest("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload)
