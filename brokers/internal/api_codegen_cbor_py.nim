@@ -98,8 +98,9 @@ proc parseTableParams*(s: string): (string, string) {.compileTime.} =
   ("", "")
 
 proc nimTypeToPyHint*(nimType: string): string {.compileTime.} =
-  ## Recursive Nim → Python type hint. Falls back to "" for types we
-  ## don't yet know how to map (the caller emits a TODO).
+  ## Recursive Nim → Python type hint. Returns "" for unmappable types;
+  ## callers raise a compile-time error when an unmappable field or method
+  ## parameter is encountered (no silent drops or skipped typed surface).
   let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if isPrimitive(t):
