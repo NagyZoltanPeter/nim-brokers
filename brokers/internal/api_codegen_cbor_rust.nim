@@ -1006,7 +1006,7 @@ proc generateCborRustFile*(
       argsStructDecl.add("        struct __Args {\n")
       for (n, t) in e.argFields:
         sigParams.add(", " & n & ": " & nimTypeToRustHint(t))
-        let lowered = t.toLowerAscii().strip()
+        let lowered = t.strip().canonOptHead().toLowerAscii()
         if lowered == "seq[byte]":
           argsStructDecl.add("            #[serde(with = \"serde_bytes\")]\n")
         elif lowered == "option[seq[byte]]":
@@ -1235,7 +1235,7 @@ proc generateCborRustFile*(
       result.add("        #[allow(non_snake_case)]\n")
       result.add("        struct __Sig {\n")
       for f in fields:
-        let lowered = f.nimType.toLowerAscii().strip()
+        let lowered = f.nimType.strip().canonOptHead().toLowerAscii()
         if lowered == "seq[byte]":
           result.add("            #[serde(with = \"serde_bytes\")]\n")
         elif lowered == "option[seq[byte]]":
