@@ -624,15 +624,19 @@ On Windows the flag is omitted intentionally (see `nimMainPrefixFlag` in
 The repository ships ready-made tasks that already pass every flag above.
 They are the easiest way to reproduce a working build.
 
-- `nimble buildFfiExampleCbor` — build the CBOR shared library
-- `nimble runFfiExampleCborCpp` / `runFfiExampleCborPy` /
-  `runFfiExampleCborRust` / `runFfiExampleCborGo` — rebuild + run the
-  matching consumer against the CBOR library
-- `nimble testApiCbor` — CBOR codec round-trips, library lifecycle,
+- `nimble buildFfiExample` — build the CBOR shared library
+- `nimble runFfiExampleCpp` / `runFfiExamplePy` / `runFfiExampleRust` /
+  `runFfiExampleGo` — rebuild + run the matching consumer against the
+  CBOR library
+- `nimble testApi` — CBOR codec round-trips, library lifecycle,
   event subscribe, discovery API, and the typemappingtestlib parity
   matrix across `--mm:orc` / `--mm:refc` × debug / release
-- `nimble runTypeMapTestLibCborCpp` / `…Py` / `…Rust` / `…Go` —
-  per-language parity matrices
+- `nimble runTypeMapTestLibCpp` / `…Py` / `…Rust` / `…Go` —
+  per-language parity matrices. Run them **sequentially**: they share one
+  Nim cache and output `.dylib`, so concurrent runs clobber each other's
+  object files and surface as spurious "Undefined symbols" link errors.
+  Each iterates both memory managers by default; override with
+  `MM=orc` / `MM=refc` to run a single one.
 - `nimble runFfiBenchEventStress` — Part D-4/D-5 event dispatch stress
   drivers (mixed audience / no-foreign / no-nim / shutdown drain /
   slow-callback non-blocking proof)
