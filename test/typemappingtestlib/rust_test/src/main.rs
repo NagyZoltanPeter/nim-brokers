@@ -3069,6 +3069,31 @@ fn test_opt_byte_param_absent() {
     lib.shutdown();
 }
 
+// Opt[seq[byte]] as an INPUT param — guards the `__Args` serde_bytes
+// canonicalization. Without it Rust encodes Vec<u8> as a CBOR array of ints
+// and the Nim seq[byte] decoder rejects the call.
+fn test_opt_wrap_byte_param_present() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_wrap_byte_param_request(Some(vec![9u8, 8, 7]));
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, 3i32);
+    }
+    lib.shutdown();
+}
+
+fn test_opt_wrap_byte_param_absent() {
+    let mut lib = Typemappingtestlib::new();
+    let _ = lib.create_context();
+    let r = lib.opt_wrap_byte_param_request(None::<Vec<u8>>);
+    check!(r.is_ok());
+    if let Some(v) = r.value() {
+        check_eq!(v.length, -1i32);
+    }
+    lib.shutdown();
+}
+
 fn test_proc_sugar_alias_payload() {
     let mut lib = Typemappingtestlib::new();
     let _ = lib.create_context();
@@ -3347,6 +3372,8 @@ fn main() {
     run_test("test_opt_wrap_byte_seq_event_absent", test_opt_wrap_byte_seq_event_absent);
     run_test("test_opt_byte_param_present", test_opt_byte_param_present);
     run_test("test_opt_byte_param_absent", test_opt_byte_param_absent);
+    run_test("test_opt_wrap_byte_param_present", test_opt_wrap_byte_param_present);
+    run_test("test_opt_wrap_byte_param_absent", test_opt_wrap_byte_param_absent);
     run_test("test_proc_sugar_alias_payload", test_proc_sugar_alias_payload);
     run_test("test_proc_sugar_distinct_payload", test_proc_sugar_distinct_payload);
     run_test("test_proc_sugar_seq_payload", test_proc_sugar_seq_payload);

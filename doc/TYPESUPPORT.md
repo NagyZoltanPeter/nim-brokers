@@ -3,9 +3,9 @@
 Authoritative reference for which Nim type patterns are supported across
 each foreign-language wrapper (C++ / Python / Rust / Go). Cells are
 evidence-backed: ✅ entries are validated by the parity test suite
-(`runTypeMapTestLibCborCpp`, `runTypeMapTestLibCborPy`,
-`runTypeMapTestLibCborRust`, `runTypeMapTestLibCborGo`); ❌ entries are
-confirmed broken by direct probe; ❓ entries are untested.
+(`runTypeMapTestLibCpp`, `runTypeMapTestLibPy`, `runTypeMapTestLibRust`,
+`runTypeMapTestLibGo`); ❌ entries are confirmed broken by direct probe;
+❓ entries are untested.
 
 **Pure C is not in the matrix.** The typed-C wrapper is deferred — see
 `doc/design/CBOR_Refactoring.md` §10. Pure-C consumers currently see
@@ -259,7 +259,10 @@ When adding a probe to close one of the `❓` cells:
    - `test/typemappingtestlib/test_typemappingtestlib.py`
    - `test/typemappingtestlib/rust_test/src/main.rs`
    - `test/typemappingtestlib/go_test/main.go`
-3. Run all four `runTypeMapTestLibCbor*` tasks (Cpp / Py / Rust / Go).
+3. Run all four `runTypeMapTestLib{Cpp,Py,Rust,Go}` tasks. Run them
+   **sequentially** — they share one Nim cache and output `.dylib`, so
+   concurrent runs clobber each other's object files and surface as
+   spurious "Undefined symbols" link errors.
 4. Update the relevant cell in this document with the result.
 
 When a defect is found, document it in the footnotes with file/line

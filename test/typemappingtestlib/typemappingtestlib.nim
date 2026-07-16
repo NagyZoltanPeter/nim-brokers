@@ -700,6 +700,20 @@ RequestBroker(API):
     value: Option[seq[byte]]
   ): Future[Result[OptByteParamRequest, string]] {.async.}
 
+## OptWrapByteParamRequest — Opt[seq[byte]] as an INPUT param, the parity twin
+## of OptByteParamRequest. Guards the wrapper-side ENCODE path specifically: the
+## Rust `__Args` struct must canonicalize `Opt[seq[byte]]` -> `option[seq[byte]]`
+## to attach `#[serde(with = "::serde_bytes")]`, else Rust emits a CBOR array of
+## ints (major type 4) instead of a byte string (major type 2) and the Nim
+## decoder rejects it. Same contract as OptByteParamRequest: -1 when absent.
+RequestBroker(API):
+  type OptWrapByteParamRequest* = object
+    length*: int32
+
+  proc signature*(
+    value: Opt[seq[byte]]
+  ): Future[Result[OptWrapByteParamRequest, string]] {.async.}
+
 # ---------------------------------------------------------------------------
 # Proc-sugar scalar payloads: a verb-named RequestBroker (no `type` decl)
 # whose response payload is a registered alias / distinct that resolves to a
@@ -1422,6 +1436,19 @@ proc setupProviders(ctx: BrokerContext) =
         else:
           -1'i32
       return ok(OptByteParamRequest(length: length)),
+  )
+
+  discard OptWrapByteParamRequest.setProvider(
+    ctx,
+    proc(
+        value: Opt[seq[byte]]
+    ): Future[Result[OptWrapByteParamRequest, string]] {.closure, async.} =
+      let length =
+        if value.isSome():
+          int32(value.get().len)
+        else:
+          -1'i32
+      return ok(OptWrapByteParamRequest(length: length)),
   )
 
   # ----- proc-sugar scalar payload providers (alias / distinct) -----
