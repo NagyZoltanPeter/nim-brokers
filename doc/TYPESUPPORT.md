@@ -163,7 +163,7 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
    RESULT field by the `OptWrapScalarRequest` / `OptWrapStringRequest` /
    `OptWrapObjRequest` brokers (`Opt[int32]` / `Opt[string]` / `Opt[Tag]`) —
    `opt_wrap_*` assertions in the Python parity suite plus the Nim parity
-   suite, with all four `runTypeMapTestLibCbor*` matrices building and running
+   suite, with all four `runTypeMapTestLib{Cpp,Py,Rust,Go}` matrices building and running
    the generated wrappers green. Directly validated as an **event payload**
    field by `OptWrapByteSeqEvent` (`Opt[seq[byte]]`, the parity twin of
    `OptByteSeqEvent`) — `test_opt_wrap_byte_seq_event*` in all four foreign
