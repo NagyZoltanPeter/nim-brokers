@@ -80,8 +80,9 @@ proc parseTableParams*(s: string): (string, string) {.compileTime.} =
   ("", "")
 
 proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
-  ## Recursive Nim → C++ type mapping. Returns "" for unmappable types
-  ## (callers emit a TODO and skip the affected typed surface).
+  ## Recursive Nim → C++ type mapping. Returns "" for unmappable types;
+  ## callers raise a compile-time error when an unmappable field or method
+  ## parameter is encountered (no silent drops or skipped typed surface).
   let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   let prim = primCppType(t)
