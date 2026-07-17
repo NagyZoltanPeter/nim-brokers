@@ -3,9 +3,9 @@
 Authoritative reference for which Nim type patterns are supported across
 each foreign-language wrapper (C++ / Python / Rust / Go). Cells are
 evidence-backed: ✅ entries are validated by the parity test suite
-(`runTypeMapTestLibCborCpp`, `runTypeMapTestLibCborPy`,
-`runTypeMapTestLibCborRust`, `runTypeMapTestLibCborGo`); ❌ entries are
-confirmed broken by direct probe; ❓ entries are untested.
+(`runTypeMapTestLibCpp`, `runTypeMapTestLibPy`, `runTypeMapTestLibRust`,
+`runTypeMapTestLibGo`); ❌ entries are confirmed broken by direct probe;
+❓ entries are untested.
 
 **Pure C is not in the matrix.** The typed-C wrapper is deferred — see
 `doc/design/CBOR_Refactoring.md` §10. Pure-C consumers currently see
@@ -56,6 +56,7 @@ The field appears inside the `Result<T>` payload struct returned by a request me
 | `array[N, string]` | ✅ ³ | ✅ ³ | ✅ ³ | ✅ ³ |
 | `array[N, Object]` | ✅ | ✅ | ✅ | ✅ |
 | `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ | ✅ | ✅ | ✅ |
+| `Opt[T]` (results — full parity with `Option[T]`) | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ |
 | `tuple[a: T, b: U, ...]` (named) | ✅ | ✅ | ✅ | ✅ |
 
 ## Section 2 — Request PARAMETER types
@@ -78,6 +79,7 @@ The type appears in the request method signature on the *caller* side.
 | `array[N, string]` | ✅ ³ | ✅ ³ | ✅ ³ | ✅ ³ |
 | `array[N, Object]` | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ | ✅ ⁵ |
 | `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ | ✅ | ✅ | ✅ |
+| `Opt[T]` (results — full parity with `Option[T]`) | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ |
 
 ## Section 3 — Event PAYLOAD field types
 
@@ -96,6 +98,8 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
 | `array[N, primitive]` | ✅ | ✅ | ✅ | ✅ |
 | `array[N, string]` | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ | ✅ ⁶ |
 | `array[N, Object]` | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ | ✅ ⁷ |
+| `Option[T]` (scalar / string / `seq[primitive]` / Object) | ✅ ⁹ | ✅ ⁹ | ✅ ⁹ | ✅ ⁹ |
+| `Opt[T]` (results — full parity with `Option[T]`) | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ | ✅ ⁸ |
 
 ## Footnotes
 
@@ -146,6 +150,39 @@ The field appears in an `EventBroker(API)` object — fired by Nim, delivered to
    `test_fixed_obj_array_event`. The wrappers deliver the slots as a
    length-N list/span of the typed element struct.
 
+8. **`Opt[T]` (results, `Opt[T] = Result[T, void]`) has full parity with
+   `Option[T]`** — it is a drop-in replacement in any position. At codegen
+   every `Opt[...]` head is canonicalized to `Option[...]` (`canonOptHead` in
+   `api_schema.nim`), so all four wrappers emit the identical
+   `std::optional<T>` / `Optional[T]` / `Option<T>` / `*T` surface and CDDL
+   (`T / null`). At runtime `Opt` binds the same four CBOR hooks as `Option`
+   (`shouldWriteObjectField` / `write` / `read` / `isFieldExpected`, in
+   `api_cbor_codec.nim`) and rides the same MT case-object codec branch
+   (`mt_codec.nim`), so the wire bytes are **byte-identical** to the
+   equivalent `Option[T]`, present and absent. Directly validated as a request
+   RESULT field by the `OptWrapScalarRequest` / `OptWrapStringRequest` /
+   `OptWrapObjRequest` brokers (`Opt[int32]` / `Opt[string]` / `Opt[Tag]`) —
+   `opt_wrap_*` assertions in the Python parity suite plus the Nim parity
+   suite, with all four `runTypeMapTestLib{Cpp,Py,Rust,Go}` matrices building and running
+   the generated wrappers green. Directly validated as an **event payload**
+   field by `OptWrapByteSeqEvent` (`Opt[seq[byte]]`, the parity twin of
+   `OptByteSeqEvent`) — `test_opt_wrap_byte_seq_event*` in all four foreign
+   harnesses plus the Nim parity suite. The parameter position inherits the
+   identical canonicalized codegen + runtime path. Nesting composes:
+   `seq[Opt[T]]`, `Opt[seq[byte]]`, `Table[K, Opt[V]]`, and `array[N, Opt[T]]`
+   all resolve through the same recursion. (`Opt[T]` is the only supported
+   optional besides `Option[T]`; both share every green cell above.)
+
+9. **`Option[T]` in event payloads** works end-to-end on all wrappers.
+   Validated by `test_opt_byte_seq_event*` against `OptByteSeqEvent`
+   (`Option[seq[byte]]`), which the wrappers deliver to the `on_<event>`
+   closure as `std::optional<Bytes>` / `Optional[bytes]` / `Option<Vec<u8>>` /
+   `*[]byte`, present and absent. The three event-callback codegen helpers
+   (`eventCallbackParamType` / `eventCallbackArgExpr` /
+   `eventCallbackInvokeSetup`) share the same `option[` branch as the
+   result/param mappers, so the other inner shapes (scalar / string /
+   `seq[primitive]` / Object) map by the identical path.
+
 ## Recommended idioms
 
 To stay safely inside the green cells:
@@ -155,8 +192,8 @@ To stay safely inside the green cells:
    `array[N, T]` enforces a runtime length check on decode. Use the
    array form when N is a true protocol-level invariant.
 2. **Composite object fields are fine.** A registered Object can carry
-   `seq[byte]`, `seq[T]`, `array[N, T]`, `Option[T]`, or nested objects
-   in any combination. The earlier "keep object field types flat"
+   `seq[byte]`, `seq[T]`, `array[N, T]`, `Option[T]` / `Opt[T]`, or nested
+   objects in any combination. The earlier "keep object field types flat"
    guidance was a native-ABI artifact and no longer applies.
 3. **Nested types auto-register.** Plain Nim `object` / `enum` /
    `distinct` types referenced in a broker signature are discovered
@@ -222,7 +259,10 @@ When adding a probe to close one of the `❓` cells:
    - `test/typemappingtestlib/test_typemappingtestlib.py`
    - `test/typemappingtestlib/rust_test/src/main.rs`
    - `test/typemappingtestlib/go_test/main.go`
-3. Run all four `runTypeMapTestLibCbor*` tasks (Cpp / Py / Rust / Go).
+3. Run all four `runTypeMapTestLib{Cpp,Py,Rust,Go}` tasks. Run them
+   **sequentially** — they share one Nim cache and output `.dylib`, so
+   concurrent runs clobber each other's object files and surface as
+   spurious "Undefined symbols" link errors.
 4. Update the relevant cell in this document with the result.
 
 When a defect is found, document it in the footnotes with file/line

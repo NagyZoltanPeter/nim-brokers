@@ -329,6 +329,29 @@ RequestBroker(API):
 
   proc signature*(present: bool): Future[Result[OptObjRequest, string]] {.async.}
 
+## Opt[T] parity probes (results' `Opt[T] = Result[T, void]`). These MUST map
+## and ride the wire byte-for-byte identically to the `Option[T]` variants
+## above — same CDDL (`T / null`), same std::optional / Optional / Option<T> /
+## *T in every wrapper, same present/absent CBOR. Covers scalar, variable-shape
+## (string) and registered-object inner types.
+RequestBroker(API):
+  type OptWrapScalarRequest* = object
+    value*: Opt[int32]
+
+  proc signature*(present: bool): Future[Result[OptWrapScalarRequest, string]] {.async.}
+
+RequestBroker(API):
+  type OptWrapStringRequest* = object
+    value*: Opt[string]
+
+  proc signature*(present: bool): Future[Result[OptWrapStringRequest, string]] {.async.}
+
+RequestBroker(API):
+  type OptWrapObjRequest* = object
+    value*: Opt[Tag]
+
+  proc signature*(present: bool): Future[Result[OptWrapObjRequest, string]] {.async.}
+
 ## Distinct-over-seq probe. Registered by the type resolver to keep the
 ## `resolveAliasBase`-over-`nnkBracketExpr` path exercised at compile
 ## time, but NOT used in any active broker signature: per-wrapper
@@ -649,8 +672,16 @@ EventBroker(API):
   type OptByteSeqEvent* = object
     value*: Option[seq[byte]]
 
-## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]) and
-## OptByteSeqEvent(some([1,2,3,4]) when present else none).
+## OptWrapByteSeqEvent — Opt[seq[byte]] (results) in an event payload. Must ride
+## the wire byte-for-byte identically to OptByteSeqEvent and deliver the same
+## optional shape (std::optional / Optional / Option / *T) in every wrapper.
+EventBroker(API):
+  type OptWrapByteSeqEvent* = object
+    value*: Opt[seq[byte]]
+
+## TriggerByteEventsRequest — fires ByteSeqEvent([0..size-1]),
+## OptByteSeqEvent(some([1,2,3,4]) when present else none), and the
+## Opt[seq[byte]] parity twin OptWrapByteSeqEvent with the same payload.
 RequestBroker(API):
   type TriggerByteEventsRequest* = object
     fired*: int32
@@ -668,6 +699,20 @@ RequestBroker(API):
   proc signature*(
     value: Option[seq[byte]]
   ): Future[Result[OptByteParamRequest, string]] {.async.}
+
+## OptWrapByteParamRequest — Opt[seq[byte]] as an INPUT param, the parity twin
+## of OptByteParamRequest. Guards the wrapper-side ENCODE path specifically: the
+## Rust `__Args` struct must canonicalize `Opt[seq[byte]]` -> `option[seq[byte]]`
+## to attach `#[serde(with = "::serde_bytes")]`, else Rust emits a CBOR array of
+## ints (major type 4) instead of a byte string (major type 2) and the Nim
+## decoder rejects it. Same contract as OptByteParamRequest: -1 when absent.
+RequestBroker(API):
+  type OptWrapByteParamRequest* = object
+    length*: int32
+
+  proc signature*(
+    value: Opt[seq[byte]]
+  ): Future[Result[OptWrapByteParamRequest, string]] {.async.}
 
 # ---------------------------------------------------------------------------
 # Proc-sugar scalar payloads: a verb-named RequestBroker (no `type` decl)
@@ -1071,6 +1116,37 @@ proc setupProviders(ctx: BrokerContext) =
         return ok(OptObjRequest(value: none(Tag))),
   )
 
+  discard OptWrapScalarRequest.setProvider(
+    ctx,
+    proc(
+        present: bool
+    ): Future[Result[OptWrapScalarRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapScalarRequest(value: Opt.some(42'i32)))
+      else:
+        return ok(OptWrapScalarRequest(value: Opt.none(int32))),
+  )
+
+  discard OptWrapStringRequest.setProvider(
+    ctx,
+    proc(
+        present: bool
+    ): Future[Result[OptWrapStringRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapStringRequest(value: Opt.some("hello")))
+      else:
+        return ok(OptWrapStringRequest(value: Opt.none(string))),
+  )
+
+  discard OptWrapObjRequest.setProvider(
+    ctx,
+    proc(present: bool): Future[Result[OptWrapObjRequest, string]] {.closure, async.} =
+      if present:
+        return ok(OptWrapObjRequest(value: Opt.some(Tag(key: "ok", value: "yes"))))
+      else:
+        return ok(OptWrapObjRequest(value: Opt.none(Tag))),
+  )
+
   discard ObjParamRequest.setProvider(
     ctx,
     proc(tag: Tag): Future[Result[ObjParamRequest, string]] {.closure, async.} =
@@ -1340,7 +1416,13 @@ proc setupProviders(ctx: BrokerContext) =
         else:
           none(seq[byte])
       OptByteSeqEvent.emit(gProviderCtx, OptByteSeqEvent(value: optVal))
-      return ok(TriggerByteEventsRequest(fired: 2)),
+      let optWrapVal =
+        if present:
+          Opt.some(@[byte 1, 2, 3, 4])
+        else:
+          Opt.none(seq[byte])
+      OptWrapByteSeqEvent.emit(gProviderCtx, OptWrapByteSeqEvent(value: optWrapVal))
+      return ok(TriggerByteEventsRequest(fired: 3)),
   )
 
   discard OptByteParamRequest.setProvider(
@@ -1354,6 +1436,19 @@ proc setupProviders(ctx: BrokerContext) =
         else:
           -1'i32
       return ok(OptByteParamRequest(length: length)),
+  )
+
+  discard OptWrapByteParamRequest.setProvider(
+    ctx,
+    proc(
+        value: Opt[seq[byte]]
+    ): Future[Result[OptWrapByteParamRequest, string]] {.closure, async.} =
+      let length =
+        if value.isSome():
+          int32(value.get().len)
+        else:
+          -1'i32
+      return ok(OptWrapByteParamRequest(length: length)),
   )
 
   # ----- proc-sugar scalar payload providers (alias / distinct) -----

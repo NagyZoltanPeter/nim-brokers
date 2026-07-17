@@ -31,7 +31,7 @@ import ./helper/broker_utils # reduced-A: per-interface partitioning
 
 proc primCppType(nimType: string): string {.compileTime.} =
   ## Direct primitive mapping. Empty string for non-primitives.
-  case nimType.strip()
+  case nimType.strip().canonOptHead()
   of "bool": "bool"
   of "string": "std::string"
   of "int", "int64": "int64_t"
@@ -80,9 +80,10 @@ proc parseTableParams*(s: string): (string, string) {.compileTime.} =
   ("", "")
 
 proc nimTypeToCppType*(nimType: string): string {.compileTime.} =
-  ## Recursive Nim → C++ type mapping. Returns "" for unmappable types
-  ## (callers emit a TODO and skip the affected typed surface).
-  let t = nimType.strip()
+  ## Recursive Nim → C++ type mapping. Returns "" for unmappable types;
+  ## callers raise a compile-time error when an unmappable field or method
+  ## parameter is encountered (no silent drops or skipped typed surface).
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   let prim = primCppType(t)
   if prim.len > 0:
@@ -160,11 +161,11 @@ proc isCppMappable*(nimType: string): bool {.compileTime.} =
   nimTypeToCppType(nimType).len > 0
 
 proc cppTableKeyType*(nimType: string): string {.compileTime.} =
-  let (k, _) = parseTableParams(nimType.strip())
+  let (k, _) = parseTableParams(nimType.strip().canonOptHead())
   nimTypeToCppType(k)
 
 proc cppTableValType*(nimType: string): string {.compileTime.} =
-  let (_, v) = parseTableParams(nimType.strip())
+  let (_, v) = parseTableParams(nimType.strip().canonOptHead())
   nimTypeToCppType(v)
 
 proc cppTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
@@ -172,7 +173,7 @@ proc cppTableNeedsKeyConv*(nimType: string): bool {.compileTime.} =
   ## (int / enum / char / distinct-of-scalar). jsoncons can't parse a text
   ## key into such a type, so the owning struct gets a wire-struct + custom
   ## json_type_traits that convert.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if not (lower.startsWith("table[") and lower.endsWith("]")):
     return false
@@ -230,7 +231,7 @@ proc snakeToLowerCamel*(s: string): string {.compileTime.} =
 proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
   ## Returns the C++ parameter type for unpacked event callback args.
   ## Empty string => the field's underlying Nim type isn't mappable.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   let prim = primCppType(t)
   if prim.len > 0:
@@ -290,7 +291,7 @@ proc eventCallbackParamType*(nimType: string): string {.compileTime.} =
 proc eventCallbackArgExpr*(fieldName, nimType: string): string {.compileTime.} =
   ## Builds the expression that destructures `evt.<fieldName>` into the
   ## callback param shape returned by `eventCallbackParamType`.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if t == "string":
     return "std::string_view(evt." & fieldName & ")"
@@ -318,7 +319,7 @@ proc eventCallbackInvokeSetup*(fieldName, nimType: string): string {.compileTime
   ## callback is called. Used to materialise non-owning views over the
   ## decoded payload (e.g. seq[string] -> vector<string_view>) so the
   ## span the user receives stays valid for the call duration.
-  let t = nimType.strip()
+  let t = nimType.strip().canonOptHead()
   let lower = t.toLowerAscii()
   if lower.startsWith("seq[") and lower.endsWith("]") and
       unwrapBracket(t, "seq").strip() == "string":
@@ -342,8 +343,12 @@ proc emitCppStructFields*(h: var string, entry: ApiTypeEntry): bool {.compileTim
   for f in entry.fields:
     let cppType = nimTypeToCppType(f.nimType)
     if cppType.len == 0:
-      h.add("  // TODO: Nim type '" & f.nimType & "' not yet mappable to C++\n")
-      result = false
+      error(
+        "FFI C++ codegen: field '" & f.name & "' of type '" & entry.name &
+          "' has Nim type '" & f.nimType &
+          "' with no C++ mapping. Fields are never silently dropped — add a " &
+          "mapping or change the field type."
+      )
     else:
       h.add("  " & cppType & " " & f.name & "{};\n")
 
@@ -375,7 +380,7 @@ proc emitMemberTraitsMacro*(
       var isOption = false
       for f in entry.fields:
         if f.name == n:
-          if f.nimType.toLowerAscii().startsWith("option["):
+          if f.nimType.canonOptHead().toLowerAscii().startsWith("option["):
             isOption = true
           break
       if isOption:
@@ -726,8 +731,12 @@ proc generateCborCppHeaderFile*(
     for f in entry.fields:
       let cppType = nimTypeToCppType(f.nimType)
       if cppType.len == 0:
-        h.add("  // TODO: Nim type '" & f.nimType & "' not yet mappable\n")
-        allMapped = false
+        error(
+          "FFI C++ codegen: field '" & f.name & "' of type '" & name & "' has Nim type '" &
+            f.nimType &
+            "' with no C++ mapping. Fields are never silently dropped — add a " &
+            "mapping or change the field type."
+        )
       else:
         h.add("  " & cppType & " " & f.name & "{};\n")
     h.add("};\n")
@@ -974,11 +983,11 @@ proc generateCborCppHeaderFile*(
       )
       continue
     if not isMethodSupported(e.apiName):
-      h.add(
-        "  // TODO: '" & e.apiName &
-          "' has parameters whose Nim types aren't yet mappable to C++.\n"
+      error(
+        "FFI C++ codegen: method '" & e.apiName &
+          "' has parameter types with no C++ mapping. Methods are never " &
+          "silently dropped — add a mapping or change the parameter types."
       )
-      continue
     h.add(
       "  Result<" & payloadCppType(e.responseTypeName) & "> " & methodName & "(" &
         sigParams & ");\n"
@@ -1227,7 +1236,11 @@ proc generateCborCppHeaderFile*(
         "  // TODO: '" & e.apiName & "' return type '" & e.responseTypeName &
         "' not emittable.\n"
     if not isMethodSupported(e.apiName):
-      return "  // TODO: '" & e.apiName & "' has unmappable parameter types.\n"
+      error(
+        "FFI C++ codegen: method '" & e.apiName &
+          "' has parameter types with no C++ mapping. Methods are never " &
+          "silently dropped — add a mapping or change the parameter types."
+      )
     let methodName = snakeToLowerCamel(e.apiName)
     result.add(
       "  " & subReqRetType(e) & " " & methodName & "(" & subReqSigParams(e) & ");\n"

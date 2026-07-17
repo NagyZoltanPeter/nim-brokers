@@ -25,6 +25,7 @@
 {.push raises: [].}
 
 import std/[macros, typetraits]
+import results
 
 # Generic recursive primitives. The `pos` parameter is updated in place;
 # the bool return is false on overflow / truncation / malformed input.
@@ -135,6 +136,20 @@ proc mtMarshalValue*[T](
       if not mtMarshalValue(buf, cap, value[i], pos):
         return false
     return true
+  elif T is Opt:
+    # `Opt[T] = Result[T, void]` is a CASE object whose discriminator is
+    # immutable, so the generic `object`/`fieldPairs` path below fails to
+    # compile on the unmarshal side. Marshal it explicitly as `<present: bool>`
+    # then `<inner>` when present. POD Opts (e.g. `Opt[int32]`) never reach here
+    # — `supportsCopyMem` catches them above. `Option[T]` is a plain object and
+    # stays on the generic path. This is the INTERNAL cross-thread MT format,
+    # independent of the foreign CBOR wire (see api_cbor_codec.nim).
+    let present = value.isSome
+    if not mtMarshalValue(buf, cap, present, pos):
+      return false
+    if present:
+      return mtMarshalValue(buf, cap, value.get, pos)
+    return true
   elif T is (object or tuple):
     for _, fval in fieldPairs(value):
       if not mtMarshalValue(buf, cap, fval, pos):
@@ -197,6 +212,22 @@ proc mtUnmarshalValue*[T](
       if not mtUnmarshalValue(buf, len, value[i], pos):
         return false
     return true
+  elif T is Opt:
+    # Mirror the `Opt[T]` marshal branch: read `<present: bool>` then the inner
+    # value when present. Avoids the generic `fieldPairs` path, which cannot
+    # bind `Result`'s immutable case discriminator as `var`.
+    var present: bool
+    if not mtUnmarshalValue(buf, len, present, pos):
+      return false
+    type Inner = typeof(value.get)
+    if present:
+      var inner: Inner
+      if not mtUnmarshalValue(buf, len, inner, pos):
+        return false
+      value = Opt.some(inner)
+    else:
+      value = Opt.none(Inner)
+    return true
   elif T is (object or tuple):
     for _, fval in fieldPairs(value):
       if not mtUnmarshalValue(buf, len, fval, pos):
@@ -250,6 +281,12 @@ proc mtMarshalSizeValue*[T](value: T): int {.gcsafe.} =
     result = 0
     for i in 0 ..< value.len:
       result += mtMarshalSizeValue(value[i])
+  elif T is Opt:
+    # Lockstep with the `Opt[T]` marshal branch: one byte for the present flag
+    # plus the inner value's size when present.
+    result = mtMarshalSizeValue(value.isSome)
+    if value.isSome:
+      result += mtMarshalSizeValue(value.get)
   elif T is (object or tuple):
     result = 0
     for _, fval in fieldPairs(value):

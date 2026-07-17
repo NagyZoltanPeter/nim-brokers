@@ -450,16 +450,17 @@ proc classifyTypeSize*(t: NimNode): tuple[bytes: int, reason: string] =
         classifyTypeSize(t[2])
       else:
         (UnclassifiableBytes, "unclassifiable:" & t.repr)
-    elif outer == "Option":
-      # Option[T] — wire size is bounded by T plus a one-byte CBOR
-      # tag (null marker vs concrete value). Recurse into the inner
-      # type and reuse its classification verbatim; the +1 byte sits
-      # comfortably inside whatever bucket T lands in. Without this
-      # special case Option[seq[byte]] would silently under-allocate
-      # (8 KB fallback < 64 KB seq[byte]), while Option[int64] would
+    elif outer == "Option" or outer == "Opt":
+      # Option[T] / Opt[T] — wire size is bounded by T plus a one-byte CBOR
+      # tag (null marker vs concrete value). `Opt[T]` (results) rides the wire
+      # identically to `Option[T]` (see api_cbor_codec.nim), so classify it the
+      # same way. Recurse into the inner type and reuse its classification
+      # verbatim; the +1 byte sits comfortably inside whatever bucket T lands
+      # in. Without this special case Option[seq[byte]] would silently under-
+      # allocate (8 KB fallback < 64 KB seq[byte]), while Option[int64] would
       # noisily over-allocate at 8 KB.
       let inner = classifyTypeSize(t[1])
-      (inner.bytes, "Option[" & inner.reason & "]")
+      (inner.bytes, outer & "[" & inner.reason & "]")
     else:
       (UnclassifiableBytes, "unclassifiable:" & outer)
   else:

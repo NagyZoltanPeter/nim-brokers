@@ -107,6 +107,47 @@ proc readValue*[T: enum](
   value = T(i)
 
 # ---------------------------------------------------------------------------
+# Opt[T] (results) parity with Option[T] (std/options)
+#
+# `results` aliases `Opt[T] = Result[T, void]`. `cbor_serialization/std/options`
+# binds three hooks for `Option[T]` — `shouldWriteObjectField` (omit-when-none
+# at the object-field level), `write` (value-or-null), and `read`. We mirror
+# exactly the same three for `Opt[T]` so an `Opt` field rides the wire byte-for-
+# byte identically to the equivalent `Option` field: absent ⇒ key omitted,
+# present ⇒ the inner value. Without this the flavor would fall back to the
+# generic object writer and leak `Result`'s private discriminator/fields.
+# ---------------------------------------------------------------------------
+
+template shouldWriteObjectField*(F: type Cbor, field: Opt): bool =
+  field.isSome
+
+func isFieldExpected*(F: type Cbor, T: type Opt): bool {.compileTime.} =
+  ## Mirror the upstream `T isnot Option` exemption (reader_impl.nim:54) so a
+  ## missing `Opt` field on decode reads back as `none` instead of tripping
+  ## `requireAllFields`. Without this an all-absent object (`{}` on the wire)
+  ## fails to decode.
+  false
+
+proc write*(writer: var CborWriter, value: Opt) {.raises: [IOError].} =
+  mixin writeValue
+
+  if value.isSome:
+    writer.writeValue value.get
+  else:
+    writer.writeValue cborNull
+
+proc read*[T](
+    reader: var CborReader, value: var Opt[T]
+) {.raises: [IOError, SerializationError].} =
+  mixin readValue
+
+  if reader.parser.cborKind() in {CborValueKind.Null, CborValueKind.Undefined}:
+    value = Opt.none(T)
+    discard reader.parseSimpleValue()
+  else:
+    value = Opt.some reader.readValue(T)
+
+# ---------------------------------------------------------------------------
 # Wire types
 # ---------------------------------------------------------------------------
 
