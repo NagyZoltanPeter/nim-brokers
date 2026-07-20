@@ -314,3 +314,159 @@ nimble perftestFfi     # FFI from C++
 the default iterates both. Debug builds run the same matrix without
 `-d:release`.
 
+
+## Submit scaling — one-way signal `_call` ingress (bench_ffi_submit)
+
+nim-brokers analog of nim-ffi's `tests/bench/bench_ffi_submit.nim`
+(logos-messaging/nim-ffi #97 / #101): K producer threads hammer one library
+context with `benchsubmit_call` on a `SignalBroker(API)` apiName — the
+slot-free, one-way enqueue onto the call-courier ring, the closest semantic
+match to nim-ffi's `sendRequestToFFIThread` (pure ingress, no response
+round-trip in the measured path).
+
+### Environment
+
+- Apple M4 (10 cores), macOS, Nim 2.2.10
+- `-d:danger` (matches the nim-ffi methodology), `--threads:on`
+- median of 5 iterations per thread count; fresh context per iteration
+- 20 000 submits per producer thread; 4 B CBOR payload; noop handler
+  (bumps an `Atomic[int]` on the processing thread)
+
+### Harness semantics (divergences from nim-ffi)
+
+- **Bounded ingress with backpressure.** nim-ffi's intrusive queue is
+  unbounded; our courier ring is finite, so `_call` returns
+  `ApiStatusAgain` (-6) when full. Producers spin-retry until accepted
+  (no backoff), and retries are reported per row — a retry-dominated row
+  means the "submit rate" is really the consumer drain rate. Since the
+  `callRingDepth:` knob landed, the bench registers its library with
+  `callRingDepth: 2_000_000` (= the largest documented sweep), so
+  documented runs never hit `-6` and measure pure enqueue; the retry
+  loop remains as a fallback for oversized custom sweeps.
+- **Per-attempt buffer cost.** Ownership of the input buffer transfers
+  into the library on every `_call` return path (freed by the library on
+  -6/-10 too), so each retry pays `allocBuffer` + `copyMem` again. That
+  is the honest foreign-caller submit path.
+- **Correctness gate identical**: handler-invocation count must equal
+  accepted submits exactly (no drops, no double-fires), zero hard errors.
+
+### Numbers — default ring (64 slots), drain-bound (2026-07-20)
+
+Measured before the `callRingDepth:` knob existed, i.e. with the stock
+64-entry call-courier ring. These rows are **drain-bound**: acceptance
+is capped by the processing thread, not by enqueue cost.
+
+Default sweep, submit/sec (accepted) and scaling vs 1 thread:
+
+| threads | orc | vs 1T | orc retries | refc | vs 1T | refc retries |
+| ---: | ---: | :---: | ---: | ---: | :---: | ---: |
+| 1 | 753 K | 1.00x | 555 K | 716 K | 1.00x | 667 K |
+| 2 | 1.10 M | 1.46x | 350 K | 923 K | 1.29x | 1.00 M |
+| 4 | 1.06 M | 1.41x | 377 K | 708 K | 0.99x | 1.94 M |
+| 8 | 295 K | 0.39x | 752 K | 267 K | 0.37x | 3.38 M |
+
+High-contention curve (orc), `BROKER_SUBMIT_THREADS="1,8,16,32,64,100"`:
+
+| threads | submit/sec | vs 1T | again-retries | retries/submit |
+| ---: | ---: | :---: | ---: | ---: |
+| 1 | 725 K | 1.00x | 533 K | ~27 |
+| 8 | 297 K | 0.41x | 703 K | ~4 |
+| 16 | 188 K | 0.26x | 19.0 M | ~59 |
+| 32 | 103 K | 0.14x | 110.7 M | ~173 |
+| 64 | 59 K | 0.08x | 506.7 M | ~396 |
+| 100 | 40 K | 0.06x | 1.24 B | ~620 |
+
+Correctness held at every row: handler count matched accepted submits
+exactly, zero hard errors, zero overruns (both memory managers).
+
+### Interpretation
+
+1. **The ceiling is the drain, not the enqueue.** Even one producer
+   out-runs the courier consumer (~27 retries per accepted submit at
+   1T): accepted throughput ≈ the processing thread's decode + dispatch
+   rate (~0.7–1.1 M/s), and the ring (64 slots) is perpetually full.
+2. **Anti-scaling past ~2 producers.** Peak is ~1.1 M/s at 2 threads;
+   at 100 threads aggregate acceptance collapses to 0.06x of the
+   1-thread rate while retries grow to ~620 per submit. Spin-retrying
+   producers contend on the ring's shared head and steal cores from the
+   consumer — the same single-hotspot collapse nim-ffi #101 measured
+   for its single lock-free MPSC candidate (0.10x at 100 threads).
+3. **Direct comparison with nim-ffi #101.** Their sharded, mutex-guarded
+   16-lane ingress reached ~24 M enq/s and 11x scaling — but against an
+   *unbounded* queue with no per-submit alloc. The comparable lesson is
+   structural, not absolute: one shared ingress point (our courier ring)
+   caps and then inverts scaling; sharding the ingress and coalescing
+   wakes is what buys headroom if concurrent foreign callers matter.
+4. **Retry policy is part of the picture.** The bare spin (no backoff)
+   maximises pressure and makes the contention visible; a small backoff
+   would raise aggregate acceptance at high K but hide the raw curve.
+
+No scaling gate is enforced yet (`BROKER_SCALING_GATE=0` default): this
+is the baseline. If the courier ingress is ever sharded per nim-ffi
+#101, flip the gate on (threshold 1.5x, nim-ffi parity) as the
+regression guard.
+
+### Pure enqueue — `callRingDepth: 2_000_000` (2026-07-20)
+
+`registerBrokerLibrary` gained a `callRingDepth:` key that pre-sizes the
+sync call-courier ring beyond the 64-slot `_call` pool (sync calls stay
+slot-gated; signals get the headroom). With the ring sized to the full
+sweep, `Again` never fires (0 retries at every row) and the timed phase
+is **pure enqueue** — the apples-to-apples shape against nim-ffi's
+unbounded ingress.
+
+Memory cost of fitting the bench: `CborCallMsg` is 280 B (256 B of it
+the fixed `apiName` field), so 2 M entries = **534 MiB virtual per
+context**, `allocShared0` (calloc) so pages become resident only as the
+mod-cap cursor touches them — over a full 2 M-submit iteration that is
+all of them, freed at each per-iteration context destroy. The default
+`1,2,4,8` sweep touches ≤ 160 K entries ≈ 43 MiB resident.
+
+Default sweep, submit/sec and scaling vs 1 thread (0 retries everywhere):
+
+| threads | orc | vs 1T | refc | vs 1T |
+| ---: | ---: | :---: | ---: | :---: |
+| 1 | 2.58 M | 1.00x | 2.79 M | 1.00x |
+| 2 | 1.97 M | 0.76x | 2.13 M | 0.76x |
+| 4 | 1.27 M | 0.49x | 1.26 M | 0.45x |
+| 8 | 270 K | 0.10x | 259 K | 0.09x |
+
+High-contention curve (orc):
+
+| threads | submit/sec | vs 1T |
+| ---: | ---: | :---: |
+| 1 | 2.40 M | 1.00x |
+| 8 | 252 K | 0.10x |
+| 16 | 188 K | 0.08x |
+| 32 | 180 K | 0.07x |
+| 64 | 182 K | 0.08x |
+| 100 | 169 K | 0.07x |
+
+Interpretation:
+
+1. **Uncoupled single-thread floor is ~2.4–2.8 M enq/s** (vs ~0.7 M
+   drain-bound): one enqueue = `allocBuffer` + 4 B copy + registry
+   lookup + 280 B msg copy under the ring lock + `fireBrokerSignal`.
+   nim-ffi's floor is 2.14 M (sharded) / 1.18 M (their Vyukov) — same
+   order of magnitude despite our extra ABI + alloc work.
+2. **The collapse is now attributable to the ingress itself**, not to
+   retry-starvation: with zero retries the curve still inverts to a
+   ~170–190 K/s contention floor (0.07x) that is *flat* from 16 to 100
+   threads. Structurally identical to nim-ffi's single lock-free MPSC
+   (0.10x at 100T): one shared cache line (ring lock + count) plus a
+   per-submit wake syscall caps aggregate throughput regardless of
+   producer count.
+3. **Fix shape is known.** nim-ffi #101's answer — shard the ingress
+   into per-producer lanes and fire the wake only on an
+   empty→non-empty edge — held 11x at 100 threads. Both techniques
+   apply directly to the call-courier if concurrent foreign callers
+   become a real workload.
+
+### Reproducing
+
+```bash
+nimble benchFfiSubmit                       # orc + refc, default 1,2,4,8
+BROKER_SUBMIT_THREADS="1,8,16,32,64,100" MM=orc nimble benchFfiSubmit
+# knobs: BROKER_SUBMIT_PER_THREAD (20000), BROKER_SUBMIT_ITERS (5),
+#        BROKER_SCALING_GATE (0)
+```
