@@ -1,12 +1,19 @@
+---
+name: nim-brokers
+description: Reference for writing code against the nim-brokers (`brokers`) nimble package — EventBroker, RequestBroker, MultiRequestBroker, SignalBroker, body sugars (listenIt, provideIt, reprovideIt, onSignalIt), bind* sugar, BrokerContext scoping, (mt) multi-thread variants, the (API) FFI shared-library surface, and BrokerInterface/BrokerImplement. Use when declaring brokers, registering listeners/providers/handlers, emitting or requesting, or exposing brokers to C/C++/Python/Rust/Go.
+---
+
 # Working with `nim-brokers`
 
-> Drop-in CLAUDE.md addon for any project that depends on the `brokers` nimble
-> package. Type-safe, decoupled messaging on top of **chronos** + **results**.
+> Agent skill for any project that depends on the `brokers` nimble package.
+> For auto-discovery, copy this file into the consuming project as
+> `.claude/skills/nim-brokers/SKILL.md` (or reference it from CLAUDE.md/AGENTS.md).
+> Type-safe, decoupled messaging on top of **chronos** + **results**.
 > All public APIs are exception-free: errors ride `Result[T, string]`, never raises.
 
 ## Mental model
 
-Three macros, each declares a **broker type** and generates its full API. The
+Four macros, each declares a **broker type** and generates its full API. The
 type *is* the channel — you call class-method-style on the typedesc: `T.emit`,
 `T.request`, `T.listen`, `T.setProvider`. No instances, no singletons to wire.
 
@@ -22,7 +29,9 @@ RequestBroker → blocking, non-async. `(API)` → FFI shared-library surface.
 
 Any provider/handler that is a **class method** (`self.foo`) can be installed
 with the `bind*` / `rebind*` sugar instead of a hand-written forwarding closure —
-see "Binding class-method providers" below.
+see "Binding class-method providers" below. For inline bodies, each registration
+verb also has a **body-sugar form** (`listenIt`, `provideIt` / `reprovideIt`,
+`onSignalIt`) that takes a block instead of a lambda — see the per-broker sections.
 
 Import only what you use:
 ```nim
@@ -65,6 +74,20 @@ await UserLoggedIn.dropAllListeners()      # drop all for this context
 - `dropListener`/`dropAllListeners` are **`async` (`Future[void]`) in every lane**
   — `await` them (or `discard`/`waitFor` in sync/`{.thread.}` contexts). Single-thread
   cancels in-flight handlers before returning; MT/API bodies are suspension-free.
+
+### `listenIt` — listener body sugar (all lanes)
+```nim
+# The block IS the listener body; the event value is injected as `it`.
+# Returns listen's Result[<T>Listener, string] — keep it to drop later.
+let h2 = UserLoggedIn.listenIt:
+  echo "login: ", it.name, " (#", it.userId, ")"
+
+let h3 = UserLoggedIn.listenIt(myCtx):   # ctx-scoped form; body may await
+  await sleepAsync(chronos.milliseconds(1))
+  echo "scoped: ", it.name
+```
+- `raises: []` is enforced as for a hand-written listener; `void` event types
+  inject nothing (the block is just the body).
 
 ### Payload variants
 ```nim
@@ -119,6 +142,25 @@ Rules & behaviors:
 - Provider exceptions are caught → `err(<msg>)`. Unset provider → `err(...)`.
 - `isProvided()` checks registration. `T.request` is `async` here.
 
+### `provideIt` / `reprovideIt` — provider body sugar (all lanes)
+```nim
+# The block is the provider's REAL proc body — the declared signature arg
+# names (`id` here) are injected; return / result= / trailing expression work.
+discard FetchUser.provideIt:          # -> setProvider (keeps "already set" guard)
+  if id < 0:
+    return err("bad id: " & $id)
+  return ok(FetchUser(name: "u" & $id))
+
+discard FetchUser.reprovideIt:        # -> replaceProvider (swap, no guard)
+  ok(FetchUser(name: "v2-u" & $id))   # trailing expression works too
+```
+- A body that could fall through without producing a value is a **compile
+  error** (it would silently answer `err("")`) — e.g. a bare `echo` body, or an
+  `if` without `else` where only one branch returns.
+- Dual-slot brokers name the slots explicitly: `provideIt` / `reprovideIt` for
+  the args slot, `provideItNoArgs` / `reprovideItNoArgs` for the zero-arg slot.
+- Sync mode: same sugar, body cannot `await`. Ctx-form: `T.provideIt(ctx): body`.
+
 ### Sync mode — no event loop needed
 ```nim
 RequestBroker(sync):
@@ -164,6 +206,23 @@ Quote.clearProviders()                  # remove all
 - Identical handler refs deduplicated on registration.
 - `setProvider` returns `Result[ProviderHandle, string]`; capture it for `removeProvider`.
 
+### `provideIt` — provider body sugar (adds, not replaces)
+```nim
+# Same body sugar as RequestBroker, but every provideIt ADDS a provider —
+# there is NO reprovideIt (no replace verb), and the generated closure is a
+# fresh reference, so it never dedups. Returns setProvider's handle.
+let h1 = Quote.provideIt:
+  ok(Quote(price: 100))
+let h2 = Quote.provideIt:            # a second provider — NOT a replacement
+  if sym.len == 0:
+    return err("empty symbol")
+  return ok(Quote(price: 101))
+
+Quote.removeProvider(h1.get())       # drop just one by its handle
+```
+- Dual-slot brokers: `provideIt` = args slot, `provideItNoArgs` = zero-arg slot.
+- Same fall-through compile check as RequestBroker's `provideIt`.
+
 ---
 
 ## SignalBroker — one-way notification, single handler
@@ -194,6 +253,17 @@ discard IngestSample.signal(deviceId = "d2", value = 1.25)             # by fiel
 #   err() = "no signal handler installed" | "queue full"
 
 await IngestSample.dropSignalHandler()   # async Future[void] — await it
+```
+
+### `onSignalIt` — handler body sugar (all lanes)
+```nim
+# Same as listenIt, for the single signal handler: the block is the handler
+# body, the signal value is injected as `it`. onSignal's duplicate guard and
+# Result return are unchanged.
+discard IngestSample.onSignalIt:
+  echo it.deviceId, " = ", it.value
+
+discard Wakeup.onSignalIt: echo "tick"   # void payload: nothing injected
 ```
 
 - `signal()` is **sync**, never `await` it. `dropSignalHandler()` is **async**.
@@ -303,6 +373,7 @@ proc worker() {.thread.} =
 | Same pattern across OS threads | add `(mt)`, `--threads:on` (call surface unchanged) |
 | Multiple isolated instances | pass a `BrokerContext` first arg |
 | Install a class method (`self.foo`) as provider/handler | `bind*` / `rebind*` sugar |
+| Register an inline body without lambda boilerplate | `listenIt` / `provideIt` / `reprovideIt` / `onSignalIt` |
 | Expose to C/C++/Python/Rust/Go | `(API)` + `registerBrokerLibrary` (see AGENTS.md) |
 
 ## Gotchas

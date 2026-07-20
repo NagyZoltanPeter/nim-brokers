@@ -147,7 +147,7 @@ always async. Full syntax, all variants, and worked examples are in the
   the OOP/DI layer, multi-thread tuning, the FFI API, and memory footprints.
 - [Broker FFI API](doc/FFI_API.md) · [Type-support matrix](doc/TYPESUPPORT.md) ·
   [OOP Brokers](doc/OOP_Brokers.md) · [MT config & tuning](doc/MT_BROKER_CONFIG.md) · [Cookbook with examples](doc/COOKBOOK.md)
-- [AI Coding agent skill](doc/CLAUDE_brokers_addon.md) <= Add this to your AGENTS/CLAUDE.md
+- [AI Coding agent skill](doc/CLAUDE_brokers_skill.md) <= Add this to your AGENTS/CLAUDE.md
 
 
 ## Platform & Nim version support
