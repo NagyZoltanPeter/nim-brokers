@@ -63,7 +63,10 @@ type
     ## the producer thread exits before the consumer fully drains).
     buf: ptr UncheckedArray[CborEventMsg]
     cap: int
-    origCap: int ## set once at construction; growth ceiling is `4 * origCap`
+    maxCap: int
+      ## Set once at construction; the growth ceiling. Defaults to 4x the
+      ## initial cap; overridable via `newCborEventCourier`'s `maxRingCap`
+      ## (surfaced as `eventRingDepth:` in `registerBrokerLibrary`).
     head: int ## next index the consumer reads
     tail: int ## next index a producer writes
     count: int ## guarded by `lock`
@@ -160,16 +163,24 @@ func ringCap*(c: ptr CborEventCourier): int =
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-proc newCborEventCourier*(ringCap: int): ptr CborEventCourier =
+proc newCborEventCourier*(ringCap: int, maxRingCap = 0): ptr CborEventCourier =
   ## Allocate an event courier sized for `ringCap` outstanding events.
   ## Producers that find the ring full drop the event (events are
   ## fire-and-forget). Pick `ringCap` generously — there's no slot pool
   ## gating it the way `CborCourier`'s slot count gates its ring.
+  ##
+  ## `maxRingCap` sets the doubling-growth ceiling: `<= 0` keeps the classic
+  ## `4 * ringCap`; a positive value below `ringCap` clamps to `ringCap`
+  ## (growth disabled). Growth always starts from `ringCap` and doubles.
   let c = cast[ptr CborEventCourier](allocShared0(sizeof(CborEventCourier)))
   c.ring.buf =
     cast[ptr UncheckedArray[CborEventMsg]](allocShared0(ringCap * sizeof(CborEventMsg)))
   c.ring.cap = ringCap
-  c.ring.origCap = ringCap
+  c.ring.maxCap =
+    if maxRingCap > 0:
+      max(ringCap, maxRingCap)
+    else:
+      ringCap * 4
   c.ring.head = 0
   c.ring.tail = 0
   c.ring.count = 0
@@ -208,9 +219,9 @@ proc tryEnqueue*(r: ptr CborEventRing, msg: CborEventMsg): bool =
   ## entered the ring, so the ring never took ownership).
   acquire(r.lock)
   if r.count >= r.cap:
-    # Full: grow by doubling, up to a hard ceiling of `4 * origCap`. At the
-    # ceiling retain the fire-and-forget drop contract.
-    let newCap = min(r.cap * 2, r.origCap * 4)
+    # Full: grow by doubling, up to the `maxCap` ceiling (default 4x the
+    # initial cap). At the ceiling retain the fire-and-forget drop contract.
+    let newCap = min(r.cap * 2, r.maxCap)
     if newCap == r.cap:
       release(r.lock)
       return false

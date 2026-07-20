@@ -522,6 +522,7 @@ Optional keys (all per-context sizing/policy, compile-time integer literals):
 | `asyncTimeoutMs:` | 30000 | Default dispatch-scoped timeout for `<lib>_callAsync` (0 = infinite). See §`<lib>_callAsync`. |
 | `asyncQueueDepth:` | 64 | Ceiling on concurrent in-flight `<lib>_callAsync`s; full ⇒ `-6`. Exposed as `<LIB>_ASYNC_QUEUE_DEPTH`. |
 | `callRingDepth:` | 0 (= slot pool) | Pre-sizes the sync call-courier ring beyond the 64-slot `_call` pool. Sync `_call`s stay slot-gated; the extra room is headroom for the slot-free one-way **signal** lane, which enqueues without a response slot and returns `-6` only when the ring itself is full. Memory: `callRingDepth × 280 B` (`sizeof(CborCallMsg)`) per context, allocated zeroed — pages become resident only as the ring cursor touches them. |
+| `eventRingDepth:` | 0 (= 4× base = 1024) | Growth ceiling of the **event**-courier ring. The ring always starts at 256 entries and doubles on full; at the ceiling further events are **dropped** with a throttled diagnostic (events are fire-and-forget — there is no `-6` on this lane). Values below the 256 base clamp to 256 (growth disabled). Memory at full growth: `eventRingDepth × sizeof(CborEventMsg)` per context, plus queued payload buffers held until the delivery thread drains. |
 
 ### 4. How to build with it
 

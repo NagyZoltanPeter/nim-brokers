@@ -72,6 +72,7 @@ proc parseLibraryConfig(
   asyncTimeoutMs: int,
   asyncQueueDepth: int,
   callRingDepth: int,
+  eventRingDepth: int,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
@@ -92,6 +93,13 @@ proc parseLibraryConfig(
   # `callRingDepth * sizeof(CborCallMsg)` (280 B/entry) virtual, allocated
   # zeroed (calloc) so pages are touched only as backlog builds.
   var callRingDepth = 0
+  # Event-courier ring growth ceiling per context. The ring always starts at
+  # 256 entries and doubles on full; 0 (default) keeps the classic ceiling of
+  # 4x the base (1024), beyond which events are dropped with a throttled
+  # diagnostic. Values below the 256 base clamp to 256 (growth disabled).
+  # Memory at full growth: eventRingDepth * sizeof(CborEventMsg) per context,
+  # plus the queued payload buffers held until the delivery thread drains.
+  var eventRingDepth = 0
   # AST emitted into the generated `<lib>_version()` proc: a string literal, or
   # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
   var versionExpr: NimNode = newLit("0.1.0")
@@ -177,6 +185,16 @@ proc parseLibraryConfig(
           callRingDepth = int(v.intVal)
         else:
           error("callRingDepth must be a non-negative integer literal", v)
+      of "eventringdepth":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkIntLit:
+          if v.intVal < 0:
+            error("eventRingDepth must be >= 0 (0 = classic 4x-base ceiling)", v)
+          eventRingDepth = int(v.intVal)
+        else:
+          error("eventRingDepth must be a non-negative integer literal", v)
       of "mainclass":
         # reduced-A (A1): designates the main `BrokerInterface(API)` facade for
         # a multi-interface library. Other (API) interfaces are auto-discovered
@@ -224,6 +242,7 @@ proc parseLibraryConfig(
     asyncTimeoutMs: asyncTimeoutMs,
     asyncQueueDepth: asyncQueueDepth,
     callRingDepth: callRingDepth,
+    eventRingDepth: eventRingDepth,
   )
 
 proc parseTypeExpr(
@@ -255,6 +274,7 @@ proc registerBrokerLibraryCborImpl(
       asyncTimeoutMs: int,
       asyncQueueDepth: int,
       callRingDepth: int,
+      eventRingDepth: int,
     ],
 ): NimNode
 
@@ -291,6 +311,7 @@ proc registerBrokerLibraryCborImpl(
         asyncTimeoutMs: int,
         asyncQueueDepth: int,
         callRingDepth: int,
+        eventRingDepth: int,
       ],
 ): NimNode =
   let libName = config.name
@@ -402,6 +423,10 @@ proc registerBrokerLibraryCborImpl(
   # Configured sync call-courier ring capacity (0 = ring sized to the slot
   # pool), baked into `_createContext` courier sizing.
   let callRingDepthLit = newLit(config.callRingDepth)
+
+  # Configured event-courier growth ceiling (0 = classic 4x the 256 base),
+  # baked into `_createContext` courier sizing.
+  let eventRingDepthLit = newLit(config.eventRingDepth)
 
   result = newStmtList()
 
@@ -1644,9 +1669,10 @@ proc registerBrokerLibraryCborImpl(
         arg.courier = newCborCourier(64, `asyncQueueDepthLit`, `callRingDepthLit`)
         arg.courierSignal = nil
         # Part D-3 — event courier: 256-slot ring (burst capacity, not
-        # concurrency bound; producer is fire-and-forget). A full ring
-        # drops the event with a diagnostic. Re-tunable after D-6 bench.
-        arg.eventCourier = newCborEventCourier(256)
+        # concurrency bound; producer is fire-and-forget), doubling on full
+        # up to the `eventRingDepth` ceiling (default 0 = classic 4x = 1024).
+        # At the ceiling a full ring drops the event with a diagnostic.
+        arg.eventCourier = newCborEventCourier(256, `eventRingDepthLit`)
         arg.deliverySignal = nil
         # Async-response courier: sized to the call courier's async in-flight
         # ceiling so a bounded set of outstanding `<lib>_callAsync`s can never
