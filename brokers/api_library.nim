@@ -71,6 +71,7 @@ proc parseLibraryConfig(
   mainClass: string,
   asyncTimeoutMs: int,
   asyncQueueDepth: int,
+  callRingDepth: int,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
@@ -83,6 +84,14 @@ proc parseLibraryConfig(
   # pool. Exposed to clients via the generated `<LIB>_ASYNC_QUEUE_DEPTH` macro so
   # they can size a bounded send window. 64 unless overridden.
   var asyncQueueDepth = 64
+  # Sync call-courier ring capacity per context. 0 (default) keeps the classic
+  # sizing: ring == sync slot pool (64, growing with it up to 4x). Values above
+  # the slot pool pre-size the ring — headroom for the slot-free one-way signal
+  # lane, which enqueues without claiming a response slot and hits -6 EAGAIN
+  # only when the ring itself is full. Ring memory is
+  # `callRingDepth * sizeof(CborCallMsg)` (280 B/entry) virtual, allocated
+  # zeroed (calloc) so pages are touched only as backlog builds.
+  var callRingDepth = 0
   # AST emitted into the generated `<lib>_version()` proc: a string literal, or
   # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
   var versionExpr: NimNode = newLit("0.1.0")
@@ -158,6 +167,16 @@ proc parseLibraryConfig(
           asyncQueueDepth = int(v.intVal)
         else:
           error("asyncQueueDepth must be a positive integer literal", v)
+      of "callringdepth":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkIntLit:
+          if v.intVal < 0:
+            error("callRingDepth must be >= 0 (0 = ring sized to the slot pool)", v)
+          callRingDepth = int(v.intVal)
+        else:
+          error("callRingDepth must be a non-negative integer literal", v)
       of "mainclass":
         # reduced-A (A1): designates the main `BrokerInterface(API)` facade for
         # a multi-interface library. Other (API) interfaces are auto-discovered
@@ -204,6 +223,7 @@ proc parseLibraryConfig(
     mainClass: mainClass,
     asyncTimeoutMs: asyncTimeoutMs,
     asyncQueueDepth: asyncQueueDepth,
+    callRingDepth: callRingDepth,
   )
 
 proc parseTypeExpr(
@@ -234,6 +254,7 @@ proc registerBrokerLibraryCborImpl(
       mainClass: string,
       asyncTimeoutMs: int,
       asyncQueueDepth: int,
+      callRingDepth: int,
     ],
 ): NimNode
 
@@ -269,6 +290,7 @@ proc registerBrokerLibraryCborImpl(
         mainClass: string,
         asyncTimeoutMs: int,
         asyncQueueDepth: int,
+        callRingDepth: int,
       ],
 ): NimNode =
   let libName = config.name
@@ -376,6 +398,10 @@ proc registerBrokerLibraryCborImpl(
   # Configured async in-flight window (per context), baked into `_createContext`
   # courier sizing.
   let asyncQueueDepthLit = newLit(config.asyncQueueDepth)
+
+  # Configured sync call-courier ring capacity (0 = ring sized to the slot
+  # pool), baked into `_createContext` courier sizing.
+  let callRingDepthLit = newLit(config.callRingDepth)
 
   result = newStmtList()
 
@@ -1613,7 +1639,9 @@ proc registerBrokerLibraryCborImpl(
         # Part C — courier: 64 response slots = initial ceiling on concurrent
         # in-flight SYNC `<lib>_call`s (grows to 4x). The async window is a
         # separate, fixed ceiling (`asyncQueueDepth`, default 64) — full => -6.
-        arg.courier = newCborCourier(64, `asyncQueueDepthLit`)
+        # `callRingDepth` (default 0 = ring == slot pool) pre-sizes the sync
+        # ring for the slot-free one-way signal lane.
+        arg.courier = newCborCourier(64, `asyncQueueDepthLit`, `callRingDepthLit`)
         arg.courierSignal = nil
         # Part D-3 — event courier: 256-slot ring (burst capacity, not
         # concurrency bound; producer is fire-and-forget). A full ring

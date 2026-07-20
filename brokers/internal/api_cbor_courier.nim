@@ -240,7 +240,7 @@ proc tryPop[T](r: var PodRing[T], dst: var T): bool =
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-proc newCborCourier*(slotCount: int, asyncCap = 0): ptr CborCourier =
+proc newCborCourier*(slotCount: int, asyncCap = 0, ringCap = 0): ptr CborCourier =
   ## Allocate a courier. `slotCount` is the *initial* ceiling on concurrent
   ## in-flight SYNC `_call`s; the sync request ring is sized the same, so the
   ## slot pool gates the ring (a `_call` always claims a slot before enqueuing).
@@ -252,11 +252,21 @@ proc newCborCourier*(slotCount: int, asyncCap = 0): ptr CborCourier =
   ## `slotCount`. The owning context's response courier MUST be sized
   ## `>= asyncCap` so a bounded set of outstanding async calls can never overflow
   ## the response ring.
+  ##
+  ## `ringCap > slotCount` pre-sizes the sync request ring beyond the slot
+  ## pool. Sync `_call`s stay slot-gated; the extra ring room is headroom for
+  ## the slot-free one-way signal lane, which enqueues without claiming a slot
+  ## and gets `Again` backpressure only when the ring itself is full. The ring
+  ## buffer is `allocShared0` (calloc): virtual size is `ringCap *
+  ## sizeof(CborCallMsg)` but pages are touched only as backlog builds.
+  ## `ringCap <= slotCount` keeps the classic ring == slot-pool sizing.
   let effAsyncCap = if asyncCap > 0: asyncCap else: slotCount
+  let effRingCap = max(slotCount, ringCap)
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
-  c.ring.buf =
-    cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))
-  c.ring.cap = slotCount
+  c.ring.buf = cast[ptr UncheckedArray[CborCallMsg]](allocShared0(
+    effRingCap * sizeof(CborCallMsg)
+  ))
+  c.ring.cap = effRingCap
   c.ring.head = 0
   c.ring.tail = 0
   c.ring.count = 0
@@ -316,6 +326,12 @@ proc growRingLocked(r: ptr CborCallRing, newCap: int): bool =
   ## Returns false — leaving the ring completely untouched — if the new buffer
   ## cannot be allocated, so the caller can roll back the coordinated pool+ring
   ## growth instead of dereferencing nil while holding the lock.
+  ##
+  ## No-op success when the ring already holds `newCap` or more: a courier
+  ## created with `ringCap > slotCount` must never be shrunk by slot-pool
+  ## growth (shrinking could also overflow-copy a signal backlog > `newCap`).
+  if newCap <= r.cap:
+    return true
   let newBuf =
     cast[ptr UncheckedArray[CborCallMsg]](allocShared0(newCap * sizeof(CborCallMsg)))
   if newBuf.isNil:

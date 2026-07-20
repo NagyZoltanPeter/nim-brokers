@@ -515,6 +515,14 @@ This generates:
 - aggregate event registration routing
 - generated C and C++ headers
 
+Optional keys (all per-context sizing/policy, compile-time integer literals):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `asyncTimeoutMs:` | 30000 | Default dispatch-scoped timeout for `<lib>_callAsync` (0 = infinite). See §`<lib>_callAsync`. |
+| `asyncQueueDepth:` | 64 | Ceiling on concurrent in-flight `<lib>_callAsync`s; full ⇒ `-6`. Exposed as `<LIB>_ASYNC_QUEUE_DEPTH`. |
+| `callRingDepth:` | 0 (= slot pool) | Pre-sizes the sync call-courier ring beyond the 64-slot `_call` pool. Sync `_call`s stay slot-gated; the extra room is headroom for the slot-free one-way **signal** lane, which enqueues without a response slot and returns `-6` only when the ring itself is full. Memory: `callRingDepth × 280 B` (`sizeof(CborCallMsg)`) per context, allocated zeroed — pages become resident only as the ring cursor touches them. |
+
 ### 4. How to build with it
 
 This subsection collects, in one place, every compile-time switch and runtime
