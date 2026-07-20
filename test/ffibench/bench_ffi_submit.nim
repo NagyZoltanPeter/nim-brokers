@@ -8,15 +8,16 @@
 ## returns from its last accepted submit; handler-side completion (single
 ## processing thread) is excluded, mirroring the nim-ffi methodology.
 ##
-## The library is registered with `callRingDepth: 2_000_000` — ring capacity
-## equal to the largest documented sweep — so ApiStatusAgain (-6) never fires
-## and the timed phase measures PURE ENQUEUE cost, directly comparable to
-## nim-ffi's unbounded ingress. The retry-on-Again loop is kept as a fallback
-## for oversized custom sweeps; a non-zero retries column means the ring was
-## outgrown and the row degraded to drain-bound acceptance. Ownership of the
-## input buffer transfers into the library on EVERY attempt (it frees the
-## buffer itself on -6/-10 as well), so each attempt allocs + copies — that
-## cost is part of the honest submit path.
+## The library is registered with `callRingCeiling: 2_000_000` — growth
+## ceiling equal to the largest documented sweep — so ApiStatusAgain (-6)
+## never fires and the timed phase measures PURE ENQUEUE cost (including the
+## amortized doubling-growth copies as the ring spills 64 -> 2M), directly
+## comparable to nim-ffi's unbounded ingress. The retry-on-Again loop is kept
+## as a fallback for oversized custom sweeps; a non-zero retries column means
+## the ceiling was reached and the row degraded to drain-bound acceptance.
+## Ownership of the input buffer transfers into the library on EVERY attempt
+## (it frees the buffer itself on -6/-10 as well), so each attempt allocs +
+## copies — that cost is part of the honest submit path.
 ##
 ## Correctness stress: the handler-invocation count must match accepted
 ## submits exactly (no drops, no double-fires), with zero hard errors.
@@ -84,15 +85,15 @@ registerBrokerLibrary:
     InitializeRequest
   shutdownRequest:
     ShutdownRequest
-  # Pre-size the call-courier ring to the largest documented sweep
+  # Raise the call-ring growth ceiling to the largest documented sweep
   # (100 threads x 20000 = 2M submits) so ApiStatusAgain never fires and the
-  # timed phase measures pure enqueue, comparable to nim-ffi's unbounded
-  # ingress. Cost: 2M x 280 B (sizeof CborCallMsg) = 534 MiB virtual per
-  # context; the mod-cap cursor walks the whole buffer over a full iteration,
-  # so resident peaks near that too (freed at each per-iteration destroy).
-  # Sweeps beyond 2M total submits fall back to retry-on-Again (still
-  # correct; the retries column exposes it).
-  callRingDepth:
+  # timed phase measures pure enqueue (incl. amortized doubling copies),
+  # comparable to nim-ffi's unbounded ingress. The ring spills 64 -> 2M only
+  # as backlog demands; at full growth 2M x 280 B (sizeof CborCallMsg) =
+  # 534 MiB per context (freed at each per-iteration destroy). Sweeps beyond
+  # 2M total submits fall back to retry-on-Again (still correct; the retries
+  # column exposes it).
+  callRingCeiling:
     2_000_000
 
 # ---------------------------------------------------------------------------

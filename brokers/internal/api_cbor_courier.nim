@@ -82,6 +82,11 @@ type
     ## allocated it, no per-thread allocator involvement.
     buf: ptr UncheckedArray[CborCallMsg]
     cap: int
+    maxCap: int
+      ## Set once at construction; the doubling-growth ceiling. Defaults to
+      ## `4 * slotCount` (the slot pool's own growth ceiling); overridable via
+      ## `newCborCourier`'s `maxRingCap` (surfaced as `callRingCeiling:` in
+      ## `registerBrokerLibrary`). Growth always starts at `slotCount`.
     head: int ## next index the consumer reads
     tail: int ## next index a producer writes
     count: int ## guarded by `lock`
@@ -240,12 +245,12 @@ proc tryPop[T](r: var PodRing[T], dst: var T): bool =
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-proc newCborCourier*(slotCount: int, asyncCap = 0, ringCap = 0): ptr CborCourier =
+proc newCborCourier*(slotCount: int, asyncCap = 0, maxRingCap = 0): ptr CborCourier =
   ## Allocate a courier. `slotCount` is the *initial* ceiling on concurrent
-  ## in-flight SYNC `_call`s; the sync request ring is sized the same, so the
-  ## slot pool gates the ring (a `_call` always claims a slot before enqueuing).
-  ## On exhaustion the sync pool and ring grow together by doubling, up to a
-  ## hard ceiling of `4 * slotCount` — see `claimSlot`.
+  ## in-flight SYNC `_call`s; the sync request ring starts at the same size, so
+  ## the slot pool gates the ring (a `_call` always claims a slot before
+  ## enqueuing). On exhaustion the sync pool and ring grow together by
+  ## doubling, up to a hard ceiling of `4 * slotCount` — see `claimSlot`.
   ##
   ## `asyncCap` is the SEPARATE, fixed ceiling on concurrent in-flight
   ## `_callAsync`s (the async ring does not grow). `asyncCap <= 0` defaults it to
@@ -253,20 +258,26 @@ proc newCborCourier*(slotCount: int, asyncCap = 0, ringCap = 0): ptr CborCourier
   ## `>= asyncCap` so a bounded set of outstanding async calls can never overflow
   ## the response ring.
   ##
-  ## `ringCap > slotCount` pre-sizes the sync request ring beyond the slot
-  ## pool. Sync `_call`s stay slot-gated; the extra ring room is headroom for
-  ## the slot-free one-way signal lane, which enqueues without claiming a slot
-  ## and gets `Again` backpressure only when the ring itself is full. The ring
-  ## buffer is `allocShared0` (calloc): virtual size is `ringCap *
-  ## sizeof(CborCallMsg)` but pages are touched only as backlog builds.
-  ## `ringCap <= slotCount` keeps the classic ring == slot-pool sizing.
+  ## `maxRingCap` overrides the ring's doubling-growth ceiling in either
+  ## direction. `<= 0` keeps the classic `4 * slotCount`; values below
+  ## `slotCount` clamp to `slotCount` (growth disabled). The ceiling bounds
+  ## the whole courier: slot-pool growth is capped at `min(4 * slotCount,
+  ## maxRingCap)` (see `claimSlot`), so a claimed slot always guarantees ring
+  ## room — a ceiling below `4 * slotCount` therefore also lowers the sync
+  ## `_call` concurrency ceiling. Headroom above the slot pool serves the
+  ## slot-free one-way signal lane, which enqueues without claiming a slot:
+  ## a full ring below the ceiling grows in place (see `tryEnqueue`), and
+  ## only at the ceiling does the signal lane get `Again` backpressure.
   let effAsyncCap = if asyncCap > 0: asyncCap else: slotCount
-  let effRingCap = max(slotCount, ringCap)
   let c = cast[ptr CborCourier](allocShared0(sizeof(CborCourier)))
-  c.ring.buf = cast[ptr UncheckedArray[CborCallMsg]](allocShared0(
-    effRingCap * sizeof(CborCallMsg)
-  ))
-  c.ring.cap = effRingCap
+  c.ring.buf =
+    cast[ptr UncheckedArray[CborCallMsg]](allocShared0(slotCount * sizeof(CborCallMsg)))
+  c.ring.cap = slotCount
+  c.ring.maxCap =
+    if maxRingCap > 0:
+      max(maxRingCap, slotCount)
+    else:
+      slotCount * 4
   c.ring.head = 0
   c.ring.tail = 0
   c.ring.count = 0
@@ -327,9 +338,10 @@ proc growRingLocked(r: ptr CborCallRing, newCap: int): bool =
   ## cannot be allocated, so the caller can roll back the coordinated pool+ring
   ## growth instead of dereferencing nil while holding the lock.
   ##
-  ## No-op success when the ring already holds `newCap` or more: a courier
-  ## created with `ringCap > slotCount` must never be shrunk by slot-pool
-  ## growth (shrinking could also overflow-copy a signal backlog > `newCap`).
+  ## No-op success when the ring already holds `newCap` or more: signal-driven
+  ## growth (see `tryEnqueue`) may have taken the ring past the slot pool, and
+  ## slot-pool growth must never shrink it (shrinking could also overflow-copy
+  ## a signal backlog > `newCap`).
   if newCap <= r.cap:
     return true
   let newBuf =
@@ -346,14 +358,18 @@ proc growRingLocked(r: ptr CborCallRing, newCap: int): bool =
   true
 
 proc tryEnqueue*(r: ptr CborCallRing, msg: CborCallMsg): bool =
-  ## Multi-producer. Returns false on full. A `_call` always claims a
-  ## response slot before enqueuing and the ring is grown in step with the
-  ## slot pool (see `claimSlot`), so the ring cap always matches the live
-  ## slot count and a `false` here is a programming error, not backpressure.
+  ## Multi-producer. On full below `maxCap` the ring grows in place by
+  ## doubling (same spill pattern as the event courier); only at the ceiling
+  ## does it return false. Slot-gated sync `_call`s can always reach room —
+  ## the slot pool's growth is capped at `ring.maxCap` (see `claimSlot`) — so
+  ## a `false` effectively only reaches the slot-free signal lane, where it
+  ## is real `Again` backpressure.
   acquire(r.lock)
   if r.count >= r.cap:
-    release(r.lock)
-    return false
+    let newCap = min(r.cap * 2, r.maxCap)
+    if newCap == r.cap or not growRingLocked(r, newCap):
+      release(r.lock)
+      return false
   r.buf[r.tail] = msg
   r.tail = (r.tail + 1) mod r.cap
   inc r.count
@@ -407,10 +423,11 @@ proc tryClaimScan(c: ptr CborCourier): int =
 
 proc claimSlot*(c: ptr CborCourier): int =
   ## Claim a free response slot. Returns its index, or -1 only when the pool
-  ## is at its `4 * origSlotCount` ceiling and fully in-use. On exhaustion
-  ## below the ceiling the pool grows by appending a new segment (existing
-  ## slots are never moved) and the ring grows in step — both under
-  ## `ring.lock`. Growth is the rare slow path.
+  ## is at its ceiling — `min(4 * origSlotCount, ring.maxCap)`, so a ring
+  ## ceiling below the classic 4x also caps sync-call concurrency — and fully
+  ## in-use. On exhaustion below the ceiling the pool grows by appending a new
+  ## segment (existing slots are never moved) and the ring grows in step —
+  ## both under `ring.lock`. Growth is the rare slow path.
   let fast = tryClaimScan(c)
   if fast >= 0:
     return fast
@@ -423,7 +440,9 @@ proc claimSlot*(c: ptr CborCourier): int =
     release(c.ring.lock)
     return again
   let curCount = c.slotCount
-  let newCount = min(curCount * 2, c.origSlotCount * 4)
+  # The ring ceiling bounds the slot pool too: a claimed slot must always be
+  # able to enqueue, so live slots can never exceed what the ring may reach.
+  let newCount = min(min(curCount * 2, c.origSlotCount * 4), c.ring.maxCap)
   let segIdx = c.nSegs.load(moAcquire)
   if newCount == curCount or segIdx >= CborMaxSlotSegments:
     release(c.ring.lock) # at the ceiling — retain the drop contract

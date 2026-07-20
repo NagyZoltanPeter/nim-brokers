@@ -339,8 +339,8 @@ round-trip in the measured path).
   `ApiStatusAgain` (-6) when full. Producers spin-retry until accepted
   (no backoff), and retries are reported per row — a retry-dominated row
   means the "submit rate" is really the consumer drain rate. Since the
-  `callRingDepth:` knob landed, the bench registers its library with
-  `callRingDepth: 2_000_000` (= the largest documented sweep), so
+  `callRingCeiling:` knob landed, the bench registers its library with
+  `callRingCeiling: 2_000_000` (= the largest documented sweep), so
   documented runs never hit `-6` and measure pure enqueue; the retry
   loop remains as a fallback for oversized custom sweeps.
 - **Per-attempt buffer cost.** Ownership of the input buffer transfers
@@ -352,7 +352,7 @@ round-trip in the measured path).
 
 ### Numbers — default ring (64 slots), drain-bound (2026-07-20)
 
-Measured before the `callRingDepth:` knob existed, i.e. with the stock
+Measured before the ring-ceiling knob existed, i.e. with the stock
 64-entry call-courier ring. These rows are **drain-bound**: acceptance
 is capped by the processing thread, not by enqueue cost.
 
@@ -406,52 +406,63 @@ is the baseline. If the courier ingress is ever sharded per nim-ffi
 #101, flip the gate on (threshold 1.5x, nim-ffi parity) as the
 regression guard.
 
-### Pure enqueue — `callRingDepth: 2_000_000` (2026-07-20)
+### Pure enqueue — `callRingCeiling: 2_000_000` (2026-07-20)
 
-`registerBrokerLibrary` gained a `callRingDepth:` key that pre-sizes the
-sync call-courier ring beyond the 64-slot `_call` pool (sync calls stay
-slot-gated; signals get the headroom). With the ring sized to the full
-sweep, `Again` never fires (0 retries at every row) and the timed phase
-is **pure enqueue** — the apples-to-apples shape against nim-ffi's
+`registerBrokerLibrary` gained a `callRingCeiling:` key: the call ring
+keeps its 64-entry base and doubling ("spill") growth, but the growth
+ceiling — classically `4 × base = 256` — becomes configurable (explicit
+values must be ≥ 256; `eventRingCeiling:` is the symmetric knob for the
+event courier, base 256, default ceiling 1024). Sync calls stay
+slot-gated; the spill headroom serves the signal lane. With the ceiling
+set to the full sweep, `Again` never fires (0 retries at every row) and
+the timed phase is **pure enqueue plus the amortized growth copies** as
+the ring spills 64 → 2 M — the apples-to-apples shape against nim-ffi's
 unbounded ingress.
 
 Memory cost of fitting the bench: `CborCallMsg` is 280 B (256 B of it
-the fixed `apiName` field), so 2 M entries = **534 MiB virtual per
-context**, `allocShared0` (calloc) so pages become resident only as the
-mod-cap cursor touches them — over a full 2 M-submit iteration that is
-all of them, freed at each per-iteration context destroy. The default
-`1,2,4,8` sweep touches ≤ 160 K entries ≈ 43 MiB resident.
+the fixed `apiName` field), so the 2 M ceiling = **534 MiB per context
+at full growth** — reached only when backlog actually demands it, and
+freed at each per-iteration context destroy. The default `1,2,4,8`
+sweep grows to ≤ 160 K entries ≈ 43 MiB.
 
 Default sweep, submit/sec and scaling vs 1 thread (0 retries everywhere):
 
 | threads | orc | vs 1T | refc | vs 1T |
 | ---: | ---: | :---: | ---: | :---: |
-| 1 | 2.58 M | 1.00x | 2.79 M | 1.00x |
-| 2 | 1.97 M | 0.76x | 2.13 M | 0.76x |
-| 4 | 1.27 M | 0.49x | 1.26 M | 0.45x |
-| 8 | 270 K | 0.10x | 259 K | 0.09x |
+| 1 | 1.41 M | 1.00x | 1.41 M | 1.00x |
+| 2 | 1.66 M | 1.17x | 1.69 M | 1.20x |
+| 4 | 1.24 M | 0.88x | 1.24 M | 0.88x |
+| 8 | 262 K | 0.18x | 282 K | 0.20x |
 
 High-contention curve (orc):
 
 | threads | submit/sec | vs 1T |
 | ---: | ---: | :---: |
-| 1 | 2.40 M | 1.00x |
-| 8 | 252 K | 0.10x |
-| 16 | 188 K | 0.08x |
-| 32 | 180 K | 0.07x |
-| 64 | 182 K | 0.08x |
-| 100 | 169 K | 0.07x |
+| 1 | 1.35 M | 1.00x |
+| 8 | 257 K | 0.19x |
+| 16 | 167 K | 0.12x |
+| 32 | 166 K | 0.12x |
+| 64 | 173 K | 0.13x |
+| 100 | 156 K | 0.12x |
+
+An earlier variant of the knob **preallocated** the ring instead of
+growing it; that variant measured 2.4–2.8 M/s at 1T with the same
+~170–190 K/s contention floor. The ~45 % lower 1T rate here is the
+amortized cost of the doubling growth (realloc + linearising copy under
+the ring lock, ~15 doublings across a 2 M-submit iteration) — the price
+of not committing 534 MiB up front.
 
 Interpretation:
 
-1. **Uncoupled single-thread floor is ~2.4–2.8 M enq/s** (vs ~0.7 M
-   drain-bound): one enqueue = `allocBuffer` + 4 B copy + registry
-   lookup + 280 B msg copy under the ring lock + `fireBrokerSignal`.
+1. **Uncoupled single-thread floor is ~1.4 M enq/s grow-as-you-go**
+   (~2.4–2.8 M preallocated, vs ~0.7 M drain-bound): one enqueue =
+   `allocBuffer` + 4 B copy + registry lookup + 280 B msg copy under the
+   ring lock + `fireBrokerSignal`, plus the amortized spill copies.
    nim-ffi's floor is 2.14 M (sharded) / 1.18 M (their Vyukov) — same
    order of magnitude despite our extra ABI + alloc work.
-2. **The collapse is now attributable to the ingress itself**, not to
+2. **The collapse is attributable to the ingress itself**, not to
    retry-starvation: with zero retries the curve still inverts to a
-   ~170–190 K/s contention floor (0.07x) that is *flat* from 16 to 100
+   ~155–175 K/s contention floor (0.12x) that is *flat* from 16 to 100
    threads. Structurally identical to nim-ffi's single lock-free MPSC
    (0.10x at 100T): one shared cache line (ring lock + count) plus a
    per-submit wake syscall caps aggregate throughput regardless of

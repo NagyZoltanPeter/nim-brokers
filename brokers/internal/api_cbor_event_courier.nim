@@ -66,7 +66,7 @@ type
     maxCap: int
       ## Set once at construction; the growth ceiling. Defaults to 4x the
       ## initial cap; overridable via `newCborEventCourier`'s `maxRingCap`
-      ## (surfaced as `eventRingDepth:` in `registerBrokerLibrary`).
+      ## (surfaced as `eventRingCeiling:` in `registerBrokerLibrary`).
     head: int ## next index the consumer reads
     tail: int ## next index a producer writes
     count: int ## guarded by `lock`
