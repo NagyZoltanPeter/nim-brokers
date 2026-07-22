@@ -14,7 +14,8 @@
 {.push raises: [].}
 
 import std/[atomics, locks, os]
-import brokers/[event_broker, request_broker, broker_context, api_library]
+import
+  brokers/[event_broker, request_broker, signal_broker, broker_context, api_library]
 import brokers/internal/mt_broker_common
 
 ## InitializeRequest — required post-create configuration broker.
@@ -135,6 +136,48 @@ RequestBroker(API):
   proc signature*(
     count: int32, payloadSize: int32, emitTimestampNs: int64
   ): Future[Result[TriggerPingPayloadRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# E2E throughput bench surface (bench_e2e_driver.cpp).
+#
+# Three lanes over a realistic 500 B payload, each handler doing a trivial
+# FNV-1a 64 hash of the bytes so "processed" means real work:
+#
+#   HashSignal      — one-way C++ -> Nim (slot-free signal `_call`); the
+#                     handler folds the hash into `gE2eHashAcc` and bumps
+#                     `gE2eProcessed` so the driver can (a) detect drain
+#                     completion and (b) verify the aggregate checksum.
+#   HashRequest     — C++ -> Nim -> C++ turnaround returning the hash;
+#                     driven both via `_callAsync` (async scenario) and the
+#                     blocking `_call` (sync scenario).
+#   E2eStatsRequest — reads the two counters (driver works with deltas, so
+#                     it is iteration-restart safe).
+# ---------------------------------------------------------------------------
+
+SignalBroker(API):
+  type HashSignal = object
+    payload*: seq[byte]
+
+RequestBroker(API):
+  type HashRequest = object
+    hash*: int64
+
+  proc signature*(payload: seq[byte]): Future[Result[HashRequest, string]] {.async.}
+
+RequestBroker(API):
+  type E2eStatsRequest = object
+    processed*: int64
+    hashAcc*: int64
+
+  proc signature*(): Future[Result[E2eStatsRequest, string]] {.async.}
+
+var gE2eProcessed: Atomic[int64]
+var gE2eHashAcc: Atomic[int64] ## wrapping sum of per-payload FNV-1a hashes
+
+proc fnv1a64(data: openArray[byte]): uint64 =
+  result = 0xcbf29ce484222325'u64
+  for b in data:
+    result = (result xor uint64(b)) * 0x100000001b3'u64
 
 # Shared-heap counters for the Nim audiences. Updated under moRelaxed from
 # whichever thread the listener fires on; read under moAcquire by the
@@ -316,6 +359,40 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   if pingPayloadRes.isErr():
     return err("TriggerPingPayloadRequest provider: " & pingPayloadRes.error())
 
+  # E2E bench — one-way signal handler: hash the payload, fold it into the
+  # accumulator, bump the processed counter.
+  let hashSigRes = HashSignal.onSignal(
+    ctx,
+    proc(s: HashSignal) {.async: (raises: []).} =
+      let h = fnv1a64(s.payload)
+      discard gE2eHashAcc.fetchAdd(cast[int64](h), moRelaxed)
+      discard gE2eProcessed.fetchAdd(1, moRelease),
+  )
+  if hashSigRes.isErr():
+    return err("HashSignal handler: " & hashSigRes.error())
+
+  # E2E bench — request turnaround: return the payload hash to the caller.
+  let hashReqRes = HashRequest.setProvider(
+    ctx,
+    proc(payload: seq[byte]): Future[Result[HashRequest, string]] {.closure, async.} =
+      return ok(HashRequest(hash: cast[int64](fnv1a64(payload)))),
+  )
+  if hashReqRes.isErr():
+    return err("HashRequest provider: " & hashReqRes.error())
+
+  # E2E bench — counter accessor (driver reads deltas).
+  let e2eStatsRes = E2eStatsRequest.setProvider(
+    ctx,
+    proc(): Future[Result[E2eStatsRequest, string]] {.closure, async.} =
+      return ok(
+        E2eStatsRequest(
+          processed: gE2eProcessed.load(moAcquire), hashAcc: gE2eHashAcc.load(moAcquire)
+        )
+      ),
+  )
+  if e2eStatsRes.isErr():
+    return err("E2eStatsRequest provider: " & e2eStatsRes.error())
+
   # Part D-4 — stats accessor. Reads the per-lane atomic counters.
   let statsRes = GetStatsRequest.setProvider(
     ctx,
@@ -335,6 +412,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   # shutdown cycles in the stress drivers).
   gSameThreadCount.store(0, moRelease)
   gCrossThreadCount.store(0, moRelease)
+  gE2eProcessed.store(0, moRelease)
+  gE2eHashAcc.store(0, moRelease)
 
   ok()
 
@@ -351,5 +430,11 @@ registerBrokerLibrary:
     InitializeRequest
   shutdownRequest:
     ShutdownRequest
+  # E2E bench: give the one-way signal lane burst headroom (64 -> 16384 spill
+  # growth, ~4.6 MiB ring at full growth) while keeping the ceiling small
+  # enough that sustained overproduction still exercises real -6 backpressure
+  # (the driver retries and reports the retry count).
+  callRingCeiling:
+    16384
 
 {.pop.}

@@ -481,3 +481,74 @@ BROKER_SUBMIT_THREADS="1,8,16,32,64,100" MM=orc nimble benchFfiSubmit
 # knobs: BROKER_SUBMIT_PER_THREAD (20000), BROKER_SUBMIT_ITERS (5),
 #        BROKER_SCALING_GATE (0)
 ```
+
+## E2E throughput scaling — C++ through the dylib (bench_e2e_driver)
+
+`nimble benchFfiE2e` — the full-foreign-boundary companion to
+`benchFfiSubmit`: a real C++ driver through the generated `benchlib.hpp`
+wrapper + `libbenchlib.dylib`, 500 B payload, the Nim handler FNV-1a-hashes
+every message, and the clock measures **processed** throughput (drain /
+callback / round-trip complete), not submit. Three lanes:
+
+1. **signal** — one-way `_call`; drain-timed via a polled stats request;
+   aggregate hash checksum verified.
+2. **async** — `_callAsync` turnaround returning the hash; clock stops at
+   the last callback; every returned hash verified.
+3. **sync** — blocking `_call` turnaround; per-thread serial round trips.
+
+benchlib registers `callRingCeiling: 16384` (burst headroom, then real `-6`
+which the driver retries and reports). `asyncQueueDepth` stays at the
+default 64. Median of 3, fresh context per iteration, threads
+`1,2,4,8,16,32,64`. Apple M4 (10 cores), `-d:release`, 2026-07-21.
+
+### Numbers — msg/s (payload MB/s in parens at the plateau)
+
+orc:
+
+| threads | signal | vs 1T | async | vs 1T | sync | vs 1T |
+| ---: | ---: | :---: | ---: | :---: | ---: | :---: |
+| 1 | 321 K | 1.00x | 213 K | 1.00x | 41 K | 1.00x |
+| 2 | 358 K | 1.11x | 211 K | 0.98x | 96 K | 2.35x |
+| 4 | 330 K | 1.02x | 218 K | 1.02x | 228 K | 5.59x |
+| 8 | 291 K | 0.90x | 205 K | 0.96x | 204 K | 5.01x |
+| 16 | 203 K | 0.63x | 178 K | 0.83x | 204 K | 4.99x |
+| 32 | 238 K | 0.74x | 156 K | 0.73x | 202 K | 4.95x |
+| 64 | 232 K (116 MB/s) | 0.72x | 168 K (84 MB/s) | 0.78x | 195 K (98 MB/s) | 4.78x |
+
+refc: signal 377 K → 194 K (0.51x at 64T), async 267 K → 98 K (0.36x),
+sync 42 K → 238 K (5.70x, plateau slightly above orc). Correctness
+(counts + hashes) held at every row under both memory managers; sync
+never saw a single `-6` (the 64→256 slot pool absorbs 64 blocking
+callers).
+
+### Interpretation
+
+1. **Every lane converges on the same ceiling — the processing thread.**
+   ~200–240 K msg/s ≈ 100–180 MB/s of payload is the single-threaded
+   CBOR-decode + hash + dispatch rate; no ingress design change moves it.
+   This is the number the submit bench deliberately excluded, and for
+   sustained load it, not the ingress, is the system's capacity.
+2. **Signal peaks early (~360–430 K/s at 2T, ring still absorbing) then
+   sheds 30 % (orc) / 50 % (refc)** as producer spin-retries at the 16 K
+   ceiling steal cores from the consumer — the e2e echo of the ingress
+   bench's contention collapse, much milder because the drain dominates.
+3. **Async is window-bound, not ingress-bound**: with `asyncQueueDepth`
+   64, producers spend their time in `Again` retries (10 M+ at 64T) and
+   throughput tracks slightly below signal. Raising the window would trade
+   memory (in-flight requests + response ring) for the gap to the drain
+   ceiling.
+4. **Sync is latency-then-ceiling**: one thread = ~25 µs round trip
+   (40 K/s); concurrency hides latency perfectly up to 4 threads, then the
+   provider-side ceiling takes over — and it needs no retry loop at all up
+   to 64 callers thanks to the slot pool. For ≤ 64-thread foreign apps the
+   blocking lane is competitive with async at far simpler call-site
+   semantics.
+
+### Reproducing
+
+```bash
+nimble benchFfiE2e            # orc + refc; MM=orc for one manager
+BROKER_E2E_THREADS="1,8,64" BROKER_E2E_PER_THREAD=20000 nimble benchFfiE2e
+# knobs: BROKER_E2E_PER_THREAD (10000), BROKER_E2E_ITERS (3),
+#        BROKER_E2E_PAYLOAD (500), BROKER_E2E_THREADS (1,2,4,8,16,32,64)
+```
