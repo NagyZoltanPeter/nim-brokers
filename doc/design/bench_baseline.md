@@ -495,85 +495,85 @@ wrapper + `libbenchlib.dylib`; the clock measures **processed** throughput
    every returned value verified.
 3. **sync** — blocking `_call` turnaround; per-thread serial round trips.
 
-Each lane runs in two payload families: **hash** (500 B byte payload, the
-Nim handler FNV-1a-hashes it — copy-heavy) and **scalar**
-(`(int64, int64, float64) -> bool` parity predicate — framing/dispatch cost
-isolated from the payload copy+hash).
+Each lane runs in two payload families that share **one O(1) parity
+predicate** as the handler compute, so the families differ purely in
+**transport** cost (wrapper CBOR encode + buffer copy + Nim-side decode),
+never in handler work: **payload** (500 B `seq[byte]`; the predicate reads
+first byte, last byte, and length — the bytes are never walked) and
+**scalar** (`(int64, int64, float64) -> bool`, same predicate). An earlier
+variant of the payload family FNV-1a-hashed the full 500 B in the handler;
+its numbers were within ~10 % of the current ones (e.g. signal 1T
+328 K hashed vs 354 K now), which itself is a finding — the drain ceiling
+was always transport-dominated, not compute-dominated.
 
 benchlib registers `callRingCeiling: 16384` (burst headroom, then real `-6`
 which the driver retries and reports). `asyncQueueDepth` stays at the
 default 64. Median of 3, fresh context per iteration, threads
 `1,2,4,8,16,32,64`. Apple M4 (10 cores), `-d:release`, 2026-07-21.
 
-### Numbers — msg/s (payload MB/s in parens at the plateau)
+### Numbers — msg/s, orc
 
-orc:
-
-| threads | signal | vs 1T | async | vs 1T | sync | vs 1T |
-| ---: | ---: | :---: | ---: | :---: | ---: | :---: |
-| 1 | 321 K | 1.00x | 213 K | 1.00x | 41 K | 1.00x |
-| 2 | 358 K | 1.11x | 211 K | 0.98x | 96 K | 2.35x |
-| 4 | 330 K | 1.02x | 218 K | 1.02x | 228 K | 5.59x |
-| 8 | 291 K | 0.90x | 205 K | 0.96x | 204 K | 5.01x |
-| 16 | 203 K | 0.63x | 178 K | 0.83x | 204 K | 4.99x |
-| 32 | 238 K | 0.74x | 156 K | 0.73x | 202 K | 4.95x |
-| 64 | 232 K (116 MB/s) | 0.72x | 168 K (84 MB/s) | 0.78x | 195 K (98 MB/s) | 4.78x |
-
-refc: signal 449 K → 191 K (0.42x at 64T), async 233 K → 100 K (0.43x),
-sync 44 K → 241 K (5.45x, plateau slightly above orc). Correctness
-(counts + hashes) held at every row under both memory managers; sync
-never saw a single `-6` (the 64→256 slot pool absorbs 64 blocking
-callers).
-
-Scalar family (orc), msg/s and scaling vs 1 thread:
+Payload family (500 B):
 
 | threads | signal | vs 1T | async | vs 1T | sync | vs 1T |
 | ---: | ---: | :---: | ---: | :---: | ---: | :---: |
-| 1 | 1.09 M | 1.00x | 491 K | 1.00x | 44 K | 1.00x |
-| 2 | 1.04 M | 0.95x | 497 K | 1.01x | 98 K | 2.20x |
-| 4 | 918 K | 0.84x | 434 K | 0.88x | 468 K | 10.5x |
-| 8 | 332 K | 0.30x | 332 K | 0.67x | 472 K | 10.6x |
-| 16 | 246 K | 0.22x | 304 K | 0.61x | 450 K | 10.1x |
-| 32 | 218 K | 0.20x | 297 K | 0.60x | 407 K | 9.18x |
-| 64 | 262 K | 0.24x | 298 K | 0.60x | 433 K | 9.76x |
+| 1 | 354 K | 1.00x | 260 K | 1.00x | 41 K | 1.00x |
+| 2 | 418 K | 1.18x | 263 K | 1.00x | 92 K | 2.21x |
+| 4 | 392 K | 1.10x | 254 K | 0.97x | 191 K | 4.60x |
+| 8 | 328 K | 0.92x | 230 K | 0.88x | 218 K | 5.26x |
+| 16 | 197 K | 0.55x | 209 K | 0.80x | 238 K | 5.73x |
+| 32 | 259 K | 0.73x | 204 K | 0.78x | 237 K | 5.72x |
+| 64 | 275 K (138 MB/s) | 0.77x | 208 K (104 MB/s) | 0.79x | 236 K (118 MB/s) | 5.68x |
 
-refc scalar: signal 1.23 M → 170 K (0.13x at 64T), async 452 K → 108 K
-(0.23x), sync 46 K → 339 K (7.40x).
+Scalar family:
+
+| threads | signal | vs 1T | async | vs 1T | sync | vs 1T |
+| ---: | ---: | :---: | ---: | :---: | ---: | :---: |
+| 1 | 1.10 M | 1.00x | 491 K | 1.00x | 45 K | 1.00x |
+| 2 | 1.08 M | 0.97x | 490 K | 0.99x | 101 K | 2.24x |
+| 4 | 929 K | 0.84x | 445 K | 0.90x | 447 K | 9.95x |
+| 8 | 303 K | 0.27x | 331 K | 0.67x | 475 K | 10.5x |
+| 16 | 207 K | 0.18x | 297 K | 0.60x | 483 K | 10.7x |
+| 32 | 195 K | 0.17x | 280 K | 0.57x | 466 K | 10.3x |
+| 64 | 282 K | 0.25x | 289 K | 0.58x | 454 K | 10.1x |
+
+refc, 1T → 64T: payload signal 508 K → 225 K (0.44x), payload async
+312 K → 106 K (0.33x), payload sync 45 K → 285 K (6.39x); scalar signal
+1.19 M → 189 K (0.15x), scalar async 446 K → 110 K (0.24x), scalar sync
+45 K → 368 K (8.08x). Correctness (counts + predicate results) held at
+every row under both memory managers; sync never saw a single `-6` (the
+64→256 slot pool absorbs 64 blocking callers).
 
 ### Interpretation
 
-1. **Every lane converges on the same ceiling — the processing thread.**
-   ~200–240 K msg/s ≈ 100–180 MB/s of payload is the single-threaded
-   CBOR-decode + hash + dispatch rate; no ingress design change moves it.
-   This is the number the submit bench deliberately excluded, and for
-   sustained load it, not the ingress, is the system's capacity.
-2. **Signal peaks early (~360–430 K/s at 2T, ring still absorbing) then
-   sheds 30 % (orc) / 50 % (refc)** as producer spin-retries at the 16 K
-   ceiling steal cores from the consumer — the e2e echo of the ingress
-   bench's contention collapse, much milder because the drain dominates.
-3. **Async is window-bound, not ingress-bound**: with `asyncQueueDepth`
-   64, producers spend their time in `Again` retries (10 M+ at 64T) and
-   throughput tracks slightly below signal. Raising the window would trade
-   memory (in-flight requests + response ring) for the gap to the drain
-   ceiling.
-4. **Sync is latency-then-ceiling**: one thread = ~25 µs round trip
-   (40 K/s); concurrency hides latency perfectly up to 4 threads, then the
-   provider-side ceiling takes over — and it needs no retry loop at all up
-   to 64 callers thanks to the slot pool. For ≤ 64-thread foreign apps the
-   blocking lane is competitive with async at far simpler call-site
-   semantics.
-5. **The scalar family shifts the bottleneck back toward the ingress.**
-   With the 500 B copy+hash gone, per-message processing cost drops ~3x
-   (scalar signal floor: 1.09 M/s at 1T vs 328 K hashed) — so the drain
-   stops being the wall and the lanes diverge: the signal lane re-inherits
-   the ingress contention collapse (0.20–0.30x past 8T, the submit-bench
-   shape), async roughly doubles its plateau (~300 K, still window-bound),
-   and **blocking sync becomes the fastest lane at concurrency**
-   (~430–470 K/s plateau, 10.5x) because each round trip parks its
-   producer in a `Cond` wait instead of spin-retrying against a shared
-   ring — backpressure by construction. Round-trip latency at 1T is
-   payload-independent (~22–25 µs both families): the handoff, not the
-   payload, dominates a single call.
+With handler compute identical across families, the payload-vs-scalar
+delta IS the transport cost, and the lane-vs-lane delta IS the mechanism
+cost:
+
+1. **500 B of transport costs ~1.9 µs/msg on the one-way lane** (1T
+   signal: 1/354 K − 1/1.10 M ≈ 2.83 − 0.91 µs) — roughly a 3.1x
+   throughput haircut, entirely wrapper-encode + buffer copy + Nim decode
+   (~260 MB/s marginal payload bandwidth). The retired hash-variant
+   numbers confirm compute was never the wall: hashing all 500 B moved
+   throughput by only ~10 %.
+2. **The payload family is drain-bound; the scalar family is
+   ingress-bound.** With cheap messages the drain ceiling roughly triples
+   and the signal lane re-inherits the submit-bench contention collapse
+   (0.17–0.27x past 8T, spin-retries against the shared ring); with 500 B
+   in flight the consumer is the wall and the collapse is milder (0.55–
+   0.92x). Ingress sharding (nim-ffi #101 style) would pay off for small
+   messages, not large ones.
+3. **Async is window-bound in both families**: `asyncQueueDepth` 64 caps
+   it at ~205–210 K (payload) / ~280–300 K (scalar) with 7–10 M `Again`
+   retries at 64T. Raising the window is the knob; until then async never
+   beats the blocking lane past 4 threads.
+4. **Blocking sync is the best-behaved lane at concurrency in BOTH
+   families** (payload: 236 K, 5.7x; scalar: 454–483 K, 10.5x): each
+   round trip parks its producer in a `Cond` wait instead of spin-retrying
+   a shared ring — backpressure by construction, zero retries, and it
+   degrades not at all up to 64 callers. Single-caller latency is
+   payload-independent (~22–25 µs RT): the cross-thread handoff dominates
+   one call, not the bytes.
 
 ### Reproducing
 

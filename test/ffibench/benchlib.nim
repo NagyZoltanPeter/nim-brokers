@@ -140,33 +140,33 @@ RequestBroker(API):
 # ---------------------------------------------------------------------------
 # E2E throughput bench surface (bench_e2e_driver.cpp).
 #
-# Three lanes over a realistic 500 B payload, each handler doing a trivial
-# FNV-1a 64 hash of the bytes so "processed" means real work:
+# Three lanes x two payload families, all sharing ONE trivial O(1) parity
+# predicate as the handler compute — so the families differ purely in
+# TRANSPORT cost (encode/copy/decode of the payload), never in handler work:
 #
-#   HashSignal      — one-way C++ -> Nim (slot-free signal `_call`); the
-#                     handler folds the hash into `gE2eHashAcc` and bumps
-#                     `gE2eProcessed` so the driver can (a) detect drain
-#                     completion and (b) verify the aggregate checksum.
-#   HashRequest     — C++ -> Nim -> C++ turnaround returning the hash;
-#                     driven both via `_callAsync` (async scenario) and the
-#                     blocking `_call` (sync scenario).
-#   E2eStatsRequest — reads the two counters (driver works with deltas, so
-#                     it is iteration-restart safe).
+#   PayloadSignal / PayloadCheckRequest — 500 B `seq[byte]` payload; the
+#       predicate reads first byte, last byte, and length (O(1), payload
+#       content is NOT walked).
+#   ScalarSignal / ScalarCheckRequest   — 2 x int64 + 1 x float64 scalars;
+#       the same predicate over (a, b, x).
+#   E2eStatsRequest — reads the signal-lane counters (driver works with
+#       deltas, so it is iteration-restart safe).
+#
+# Request lanes return the predicate bool; signal lanes count true results
+# so the driver can verify the aggregate by delta.
 # ---------------------------------------------------------------------------
 
 SignalBroker(API):
-  type HashSignal = object
+  type PayloadSignal = object
     payload*: seq[byte]
 
 RequestBroker(API):
-  type HashRequest = object
-    hash*: int64
+  type PayloadCheckRequest = object
+    ok*: bool
 
-  proc signature*(payload: seq[byte]): Future[Result[HashRequest, string]] {.async.}
-
-# Scalar variant of the same three lanes: 2 x int64 + 1 x float64 in, bool
-# out, with a trivial parity predicate as the "compute". Isolates the framing
-# / dispatch cost from the 500 B copy+hash the Hash* lanes pay.
+  proc signature*(
+    payload: seq[byte]
+  ): Future[Result[PayloadCheckRequest, string]] {.async.}
 
 SignalBroker(API):
   type ScalarSignal = object
@@ -184,28 +184,30 @@ RequestBroker(API):
 
 RequestBroker(API):
   type E2eStatsRequest = object
-    processed*: int64
-    hashAcc*: int64
+    payloadProcessed*: int64
+    payloadTrue*: int64
     scalarProcessed*: int64
     scalarTrue*: int64
 
   proc signature*(): Future[Result[E2eStatsRequest, string]] {.async.}
 
-var gE2eProcessed: Atomic[int64]
-var gE2eHashAcc: Atomic[int64] ## wrapping sum of per-payload FNV-1a hashes
+var gE2ePayloadProcessed: Atomic[int64]
+var gE2ePayloadTrue: Atomic[int64] ## count of true predicate results
 var gE2eScalarProcessed: Atomic[int64]
 var gE2eScalarTrue: Atomic[int64] ## count of true predicate results
 
-proc fnv1a64(data: openArray[byte]): uint64 =
-  result = 0xcbf29ce484222325'u64
-  for b in data:
-    result = (result xor uint64(b)) * 0x100000001b3'u64
-
 proc scalarPred(a, b: int64, x: float64): bool =
-  ## The trivial scalar compute. `int64(x)` truncates toward zero on both
-  ## sides of the boundary (IEEE double, i < 2^52 in the driver), so the C++
-  ## driver can predict the result exactly.
+  ## The shared trivial compute. `int64(x)` truncates toward zero on both
+  ## sides of the boundary (IEEE double, values < 2^52 in the driver), so the
+  ## C++ driver can predict the result exactly.
   ((a + b + int64(x)) and 1) == 0
+
+proc payloadPred(payload: openArray[byte]): bool =
+  ## Same predicate, inputs sourced from O(1) reads of the payload — the
+  ## bytes are never walked, so handler cost is identical to the scalar lane.
+  if payload.len == 0:
+    return scalarPred(0, 0, 0.0)
+  scalarPred(int64(payload[0]), int64(payload[^1]), float64(payload.len))
 
 # Shared-heap counters for the Nim audiences. Updated under moRelaxed from
 # whichever thread the listener fires on; read under moAcquire by the
@@ -387,26 +389,27 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   if pingPayloadRes.isErr():
     return err("TriggerPingPayloadRequest provider: " & pingPayloadRes.error())
 
-  # E2E bench — one-way signal handler: hash the payload, fold it into the
-  # accumulator, bump the processed counter.
-  let hashSigRes = HashSignal.onSignal(
+  # E2E bench — one-way payload signal handler: O(1) predicate, count trues.
+  let payloadSigRes = PayloadSignal.onSignal(
     ctx,
-    proc(s: HashSignal) {.async: (raises: []).} =
-      let h = fnv1a64(s.payload)
-      discard gE2eHashAcc.fetchAdd(cast[int64](h), moRelaxed)
-      discard gE2eProcessed.fetchAdd(1, moRelease),
+    proc(s: PayloadSignal) {.async: (raises: []).} =
+      if payloadPred(s.payload):
+        discard gE2ePayloadTrue.fetchAdd(1, moRelaxed)
+      discard gE2ePayloadProcessed.fetchAdd(1, moRelease),
   )
-  if hashSigRes.isErr():
-    return err("HashSignal handler: " & hashSigRes.error())
+  if payloadSigRes.isErr():
+    return err("PayloadSignal handler: " & payloadSigRes.error())
 
-  # E2E bench — request turnaround: return the payload hash to the caller.
-  let hashReqRes = HashRequest.setProvider(
+  # E2E bench — payload request turnaround: return the predicate result.
+  let payloadReqRes = PayloadCheckRequest.setProvider(
     ctx,
-    proc(payload: seq[byte]): Future[Result[HashRequest, string]] {.closure, async.} =
-      return ok(HashRequest(hash: cast[int64](fnv1a64(payload)))),
+    proc(
+        payload: seq[byte]
+    ): Future[Result[PayloadCheckRequest, string]] {.closure, async.} =
+      return ok(PayloadCheckRequest(ok: payloadPred(payload))),
   )
-  if hashReqRes.isErr():
-    return err("HashRequest provider: " & hashReqRes.error())
+  if payloadReqRes.isErr():
+    return err("PayloadCheckRequest provider: " & payloadReqRes.error())
 
   # E2E bench — scalar signal handler: evaluate the predicate, count trues.
   let scalarSigRes = ScalarSignal.onSignal(
@@ -436,8 +439,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
     proc(): Future[Result[E2eStatsRequest, string]] {.closure, async.} =
       return ok(
         E2eStatsRequest(
-          processed: gE2eProcessed.load(moAcquire),
-          hashAcc: gE2eHashAcc.load(moAcquire),
+          payloadProcessed: gE2ePayloadProcessed.load(moAcquire),
+          payloadTrue: gE2ePayloadTrue.load(moAcquire),
           scalarProcessed: gE2eScalarProcessed.load(moAcquire),
           scalarTrue: gE2eScalarTrue.load(moAcquire),
         )
@@ -465,8 +468,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   # shutdown cycles in the stress drivers).
   gSameThreadCount.store(0, moRelease)
   gCrossThreadCount.store(0, moRelease)
-  gE2eProcessed.store(0, moRelease)
-  gE2eHashAcc.store(0, moRelease)
+  gE2ePayloadProcessed.store(0, moRelease)
+  gE2ePayloadTrue.store(0, moRelease)
   gE2eScalarProcessed.store(0, moRelease)
   gE2eScalarTrue.store(0, moRelease)
 

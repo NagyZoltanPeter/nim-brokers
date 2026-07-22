@@ -2,29 +2,31 @@
  *
  * Drives the ACTUAL foreign path: this C++ process -> generated benchlib.hpp
  * wrapper (CBOR encode) -> libbenchlib C ABI -> courier -> Nim processing
- * thread, which FNV-1a-hashes every 500 B payload. Three scenarios:
+ * thread. Three scenarios:
  *
  *   1. signal    C++ -> Nim            one-way signal `_call`; the clock runs
  *                                      until the Nim handler has PROCESSED all
  *                                      messages (polled via e2eStatsRequest),
  *                                      so this is drain throughput, not submit.
  *   2. async     C++ -> Nim -> C++     `_callAsync` turnaround returning the
- *                                      hash; clock stops at the last callback.
+ *                                      result; clock stops at the last callback.
  *   3. sync      C++ -> Nim -> C++     blocking `_call` turnaround; each
  *                                      thread's calls are serial round trips.
  *
- * Correctness is enforced per scenario: the aggregate hash accumulator
- * (scenario 1) / every returned hash (2, 3) must match the C++-computed
- * expectation, and completion counts must match exactly.
+ * Each scenario runs in two payload families that share ONE trivial O(1)
+ * parity predicate as the handler compute, so the families differ purely in
+ * TRANSPORT cost (encode/copy/decode), never in handler work:
+ *   payload — 500 B byte payload; predicate over (first byte, last byte,
+ *             length) — the bytes are never walked by the handler
+ *   scalar  — 2 x int64 + 1 x float64 in, bool out, same predicate
  *
- * Each scenario runs in two payload families:
- *   hash    — 500 B byte payload, handler FNV-1a-hashes it (copy-heavy)
- *   scalar  — 2 x int64 + 1 x float64 in, bool out, parity predicate
- *             (framing/dispatch cost isolated from the payload copy+hash)
+ * Correctness is enforced per scenario: the signal lanes verify the
+ * aggregate predicate-true count by delta; the request lanes verify every
+ * returned bool; completion counts must match exactly.
  *
  * Env knobs: BROKER_E2E_PER_THREAD (default 10000), BROKER_E2E_ITERS (3,
  * median reported), BROKER_E2E_THREADS ("1,2,4,8,16,32,64"),
- * BROKER_E2E_PAYLOAD (500 bytes; hash family only).
+ * BROKER_E2E_PAYLOAD (500 bytes; payload family only).
  */
 
 #include <algorithm>
@@ -42,14 +44,6 @@
 
 using namespace benchlib;
 using sclock = std::chrono::steady_clock;
-
-static uint64_t fnv1a64(const uint8_t* p, size_t n) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < n; ++i) {
-        h = (h ^ p[i]) * 0x100000001b3ull;
-    }
-    return h;
-}
 
 static int envInt(const char* name, int def) {
     const char* v = std::getenv(name);
@@ -85,17 +79,30 @@ struct IterOut {
 struct RunCfg {
     int threads = 1;
     int perThread = 0;
-    const Bytes* payload = nullptr;  // hash family only
-    uint64_t perMsgHash = 0;         // hash family only
+    const Bytes* payload = nullptr;  // payload family only
+    bool payloadOk = false;          // expected predicate result for *payload
 };
 
-// Scalar family inputs, derived per message index i (identical formula in the
-// Nim provider's `scalarPred`, so results are exactly predictable here).
+// The one shared predicate — identical formula in the Nim providers
+// (`scalarPred` / `payloadPred`), so results are exactly predictable here
+// ((int64_t)x truncation matches Nim's int64(x) for the value ranges used).
+static bool parityPred(int64_t a, int64_t b, double x) {
+    return ((a + b + static_cast<int64_t>(x)) & 1) == 0;
+}
+
+// Payload family: predicate inputs are O(1) reads of the payload.
+static bool payloadPredOf(const Bytes& p) {
+    if (p.empty()) return parityPred(0, 0, 0.0);
+    return parityPred(static_cast<int64_t>(p.front()), static_cast<int64_t>(p.back()),
+                      static_cast<double>(p.size()));
+}
+
+// Scalar family inputs, derived per message index i.
 static int64_t scalarA(int64_t i) { return i; }
 static int64_t scalarB(int64_t i) { return 3 * i + 1; }
 static double scalarX(int64_t i) { return 0.5 * static_cast<double>(i); }
 static bool scalarPred(int64_t i) {
-    return ((scalarA(i) + scalarB(i) + static_cast<int64_t>(scalarX(i))) & 1) == 0;
+    return parityPred(scalarA(i), scalarB(i), scalarX(i));
 }
 static uint64_t scalarTruesUpTo(int64_t n) {
     uint64_t trues = 0;
@@ -127,14 +134,14 @@ static IterOut runSignal(const RunCfg& cfg) {
             while (!start.load(std::memory_order_acquire)) {}
             for (int i = 0; i < cfg.perThread; ++i) {
                 for (;;) {
-                    auto r = lib.hashSignal(*cfg.payload);
+                    auto r = lib.payloadSignal(*cfg.payload);
                     if (r.isOk()) break;
                     if (r.error().rfind("EAGAIN", 0) == 0) {
                         ++myRetries;
                         std::this_thread::yield();  // let the consumer drain
                         continue;
                     }
-                    fatal("hashSignal", r.error());
+                    fatal("payloadSignal", r.error());
                 }
             }
             retries.fetch_add(myRetries, std::memory_order_relaxed);
@@ -150,12 +157,12 @@ static IterOut runSignal(const RunCfg& cfg) {
     // to the volume).
     const auto deadline = sclock::now() + std::chrono::seconds(120);
     int64_t processedDelta = 0;
-    int64_t hashDelta = 0;
+    int64_t trueDelta = 0;
     for (;;) {
         auto s = lib.e2eStatsRequest();
         if (!s.isOk()) fatal("e2eStatsRequest(poll)", s.error());
-        processedDelta = s->processed - base->processed;
-        hashDelta = s->hashAcc - base->hashAcc;
+        processedDelta = s->payloadProcessed - base->payloadProcessed;
+        trueDelta = s->payloadTrue - base->payloadTrue;
         if (processedDelta >= static_cast<int64_t>(total)) break;
         if (sclock::now() > deadline) fatal("signal drain", "timeout waiting for drain");
         std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -164,9 +171,9 @@ static IterOut runSignal(const RunCfg& cfg) {
 
     if (processedDelta != static_cast<int64_t>(total))
         fatal("signal correctness", "processed != submitted");
-    const uint64_t expectedAcc = cfg.perMsgHash * total;  // wrapping, matches Nim
-    if (static_cast<uint64_t>(hashDelta) != expectedAcc)
-        fatal("signal correctness", "aggregate hash mismatch");
+    const uint64_t expectedTrues = cfg.payloadOk ? total : 0;
+    if (static_cast<uint64_t>(trueDelta) != expectedTrues)
+        fatal("signal correctness", "aggregate predicate count mismatch");
 
     const double sec = std::chrono::duration<double>(t1 - t0).count();
     return IterOut{static_cast<double>(total) / sec,
@@ -187,9 +194,9 @@ static IterOut runAsync(const RunCfg& cfg) {
     std::atomic<uint64_t> done{0};
     std::atomic<uint64_t> bad{0};
 
-    const int64_t expected = static_cast<int64_t>(cfg.perMsgHash);
-    auto cb = [&done, &bad, expected](Result<HashRequest> r) {
-        if (!r.isOk() || r->hash != expected) bad.fetch_add(1, std::memory_order_relaxed);
+    const bool expected = cfg.payloadOk;
+    auto cb = [&done, &bad, expected](Result<PayloadCheckRequest> r) {
+        if (!r.isOk() || r->ok != expected) bad.fetch_add(1, std::memory_order_relaxed);
         done.fetch_add(1, std::memory_order_release);
     };
 
@@ -201,14 +208,14 @@ static IterOut runAsync(const RunCfg& cfg) {
             while (!start.load(std::memory_order_acquire)) {}
             for (int i = 0; i < cfg.perThread; ++i) {
                 for (;;) {
-                    const int32_t rc = lib.hashRequestAsync(*cfg.payload, cb);
+                    const int32_t rc = lib.payloadCheckRequestAsync(*cfg.payload, cb);
                     if (rc == 0) break;
                     if (rc == Benchlib::asyncAgain) {
                         ++myRetries;
                         std::this_thread::yield();  // in-flight window full
                         continue;
                     }
-                    fatal("hashRequestAsync", "rc=" + std::to_string(rc));
+                    fatal("payloadCheckRequestAsync", "rc=" + std::to_string(rc));
                 }
             }
             retries.fetch_add(myRetries, std::memory_order_relaxed);
@@ -226,7 +233,7 @@ static IterOut runAsync(const RunCfg& cfg) {
     }
     const auto t1 = sclock::now();
 
-    if (bad.load() != 0) fatal("async correctness", "hash mismatch in callbacks");
+    if (bad.load() != 0) fatal("async correctness", "predicate mismatch in callbacks");
 
     const double sec = std::chrono::duration<double>(t1 - t0).count();
     return IterOut{static_cast<double>(total) / sec,
@@ -244,7 +251,7 @@ static IterOut runSync(const RunCfg& cfg) {
         static_cast<uint64_t>(cfg.threads) * static_cast<uint64_t>(cfg.perThread);
     std::atomic<bool> start{false};
     std::atomic<uint64_t> retries{0};
-    const int64_t expected = static_cast<int64_t>(cfg.perMsgHash);
+    const bool expected = cfg.payloadOk;
 
     std::vector<std::thread> producers;
     producers.reserve(cfg.threads);
@@ -254,9 +261,10 @@ static IterOut runSync(const RunCfg& cfg) {
             while (!start.load(std::memory_order_acquire)) {}
             for (int i = 0; i < cfg.perThread; ++i) {
                 for (;;) {
-                    auto r = lib.hashRequest(*cfg.payload);
+                    auto r = lib.payloadCheckRequest(*cfg.payload);
                     if (r.isOk()) {
-                        if (r->hash != expected) fatal("sync correctness", "hash mismatch");
+                        if (r->ok != expected)
+                            fatal("sync correctness", "predicate mismatch");
                         break;
                     }
                     if (r.error().rfind("EAGAIN", 0) == 0) {
@@ -264,7 +272,7 @@ static IterOut runSync(const RunCfg& cfg) {
                         std::this_thread::yield();
                         continue;
                     }
-                    fatal("hashRequest", r.error());
+                    fatal("payloadCheckRequest", r.error());
                 }
             }
             retries.fetch_add(myRetries, std::memory_order_relaxed);
@@ -464,8 +472,7 @@ static double median(std::vector<double> xs) {
 
 static void runScenario(const char* name, IterOut (*fn)(const RunCfg&),
                         const std::vector<int>& threadCounts, int perThread,
-                        int iters, const Bytes& payload, uint64_t perMsgHash,
-                        int bytesPerMsg) {
+                        int iters, const Bytes& payload, int bytesPerMsg) {
     std::printf("── %s — %d msgs/thread (median of %d) ──────\n", name, perThread,
                 iters);
     std::printf("  %-9s%-11s%-13s%-11s%-12s%s\n", "threads", "msgs", "msg/s",
@@ -476,7 +483,7 @@ static void runScenario(const char* name, IterOut (*fn)(const RunCfg&),
         cfg.threads = k;
         cfg.perThread = perThread;
         cfg.payload = &payload;
-        cfg.perMsgHash = perMsgHash;
+        cfg.payloadOk = payloadPredOf(payload);
         std::vector<double> rates;
         uint64_t retries = 0;
         for (int i = 0; i < iters; ++i) {
@@ -517,33 +524,25 @@ int main() {
     payload.resize(static_cast<size_t>(payloadSize));
     for (size_t i = 0; i < payload.size(); ++i)
         payload[i] = static_cast<uint8_t>(i & 0xFF);
-    const uint64_t perMsgHash = fnv1a64(payload.data(), payload.size());
 
-    std::printf("# benchlib FFI e2e throughput — hash family: payload=%dB "
-                "handler=fnv1a64; scalar family: (i64,i64,f64)->bool parity\n\n",
+    std::printf("# benchlib FFI e2e throughput — shared O(1) parity predicate; "
+                "families differ only in transport (%dB bytes vs 3 scalars)\n\n",
                 payloadSize);
-    const std::string tag = " [" + std::to_string(payloadSize) + "B hash]";
+    const std::string tag = " [" + std::to_string(payloadSize) + "B payload]";
     runScenario(("signal C++ -> Nim (one-way _call, drain-timed)" + tag).c_str(),
-                runSignal, threadCounts, perThread, iters, payload, perMsgHash,
-                payloadSize);
+                runSignal, threadCounts, perThread, iters, payload, payloadSize);
     runScenario(("async request C++ -> Nim -> C++ (_callAsync turnaround)" + tag).c_str(),
-                runAsync, threadCounts, perThread, iters, payload, perMsgHash,
-                payloadSize);
+                runAsync, threadCounts, perThread, iters, payload, payloadSize);
     runScenario(("sync request C++ -> Nim -> C++ (blocking _call turnaround)" + tag).c_str(),
-                runSync, threadCounts, perThread, iters, payload, perMsgHash,
-                payloadSize);
+                runSync, threadCounts, perThread, iters, payload, payloadSize);
 
     runScenario("signal C++ -> Nim (one-way _call, drain-timed) [scalar]",
-                runScalarSignal, threadCounts, perThread, iters, payload, perMsgHash,
-                0);
+                runScalarSignal, threadCounts, perThread, iters, payload, 0);
     runScenario("async request C++ -> Nim -> C++ (_callAsync turnaround) [scalar]",
-                runScalarAsync, threadCounts, perThread, iters, payload, perMsgHash,
-                0);
+                runScalarAsync, threadCounts, perThread, iters, payload, 0);
     runScenario("sync request C++ -> Nim -> C++ (blocking _call turnaround) [scalar]",
-                runScalarSync, threadCounts, perThread, iters, payload, perMsgHash,
-                0);
+                runScalarSync, threadCounts, perThread, iters, payload, 0);
 
-    std::printf(
-        "  correctness: all counts, hashes and predicates matched expectations.\n");
+    std::printf("  correctness: all counts and predicates matched expectations.\n");
     return 0;
 }
