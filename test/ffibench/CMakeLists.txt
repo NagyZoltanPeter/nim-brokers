@@ -88,3 +88,5 @@ add_ffibench_target(stress_event_drop_overload stress_event_drop_overload.cpp)
 add_ffibench_target(bench_event_driver bench_event_driver.cpp)
 # Round-2 closure — FFI perftest from C++ (matches perf_test_multi_thread_*).
 add_ffibench_target(perf_driver perf_driver.cpp)
+# E2E throughput scaling — 500 B payload through signal / async / sync lanes.
+add_ffibench_target(bench_e2e_driver bench_e2e_driver.cpp)

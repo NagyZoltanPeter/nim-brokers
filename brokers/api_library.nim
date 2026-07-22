@@ -71,6 +71,8 @@ proc parseLibraryConfig(
   mainClass: string,
   asyncTimeoutMs: int,
   asyncQueueDepth: int,
+  callRingCeiling: int,
+  eventRingCeiling: int,
 ] {.compileTime.} =
   var name = ""
   var version = "0.1.0"
@@ -83,6 +85,24 @@ proc parseLibraryConfig(
   # pool. Exposed to clients via the generated `<LIB>_ASYNC_QUEUE_DEPTH` macro so
   # they can size a bounded send window. 64 unless overridden.
   var asyncQueueDepth = 64
+  # Sync call-courier ring growth ceiling per context. The ring starts at the
+  # 64-slot base and doubles on full ("spill" growth, new cap =
+  # min(2 * old, ceiling), same pattern as the event courier); 0 = key
+  # omitted = the default ceiling of 4x the base (256). At the ceiling the
+  # slot-free one-way signal lane gets -6 EAGAIN. An explicit value must be
+  # >= 256: the key can only raise the ceiling above stock behavior, never
+  # lower it (keeps the sync slot pool's 4x growth reachable, so a claimed
+  # slot always fits the ring). Memory at full growth:
+  # ceiling * sizeof(CborCallMsg) (280 B/entry) per context.
+  var callRingCeiling = 0
+  # Event-courier ring growth ceiling per context. The ring starts at the
+  # 256-entry base and doubles on full; 0 = key omitted = the default ceiling
+  # of 4x the base (1024), beyond which events are dropped with a throttled
+  # diagnostic. An explicit value must be >= 1024 — raise-only, mirroring
+  # callRingCeiling. Memory at full growth: ceiling * sizeof(CborEventMsg)
+  # per context, plus the queued payload buffers held until the delivery
+  # thread drains.
+  var eventRingCeiling = 0
   # AST emitted into the generated `<lib>_version()` proc: a string literal, or
   # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
   var versionExpr: NimNode = newLit("0.1.0")
@@ -158,6 +178,36 @@ proc parseLibraryConfig(
           asyncQueueDepth = int(v.intVal)
         else:
           error("asyncQueueDepth must be a positive integer literal", v)
+      of "callringceiling":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkIntLit:
+          if v.intVal < 256:
+            error(
+              "callRingCeiling must be >= 256 (the default ceiling — the key " &
+                "can only raise it, never lower it below stock behavior). " &
+                "Omit the key for the default.",
+              v,
+            )
+          callRingCeiling = int(v.intVal)
+        else:
+          error("callRingCeiling must be an integer literal >= 256", v)
+      of "eventringceiling":
+        var v = value
+        if v.kind == nnkStmtList and v.len == 1:
+          v = v[0]
+        if v.kind == nnkIntLit:
+          if v.intVal < 1024:
+            error(
+              "eventRingCeiling must be >= 1024 (the default ceiling — the " &
+                "key can only raise it, never lower it below stock behavior). " &
+                "Omit the key for the default.",
+              v,
+            )
+          eventRingCeiling = int(v.intVal)
+        else:
+          error("eventRingCeiling must be an integer literal >= 1024", v)
       of "mainclass":
         # reduced-A (A1): designates the main `BrokerInterface(API)` facade for
         # a multi-interface library. Other (API) interfaces are auto-discovered
@@ -204,6 +254,8 @@ proc parseLibraryConfig(
     mainClass: mainClass,
     asyncTimeoutMs: asyncTimeoutMs,
     asyncQueueDepth: asyncQueueDepth,
+    callRingCeiling: callRingCeiling,
+    eventRingCeiling: eventRingCeiling,
   )
 
 proc parseTypeExpr(
@@ -234,6 +286,8 @@ proc registerBrokerLibraryCborImpl(
       mainClass: string,
       asyncTimeoutMs: int,
       asyncQueueDepth: int,
+      callRingCeiling: int,
+      eventRingCeiling: int,
     ],
 ): NimNode
 
@@ -269,6 +323,8 @@ proc registerBrokerLibraryCborImpl(
         mainClass: string,
         asyncTimeoutMs: int,
         asyncQueueDepth: int,
+        callRingCeiling: int,
+        eventRingCeiling: int,
       ],
 ): NimNode =
   let libName = config.name
@@ -376,6 +432,14 @@ proc registerBrokerLibraryCborImpl(
   # Configured async in-flight window (per context), baked into `_createContext`
   # courier sizing.
   let asyncQueueDepthLit = newLit(config.asyncQueueDepth)
+
+  # Configured sync call-courier growth ceiling (0 = key omitted = classic
+  # 4x the 64 base), baked into `_createContext` courier sizing.
+  let callRingCeilingLit = newLit(config.callRingCeiling)
+
+  # Configured event-courier growth ceiling (0 = classic 4x the 256 base),
+  # baked into `_createContext` courier sizing.
+  let eventRingCeilingLit = newLit(config.eventRingCeiling)
 
   result = newStmtList()
 
@@ -1613,12 +1677,16 @@ proc registerBrokerLibraryCborImpl(
         # Part C — courier: 64 response slots = initial ceiling on concurrent
         # in-flight SYNC `<lib>_call`s (grows to 4x). The async window is a
         # separate, fixed ceiling (`asyncQueueDepth`, default 64) — full => -6.
-        arg.courier = newCborCourier(64, `asyncQueueDepthLit`)
+        # The call ring starts at the 64 base and doubles on full up to
+        # `callRingCeiling` (0 = key omitted = classic 4x = 256) — the spill
+        # headroom serves the slot-free one-way signal lane.
+        arg.courier = newCborCourier(64, `asyncQueueDepthLit`, `callRingCeilingLit`)
         arg.courierSignal = nil
         # Part D-3 — event courier: 256-slot ring (burst capacity, not
-        # concurrency bound; producer is fire-and-forget). A full ring
-        # drops the event with a diagnostic. Re-tunable after D-6 bench.
-        arg.eventCourier = newCborEventCourier(256)
+        # concurrency bound; producer is fire-and-forget), doubling on full
+        # up to `eventRingCeiling` (0 = key omitted = classic 4x = 1024).
+        # At the ceiling a full ring drops the event with a diagnostic.
+        arg.eventCourier = newCborEventCourier(256, `eventRingCeilingLit`)
         arg.deliverySignal = nil
         # Async-response courier: sized to the call courier's async in-flight
         # ceiling so a bounded set of outstanding `<lib>_callAsync`s can never

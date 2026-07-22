@@ -527,6 +527,30 @@ task perftestInproc,
         flags.add(" -d:release")
       exec "nim c -r " & flags & " test/ffibench/perf_inproc.nim"
 
+task benchFfiE2e,
+  "E2E FFI throughput scaling from C++ (500 B payload, fnv1a handler; signal / callAsync / blocking _call; BROKER_E2E_* env knobs)":
+  ## Full foreign-boundary companion to `benchFfiSubmit`: a real C++ driver
+  ## through the generated benchlib.hpp wrapper + dylib, timing PROCESSED
+  ## throughput (drain / callback / round-trip complete), not just submit.
+  mkDir("test/ffibench/cmake-build")
+  for mm in memoryManagerMatrix():
+    echo "\n=== benchFfiE2e: --mm:" & mm & " (release) ==="
+    buildBenchLibWithMM(mm, true)
+    exec "cmake -S test/ffibench -B test/ffibench/cmake-build -DCMAKE_BUILD_TYPE=Release"
+    exec "cmake --build test/ffibench/cmake-build --target bench_e2e_driver"
+    exec "test/ffibench/build/bench_e2e_driver"
+
+task benchFfiSubmit,
+  "Concurrent submit-scaling bench: one-way SignalBroker(API) _call ingress (median-of-N; BROKER_SUBMIT_* env knobs; orc + refc, danger)":
+  ## nim-brokers analog of nim-ffi's bench_ffi_submit (logos-messaging/nim-ffi
+  ## #97/#101): K producer threads → one context, submit phase timed, median
+  ## of BROKER_SUBMIT_ITERS, exactly-once correctness. -d:danger to match the
+  ## nim-ffi methodology so the tables compare directly.
+  for mm in memoryManagerMatrix():
+    echo "\n=== benchFfiSubmit: --mm:" & mm & " (danger) ==="
+    exec "nim c -r -d:danger -d:BrokerFfiApi --threads:on --path:. --outdir:build " &
+      "--mm:" & mm & " --nimMainPrefix:benchsubmit test/ffibench/bench_ffi_submit.nim"
+
 task perfOverhead,
   "Same-thread RequestBroker dispatch overhead vs direct proc call + memory (sync/async, scalar+512B; orc + refc, release)":
   ## Isolates the broker machinery cost: each row calls one shared impl, so

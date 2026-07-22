@@ -14,7 +14,8 @@
 {.push raises: [].}
 
 import std/[atomics, locks, os]
-import brokers/[event_broker, request_broker, broker_context, api_library]
+import
+  brokers/[event_broker, request_broker, signal_broker, broker_context, api_library]
 import brokers/internal/mt_broker_common
 
 ## InitializeRequest — required post-create configuration broker.
@@ -135,6 +136,78 @@ RequestBroker(API):
   proc signature*(
     count: int32, payloadSize: int32, emitTimestampNs: int64
   ): Future[Result[TriggerPingPayloadRequest, string]] {.async.}
+
+# ---------------------------------------------------------------------------
+# E2E throughput bench surface (bench_e2e_driver.cpp).
+#
+# Three lanes x two payload families, all sharing ONE trivial O(1) parity
+# predicate as the handler compute — so the families differ purely in
+# TRANSPORT cost (encode/copy/decode of the payload), never in handler work:
+#
+#   PayloadSignal / PayloadCheckRequest — 500 B `seq[byte]` payload; the
+#       predicate reads first byte, last byte, and length (O(1), payload
+#       content is NOT walked).
+#   ScalarSignal / ScalarCheckRequest   — 2 x int64 + 1 x float64 scalars;
+#       the same predicate over (a, b, x).
+#   E2eStatsRequest — reads the signal-lane counters (driver works with
+#       deltas, so it is iteration-restart safe).
+#
+# Request lanes return the predicate bool; signal lanes count true results
+# so the driver can verify the aggregate by delta.
+# ---------------------------------------------------------------------------
+
+SignalBroker(API):
+  type PayloadSignal = object
+    payload*: seq[byte]
+
+RequestBroker(API):
+  type PayloadCheckRequest = object
+    ok*: bool
+
+  proc signature*(
+    payload: seq[byte]
+  ): Future[Result[PayloadCheckRequest, string]] {.async.}
+
+SignalBroker(API):
+  type ScalarSignal = object
+    a*: int64
+    b*: int64
+    x*: float64
+
+RequestBroker(API):
+  type ScalarCheckRequest = object
+    ok*: bool
+
+  proc signature*(
+    a: int64, b: int64, x: float64
+  ): Future[Result[ScalarCheckRequest, string]] {.async.}
+
+RequestBroker(API):
+  type E2eStatsRequest = object
+    payloadProcessed*: int64
+    payloadTrue*: int64
+    scalarProcessed*: int64
+    scalarTrue*: int64
+
+  proc signature*(): Future[Result[E2eStatsRequest, string]] {.async.}
+
+var gE2ePayloadProcessed: Atomic[int64]
+var gE2ePayloadTrue: Atomic[int64] ## count of true predicate results
+var gE2eScalarProcessed: Atomic[int64]
+var gE2eScalarTrue: Atomic[int64] ## count of true predicate results
+
+proc scalarPred(a, b: int64, x: float64): bool =
+  ## The shared trivial compute. `int64(x)` truncates toward zero on both
+  ## sides of the boundary (IEEE double, values < 2^52 in the driver), so the
+  ## C++ driver can predict the result exactly.
+  ((a + b + int64(x)) and 1) == 0
+
+proc payloadPred(payload: openArray[byte]): bool =
+  ## Same predicate, inputs sourced from O(1) reads of the payload — the
+  ## bytes are never walked, so handler cost is identical to the scalar lane.
+  if payload.len == 0:
+    return scalarPred(0, 0, 0.0)
+  scalarPred(int64(payload[0]), int64(payload[^1]), float64(payload.len))
 
 # Shared-heap counters for the Nim audiences. Updated under moRelaxed from
 # whichever thread the listener fires on; read under moAcquire by the
@@ -316,6 +389,66 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   if pingPayloadRes.isErr():
     return err("TriggerPingPayloadRequest provider: " & pingPayloadRes.error())
 
+  # E2E bench — one-way payload signal handler: O(1) predicate, count trues.
+  let payloadSigRes = PayloadSignal.onSignal(
+    ctx,
+    proc(s: PayloadSignal) {.async: (raises: []).} =
+      if payloadPred(s.payload):
+        discard gE2ePayloadTrue.fetchAdd(1, moRelaxed)
+      discard gE2ePayloadProcessed.fetchAdd(1, moRelease),
+  )
+  if payloadSigRes.isErr():
+    return err("PayloadSignal handler: " & payloadSigRes.error())
+
+  # E2E bench — payload request turnaround: return the predicate result.
+  let payloadReqRes = PayloadCheckRequest.setProvider(
+    ctx,
+    proc(
+        payload: seq[byte]
+    ): Future[Result[PayloadCheckRequest, string]] {.closure, async.} =
+      return ok(PayloadCheckRequest(ok: payloadPred(payload))),
+  )
+  if payloadReqRes.isErr():
+    return err("PayloadCheckRequest provider: " & payloadReqRes.error())
+
+  # E2E bench — scalar signal handler: evaluate the predicate, count trues.
+  let scalarSigRes = ScalarSignal.onSignal(
+    ctx,
+    proc(s: ScalarSignal) {.async: (raises: []).} =
+      if scalarPred(s.a, s.b, s.x):
+        discard gE2eScalarTrue.fetchAdd(1, moRelaxed)
+      discard gE2eScalarProcessed.fetchAdd(1, moRelease),
+  )
+  if scalarSigRes.isErr():
+    return err("ScalarSignal handler: " & scalarSigRes.error())
+
+  # E2E bench — scalar request turnaround: return the predicate result.
+  let scalarReqRes = ScalarCheckRequest.setProvider(
+    ctx,
+    proc(
+        a: int64, b: int64, x: float64
+    ): Future[Result[ScalarCheckRequest, string]] {.closure, async.} =
+      return ok(ScalarCheckRequest(ok: scalarPred(a, b, x))),
+  )
+  if scalarReqRes.isErr():
+    return err("ScalarCheckRequest provider: " & scalarReqRes.error())
+
+  # E2E bench — counter accessor (driver reads deltas).
+  let e2eStatsRes = E2eStatsRequest.setProvider(
+    ctx,
+    proc(): Future[Result[E2eStatsRequest, string]] {.closure, async.} =
+      return ok(
+        E2eStatsRequest(
+          payloadProcessed: gE2ePayloadProcessed.load(moAcquire),
+          payloadTrue: gE2ePayloadTrue.load(moAcquire),
+          scalarProcessed: gE2eScalarProcessed.load(moAcquire),
+          scalarTrue: gE2eScalarTrue.load(moAcquire),
+        )
+      ),
+  )
+  if e2eStatsRes.isErr():
+    return err("E2eStatsRequest provider: " & e2eStatsRes.error())
+
   # Part D-4 — stats accessor. Reads the per-lane atomic counters.
   let statsRes = GetStatsRequest.setProvider(
     ctx,
@@ -335,6 +468,10 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   # shutdown cycles in the stress drivers).
   gSameThreadCount.store(0, moRelease)
   gCrossThreadCount.store(0, moRelease)
+  gE2ePayloadProcessed.store(0, moRelease)
+  gE2ePayloadTrue.store(0, moRelease)
+  gE2eScalarProcessed.store(0, moRelease)
+  gE2eScalarTrue.store(0, moRelease)
 
   ok()
 
@@ -351,5 +488,11 @@ registerBrokerLibrary:
     InitializeRequest
   shutdownRequest:
     ShutdownRequest
+  # E2E bench: give the one-way signal lane burst headroom (64 -> 16384 spill
+  # growth, ~4.6 MiB ring at full growth) while keeping the ceiling small
+  # enough that sustained overproduction still exercises real -6 backpressure
+  # (the driver retries and reports the retry count).
+  callRingCeiling:
+    16384
 
 {.pop.}

@@ -515,6 +515,15 @@ This generates:
 - aggregate event registration routing
 - generated C and C++ headers
 
+Optional keys (all per-context sizing/policy, compile-time integer literals):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `asyncTimeoutMs:` | 30000 | Default dispatch-scoped timeout for `<lib>_callAsync` (0 = infinite). See §`<lib>_callAsync`. |
+| `asyncQueueDepth:` | 64 | Ceiling on concurrent in-flight `<lib>_callAsync`s; full ⇒ `-6`. Exposed as `<LIB>_ASYNC_QUEUE_DEPTH`. |
+| `callRingCeiling:` | 256 (= 4× the 64 base) | Growth ceiling of the sync **call**-courier ring. The ring starts at 64 entries and doubles on full (spill growth: new cap = `min(2 × old, ceiling)`); at the ceiling the slot-free one-way **signal** lane gets `-6` (sync `_call`s stay slot-gated and always fit). **Raise-only**: explicit values must be ≥ 256, the default — lowering a ceiling below stock behavior is a compile error; omit the key for the default. Memory at full growth: ceiling × 280 B (`sizeof(CborCallMsg)`) per context. |
+| `eventRingCeiling:` | 1024 (= 4× the 256 base) | Growth ceiling of the **event**-courier ring. The ring starts at 256 entries and doubles on full; at the ceiling further events are **dropped** with a throttled diagnostic (events are fire-and-forget — there is no `-6` on this lane). **Raise-only**: explicit values must be ≥ 1024, the default (compile error otherwise); omit the key for the default. Memory at full growth: ceiling × `sizeof(CborEventMsg)` per context, plus queued payload buffers held until the delivery thread drains. |
+
 ### 4. How to build with it
 
 This subsection collects, in one place, every compile-time switch and runtime
