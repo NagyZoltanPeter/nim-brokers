@@ -164,20 +164,48 @@ RequestBroker(API):
 
   proc signature*(payload: seq[byte]): Future[Result[HashRequest, string]] {.async.}
 
+# Scalar variant of the same three lanes: 2 x int64 + 1 x float64 in, bool
+# out, with a trivial parity predicate as the "compute". Isolates the framing
+# / dispatch cost from the 500 B copy+hash the Hash* lanes pay.
+
+SignalBroker(API):
+  type ScalarSignal = object
+    a*: int64
+    b*: int64
+    x*: float64
+
+RequestBroker(API):
+  type ScalarCheckRequest = object
+    ok*: bool
+
+  proc signature*(
+    a: int64, b: int64, x: float64
+  ): Future[Result[ScalarCheckRequest, string]] {.async.}
+
 RequestBroker(API):
   type E2eStatsRequest = object
     processed*: int64
     hashAcc*: int64
+    scalarProcessed*: int64
+    scalarTrue*: int64
 
   proc signature*(): Future[Result[E2eStatsRequest, string]] {.async.}
 
 var gE2eProcessed: Atomic[int64]
 var gE2eHashAcc: Atomic[int64] ## wrapping sum of per-payload FNV-1a hashes
+var gE2eScalarProcessed: Atomic[int64]
+var gE2eScalarTrue: Atomic[int64] ## count of true predicate results
 
 proc fnv1a64(data: openArray[byte]): uint64 =
   result = 0xcbf29ce484222325'u64
   for b in data:
     result = (result xor uint64(b)) * 0x100000001b3'u64
+
+proc scalarPred(a, b: int64, x: float64): bool =
+  ## The trivial scalar compute. `int64(x)` truncates toward zero on both
+  ## sides of the boundary (IEEE double, i < 2^52 in the driver), so the C++
+  ## driver can predict the result exactly.
+  ((a + b + int64(x)) and 1) == 0
 
 # Shared-heap counters for the Nim audiences. Updated under moRelaxed from
 # whichever thread the listener fires on; read under moAcquire by the
@@ -380,13 +408,38 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   if hashReqRes.isErr():
     return err("HashRequest provider: " & hashReqRes.error())
 
+  # E2E bench — scalar signal handler: evaluate the predicate, count trues.
+  let scalarSigRes = ScalarSignal.onSignal(
+    ctx,
+    proc(s: ScalarSignal) {.async: (raises: []).} =
+      if scalarPred(s.a, s.b, s.x):
+        discard gE2eScalarTrue.fetchAdd(1, moRelaxed)
+      discard gE2eScalarProcessed.fetchAdd(1, moRelease),
+  )
+  if scalarSigRes.isErr():
+    return err("ScalarSignal handler: " & scalarSigRes.error())
+
+  # E2E bench — scalar request turnaround: return the predicate result.
+  let scalarReqRes = ScalarCheckRequest.setProvider(
+    ctx,
+    proc(
+        a: int64, b: int64, x: float64
+    ): Future[Result[ScalarCheckRequest, string]] {.closure, async.} =
+      return ok(ScalarCheckRequest(ok: scalarPred(a, b, x))),
+  )
+  if scalarReqRes.isErr():
+    return err("ScalarCheckRequest provider: " & scalarReqRes.error())
+
   # E2E bench — counter accessor (driver reads deltas).
   let e2eStatsRes = E2eStatsRequest.setProvider(
     ctx,
     proc(): Future[Result[E2eStatsRequest, string]] {.closure, async.} =
       return ok(
         E2eStatsRequest(
-          processed: gE2eProcessed.load(moAcquire), hashAcc: gE2eHashAcc.load(moAcquire)
+          processed: gE2eProcessed.load(moAcquire),
+          hashAcc: gE2eHashAcc.load(moAcquire),
+          scalarProcessed: gE2eScalarProcessed.load(moAcquire),
+          scalarTrue: gE2eScalarTrue.load(moAcquire),
         )
       ),
   )
@@ -414,6 +467,8 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   gCrossThreadCount.store(0, moRelease)
   gE2eProcessed.store(0, moRelease)
   gE2eHashAcc.store(0, moRelease)
+  gE2eScalarProcessed.store(0, moRelease)
+  gE2eScalarTrue.store(0, moRelease)
 
   ok()
 

@@ -486,15 +486,19 @@ BROKER_SUBMIT_THREADS="1,8,16,32,64,100" MM=orc nimble benchFfiSubmit
 
 `nimble benchFfiE2e` — the full-foreign-boundary companion to
 `benchFfiSubmit`: a real C++ driver through the generated `benchlib.hpp`
-wrapper + `libbenchlib.dylib`, 500 B payload, the Nim handler FNV-1a-hashes
-every message, and the clock measures **processed** throughput (drain /
-callback / round-trip complete), not submit. Three lanes:
+wrapper + `libbenchlib.dylib`; the clock measures **processed** throughput
+(drain / callback / round-trip complete), not submit. Three lanes:
 
 1. **signal** — one-way `_call`; drain-timed via a polled stats request;
-   aggregate hash checksum verified.
-2. **async** — `_callAsync` turnaround returning the hash; clock stops at
-   the last callback; every returned hash verified.
+   aggregate checksum verified.
+2. **async** — `_callAsync` turnaround; clock stops at the last callback;
+   every returned value verified.
 3. **sync** — blocking `_call` turnaround; per-thread serial round trips.
+
+Each lane runs in two payload families: **hash** (500 B byte payload, the
+Nim handler FNV-1a-hashes it — copy-heavy) and **scalar**
+(`(int64, int64, float64) -> bool` parity predicate — framing/dispatch cost
+isolated from the payload copy+hash).
 
 benchlib registers `callRingCeiling: 16384` (burst headroom, then real `-6`
 which the driver retries and reports). `asyncQueueDepth` stays at the
@@ -515,11 +519,26 @@ orc:
 | 32 | 238 K | 0.74x | 156 K | 0.73x | 202 K | 4.95x |
 | 64 | 232 K (116 MB/s) | 0.72x | 168 K (84 MB/s) | 0.78x | 195 K (98 MB/s) | 4.78x |
 
-refc: signal 377 K → 194 K (0.51x at 64T), async 267 K → 98 K (0.36x),
-sync 42 K → 238 K (5.70x, plateau slightly above orc). Correctness
+refc: signal 449 K → 191 K (0.42x at 64T), async 233 K → 100 K (0.43x),
+sync 44 K → 241 K (5.45x, plateau slightly above orc). Correctness
 (counts + hashes) held at every row under both memory managers; sync
 never saw a single `-6` (the 64→256 slot pool absorbs 64 blocking
 callers).
+
+Scalar family (orc), msg/s and scaling vs 1 thread:
+
+| threads | signal | vs 1T | async | vs 1T | sync | vs 1T |
+| ---: | ---: | :---: | ---: | :---: | ---: | :---: |
+| 1 | 1.09 M | 1.00x | 491 K | 1.00x | 44 K | 1.00x |
+| 2 | 1.04 M | 0.95x | 497 K | 1.01x | 98 K | 2.20x |
+| 4 | 918 K | 0.84x | 434 K | 0.88x | 468 K | 10.5x |
+| 8 | 332 K | 0.30x | 332 K | 0.67x | 472 K | 10.6x |
+| 16 | 246 K | 0.22x | 304 K | 0.61x | 450 K | 10.1x |
+| 32 | 218 K | 0.20x | 297 K | 0.60x | 407 K | 9.18x |
+| 64 | 262 K | 0.24x | 298 K | 0.60x | 433 K | 9.76x |
+
+refc scalar: signal 1.23 M → 170 K (0.13x at 64T), async 452 K → 108 K
+(0.23x), sync 46 K → 339 K (7.40x).
 
 ### Interpretation
 
@@ -543,6 +562,18 @@ callers).
    to 64 callers thanks to the slot pool. For ≤ 64-thread foreign apps the
    blocking lane is competitive with async at far simpler call-site
    semantics.
+5. **The scalar family shifts the bottleneck back toward the ingress.**
+   With the 500 B copy+hash gone, per-message processing cost drops ~3x
+   (scalar signal floor: 1.09 M/s at 1T vs 328 K hashed) — so the drain
+   stops being the wall and the lanes diverge: the signal lane re-inherits
+   the ingress contention collapse (0.20–0.30x past 8T, the submit-bench
+   shape), async roughly doubles its plateau (~300 K, still window-bound),
+   and **blocking sync becomes the fastest lane at concurrency**
+   (~430–470 K/s plateau, 10.5x) because each round trip parks its
+   producer in a `Cond` wait instead of spin-retrying against a shared
+   ring — backpressure by construction. Round-trip latency at 1T is
+   payload-independent (~22–25 µs both families): the handoff, not the
+   payload, dominates a single call.
 
 ### Reproducing
 
