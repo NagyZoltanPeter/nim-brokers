@@ -201,9 +201,32 @@ on weak memory. Benign on x86 (the CI cells); latent on ARM. One-line fix per si
 - **S12 — Go `internalCborCall` copies response with unguarded length** `[smell]` —
   `brokers/internal/api_codegen_cbor_go.nim:634-636` checks `outBuf != nil` but not `outLen > 0`;
   `C.GoBytes` with a negative length panics. Library-controlled today, latent.
-- **S13 — teardown contract footgun** `[known §2.2]` — foreign/FFI threads that used broker APIs
-  must call `teardownBrokerThread()` before returning, or hit a Windows+refc UAF at thread exit.
-  Correct by design but easy to get wrong; not enforceable at the ABI.
+- **S13 — teardown contract footgun** `[CLOSED — retrospective only; corrected 2026-07-30]` —
+  the original entry claimed foreign/FFI threads must call `teardownBrokerThread()` or risk a
+  Windows+refc UAF at thread exit. **Re-verification shows this does not apply to the CBOR FFI
+  lane**, and `LIMITATION.md` §2.2 documents an already-fixed issue retained as a retrospective:
+  - The teardown-sequence fix is in place: `BrokerSignalShared`
+    (`brokers/internal/mt_broker_common.nim:190+`) and `teardownBrokerThread` (`:492`),
+    auto-registered via `onThreadDestruction` for Nim-created threads (`:423-428`).
+  - The FFI lane's own threads call it explicitly — delivery `api_library.nim:1300`,
+    processing `:1580`.
+  - Foreign caller threads call `ensureForeignThreadGc()` but **never**
+    `ensureBrokerDispatchStarted()` (only `:1280` / `:1561`, both library-owned threads; the mt
+    macro call sites run on the processing thread). With no per-thread dispatch loop started,
+    a foreign thread has no teardown obligation.
+
+  **Remaining real caveat, unchanged and by design:** a thread *not created by Nim* that drives
+  `(mt)` brokers **directly** (outside the FFI lane) still must call `teardownBrokerThread()`;
+  and app code must not call Nim allocators from its own `RegisterWaitForSingleObject` callbacks
+  under refc. Neither is a CBOR-FFI-lane finding. **No action in this audit.**
+- **S14 — foreign threads register with the GC and never unregister** `[smell — verify]` —
+  `ensureForeignThreadGc()` (`brokers/internal/api_common.nim:305-322`) is latched per thread
+  (`gForeignGcRegistered` threadvar) and calls `setupForeignThreadGc()`, but there is no paired
+  `tearDownForeignThreadGc()` on any path. A foreign thread that calls into the library and then
+  exits leaves a registered-but-dead thread entry; under refc the collector can retain/scan a
+  dead thread's stack bottom. Bounded by the number of distinct foreign threads, so low impact —
+  but worth confirming against Nim's current refc behaviour before dismissing. nim-ffi pairs the
+  two around each call (`ffi/ffi_types.nim:22-29`, `foreignThreadGc` template).
 
 ### Build / CI / supply chain
 - **B1 [High] — No dependency lockfile; all nimble deps floating `>=`** — `brokers.nimble:12-17`;

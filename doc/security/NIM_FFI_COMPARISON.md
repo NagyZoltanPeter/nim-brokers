@@ -292,7 +292,45 @@ gaps, and avoids 1 by not offering the misleading knob.
 
 ---
 
-## 10. Concrete adoptions, ordered by value
+## 10. Adoption decision (maintainer, 2026-07-30)
+
+**Guiding rule: nim-brokers is not nim-ffi.** Both are legitimate designs that overlap in places.
+Only adopt what slots into nim-brokers' existing architecture — **nothing requiring a design or
+deep structural change.** The list below is split accordingly.
+
+### ✅ ADOPT — local, no architectural change
+
+| # | Adoption | Fixes | PR |
+|---|---|---|---|
+| 1 | **Leak-instead-of-free on teardown timeout**: if the drain does not reach quiescence, return `err` and do **not** `freeCborCourier`. Add the two-round drain (wait → cancel → wait). | H1 | 1 |
+| 2 | **Bounded `waitSlot` + courier keep-alive refcount** — keeps sync `_call` while closing the free-under-waiter window. | H1, H2 | 1 |
+| 3 | **One shared entry-point guard helper** emitting ctx-validity + callback nil checks, so no entry point can forget them. | M6, S4 | 5 |
+| 4 | **Buffer-provenance tagging** on `_allocBuffer`/`_freeBuffer` (guard header), so `_freeBuffer` rejects foreign/static/already-freed pointers. | M7, M5 | 5 |
+| 5 | **Never hand a callback a nil pointer at length 0** — non-nil empty sentinel + `max(len,0)` clamp; add the Go `outLen > 0` guard. | S12 | 7 |
+| 6 | **CAS state machines for lifecycle glue** instead of non-atomic check-then-set; `moAcquire` on init fast paths. | M8, M9 | 6 |
+| 7 | **Bounded queue + backpressure that reaches the ABI**, and **validate `ctx` in `_subscribe`** with a cap. | S3 | 7 |
+| 8 | **Error, don't abort, on context exhaustion** — return an ABI status instead of `doAssert`. | S2 | 6 |
+| 9 | **Commit `nimble.lock`; pin `cbor_serialization` exactly.** Direct precedent, zero design impact. | B1, S1 | 8 |
+
+### ❌ NOT ADOPTED — would change nim-brokers' design
+
+| Item | Why rejected |
+|---|---|
+| **Remove the sync `_call` ABI path** (nim-ffi is callback-only) | Sync `_call` is a first-class nim-brokers ABI promise. Removing it is a breaking redesign. Adoption #2 is the correct compromise: keep the feature, close the window. |
+| **`RET_STALE_WARN` progress-ping model / never time out handlers** | A different request-lifecycle contract. The slot-generation tag (PR 2) fixes H3/S5 **within** the existing timeout model. Revisit only if a progress-callback feature is wanted on its own merits. |
+| **Migrate cross-thread buffers from `allocShared` to libc `c_malloc`/`c_free`** | Deep structural change across the whole MT + FFI lane. The hazard it targets is already handled by `BrokerSignalShared` + `teardownBrokerThread` (see S13 — §2.2 is closed). Not worth re-plumbing a solved problem. |
+| **Fixed context pool with slot recycling** | Architectural. Only the *error-instead-of-abort* half is adopted (#8); nim-brokers' unbounded-id model stays. |
+| **Replace lock-free hot paths with sharded mutexes** | The audit confirmed nim-brokers' Vyukov ring / Treiber free lists are **correct**. Only the *lifecycle glue* moves to CAS (#6); the proven primitives stay. |
+
+### ⚠️ Not available from nim-ffi (solve from first principles)
+
+**M1** (callback panic/exception isolation), **M5/S10** (raw `(ptr,len)` / `cstring` trust),
+**S1** (CBOR depth/count limits), **B2** (mutable-ref Actions) — all shared gaps. nim-brokers is
+in fact *ahead* on M1 in two places already.
+
+---
+
+## 11. Original full recommendation list (superseded by §10 for planning)
 
 1. **Leak-instead-of-free on teardown timeout** (H1) — the single highest-value change, and
    nim-ffi proves it in production. Feed into `SECURITY_FIX_PLAN.md` PR 1: if the drain does not
