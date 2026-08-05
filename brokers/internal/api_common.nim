@@ -45,11 +45,27 @@ const
   ApiStatusProviderErr* = -10'i32
     ## provider/dispatch or internal failure (e.g. serialization)
   ApiStatusShutdown* = -11'i32 ## context shut down before the response was delivered
-  ApiStatusTimeout* = -12'i32 ## async dispatch exceeded its timeoutMs
+  ApiStatusTimeout* = -12'i32 ## sync or async dispatch exceeded its timeoutMs
   ApiStatusOneWay* = -13'i32
     ## `<lib>_callAsync` was invoked on a one-way signal name — signals carry no
     ## response, so a completion callback would deliver nothing not already known
     ## synchronously. Use the (slot-free) `<lib>_call` for signals.
+
+const brokerFfiSyncTimeoutMs* {.intdefine.} = 120_000
+  ## Dispatch-scoped budget applied to the SYNC `<lib>_call` path, in
+  ## milliseconds. `0` restores the historical unbounded behaviour.
+  ##
+  ## The `<lib>_call` C ABI carries no timeout parameter, so this library-level
+  ## default is what bounds it. It exists because of audit finding H2: a
+  ## provider that never resolves never calls `completeSlot`, leaving the
+  ## foreign caller parked in `waitSlot` forever — and, before the H1 fix, also
+  ## deadlocking `_shutdown`.
+  ##
+  ## The default is deliberately generous (2 minutes): it is a liveness
+  ## backstop against a wedged provider, NOT a latency policy. Lower it with
+  ## `-d:brokerFfiSyncTimeoutMs=<ms>` when callers need faster failure, or set
+  ## `0` if a library genuinely has unbounded-duration sync requests and its
+  ## callers accept an indefinite block.
 
 # ---------------------------------------------------------------------------
 # Library name accumulator

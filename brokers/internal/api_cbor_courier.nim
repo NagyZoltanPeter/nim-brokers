@@ -53,6 +53,17 @@ type
     reqBuf*: pointer ## allocShared0; ownership transfers to the processing thread
     reqLen*: int32
     slotIdx*: int32 ## index of the response slot to complete
+    timeoutMs*: uint32
+      ## Dispatch-scoped budget for the SYNC path, mirroring
+      ## `CborAsyncCallMsg.timeoutMs`. 0 = infinite. The `<lib>_call` C ABI has
+      ## no timeout parameter, so this is filled from the library-level default
+      ## (`-d:brokerFfiSyncTimeoutMs=<ms>`), not from the foreign caller.
+      ##
+      ## Audit finding H2: without it, a provider that never resolves never
+      ## calls `completeSlot`, so the foreign caller parks in `waitSlot`
+      ## forever. Enforcing it on the PROCESSING thread (rather than as a
+      ## caller-side timed wait) preserves the zero-fd `Cond` handoff and keeps
+      ## the invariant "every claimed slot is eventually completed".
     targetCtx*: uint32
       ## reduced-A: the FULL BrokerContext the foreign caller addressed. For a
       ## main-context call this equals the library ctx; for a sub-instance call
@@ -164,6 +175,19 @@ type
       ## `_callAsync` accept, decremented after the foreign callback fires on
       ## the delivery thread. Distinct from `inFlight` (the shutdown gate),
       ## which spans accept→response-enqueue only.
+    closing*: Atomic[int]
+      ## Set to 1 by `beginCourierClose` when `_shutdown` starts tearing this
+      ## courier down. A parked `waitSlot` re-checks it on every wake and
+      ## returns `ApiStatusShutdown` instead of waiting for a response that is
+      ## never coming.
+    waiters*: Atomic[int]
+      ## Number of foreign threads currently inside `waitSlot` (incremented
+      ## BEFORE `acquire`, decremented AFTER `release`). This is the guard that
+      ## makes teardown safe: destroying a `Cond` that still has a waiter is
+      ## undefined behaviour per POSIX, and glibc's `pthread_cond_destroy`
+      ## blocks forever on it (audit finding H1 — reproduced as a shutdown
+      ## deadlock, `deinitCond` → `futex_wait`). `freeCborCourier` refuses to
+      ## run while this is non-zero.
 
 # ---------------------------------------------------------------------------
 # Async call path (side by side with the sync slot/Cond machinery above).
@@ -277,30 +301,9 @@ proc newCborCourier*(slotCount: int, asyncCap = 0): ptr CborCourier =
   initPodRing(c.asyncRing, effAsyncCap)
   c.asyncCap = effAsyncCap
   c.asyncDepth.store(0, moRelaxed)
+  c.closing.store(0, moRelaxed)
+  c.waiters.store(0, moRelaxed)
   c
-
-proc freeCborCourier*(c: ptr CborCourier) =
-  ## Release a courier. MUST be called only after the processing thread
-  ## has joined and `inFlight` has reached zero — see `_shutdown`.
-  if c.isNil:
-    return
-  for s in 0 ..< c.nSegs.load(moAcquire):
-    let seg = addr c.segs[s]
-    for i in 0 ..< seg.len:
-      deinitCond(seg.slots[i].cond)
-      deinitLock(seg.slots[i].lock)
-    deallocShared(seg.slots)
-  deinitLock(c.ring.lock)
-  if not c.ring.buf.isNil:
-    deallocShared(c.ring.buf)
-  # Free any async request buffers still queued (never reached the processing
-  # thread): their `reqBuf` ownership was transferred to the message on enqueue.
-  var am: CborAsyncCallMsg
-  while tryPop(c.asyncRing, am):
-    if not am.reqBuf.isNil:
-      deallocShared(am.reqBuf)
-  deinitPodRing(c.asyncRing)
-  deallocShared(c)
 
 # ---------------------------------------------------------------------------
 # Ring — MPSC over a fixed-size POD slot array. Single lock for both ends;
@@ -465,18 +468,89 @@ proc completeSlot*(
   signal(s.cond)
   release(s.lock)
 
+const ApiStatusShutdownCourier* = -11'i32
+  ## Mirrors `ApiStatusShutdown` in the generated ABI. Duplicated here (rather
+  ## than imported) because this module is runtime support and deliberately has
+  ## no dependency on the codegen layer.
+
 proc waitSlot*(
     c: ptr CborCourier, idx: int
 ): tuple[respBuf: pointer, respLen: int32, status: int32] =
-  ## Foreign `_call` side: block until `completeSlot` publishes a response.
+  ## Foreign `_call` side: block until `completeSlot` publishes a response, or
+  ## until `beginCourierClose` announces teardown.
   ## Zero-fd blocking handoff via `Cond` — no busy-poll.
+  ##
+  ## `waiters` brackets the ENTIRE critical section, incremented before
+  ## `acquire` and decremented after `release`, so a concurrent `_shutdown`
+  ## can never observe zero while this thread still holds a reference to
+  ## `s.lock`/`s.cond`. See audit finding H1.
   let s = slotAt(c, idx)
+  discard c.waiters.fetchAdd(1, moAcquireRelease)
   acquire(s.lock)
-  while s.ready == 0:
+  while s.ready == 0 and c.closing.load(moAcquire) == 0:
     wait(s.cond, s.lock)
-  result = (s.respBuf, s.respLen, s.status)
-  s.ready = 0
+  if s.ready != 0:
+    result = (s.respBuf, s.respLen, s.status)
+    s.ready = 0
+  else:
+    # Woken by teardown with no response: the provider will never answer.
+    result = (nil, 0'i32, ApiStatusShutdownCourier)
   release(s.lock)
+  discard c.waiters.fetchSub(1, moAcquireRelease)
+
+proc beginCourierClose*(c: ptr CborCourier) =
+  ## Announce teardown and wake every parked `waitSlot` so it can leave before
+  ## anything is destroyed. Idempotent.
+  ##
+  ## Each slot's `cond` is broadcast under its own `lock`, which is what makes
+  ## the wake visible to a thread already inside `wait()`.
+  if c.isNil:
+    return
+  c.closing.store(1, moRelease)
+  for sIdx in 0 ..< c.nSegs.load(moAcquire):
+    let seg = addr c.segs[sIdx]
+    for i in 0 ..< seg.len:
+      acquire(seg.slots[i].lock)
+      broadcast(seg.slots[i].cond)
+      release(seg.slots[i].lock)
+
+proc courierWaiters*(c: ptr CborCourier): int =
+  ## Foreign threads currently inside `waitSlot`. `_shutdown` must see 0 before
+  ## it may free the courier.
+  if c.isNil: 0 else: c.waiters.load(moAcquire)
+
+proc freeCborCourier*(c: ptr CborCourier): bool {.discardable.} =
+  ## Release a courier. Returns `false` — having freed NOTHING — when a foreign
+  ## thread is still parked in `waitSlot`.
+  ##
+  ## Refusing is deliberate (audit finding H1): `deinitCond` on a `Cond` that
+  ## still has a waiter is undefined behaviour per POSIX, and on glibc it
+  ## deadlocks in `pthread_cond_destroy` → `futex_wait`. Leaking a courier is
+  ## strictly better than destroying synchronisation primitives out from under
+  ## a live thread, so the caller is expected to treat `false` as "leak it and
+  ## report", not as something to retry-force.
+  if c.isNil:
+    return true
+  if c.waiters.load(moAcquire) != 0:
+    return false
+  for s in 0 ..< c.nSegs.load(moAcquire):
+    let seg = addr c.segs[s]
+    for i in 0 ..< seg.len:
+      deinitCond(seg.slots[i].cond)
+      deinitLock(seg.slots[i].lock)
+    deallocShared(seg.slots)
+  deinitLock(c.ring.lock)
+  if not c.ring.buf.isNil:
+    deallocShared(c.ring.buf)
+  # Free any async request buffers still queued (never reached the processing
+  # thread): their `reqBuf` ownership was transferred to the message on enqueue.
+  var am: CborAsyncCallMsg
+  while tryPop(c.asyncRing, am):
+    if not am.reqBuf.isNil:
+      deallocShared(am.reqBuf)
+  deinitPodRing(c.asyncRing)
+  deallocShared(c)
+  true
 
 # ---------------------------------------------------------------------------
 # Async call path — enqueue / dequeue + depth accounting

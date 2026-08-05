@@ -1417,6 +1417,7 @@ proc registerBrokerLibraryCborImpl(
             return
           let known = `knownNamePredIdent`(apiName)
           var dispErr = false
+          var timedOut = false
           var respBytes: seq[byte]
           if known:
             # reduced-A: dispatch against the FULL ctx the caller addressed
@@ -1428,15 +1429,36 @@ proc registerBrokerLibraryCborImpl(
                 BrokerContext(m.targetCtx)
               else:
                 arg.ctx
-            let dispRes = catch:
-              await `dispatchProcIdent`(apiName, dispCtx, nimReq)
-            if dispRes.isErr():
-              dispErr = true
+            # Audit H2 — race the provider against the sync budget exactly as
+            # the async path does, so a provider that never resolves still
+            # completes the slot and releases the parked foreign caller.
+            # `race` (not `withTimeout`): the broker machinery swallows
+            # `withTimeout`'s cancellation into a normal completion.
+            let dispFut = `dispatchProcIdent`(apiName, dispCtx, nimReq)
+            if m.timeoutMs != 0'u32:
+              let timerFut = sleepAsync(milliseconds(m.timeoutMs.int64))
+              let raceRes = catch:
+                await race(dispFut, timerFut)
+              timedOut = (not raceRes.isErr()) and (not dispFut.finished())
+              if not timerFut.finished():
+                timerFut.cancelSoon()
+            if timedOut:
+              # Budget exceeded: best-effort-cancel the provider and drop its
+              # late result. The slot is completed with -12 below.
+              dispFut.cancelSoon()
             else:
-              respBytes = dispRes.get()
-          let (status, respBuf, respLen) =
-            encodeApiResp(apiName, known, dispErr, respBytes)
-          completeSlot(arg.courier, m.slotIdx.int, respBuf, respLen, status)
+              let dispRes = catch:
+                await dispFut
+              if dispRes.isErr():
+                dispErr = true
+              else:
+                respBytes = dispRes.get()
+          if timedOut:
+            completeSlot(arg.courier, m.slotIdx.int, nil, 0'i32, ApiStatusTimeout)
+          else:
+            let (status, respBuf, respLen) =
+              encodeApiResp(apiName, known, dispErr, respBytes)
+            completeSlot(arg.courier, m.slotIdx.int, respBuf, respLen, status)
 
         # Async sibling of `handleCourierMsg`. Same dispatch, but instead of
         # waking a blocked foreign caller via the slot/Cond, it hands the
@@ -1745,6 +1767,15 @@ proc registerBrokerLibraryCborImpl(
         # inFlight reaches 0 is the channel guaranteed quiescent, so
         # signalling shutdown + freeing the courier cannot race a `_call`.
         # A bounded timeout guards against a hung provider (best-effort).
+        #
+        # Audit H1: this drain alone is NOT sufficient. When it expires with a
+        # foreign thread still parked in `waitSlot`, tearing the courier down
+        # anyway destroys a `Cond` that still has a waiter — undefined per
+        # POSIX, and on glibc `pthread_cond_destroy` blocks forever
+        # (reproduced as a shutdown deadlock: `deinitCond` → `futex_wait`).
+        # So once the drain gives up we explicitly ANNOUNCE the close and wake
+        # every parked caller, then wait for them to actually leave `waitSlot`
+        # before anything may be freed.
         block:
           let courier = entryToShutdown.arg.courier
           if not courier.isNil:
@@ -1753,6 +1784,18 @@ proc registerBrokerLibraryCborImpl(
             while courier.inFlight.load(moAcquire) > 0 and waitedMs < drainTimeoutMs:
               sleep(1)
               inc waitedMs
+
+            # Wake anyone still blocked; they return `ApiStatusShutdown`.
+            beginCourierClose(courier)
+
+            # Give the woken callers a bounded window to leave the critical
+            # section. This is short because it only covers the wake→return
+            # path, not any provider work.
+            const waiterExitTimeoutMs = 2000
+            var exitWaitMs = 0
+            while courierWaiters(courier) > 0 and exitWaitMs < waiterExitTimeoutMs:
+              sleep(1)
+              inc exitWaitMs
 
         entryToShutdown.arg.shutdownFlag.store(1, moRelease)
         # Part D: join delivery thread first — it must finish any
@@ -1797,7 +1840,19 @@ proc registerBrokerLibraryCborImpl(
               # sum if the courier ever outlives a single shutdown.
               asyncDepthDec(entryToShutdown.arg.courier)
         # Part C — free the courier after both threads joined.
-        freeCborCourier(entryToShutdown.arg.courier)
+        #
+        # Audit H1: `freeCborCourier` refuses (returns false) while a foreign
+        # thread is still inside `waitSlot`. Destroying its `Cond`/`Lock` then
+        # would be undefined behaviour — glibc deadlocks in
+        # `pthread_cond_destroy`. Deliberately LEAK the courier in that case:
+        # a bounded leak is strictly better than tearing synchronisation
+        # primitives out from under a live thread. This mirrors the
+        # leak-rather-than-free-on-timeout policy nim-ffi applies to its
+        # context slots (see doc/security/NIM_FFI_COMPARISON.md §2).
+        if not freeCborCourier(entryToShutdown.arg.courier):
+          warn "FFI shutdown: a foreign caller is still parked in _call; " &
+            "leaking the courier instead of destroying live locks",
+            waiters = courierWaiters(entryToShutdown.arg.courier)
         # Part D-3 — free the event courier (drains any messages left
         # in the ring, freeing their buffers) after both threads joined.
         drainAndFree(entryToShutdown.arg.eventCourier)
@@ -1923,6 +1978,8 @@ proc registerBrokerLibraryCborImpl(
         msg.reqLen = reqLen
         msg.slotIdx = int32(slotIdx)
         msg.targetCtx = ctx # full ctx (sub-instance routing, reduced-A)
+        # Audit H2 — library-level sync budget (the C ABI has no timeout arg).
+        msg.timeoutMs = uint32(brokerFfiSyncTimeoutMs)
         # Ownership of reqBuf transfers into the ring here. Enqueue is
         # backstopped by the slot claim above (ring.cap == slotCount), so
         # a false return is a programming error rather than backpressure;
