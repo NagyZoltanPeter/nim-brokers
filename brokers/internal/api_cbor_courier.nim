@@ -32,6 +32,7 @@
 {.push raises: [].}
 
 import std/[atomics, locks]
+import ./api_buf
 
 const CborApiNameMax* = 256
   ## Inline fixed-size buffer for the ASCII API name carried in a courier
@@ -547,7 +548,8 @@ proc freeCborCourier*(c: ptr CborCourier): bool {.discardable.} =
   var am: CborAsyncCallMsg
   while tryPop(c.asyncRing, am):
     if not am.reqBuf.isNil:
-      deallocShared(am.reqBuf)
+      # Request buffers come from `<lib>_allocBuffer`, which is tagged.
+      apiFreeTagged(am.reqBuf)
   deinitPodRing(c.asyncRing)
   deallocShared(c)
   true

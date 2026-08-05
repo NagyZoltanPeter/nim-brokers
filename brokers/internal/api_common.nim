@@ -17,11 +17,12 @@
 
 import std/macros
 
+import ./api_buf
 import ./api_schema
 import ./api_outdir
 import ./helper/broker_utils
 
-export api_schema
+export api_buf, api_schema
 export api_outdir
 
 # ---------------------------------------------------------------------------

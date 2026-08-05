@@ -19,21 +19,44 @@ reachable on the current tree.
 > | **M6** | ✅ **FIXED** | `_subscribe` → `0`, `_unsubscribe` → `-1`; no segfault |
 > | **M3** | ⬜ open | fix is PR 4 |
 > | **M4** | 🟨 partial | request ceiling is now configurable (`-d:brokerFfiMaxRequestBytes`); per-API `maxPayloadBytes` binding still **not** implemented, so the test stays red by design |
-> | **M5** | ⬜ open | still SIGSEGVs; needs the trusted-length work |
-> | **M7a/b** | ⬜ open | needs universal buffer provenance tagging — see note below |
+> | **M5** | ✅ **FIXED** | lying `reqLen` rejected with `-3`; validated against the registry's recorded size |
+> | **M7a** | ✅ **FIXED** | freeing the static `_version()` pointer is refused; process survives |
+> | **M7b** | ✅ **FIXED** | double free refused; ASan-clean |
 >
 > Regression check after the fixes: 119 existing tests green
 > (`api_courier_growth`, `api_library_init` — fd-leak delta 0 —, `api_callAsync`,
 > `api_signal_broker`, `api_discovery`, `api_codec`, `event_broker`,
 > `request_broker`, `multi_thread_request_broker`).
 >
-> **Why M7 was not fixed in this pass.** Provenance tagging must cover *every*
-> buffer the foreign side frees through `_freeBuffer` — not just `_allocBuffer`
-> results, but response buffers produced on the processing thread
-> (`cborEncodeShared` / `encodeApiResp`). Tagging only `_allocBuffer` would make
-> `_freeBuffer` reject legitimate response buffers and leak them — a worse bug
-> than the one being fixed. It needs its own PR that moves all such allocations
-> behind one tagged allocator.
+> **M5 + M7 — design note (inline header rejected).** These share a root cause:
+> `_freeBuffer` could not tell what it was freeing, and `_call` could not tell
+> how big a buffer really was. Both are answered by tracking live library
+> allocations in `brokers/internal/api_buf.nim`.
+>
+> The obvious implementation — a `[magic][size]` header before each payload —
+> was written first and **rejected after measurement**. Validating a pointer
+> then means reading the bytes *before* it, which is undefined behaviour in
+> exactly the cases being defended against. Under ASan:
+>
+> * freeing the static `_version()` string → `global-buffer-overflow` **inside
+>   the validator itself**;
+> * double free → `heap-use-after-free`, because the second call reads a header
+>   already returned to the allocator — so "poison the magic on free" is not
+>   even reliable.
+>
+> Both behave correctly without a sanitizer, but a security fix must not
+> introduce UB, and this repo runs ASan in CI (`memcheck_ci.yml`). The shipped
+> design is a **side registry** keyed by the pointer's numeric value: it never
+> dereferences an untrusted pointer, so it is ASan-clean and correct by
+> construction. It also has a benign failure mode — a missed `apiFreeTagged`
+> leaves a stale table entry (small leak), never heap corruption, because
+> allocations keep their plain `allocShared0` layout.
+>
+> The classification of free sites mattered: `eventCourierPoll` and
+> `respCourierPoll` contain near-identical `deallocShared(m.buf)` calls, but the
+> first frees an **event** payload (`cborEncodeShared`, untracked) and the
+> second an **async response** (`encodeApiResp`, tracked). Conflating them
+> would have been a heap bug.
 
 ## Summary (original pre-fix baseline)
 

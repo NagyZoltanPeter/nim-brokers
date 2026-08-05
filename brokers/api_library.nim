@@ -827,14 +827,21 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if size <= 0 or size.int > `bufSizeCap`:
           return nil
-        allocShared0(size.int)
+        # Audit M5/M7 — tagged so `_freeBuffer` can validate provenance and
+        # `_call` can recover the buffer's real size.
+        apiAllocTagged(size.int)
 
       proc `freeBufFuncIdent`*(
           buf: pointer
       ) {.exportc: `freeBufFuncNameLit`, cdecl, dynlib.} =
         ensureForeignThreadGc()
-        if not buf.isNil:
-          deallocShared(buf)
+        # Audit M7 — refuse anything that is not a live library buffer: a
+        # foreign pointer, the static `_version()` string, or a buffer that was
+        # already freed (its magic is poisoned). Silently ignoring such a call
+        # is the safe outcome; freeing it corrupts the allocator.
+        if not apiFreeTagged(buf):
+          warn "FFI freeBuffer: ignoring a pointer this library did not " &
+            "allocate (or that was already freed)"
 
   )
 
@@ -1282,7 +1289,11 @@ proc registerBrokerLibraryCborImpl(
               let cbTyped = cast[`responseCallbackTypeIdent`](cbPtr)
               cbTyped(m.userData, m.reqId, m.status, m.buf, m.bufLen)
             if not m.buf.isNil:
-              deallocShared(m.buf)
+              # Async RESPONSE buffer — produced by `encodeApiResp`, so it is
+              # tagged. (The near-identical free in `eventCourierPoll` above
+              # handles an EVENT payload from `cborEncodeShared`, which is NOT
+              # tagged — the two must not be conflated.)
+              apiFreeTagged(m.buf)
             asyncDepthDec(arg.courier)
           didWork
 
@@ -1384,14 +1395,14 @@ proc registerBrokerLibraryCborImpl(
         ): tuple[status: int32, respBuf: pointer, respLen: int32] {.gcsafe, raises: [].} =
           if not known:
             let em = "unknown apiName: " & apiName
-            let b = allocShared0(em.len)
+            let b = apiAllocTagged(em.len)
             if em.len > 0:
               copyMem(b, unsafeAddr em[0], em.len)
             return (ApiStatusUnknownApi, b, int32(em.len))
           if dispErr:
             return (ApiStatusProviderErr, nil, 0'i32)
           if respBytes.len > 0:
-            let b = allocShared0(respBytes.len)
+            let b = apiAllocTagged(respBytes.len)
             copyMem(b, unsafeAddr respBytes[0], respBytes.len)
             return (ApiStatusOk, b, int32(respBytes.len))
           return (ApiStatusOk, nil, 0'i32)
@@ -1403,7 +1414,7 @@ proc registerBrokerLibraryCborImpl(
           if m.reqLen > 0 and not m.reqBuf.isNil:
             copyMem(addr nimReq[0], m.reqBuf, m.reqLen.int)
           if not m.reqBuf.isNil:
-            deallocShared(m.reqBuf)
+            apiFreeTagged(m.reqBuf)
           let apiName = $cast[cstring](addr m.apiName[0])
           if apiName == `releaseApiNameLit`:
             # reduced-A: per-context teardown control op (from
@@ -1485,7 +1496,7 @@ proc registerBrokerLibraryCborImpl(
           if m.reqLen > 0 and not m.reqBuf.isNil:
             copyMem(addr nimReq[0], m.reqBuf, m.reqLen.int)
           if not m.reqBuf.isNil:
-            deallocShared(m.reqBuf)
+            apiFreeTagged(m.reqBuf)
           let apiName = $cast[cstring](addr m.apiName[0])
           let known = `knownNamePredIdent`(apiName)
           var dispErr = false
@@ -1554,7 +1565,7 @@ proc registerBrokerLibraryCborImpl(
             # the buffer, release the depth reservation (the callback will not
             # fire for this lost response), and drop.
             if not respBuf.isNil:
-              deallocShared(respBuf)
+              apiFreeTagged(respBuf)
             asyncDepthDec(arg.courier)
           elif not arg.deliverySignal.isNil:
             fireBrokerSignal(arg.deliverySignal)
@@ -1844,7 +1855,7 @@ proc registerBrokerLibraryCborImpl(
                 let cbTyped = cast[`responseCallbackTypeIdent`](rm.cb)
                 cbTyped(rm.userData, rm.reqId, ApiStatusShutdown, nil, 0'i32)
               if not rm.buf.isNil:
-                deallocShared(rm.buf)
+                apiFreeTagged(rm.buf)
               # Symmetry with `respCourierPoll`, which releases one depth
               # reservation per delivered response. Harmless today (the courier
               # is freed just below), but keeps `asyncDepth` a correct running
@@ -1902,22 +1913,36 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if respBufOut.isNil or respLenOut.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -1'i32
         respBufOut[] = nil
         respLenOut[] = 0
         if apiNameC.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -2'i32
         if reqLen < 0 or reqLen.int > `bufSizeCap`:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -3'i32
+        # Audit M5 — `reqLen` is a caller-supplied number that later becomes a
+        # `copyMem` length on the processing thread. Validate it against the
+        # buffer's REAL size instead of trusting it: a 16-byte buffer submitted
+        # with reqLen = 4 MiB used to be copied wholesale (reproduced as a
+        # SIGSEGV in `handleCourierMsg`). Request buffers must come from
+        # `<lib>_allocBuffer` anyway — the library frees them with the matching
+        # deallocator — so an untagged buffer here is already a contract
+        # violation and is rejected rather than read out of bounds.
+        if reqLen > 0'i32:
+          let trueSize = apiTaggedSize(reqBuf)
+          if trueSize < 0 or reqLen.int > trueSize:
+            if not reqBuf.isNil:
+              apiFreeTagged(reqBuf)
+            return -3'i32
         let nameLen = apiNameC.len
         if nameLen >= CborApiNameMax:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -2'i32
 
         # Resolve ctx -> courier. `inFlight` is bumped under the SAME lock
@@ -1941,7 +1966,7 @@ proc registerBrokerLibraryCborImpl(
               break
         if courier.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -5'i32
 
         # SignalBroker(API): slot-free one-way path. No response slot is
@@ -1956,7 +1981,7 @@ proc registerBrokerLibraryCborImpl(
           if not `signalHasHandlerPredIdent`(sigApiName):
             discard courier.inFlight.fetchSub(1, moAcquireRelease)
             if not reqBuf.isNil:
-              deallocShared(reqBuf)
+              apiFreeTagged(reqBuf)
             return ApiStatusProviderErr
           var smsg: CborCallMsg
           if nameLen > 0:
@@ -1968,7 +1993,7 @@ proc registerBrokerLibraryCborImpl(
           if not tryEnqueue(addr courier.ring, smsg):
             discard courier.inFlight.fetchSub(1, moAcquireRelease)
             if not reqBuf.isNil:
-              deallocShared(reqBuf)
+              apiFreeTagged(reqBuf)
             return ApiStatusAgain
           if not courierSig.isNil:
             fireBrokerSignal(courierSig)
@@ -1978,7 +2003,7 @@ proc registerBrokerLibraryCborImpl(
         if slotIdx < 0:
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return ApiStatusAgain
 
         var msg: CborCallMsg
@@ -2000,7 +2025,7 @@ proc registerBrokerLibraryCborImpl(
           releaseSlot(courier, slotIdx)
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
@@ -2044,20 +2069,34 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if apiNameC.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -2'i32
         if reqLen < 0 or reqLen.int > `bufSizeCap`:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -3'i32
+        # Audit M5 — `reqLen` is a caller-supplied number that later becomes a
+        # `copyMem` length on the processing thread. Validate it against the
+        # buffer's REAL size instead of trusting it: a 16-byte buffer submitted
+        # with reqLen = 4 MiB used to be copied wholesale (reproduced as a
+        # SIGSEGV in `handleCourierMsg`). Request buffers must come from
+        # `<lib>_allocBuffer` anyway — the library frees them with the matching
+        # deallocator — so an untagged buffer here is already a contract
+        # violation and is rejected rather than read out of bounds.
+        if reqLen > 0'i32:
+          let trueSize = apiTaggedSize(reqBuf)
+          if trueSize < 0 or reqLen.int > trueSize:
+            if not reqBuf.isNil:
+              apiFreeTagged(reqBuf)
+            return -3'i32
         if cb.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -7'i32
         let nameLen = apiNameC.len
         if nameLen >= CborApiNameMax:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -2'i32
 
         # Resolve ctx -> courier, same routing + `inFlight` gate as `_call`.
@@ -2074,7 +2113,7 @@ proc registerBrokerLibraryCborImpl(
               break
         if courier.isNil:
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return -5'i32
 
         # Signals are one-way: a completion callback would carry no information
@@ -2084,7 +2123,7 @@ proc registerBrokerLibraryCborImpl(
         if `isSignalNamePredIdent`($apiNameC):
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return ApiStatusOneWay
 
         var msg: CborAsyncCallMsg
@@ -2104,7 +2143,7 @@ proc registerBrokerLibraryCborImpl(
         if not tryEnqueueAsync(courier, msg):
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
           if not reqBuf.isNil:
-            deallocShared(reqBuf)
+            apiFreeTagged(reqBuf)
           return ApiStatusAgain
         if not courierSig.isNil:
           fireBrokerSignal(courierSig)
@@ -2352,7 +2391,7 @@ proc registerBrokerLibraryCborImpl(
         except CatchableError:
           return ApiStatusProviderErr
         if jsonStr.len > 0:
-          let buf = allocShared0(jsonStr.len)
+          let buf = apiAllocTagged(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)
           respBufOut[] = buf
           respLenOut[] = int32(jsonStr.len)
@@ -2378,7 +2417,7 @@ proc registerBrokerLibraryCborImpl(
         except CatchableError:
           return ApiStatusProviderErr
         if jsonStr.len > 0:
-          let buf = allocShared0(jsonStr.len)
+          let buf = apiAllocTagged(jsonStr.len)
           copyMem(buf, addr jsonStr[0], jsonStr.len)
           respBufOut[] = buf
           respLenOut[] = int32(jsonStr.len)
