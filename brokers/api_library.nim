@@ -371,7 +371,8 @@ proc registerBrokerLibraryCborImpl(
   let apiListBuildIdent = ident(libName & "CborBuildApiList")
 
   # Hard cap on a single buffer to detect runaway encodes.
-  let bufSizeCap = newLit(64 * 1024 * 1024)
+  # Audit M4 — configurable via `-d:brokerFfiMaxRequestBytes` (default 64 MiB).
+  let bufSizeCap = newLit(brokerFfiMaxRequestBytes)
 
   # Configured async in-flight window (per context), baked into `_createContext`
   # courier sizing.
@@ -1140,6 +1141,13 @@ proc registerBrokerLibraryCborImpl(
         ensureForeignThreadGc()
         if eventNameC.isNil:
           return 0'u64
+        # Audit M6 — the subscription registry is allocated by `_initialize`,
+        # which is only reached via `_createContext`. A foreign caller that
+        # subscribes first (or probes for support before creating a context)
+        # would otherwise take `withLock reg.lock` on a nil registry and
+        # segfault the host. Fail closed instead.
+        if `subsRegIdent`.isNil:
+          return 0'u64
         let name = $eventNameC
         if not `knownEventPredIdent`(name):
           return 0'u64
@@ -1170,6 +1178,9 @@ proc registerBrokerLibraryCborImpl(
       ): int32 {.exportc: `unsubscribeFuncNameLit`, cdecl, dynlib.} =
         ensureForeignThreadGc()
         if eventNameC.isNil:
+          return -1'i32
+        # Audit M6 — see `_subscribe`: nil registry before `_createContext`.
+        if `subsRegIdent`.isNil:
           return -1'i32
         let name = $eventNameC
         if handle == 0'u64:

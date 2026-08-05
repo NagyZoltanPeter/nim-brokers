@@ -51,6 +51,20 @@ const
     ## response, so a completion callback would deliver nothing not already known
     ## synchronously. Use the (slot-free) `<lib>_call` for signals.
 
+const brokerFfiMaxRequestBytes* {.intdefine.} = 64 * 1024 * 1024
+  ## Hard ceiling, in bytes, on a single `<lib>_allocBuffer` / `<lib>_call`
+  ## request buffer.
+  ##
+  ## Audit finding M4: a broker's `maxPayloadBytes` kwarg sizes internal MT
+  ## slab cells and does NOT bound the untrusted CBOR request buffer — only
+  ## this ceiling does. Until the per-API binding lands, this is the knob that
+  ## actually limits how much memory one foreign call can make the library
+  ## allocate, so make it settable: `-d:brokerFfiMaxRequestBytes=<bytes>`.
+  ##
+  ## The 64 MiB default preserves historical behaviour. Deployments that know
+  ## their real payload ceiling should lower it substantially — the default is
+  ## an attacker-controlled multiplier when combined with concurrent calls.
+
 const brokerFfiSyncTimeoutMs* {.intdefine.} = 120_000
   ## Dispatch-scoped budget applied to the SYNC `<lib>_call` path, in
   ## milliseconds. `0` restores the historical unbounded behaviour.

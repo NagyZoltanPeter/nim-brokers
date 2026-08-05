@@ -9,7 +9,33 @@ reachable on the current tree.
 - **Platform:** Linux amd64, Nim 2.2.4, default memory manager, **no sanitizer**
 - **Deps:** pinned per nim-ffi's `nimble.lock` (see "Reproducing" below)
 
-## Summary
+> **Update 2026-07-30 (post-fix):** PR 1 (H1, H2) and the M6 guard have landed.
+> Current status of the same suite:
+>
+> | Finding | Status | Evidence |
+> |---|---|---|
+> | **H1** | ✅ **FIXED** | `shutdown returned 0`; parked caller wakes with `-11` (`ApiStatusShutdown`) |
+> | **H2** | ✅ **FIXED** | wedged provider now returns `-12` (`ApiStatusTimeout`) |
+> | **M6** | ✅ **FIXED** | `_subscribe` → `0`, `_unsubscribe` → `-1`; no segfault |
+> | **M3** | ⬜ open | fix is PR 4 |
+> | **M4** | 🟨 partial | request ceiling is now configurable (`-d:brokerFfiMaxRequestBytes`); per-API `maxPayloadBytes` binding still **not** implemented, so the test stays red by design |
+> | **M5** | ⬜ open | still SIGSEGVs; needs the trusted-length work |
+> | **M7a/b** | ⬜ open | needs universal buffer provenance tagging — see note below |
+>
+> Regression check after the fixes: 119 existing tests green
+> (`api_courier_growth`, `api_library_init` — fd-leak delta 0 —, `api_callAsync`,
+> `api_signal_broker`, `api_discovery`, `api_codec`, `event_broker`,
+> `request_broker`, `multi_thread_request_broker`).
+>
+> **Why M7 was not fixed in this pass.** Provenance tagging must cover *every*
+> buffer the foreign side frees through `_freeBuffer` — not just `_allocBuffer`
+> results, but response buffers produced on the processing thread
+> (`cborEncodeShared` / `encodeApiResp`). Tagging only `_allocBuffer` would make
+> `_freeBuffer` reject legitimate response buffers and leak them — a worse bug
+> than the one being fixed. It needs its own PR that moves all such allocations
+> behind one tagged allocator.
+
+## Summary (original pre-fix baseline)
 
 | Finding | Test | Result | Evidence |
 |---|---|---|---|
