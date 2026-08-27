@@ -59,16 +59,20 @@ export mt_request_broker, mt_config, api_common, api_cbor_codec, api_type_resolv
 # ---------------------------------------------------------------------------
 
 proc registerCborObjectType*(
-    typeName: string, fieldNames, fieldTypes: seq[NimNode]
+    typeName: string,
+    fieldNames, fieldTypes: seq[NimNode],
+    docText: string = "",
+    fieldDocs: seq[string] = @[],
 ) {.compileTime.} =
   ## Register a parsed object type in `gApiTypeRegistry` so the C++ /
   ## Python / etc. wrapper codegen can emit typed structs for it.
   ## Idempotent — subsequent calls for the same type are a no-op so a
   ## type that ends up registered through both the auto-resolver and a
-  ## broker macro doesn't double-list.
+  ## broker macro doesn't double-list. `docText` / `fieldDocs` carry the
+  ## captured `##` doc comments (#50) into the schema for codegen.
   if isTypeRegistered(typeName):
     return
-  var entry = ApiTypeEntry(name: typeName, kind: atkObject)
+  var entry = ApiTypeEntry(name: typeName, kind: atkObject, doc: docText)
   for i in 0 ..< fieldNames.len:
     var fname = $fieldNames[i]
     # `fieldNames` from parseSingleTypeDef carry the original AST,
@@ -77,7 +81,10 @@ proc registerCborObjectType*(
     if fname.endsWith("*"):
       fname.setLen(fname.len - 1)
     let ftype = fieldTypes[i].repr.strip()
-    entry.fields.add(ApiFieldDef(name: fname, nimType: ftype))
+    var fdef = ApiFieldDef(name: fname, nimType: ftype)
+    if i < fieldDocs.len:
+      fdef.doc = fieldDocs[i]
+    entry.fields.add(fdef)
   registerTypeEntry(entry)
 
 proc registerCborPrimitiveType*(
@@ -113,7 +120,7 @@ proc registerCborPrimitiveType*(
     # accepts it.
     if isNimPrimitive(base) or isAliasOrDistinctRegistered(base) or
         isTypeRegistered(base):
-      registerTypeEntry(makeAliasEntry(typeName, base, atkDistinct))
+      registerTypeEntry(makeAliasEntry(typeName, base, atkDistinct, parsed.docText))
   elif parsed.objectDef.kind == nnkDistinctTy and parsed.objectDef.len == 1 and
       parsed.objectDef[0].kind == nnkBracketExpr:
     # Container payload — proc-sugar `proc connectedPeers(): Result[seq[string]]`
@@ -123,7 +130,9 @@ proc registerCborPrimitiveType*(
     # `[]...` at codegen. A container whose element doesn't map is a hard
     # codegen error (fields/methods are never silently dropped).
     registerTypeEntry(
-      makeAliasEntry(typeName, parsed.objectDef[0].repr.strip(), atkDistinct)
+      makeAliasEntry(
+        typeName, parsed.objectDef[0].repr.strip(), atkDistinct, parsed.docText
+      )
     )
 
 # ---------------------------------------------------------------------------
@@ -469,6 +478,10 @@ proc generateApiCborRequestBrokerImpl(
   # uses the finalized rule: zero-arg stays bare, arg-based gets `_arg`.
   var zeroApiSuffix = ""
   var argApiSuffix = ""
+  # Captured `##` doc text (#50): per-signature where the sugar provides it,
+  # the type-level doc otherwise.
+  var zeroDoc = ""
+  var argDoc = ""
 
   proc legacySuffix(sigName: string): string =
     if sigName.len <= "signature".len:
@@ -490,6 +503,8 @@ proc generateApiCborRequestBrokerImpl(
       zeroApiSuffix = (if zs.len > 0: "_" & zs else: "_zero")
       let asfx = legacySuffix(sigs.argSigName)
       argApiSuffix = (if asfx.len > 0: "_" & asfx else: "_args")
+    zeroDoc = parsed.docText
+    argDoc = parsed.docText
   else:
     let sg = parseRequestSugar(body, "RequestBroker", async = true)
     typeIdent = sg.typeIdent
@@ -498,6 +513,8 @@ proc generateApiCborRequestBrokerImpl(
     zeroArgPresent = not sg.zeroArgProc.isNil
     argPresent = not sg.argProc.isNil
     argParams = sg.argParams
+    zeroDoc = (if sg.zeroArgDoc.len > 0: sg.zeroArgDoc else: sg.docText)
+    argDoc = (if sg.argDoc.len > 0: sg.argDoc else: sg.docText)
     if zeroArgPresent and argPresent:
       argApiSuffix = "_arg" # zero-arg stays bare
 
@@ -517,11 +534,13 @@ proc generateApiCborRequestBrokerImpl(
   if returnsIface.len > 0:
     discard # instance-returning request: no payload type to register.
   elif parsed.hasInlineFields:
-    registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
+    registerCborObjectType(
+      typeName, parsed.fieldNames, parsed.fieldTypes, parsed.docText, parsed.fieldDocs
+    )
   elif parsed.isVoid:
     # `void` → a zero-field object: payload-less request, the response
     # envelope carries only the ok/err signal.
-    registerCborObjectType(typeName, @[], @[])
+    registerCborObjectType(typeName, @[], @[], parsed.docText)
   else:
     registerCborPrimitiveType(typeName, parsed)
 
@@ -560,7 +579,12 @@ proc generateApiCborRequestBrokerImpl(
         emitZeroArgAdapter(typeIdent, payloadType, adapterIdent, parsed.isVoid)
       )
     registerCborRequestEntry(
-      apiName, $adapterIdent, typeName, @[], returnsInterface = returnsIface
+      apiName,
+      $adapterIdent,
+      typeName,
+      @[],
+      returnsInterface = returnsIface,
+      doc = zeroDoc,
     )
     return
 
@@ -579,6 +603,7 @@ proc generateApiCborRequestBrokerImpl(
       typeName,
       @[],
       returnsInterface = returnsIface,
+      doc = zeroDoc,
     )
 
   if argPresent:
@@ -603,6 +628,7 @@ proc generateApiCborRequestBrokerImpl(
       typeName,
       fields,
       returnsInterface = returnsIface,
+      doc = argDoc,
     )
 
   when defined(brokerDebug):

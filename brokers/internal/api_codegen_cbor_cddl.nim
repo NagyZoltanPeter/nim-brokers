@@ -142,14 +142,25 @@ proc nimTypeToCddl*(nimType: string): string {.compileTime.} =
 # Type-rule emission
 # ---------------------------------------------------------------------------
 
+proc cddlDocLines(doc: string, indent: string = ""): string {.compileTime.} =
+  ## Render captured `##` doc text as CDDL `;` comment lines (#50).
+  result = ""
+  if doc.len == 0:
+    return
+  for line in doc.splitLines():
+    result.add(indent & "; " & line & "\n")
+
 proc emitObjectRule(entry: ApiTypeEntry): string {.compileTime.} =
-  result = entry.name & " = {\n"
+  result = cddlDocLines(entry.doc)
+  result.add(entry.name & " = {\n")
   for f in entry.fields:
+    result.add(cddlDocLines(f.doc, "  "))
     result.add("  " & f.name & ": " & nimTypeToCddl(f.nimType) & ",\n")
   result.add("}\n")
 
 proc emitEnumRule(entry: ApiTypeEntry): string {.compileTime.} =
-  result = "; enum " & entry.name & ":\n"
+  result = cddlDocLines(entry.doc)
+  result.add("; enum " & entry.name & ":\n")
   for v in entry.enumValues:
     result.add(";   " & v.name & " = " & $v.ordinal & "\n")
   result.add(entry.name & " = uint\n")
@@ -160,7 +171,8 @@ proc emitAliasRule(entry: ApiTypeEntry): string {.compileTime.} =
     of atkAlias: "alias"
     of atkDistinct: "distinct"
     else: "alias"
-  result = "; " & kind & " of " & entry.underlyingType & "\n"
+  result = cddlDocLines(entry.doc)
+  result.add("; " & kind & " of " & entry.underlyingType & "\n")
   result.add(entry.name & " = " & nimTypeToCddl(entry.underlyingType) & "\n")
 
 proc emitTypeRule(entry: ApiTypeEntry): string {.compileTime.} =
@@ -231,6 +243,7 @@ proc generateCborCddl*(
           "{}"
 
       result.add("; apiName: \"" & r.apiName & "\"\n")
+      result.add(cddlDocLines(r.doc))
       if r.argFields.len > 0:
         result.add(emitArgsRule(argsRule, r.argFields))
       else:
@@ -242,6 +255,7 @@ proc generateCborCddl*(
     result.add("; ----- Events ----------------------------------------------\n")
     for e in eventEntries:
       result.add("; eventName: \"" & e.apiName & "\"\n")
+      result.add(cddlDocLines(e.doc))
       result.add(
         upperCamel(e.apiName) & "Event = " & nimTypeToCddl(e.typeName) & "\n\n"
       )
@@ -251,6 +265,7 @@ proc generateCborCddl*(
     result.add("; ----- Signals (one-way, consumed by the library) ----------\n")
     for s in signalEntries:
       result.add("; signalName: \"" & s.apiName & "\"\n")
+      result.add(cddlDocLines(s.doc))
       result.add(
         upperCamel(s.apiName) & "Signal = " & nimTypeToCddl(s.typeName) & "\n\n"
       )

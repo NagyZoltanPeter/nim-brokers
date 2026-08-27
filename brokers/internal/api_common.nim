@@ -110,6 +110,10 @@ type CborRequestEntry* = object
     ## When set, the wire `ok` value is a bare uint32 (the sub-instance's
     ## BrokerContext); wrapper codegen emits a method returning the typed
     ## sub-wrapper class built from that ctx instead of a decoded payload.
+  doc*: string
+    ## Doc-comment text captured from the broker declaration (#50). Wrapper
+    ## codegen propagates it onto the generated method in every language
+    ## and onto the CDDL rules.
 
 var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
   ## Accumulated by `RequestBroker(API)` expansions.
@@ -119,6 +123,7 @@ var gApiCborRequestEntries* {.compileTime.}: seq[CborRequestEntry] = @[]
 type CborEventEntry* = object
   apiName*: string ## Wire eventName foreign callers pass to `<lib>_subscribe`.
   typeName*: string ## Nim type identifier for the event payload.
+  doc*: string ## Doc-comment text captured from the broker declaration (#50).
 
 var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
   ## Accumulated by `EventBroker(API)` expansions.
@@ -128,7 +133,9 @@ var gApiCborEventEntries* {.compileTime.}: seq[CborEventEntry] = @[]
   ## Nim's compile-time VM aliases `let` copies of seqs back to the
   ## source.
 
-proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
+proc registerCborEventEntry*(
+    apiName, typeName: string, doc: string = ""
+) {.compileTime.} =
   ## Register an event for the next library's CBOR-mode subscribe surface.
   for entry in gApiCborEventEntries:
     if entry.apiName == apiName:
@@ -146,7 +153,9 @@ proc registerCborEventEntry*(apiName, typeName: string) {.compileTime.} =
           entry.typeName & "')" & ifaceHint & ". " &
           "Each EventBroker(API) must have a unique event type name."
       )
-  gApiCborEventEntries.add(CborEventEntry(apiName: apiName, typeName: typeName))
+  gApiCborEventEntries.add(
+    CborEventEntry(apiName: apiName, typeName: typeName, doc: doc)
+  )
 
 type CborSignalEntry* = object
   ## A `SignalBroker(API)` entry. A signal is one-way: `<lib>_call` enqueues
@@ -157,13 +166,16 @@ type CborSignalEntry* = object
   apiName*: string ## Wire name foreign callers pass to `<lib>_call`.
   adapterProc*: string ## Identifier of the generated signal adapter proc.
   typeName*: string ## Nim type identifier for the signal payload.
+  doc*: string ## Doc-comment text captured from the broker declaration (#50).
 
 var gApiCborSignalEntries* {.compileTime.}: seq[CborSignalEntry] = @[]
   ## Accumulated by `SignalBroker(API)` expansions. `registerBrokerLibrary`
   ## reads this list to wire the slot-free `<lib>_call` signal path and the
   ## per-language `signal_<name>()` wrapper methods.
 
-proc registerCborSignalEntry*(apiName, adapterProc, typeName: string) {.compileTime.} =
+proc registerCborSignalEntry*(
+    apiName, adapterProc, typeName: string, doc: string = ""
+) {.compileTime.} =
   ## Register a CBOR signal adapter for the next library. Signal apiNames share
   ## the same wire namespace as requests (both are dispatched by `<lib>_call`),
   ## so a duplicate against either list is a collision.
@@ -181,7 +193,9 @@ proc registerCborSignalEntry*(apiName, adapterProc, typeName: string) {.compileT
           "both, so their wire names must be distinct."
       )
   gApiCborSignalEntries.add(
-    CborSignalEntry(apiName: apiName, adapterProc: adapterProc, typeName: typeName)
+    CborSignalEntry(
+      apiName: apiName, adapterProc: adapterProc, typeName: typeName, doc: doc
+    )
   )
 
 proc registerCborRequestEntry*(
@@ -189,6 +203,7 @@ proc registerCborRequestEntry*(
     responseTypeName: string = "",
     argFields: seq[(string, string)] = @[],
     returnsInterface: string = "",
+    doc: string = "",
 ) {.compileTime.} =
   ## Register a CBOR request adapter for the next library that calls
   ## `registerBrokerLibrary`. Detects duplicate apiNames at compile time
@@ -220,6 +235,7 @@ proc registerCborRequestEntry*(
       responseTypeName: responseTypeName,
       argFields: argFields,
       returnsInterface: returnsInterface,
+      doc: doc,
     )
   )
 
