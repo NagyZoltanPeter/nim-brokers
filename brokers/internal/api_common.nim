@@ -15,7 +15,7 @@
 
 {.push raises: [].}
 
-import std/macros
+import std/[macros, strutils]
 
 import ./api_schema
 import ./api_outdir
@@ -23,6 +23,32 @@ import ./helper/broker_utils
 
 export api_schema
 export api_outdir
+
+# ---------------------------------------------------------------------------
+# Doc-comment rendering helpers for wrapper codegen (#50)
+# ---------------------------------------------------------------------------
+
+proc cDocComment*(doc: string, indent: string = "  "): string {.compileTime.} =
+  ## Render captured `##` doc text as a C/C++ `/** … */` block.
+  result = ""
+  if doc.len == 0:
+    return
+  result.add(indent & "/**\n")
+  for line in doc.splitLines():
+    # A literal `*/` inside the doc text would terminate the comment.
+    result.add(indent & " * " & line.replace("*/", "* /") & "\n")
+  result.add(indent & " */\n")
+
+proc lineDocComment*(
+    doc, prefix: string, indent: string = ""
+): string {.compileTime.} =
+  ## Render captured `##` doc text as line comments — `/// ` for Rust,
+  ## `// ` for Go, `# ` for scripting-style files.
+  result = ""
+  if doc.len == 0:
+    return
+  for line in doc.splitLines():
+    result.add(indent & prefix & line & "\n")
 
 # ---------------------------------------------------------------------------
 # FFI response status codes — single source of truth

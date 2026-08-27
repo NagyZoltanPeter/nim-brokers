@@ -28,8 +28,13 @@ proc generateCborCHeaderFile*(
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
     signalApiNames: seq[string] = @[],
+    requestApiDocs: seq[string] = @[],
+    eventApiDocs: seq[string] = @[],
+    signalApiDocs: seq[string] = @[],
 ) {.compileTime, raises: [].} =
-  ## Writes the fixed-shape C header for a CBOR-mode library.
+  ## Writes the fixed-shape C header for a CBOR-mode library. The optional
+  ## `*Docs` seqs are parallel to the corresponding `*Names` and carry the
+  ## `##` doc text captured from the broker declarations (#50).
   ensureGeneratedOutputDir(outDir)
 
   let upperLib = libName.toUpperAscii().replace("-", "_")
@@ -258,25 +263,34 @@ proc generateCborCHeaderFile*(
   h.add("int32_t " & p & "getSchema(void** respBufOut, int32_t* respLenOut);\n\n")
 
   if requestApiNames.len > 0 or eventApiNames.len > 0 or signalApiNames.len > 0:
+    # Render one apiName plus its captured `##` doc text (indented under the
+    # name, #50) into the comment block.
+    proc addNameWithDoc(h: var string, names, docs: seq[string], i: int) =
+      h.add(" *   \"" & names[i] & "\"\n")
+      if i < docs.len and docs[i].len > 0:
+        for line in docs[i].splitLines():
+          # A literal `*/` inside the doc text would terminate the comment.
+          h.add(" *       " & line.replace("*/", "* /") & "\n")
+
     h.add("/* ----------------------------------------------------------------\n")
     h.add(" * Documented apiNames\n")
     h.add(" * ---------------------------------------------------------------- */\n\n")
     if requestApiNames.len > 0:
       h.add("/* Requests (pass these as `apiName` to " & p & "call):\n")
-      for n in requestApiNames:
-        h.add(" *   \"" & n & "\"\n")
+      for i in 0 ..< requestApiNames.len:
+        addNameWithDoc(h, requestApiNames, requestApiDocs, i)
       h.add(" */\n\n")
     if eventApiNames.len > 0:
       h.add("/* Events (pass these as `eventName` to " & p & "subscribe):\n")
-      for n in eventApiNames:
-        h.add(" *   \"" & n & "\"\n")
+      for i in 0 ..< eventApiNames.len:
+        addNameWithDoc(h, eventApiNames, eventApiDocs, i)
       h.add(" */\n\n")
     if signalApiNames.len > 0:
       h.add(
         "/* Signals (one-way; pass these as `apiName` to " & p & "call, no response):\n"
       )
-      for n in signalApiNames:
-        h.add(" *   \"" & n & "\"\n")
+      for i in 0 ..< signalApiNames.len:
+        addNameWithDoc(h, signalApiNames, signalApiDocs, i)
       h.add(" */\n\n")
 
   h.add("#ifdef __cplusplus\n}\n#endif\n\n")

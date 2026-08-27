@@ -439,6 +439,7 @@ proc generateCborGoFile*(
 
   for name in enumNames:
     let entry = lookupTypeEntry(name)
+    g.add(lineDocComment(entry.doc, "// "))
     g.add("type " & name & " int32\n\n")
     g.add("const (\n")
     if entry.enumValues.len == 0:
@@ -466,10 +467,12 @@ proc generateCborGoFile*(
           "' (no Go mapping)\n\n"
       )
       continue
+    g.add(lineDocComment(lookupTypeEntry(name).doc, "// "))
     g.add("type " & name & " = " & goU & "\n\n")
 
   for name in objectNames:
     let entry = lookupTypeEntry(name)
+    g.add(lineDocComment(entry.doc, "// "))
     g.add("type " & name & " struct {\n")
     var anyField = false
     for f in entry.fields:
@@ -482,6 +485,7 @@ proc generateCborGoFile*(
             "mapping or change the field type."
         )
       let fx = goExportedField(f.name)
+      g.add(lineDocComment(f.doc, "// ", "\t"))
       g.add("\t" & fx & " " & hint & " `cbor:\"" & f.name & "\"`\n")
       anyField = true
     if not anyField:
@@ -760,6 +764,7 @@ proc generateCborGoFile*(
       argsStructFields.add("\t\t" & exN & " " & hType & " `cbor:\"" & n & "\"`\n")
       argsAssign.add("\t\t" & exN & ": " & goSafeParam(n) & ",\n")
       firstNonZero = true
+    result.add(lineDocComment(e.doc, "// "))
     result.add("func (l *" & recv & ") " & methodName & "(")
     var firstP = true
     for (n, t) in e.argFields:
@@ -921,6 +926,7 @@ proc generateCborGoFile*(
       argsStructFields.add("\t\t" & exN & " " & hType & " `cbor:\"" & n & "\"`\n")
       argsAssign.add("\t\t" & exN & ": " & goSafeParam(n) & ",\n")
       firstNonZero = true
+    result.add(lineDocComment(e.doc, "// "))
     result.add("func (l *" & recv & ") " & methodName & "(")
     var firstP = true
     for (n, t) in e.argFields:
@@ -990,6 +996,7 @@ proc generateCborGoFile*(
         sigParams.add(", ")
       sigParams.add(goSafeParam(f.name) & " " & nimTypeToGoCborHint(f.nimType))
       first = false
+    result.add(lineDocComment(s.doc, "// "))
     result.add("func (l *" & recv & ") " & methodName & "(" & sigParams & ") error {\n")
     if fields.len == 0:
       result.add("\treturn l.signalCall(\"" & s.apiName & "\", nil)\n")
@@ -1086,6 +1093,7 @@ proc generateCborGoFile*(
         if i > 0:
           sig.add(", ")
         sig.add(fieldNames[i] & " " & fieldGoTypes[i])
+      g.add(lineDocComment(ev.doc, "// "))
       g.add(
         "func (l *" & className & ") On" & exName & "(cb func(" & sig & ")) uint64 {\n"
       )
@@ -1241,6 +1249,7 @@ proc generateCborGoFile*(
           if i > 0:
             sig.add(", ")
           sig.add(fieldNames[i] & " " & fieldGoTypes[i])
+        g.add(lineDocComment(ev.doc, "// "))
         g.add("func (l *" & sub & ") On" & exName & "(cb func(" & sig & ")) uint64 {\n")
         g.add("\tif l.ctx == 0 { return 0 }\n")
         g.add("\twrap := cborEventHandler(func(payload []byte) {\n")

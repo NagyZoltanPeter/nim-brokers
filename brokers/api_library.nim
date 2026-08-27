@@ -2105,17 +2105,23 @@ proc registerBrokerLibraryCborImpl(
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
   var requestNames: seq[string] = @[]
+  var requestDocs: seq[string] = @[]
   for e in entries:
     requestNames.add(e.apiName)
+    requestDocs.add(e.doc)
   var eventNames: seq[string] = @[]
+  var eventDocs: seq[string] = @[]
   for e in eventEntries:
     eventNames.add(e.apiName)
+    eventDocs.add(e.doc)
   var signalNames: seq[string] = @[]
+  var signalDocs: seq[string] = @[]
   for s in signalEntries:
     signalNames.add(s.apiName)
+    signalDocs.add(s.doc)
   generateCborCHeaderFile(
     outDir, libName, config.version, requestNames, eventNames, config.asyncTimeoutMs,
-    config.asyncQueueDepth, signalNames,
+    config.asyncQueueDepth, signalNames, requestDocs, eventDocs, signalDocs,
   )
   generateCborCppHeaderFile(
     outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
