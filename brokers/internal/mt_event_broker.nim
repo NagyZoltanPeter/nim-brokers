@@ -165,30 +165,31 @@ proc generateMtEventBroker*(
   result = newStmtList()
 
   # ── Type section ──────────────────────────────────────────────────────
-  result.add(
-    quote do:
-      type
-        `exportedTypeIdent` = `objectDef`
-        `exportedListenerHandleIdent` = object
-          id*: uint64
-          threadId*: pointer ## Thread that registered this listener.
+  let brokerTypes = quote do:
+    type
+      `exportedTypeIdent` = `objectDef`
+      `exportedListenerHandleIdent` = object
+        id*: uint64
+        threadId*: pointer ## Thread that registered this listener.
 
-        `exportedHandlerProcIdent` =
-          proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
+      `exportedHandlerProcIdent` =
+        proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-        `dropAllHookProcTypeIdent` =
-          proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
+      `dropAllHookProcTypeIdent` =
+        proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
 
-        `bucketName` = object
-          brokerCtx: BrokerContext
-          ring: ptr VyukovMpscRing[uint32]
-          listenerSignal: ptr BrokerSignalShared
-          threadId: pointer
-          threadGen: uint64 ## disambiguates reused threadvar addresses
-          active: bool
-          hasListeners: bool
+      `bucketName` = object
+        brokerCtx: BrokerContext
+        ring: ptr VyukovMpscRing[uint32]
+        listenerSignal: ptr BrokerSignalShared
+        threadId: pointer
+        threadGen: uint64 ## disambiguates reused threadvar addresses
+        active: bool
+        hasListeners: bool
 
-  )
+  # Attach the captured `##` doc text to the re-emitted event type (#50).
+  attachFirstTypeDefDoc(brokerTypes, parsed.docText)
+  result.add(brokerTypes)
 
   # ── Codec procs (marshal / unmarshal) ─────────────────────────────────
   for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):

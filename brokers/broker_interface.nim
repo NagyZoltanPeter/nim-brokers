@@ -49,7 +49,10 @@ proc brokerHeadName(stmt: NimNode): string =
   ""
 
 proc renderRequestMethod(
-    ifaceName, verb, payloadRepr: string, argParams: seq[NimNode], async: bool
+    ifaceName, verb, payloadRepr: string,
+    argParams: seq[NimNode],
+    async: bool,
+    doc: string = "",
 ): string =
   ## Render the interface's public request entry point as a plain proc that
   ## *tunnels* through the broker dispatch path:
@@ -81,8 +84,14 @@ proc renderRequestMethod(
     else:
       "self.brokerCtx"
   let call = brokerName & ".request(" & callArgs & ")"
+  # Splice the captured `##` doc text (issue #50) as the rendered proc's doc
+  # comment so hover / `nim doc` show it on the tunneling entry point.
+  var docLines = ""
+  if doc.len > 0:
+    for line in doc.splitLines():
+      docLines.add("  ## " & line & "\n")
   result =
-    "proc " & verb & "*(" & params & "): " & ret & " " & pragma & " =\n" &
+    "proc " & verb & "*(" & params & "): " & ret & " " & pragma & " =\n" & docLines &
     (if async: "  await " & call & "\n" else: "  " & call & "\n")
 
 macro BrokerInterface*(args: varargs[untyped]): untyped =
@@ -113,13 +122,20 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   let ifaceNameStr = $ifaceName
   result = newStmtList()
 
-  # 1. Interface ref type with the hidden context.
-  result.add(
-    quote do:
-      type `ifaceName`* = ref object of RootObj
-        brokerCtx*: BrokerContext
+  # Top-level `##` comments inside the interface body document the interface
+  # itself (issue #50).
+  var ifaceDoc = ""
+  for stmt in body:
+    if stmt.kind == nnkCommentStmt:
+      ifaceDoc = joinDocText(ifaceDoc, stmt.strVal)
 
-  )
+  # 1. Interface ref type with the hidden context.
+  let ifaceTypeSection = quote do:
+    type `ifaceName`* = ref object of RootObj
+      brokerCtx*: BrokerContext
+
+  attachFirstTypeDefDoc(ifaceTypeSection, ifaceDoc)
+  result.add(ifaceTypeSection)
 
   # 2. Walk the sub-blocks: re-emit each broker (lowered to `(API)` when the
   #    interface is `(API)`), and generate abstract methods for requests.
@@ -129,6 +145,8 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
   var requestTypes: seq[string] = @[] # sanitized request broker type names (A1)
   var requestVerbs: seq[(string, string)] = @[] # (verb, sanitized type name)
   for stmt in body:
+    if stmt.kind in {nnkCommentStmt, nnkEmpty}:
+      continue # interface-level doc comments, captured above
     let headName = brokerHeadName(stmt)
     if headName notin ["EventBroker", "RequestBroker", "SignalBroker"]:
       macros.error(
@@ -166,12 +184,18 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       requestVerbs.add((sg.verb, sanitizeIdentName(sg.typeIdent)))
       if not sg.zeroArgProc.isNil:
         result.add(
-          parseStmt(renderRequestMethod(ifaceNameStr, sg.verb, payloadRepr, @[], async))
+          parseStmt(
+            renderRequestMethod(
+              ifaceNameStr, sg.verb, payloadRepr, @[], async, sg.zeroArgDoc
+            )
+          )
         )
       if not sg.argProc.isNil:
         result.add(
           parseStmt(
-            renderRequestMethod(ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async)
+            renderRequestMethod(
+              ifaceNameStr, sg.verb, payloadRepr, sg.argParams, async, sg.argDoc
+            )
           )
         )
     elif headName == "EventBroker":

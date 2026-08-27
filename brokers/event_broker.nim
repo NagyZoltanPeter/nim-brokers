@@ -162,24 +162,26 @@ proc generateEventBroker(body: NimNode): NimNode =
       quote:
         proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-  result.add(
-    quote do:
-      type
-        `exportedTypeIdent` = `objectDef`
-        `exportedListenerHandleIdent` = object
-          id*: uint64
+  let brokerTypes = quote do:
+    type
+      `exportedTypeIdent` = `objectDef`
+      `exportedListenerHandleIdent` = object
+        id*: uint64
 
-        `exportedHandlerProcIdent` = `handlerProcTy`
-        `bucketTypeIdent` = object
-          brokerCtx: BrokerContext
-          listeners: Table[uint64, `handlerProcIdent`]
-          nextId: uint64
-          inFlight: seq[Future[void]]
+      `exportedHandlerProcIdent` = `handlerProcTy`
+      `bucketTypeIdent` = object
+        brokerCtx: BrokerContext
+        listeners: Table[uint64, `handlerProcIdent`]
+        nextId: uint64
+        inFlight: seq[Future[void]]
 
-        `exportedBrokerTypeIdent` = ref object
-          buckets: seq[`bucketTypeIdent`]
+      `exportedBrokerTypeIdent` = ref object
+        buckets: seq[`bucketTypeIdent`]
 
-  )
+  # Attach the captured `##` doc text so hover / `nim doc` show it on the
+  # re-emitted event type (issue #50).
+  attachFirstTypeDefDoc(brokerTypes, parsed.docText)
+  result.add(brokerTypes)
 
   result.add(
     quote do:
