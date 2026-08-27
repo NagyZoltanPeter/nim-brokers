@@ -79,6 +79,48 @@ proc attachedDocText*(n: NimNode): string {.compileTime.} =
         continue
     result = joinDocText(result, text)
 
+proc fieldDocText*(field: NimNode): string {.compileTime.} =
+  ## Doc text attached to an object-field `nnkIdentDefs`. The renderer only
+  ## prints attached comments in a declaration context, so wrap the field
+  ## into a synthetic single-field type section before scanning its repr.
+  if field.kind != nnkIdentDefs:
+    return ""
+  attachedDocText(
+    newTree(
+      nnkTypeSection,
+      newTree(
+        nnkTypeDef,
+        ident("TmpFieldDocProbe"),
+        newEmptyNode(),
+        newTree(
+          nnkObjectTy,
+          newEmptyNode(),
+          newEmptyNode(),
+          newTree(nnkRecList, copyNimTree(field)),
+        ),
+      ),
+    )
+  )
+
+proc procDocsFromBody*(body: NimNode): seq[(string, string)] {.compileTime.} =
+  ## (procName, docText) for each top-level proc in a broker body: the
+  ## standalone `##` lines immediately above the proc joined with any doc
+  ## the parser attached to the signature itself.
+  result = @[]
+  var pendingDoc = ""
+  for stmt in body:
+    case stmt.kind
+    of nnkCommentStmt:
+      pendingDoc = joinDocText(pendingDoc, stmt.strVal)
+    of nnkProcDef:
+      let nm = stmt[0]
+      let base = (if nm.kind == nnkPostfix: nm[1] else: nm)
+      let attached = attachedDocText(newStmtList(copyNimTree(stmt)))
+      result.add(($base, joinDocText(pendingDoc, attached)))
+      pendingDoc = ""
+    else:
+      pendingDoc = ""
+
 proc typeDefWithDoc*(td: NimNode, doc: string): NimNode {.compileTime.} =
   ## Rebuild a `nnkTypeDef` so `doc` becomes its attached doc comment,
   ## visible to `nim doc` / IDE hover on the generated type. Comments
@@ -560,7 +602,7 @@ proc parseOneTypeDef(
         ensureFieldDef(field)
         if collectFieldInfo:
           let fieldTypeNode = field[field.len - 2]
-          let fieldDoc = attachedDocText(field)
+          let fieldDoc = fieldDocText(field)
           for i in 0 ..< field.len - 2:
             let baseFieldIdent = baseTypeIdent(field[i])
             fieldNames.add(copyNimTree(baseFieldIdent))
@@ -600,7 +642,7 @@ proc parseOneTypeDef(
           ensureFieldDef(field)
           if collectFieldInfo:
             let fieldTypeNode = field[field.len - 2]
-            let fieldDoc = attachedDocText(field)
+            let fieldDoc = fieldDocText(field)
             for i in 0 ..< field.len - 2:
               let baseFieldIdent = baseTypeIdent(field[i])
               fieldNames.add(copyNimTree(baseFieldIdent))
@@ -802,7 +844,9 @@ proc parseRequestSugar*(
     case stmt.kind
     of nnkProcDef:
       procs.add(stmt)
-      procDocs.add(joinDocText(pendingDoc, attachedDocText(stmt)))
+      procDocs.add(
+        joinDocText(pendingDoc, attachedDocText(newStmtList(copyNimTree(stmt))))
+      )
       pendingDoc = ""
     of nnkTypeSection:
       for d in stmt:
@@ -928,11 +972,7 @@ proc parseRequestSugar*(
   if result.docText.len == 0:
     # POD form without a documented type: the signature doc is the best
     # broker-level description we have.
-    result.docText =
-      if result.zeroArgDoc.len > 0:
-        result.zeroArgDoc
-      else:
-        result.argDoc
+    result.docText = if result.zeroArgDoc.len > 0: result.zeroArgDoc else: result.argDoc
   result.parsed.docText = result.docText
 
 # ---------------------------------------------------------------------------

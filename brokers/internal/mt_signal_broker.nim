@@ -147,7 +147,7 @@ proc generateMtSignalBroker*(
       quote:
         proc(signalValue: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-  let brokerTypes = quote do:
+  let brokerTypes = quote:
     type
       `exportedTypeIdent` = `objectDef`
       `exportedHandlerProcIdent` = `handlerProcTy`

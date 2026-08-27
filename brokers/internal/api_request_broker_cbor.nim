@@ -503,8 +503,20 @@ proc generateApiCborRequestBrokerImpl(
       zeroApiSuffix = (if zs.len > 0: "_" & zs else: "_zero")
       let asfx = legacySuffix(sigs.argSigName)
       argApiSuffix = (if asfx.len > 0: "_" & asfx else: "_args")
-    zeroDoc = parsed.docText
-    argDoc = parsed.docText
+    # Per-signature doc where written; the type-level doc otherwise.
+    let procDocs = procDocsFromBody(body)
+    proc docFor(name: string): string =
+      for (n, d) in procDocs:
+        if n == name:
+          return d
+      ""
+
+    zeroDoc = docFor(sigs.zeroArgName)
+    if zeroDoc.len == 0:
+      zeroDoc = parsed.docText
+    argDoc = docFor(sigs.argSigName)
+    if argDoc.len == 0:
+      argDoc = parsed.docText
   else:
     let sg = parseRequestSugar(body, "RequestBroker", async = true)
     typeIdent = sg.typeIdent

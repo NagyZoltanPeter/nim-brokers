@@ -130,7 +130,7 @@ macro BrokerInterface*(args: varargs[untyped]): untyped =
       ifaceDoc = joinDocText(ifaceDoc, stmt.strVal)
 
   # 1. Interface ref type with the hidden context.
-  let ifaceTypeSection = quote do:
+  let ifaceTypeSection = quote:
     type `ifaceName`* = ref object of RootObj
       brokerCtx*: BrokerContext
 

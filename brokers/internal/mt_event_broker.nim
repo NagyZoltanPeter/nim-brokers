@@ -165,7 +165,7 @@ proc generateMtEventBroker*(
   result = newStmtList()
 
   # ── Type section ──────────────────────────────────────────────────────
-  let brokerTypes = quote do:
+  let brokerTypes = quote:
     type
       `exportedTypeIdent` = `objectDef`
       `exportedListenerHandleIdent` = object
@@ -175,8 +175,7 @@ proc generateMtEventBroker*(
       `exportedHandlerProcIdent` =
         proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-      `dropAllHookProcTypeIdent` =
-        proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
+      `dropAllHookProcTypeIdent` = proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
 
       `bucketName` = object
         brokerCtx: BrokerContext

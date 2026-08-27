@@ -287,10 +287,7 @@ proc makeEnumEntry*(
   result.enumValues = values
 
 proc makeAliasEntry*(
-    name: string,
-    underlyingType: string,
-    kind: ApiTypeKind = atkAlias,
-    doc: string = "",
+    name: string, underlyingType: string, kind: ApiTypeKind = atkAlias, doc: string = ""
 ): ApiTypeEntry {.compileTime.} =
   ## Construct an ApiTypeEntry for an alias or distinct type.
   result.name = name

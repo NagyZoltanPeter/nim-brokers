@@ -162,7 +162,7 @@ proc generateEventBroker(body: NimNode): NimNode =
       quote:
         proc(event: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-  let brokerTypes = quote do:
+  let brokerTypes = quote:
     type
       `exportedTypeIdent` = `objectDef`
       `exportedListenerHandleIdent` = object

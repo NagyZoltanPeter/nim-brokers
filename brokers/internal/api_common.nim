@@ -39,9 +39,7 @@ proc cDocComment*(doc: string, indent: string = "  "): string {.compileTime.} =
     result.add(indent & " * " & line.replace("*/", "* /") & "\n")
   result.add(indent & " */\n")
 
-proc lineDocComment*(
-    doc, prefix: string, indent: string = ""
-): string {.compileTime.} =
+proc lineDocComment*(doc, prefix: string, indent: string = ""): string {.compileTime.} =
   ## Render captured `##` doc text as line comments — `/// ` for Rust,
   ## `// ` for Go, `# ` for scripting-style files.
   result = ""
