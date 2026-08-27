@@ -92,6 +92,8 @@ proc parseLibraryConfig(
   var mainClass = ""
 
   for stmt in body:
+    if stmt.kind in {nnkCommentStmt, nnkEmpty}:
+      continue # doc comments are allowed anywhere in the body (issue #50)
     if stmt.kind == nnkCall and stmt.len == 2:
       let key = $stmt[0]
       let value = stmt[1]

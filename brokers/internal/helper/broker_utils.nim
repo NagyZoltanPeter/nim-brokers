@@ -16,6 +16,13 @@ type ParsedBrokerType* = object
   isVoid*: bool ## true when the declared RHS is the bare `void` type
   fieldNames*: seq[NimNode]
   fieldTypes*: seq[NimNode]
+  docText*: string
+    ## Doc-comment text captured for the declared type: standalone `##`
+    ## statements written above the `type` section inside the broker block
+    ## (joined with newlines). Empty when the user wrote none.
+  fieldDocs*: seq[string]
+    ## Per-field doc text (trailing `## …` on the field), parallel to
+    ## `fieldNames`. Populated only when `collectFieldInfo = true`.
 
 proc toSnakeCase*(name: string): string {.compileTime.} =
   ## Converts PascalCase / camelCase to snake_case. Shared between the
@@ -29,6 +36,86 @@ proc toSnakeCase*(name: string): string {.compileTime.} =
       result.add(chr(ord(ch) + 32))
     else:
       result.add(ch)
+
+# ── doc-comment capture (issue #50) ───────────────────────────────────────
+# Standalone `##` lines arrive as nnkCommentStmt nodes (strVal is the text).
+# A `##` the parser ATTACHED to a declaration (trailing on an object field,
+# indented under a proc signature) is invisible in the node tree —
+# std/macros exposes no comment accessor — but survives `copyNimTree` and
+# is rendered back by `repr`, so we recover the text from the rendered
+# source. Attachment cannot be synthesised on macro-built nodes either;
+# `typeDefWithDoc` grafts real content into a parsed skeleton whose
+# TypeDef node already carries the comment.
+
+proc joinDocText*(a, b: string): string {.compileTime.} =
+  ## Join two doc fragments with a newline, tolerating empty parts.
+  if a.len == 0:
+    b
+  elif b.len == 0:
+    a
+  else:
+    a & "\n" & b
+
+proc attachedDocText*(n: NimNode): string {.compileTime.} =
+  ## Recover doc comments the parser attached to `n` (e.g. a trailing
+  ## `## …` on a field, or a `##` line indented under a signature proc)
+  ## by scanning the node's rendered source for `##` lines.
+  result = ""
+  var rendered: string
+  try:
+    rendered = n.repr
+  except CatchableError, Defect:
+    return ""
+  for rawLine in rendered.splitLines():
+    let line = rawLine.strip()
+    var text = ""
+    if line.startsWith("##"):
+      text = line[2 .. ^1].strip()
+    else:
+      let idx = line.find(" ## ")
+      if idx >= 0:
+        text = line[idx + 4 .. ^1].strip()
+      else:
+        continue
+    result = joinDocText(result, text)
+
+proc typeDefWithDoc*(td: NimNode, doc: string): NimNode {.compileTime.} =
+  ## Rebuild a `nnkTypeDef` so `doc` becomes its attached doc comment,
+  ## visible to `nim doc` / IDE hover on the generated type. Comments
+  ## cannot be attached to macro-built nodes directly, so parse a skeleton
+  ## type definition carrying the comment and graft the real name /
+  ## generic params / RHS into it (the comment lives on the TypeDef node,
+  ## which is kept).
+  if doc.len == 0 or td.kind != nnkTypeDef:
+    return td
+  var src = "type TmpDocCarrier = int\n"
+  for line in doc.splitLines():
+    src.add("  ## " & line & "\n")
+  var skel: NimNode
+  try:
+    skel = parseStmt(src)
+  except CatchableError, Defect:
+    return td
+  result = skel[0][0]
+  result[0] = td[0]
+  result[1] = td[1]
+  result[2] = td[2]
+
+proc attachFirstTypeDefDoc*(n: NimNode, doc: string) {.compileTime.} =
+  ## Attach `doc` to the first `nnkTypeDef` under `n` — in place. `n` may be
+  ## the `nnkTypeSection` itself or a statement list holding one (`quote do`
+  ## returns the bare section for a single `type` statement).
+  if doc.len == 0:
+    return
+  var sec = n
+  if sec.kind != nnkTypeSection:
+    for child in n:
+      if child.kind == nnkTypeSection:
+        sec = child
+        break
+  if sec.kind != nnkTypeSection or sec.len == 0 or sec[0].kind != nnkTypeDef:
+    return
+  sec[0] = typeDefWithDoc(sec[0], doc)
 
 proc sanitizeIdentName*(node: NimNode): string =
   var raw = $node
@@ -451,6 +538,8 @@ proc parseOneTypeDef(
   ## Internal helper used by both parseSingleTypeDef and parseTypeDefs.
   var fieldNames: seq[NimNode] = @[]
   var fieldTypes: seq[NimNode] = @[]
+  var fieldDocs: seq[string] = @[]
+  var docText = ""
 
   let typeIdent = baseTypeIdent(def[0])
   let rhs = def[2]
@@ -471,16 +560,22 @@ proc parseOneTypeDef(
         ensureFieldDef(field)
         if collectFieldInfo:
           let fieldTypeNode = field[field.len - 2]
+          let fieldDoc = attachedDocText(field)
           for i in 0 ..< field.len - 2:
             let baseFieldIdent = baseTypeIdent(field[i])
             fieldNames.add(copyNimTree(baseFieldIdent))
             fieldTypes.add(copyNimTree(fieldTypeNode))
+            fieldDocs.add(fieldDoc)
         var cloned = copyNimTree(field)
         for i in 0 ..< cloned.len - 2:
           cloned[i] = exportIdentNode(cloned[i])
         exportedRecList.add(cloned)
       of nnkEmpty:
         discard
+      of nnkCommentStmt:
+        # A `##` doc comment the parser surfaced as its own node inside the
+        # field list — fold it into the type's doc text.
+        docText = joinDocText(docText, field.strVal)
       else:
         error(
           macroName & " object definition only supports simple field declarations",
@@ -505,16 +600,20 @@ proc parseOneTypeDef(
           ensureFieldDef(field)
           if collectFieldInfo:
             let fieldTypeNode = field[field.len - 2]
+            let fieldDoc = attachedDocText(field)
             for i in 0 ..< field.len - 2:
               let baseFieldIdent = baseTypeIdent(field[i])
               fieldNames.add(copyNimTree(baseFieldIdent))
               fieldTypes.add(copyNimTree(fieldTypeNode))
+              fieldDocs.add(fieldDoc)
           var cloned = copyNimTree(field)
           for i in 0 ..< cloned.len - 2:
             cloned[i] = exportIdentNode(cloned[i])
           exportedRecList.add(cloned)
         of nnkEmpty:
           discard
+        of nnkCommentStmt:
+          docText = joinDocText(docText, field.strVal)
         else:
           error(
             macroName & " object definition only supports simple field declarations",
@@ -559,6 +658,8 @@ proc parseOneTypeDef(
     isVoid: isVoid,
     fieldNames: fieldNames,
     fieldTypes: fieldTypes,
+    docText: docText,
+    fieldDocs: fieldDocs,
   )
 
 proc parseTypeDefs*(
@@ -574,13 +675,25 @@ proc parseTypeDefs*(
   ## Callers are responsible for identifying which entry is the "primary" type
   ## (typically the last one, or the one referenced in the signature return type).
   result = @[]
+  var pendingDoc = ""
   for stmt in body:
-    if stmt.kind != nnkTypeSection:
-      continue
-    for def in stmt:
-      if def.kind != nnkTypeDef:
-        continue
-      result.add(parseOneTypeDef(def, macroName, allowRefToNonObject, collectFieldInfo))
+    case stmt.kind
+    of nnkCommentStmt:
+      # Standalone `##` lines above the `type` section document the type.
+      pendingDoc = joinDocText(pendingDoc, stmt.strVal)
+    of nnkTypeSection:
+      for def in stmt:
+        if def.kind != nnkTypeDef:
+          continue
+        var parsed =
+          parseOneTypeDef(def, macroName, allowRefToNonObject, collectFieldInfo)
+        parsed.docText = joinDocText(pendingDoc, parsed.docText)
+        pendingDoc = ""
+        result.add(parsed)
+    else:
+      # A comment above e.g. a signature proc documents that proc, not the
+      # type — drop any pending text so it is not mis-attributed.
+      pendingDoc = ""
 
   if result.len == 0:
     error(macroName & " body must declare at least one type", body)
@@ -630,6 +743,14 @@ type ParsedRequestSugar* = object
   verb*: string
     ## The (lowercase) signature verb — the BrokerInterface method name that
     ## `BrokerImplement` overrides (e.g. `getHealth`).
+  docText*: string
+    ## Doc text for the broker as a whole: standalone `##` lines above the
+    ## payload `type` declaration; falls back to the first signature doc
+    ## when the block declares no type of its own (POD form).
+  zeroArgDoc*: string
+    ## Doc text for the zero-argument signature: standalone `##` lines above
+    ## the proc plus any `##` the parser attached to the signature itself.
+  argDoc*: string ## Doc text for the argument-based signature (same sources).
   parsed*: ParsedBrokerType
     ## Full parse of the dispatch tag over the payload — drives the API/CBOR
     ## schema registration identically to the legacy `type X = ...` path.
@@ -673,19 +794,29 @@ proc parseRequestSugar*(
   ## Parse the proc-style sugar form of a RequestBroker body (one broker per
   ## block, two signature slots, payload decoupled from the dispatch tag).
   var typeDecl: NimNode = nil
+  var typeDoc = ""
   var procs: seq[NimNode] = @[]
+  var procDocs: seq[string] = @[]
+  var pendingDoc = ""
   for stmt in body:
     case stmt.kind
     of nnkProcDef:
       procs.add(stmt)
+      procDocs.add(joinDocText(pendingDoc, attachedDocText(stmt)))
+      pendingDoc = ""
     of nnkTypeSection:
       for d in stmt:
         if d.kind == nnkTypeDef:
           if typeDecl != nil:
             error(macroName & " sugar allows a single payload type", d)
           typeDecl = d
+      typeDoc = joinDocText(typeDoc, pendingDoc)
+      pendingDoc = ""
     of nnkEmpty:
       discard
+    of nnkCommentStmt:
+      # `##` doc comment above the type / proc it precedes.
+      pendingDoc = joinDocText(pendingDoc, stmt.strVal)
     else:
       error("Unsupported statement inside " & macroName & " definition", stmt)
   if procs.len == 0:
@@ -733,7 +864,8 @@ proc parseRequestSugar*(
       )
     result.typeIdent = ident(brokerName)
 
-  for p in procs:
+  for pi in 0 ..< procs.len:
+    let p = procs[pi]
     let params = p.params
     if params.len == 0:
       error("Signature must declare a return type", p)
@@ -756,10 +888,12 @@ proc parseRequestSugar*(
       if not result.zeroArgProc.isNil:
         error("Only one zero-argument signature is allowed", p)
       result.zeroArgProc = p
+      result.zeroArgDoc = procDocs[pi]
     else:
       if not result.argProc.isNil:
         error("Only one argument-based signature is allowed", p)
       result.argProc = p
+      result.argDoc = procDocs[pi]
       result.argParams = @[]
       for idx in 1 ..< params.len:
         let pd = params[idx]
@@ -789,6 +923,17 @@ proc parseRequestSugar*(
       synth, macroName, allowRefToNonObject = true, collectFieldInfo = true
     )
     result.objectDef = result.parsed.objectDef
+
+  result.docText = joinDocText(typeDoc, result.parsed.docText)
+  if result.docText.len == 0:
+    # POD form without a documented type: the signature doc is the best
+    # broker-level description we have.
+    result.docText =
+      if result.zeroArgDoc.len > 0:
+        result.zeroArgDoc
+      else:
+        result.argDoc
+  result.parsed.docText = result.docText
 
 # ---------------------------------------------------------------------------
 # Compile-time interface -> event-type registry. BrokerInterface records the
