@@ -55,13 +55,15 @@ proc generateApiCborEventBrokerImpl(body: NimNode, cfg: MtEvtCfg): NimNode =
   let typeName = sanitizeIdentName(typeIdent)
   let apiName = toSnakeCase(typeName)
   if parsed.hasInlineFields:
-    registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
+    registerCborObjectType(
+      typeName, parsed.fieldNames, parsed.fieldTypes, parsed.docText, parsed.fieldDocs
+    )
   elif parsed.isVoid:
     # `void` → a zero-field object: a payload-less event notification.
-    registerCborObjectType(typeName, @[], @[])
+    registerCborObjectType(typeName, @[], @[], parsed.docText)
   else:
     registerCborPrimitiveType(typeName, parsed)
-  registerCborEventEntry(apiName, typeName)
+  registerCborEventEntry(apiName, typeName, parsed.docText)
 
   when defined(brokerDebug):
     writeBrokerDebug(

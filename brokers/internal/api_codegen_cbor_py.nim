@@ -37,6 +37,29 @@ import ./api_common, ./api_schema
 import ./helper/broker_utils # reduced-A: per-interface partitioning
 
 # ---------------------------------------------------------------------------
+# Doc propagation (#50)
+# ---------------------------------------------------------------------------
+
+proc pyDocstring(doc, indent: string): string {.compileTime.} =
+  ## Render captured `##` doc text as a Python docstring block.
+  result = ""
+  if doc.len == 0:
+    return
+  let lines = doc.replace("\"\"\"", "'''").splitLines()
+  if lines.len == 1:
+    return indent & "\"\"\"" & lines[0] & "\"\"\"\n"
+  result = indent & "\"\"\"" & lines[0] & "\n"
+  for i in 1 ..< lines.len:
+    # Blank doc lines stay free of trailing whitespace.
+    result.add(
+      if lines[i].len == 0:
+        "\n"
+      else:
+        indent & lines[i] & "\n"
+    )
+  result.add(indent & "\"\"\"\n")
+
+# ---------------------------------------------------------------------------
 # Nim → Python type mapping (registry-aware)
 # ---------------------------------------------------------------------------
 
@@ -749,6 +772,7 @@ proc generateCborPyFile*(
     let entry = lookupTypeEntry(name)
     py.add("@dataclass\n")
     py.add("class " & name & ":\n")
+    py.add(pyDocstring(entry.doc, "    "))
     var anyField = false
     for f in entry.fields:
       let hint = nimTypeToPyHint(f.nimType)
@@ -759,6 +783,7 @@ proc generateCborPyFile*(
             "' with no Python mapping. Fields are never silently dropped — add " &
             "a mapping or change the field type."
         )
+      py.add(lineDocComment(f.doc, "# ", "    "))
       py.add(
         "    " & f.name & ": " & hint & " = " & nimTypeToPyDefault(f.nimType) & "\n"
       )
@@ -1077,6 +1102,7 @@ proc generateCborPyFile*(
       result.add(
         "    def " & e.apiName & "(" & sigParams & ") -> Result[\"" & sub & "\"]:\n"
       )
+      result.add(pyDocstring(e.doc, "        "))
       result.add("        if self._ctx == 0:\n")
       result.add("            return Result.err(\"Library context is not created\")\n")
       if e.argFields.len > 0:
@@ -1121,6 +1147,7 @@ proc generateCborPyFile*(
       "    def " & methodName & "(" & sigParams & ") -> Result[" & e.responseTypeName &
         "]:\n"
     )
+    result.add(pyDocstring(e.doc, "        "))
     result.add("        if self._ctx == 0:\n")
     result.add("            return Result.err(\"Library context is not created\")\n")
     if e.argFields.len > 0:
@@ -1267,6 +1294,7 @@ proc generateCborPyFile*(
         dictParts.add(", ")
       dictParts.add("\"" & f.name & "\": " & pyEncodeExpr(f.nimType, f.name))
     result.add("    def " & s.apiName & "(" & sigParams & ") -> None:\n")
+    result.add(pyDocstring(s.doc, "        "))
     result.add("        if self._ctx == 0:\n")
     result.add("            raise RuntimeError(\"Library context is not created\")\n")
     if fields.len == 0:
@@ -1319,6 +1347,7 @@ proc generateCborPyFile*(
       "        \"\"\"Subscribe to '" & ev.apiName &
         "' events. Returns a handle (>=2) on success, 0 on failure.\n"
     )
+    py.add(lineDocComment(ev.doc.replace("\"\"\"", "'''"), "", "        "))
     py.add("        The callback receives the owning library instance as its\n")
     py.add("        first argument followed by the unpacked event payload\n")
     py.add("        fields.\"\"\"\n")
@@ -1543,8 +1572,10 @@ proc generateCborPyFile*(
         )
         py.add(
           "        \"\"\"Subscribe to '" & ev.apiName &
-            "' events. Returns a handle (>=2) on success, 0 on failure.\"\"\"\n"
+            "' events. Returns a handle (>=2) on success, 0 on failure.\n"
         )
+        py.add(lineDocComment(ev.doc.replace("\"\"\"", "'''"), "", "        "))
+        py.add("        \"\"\"\n")
         py.add("        if self._ctx == 0:\n")
         py.add("            return 0\n")
         py.add("        def trampoline(\n")

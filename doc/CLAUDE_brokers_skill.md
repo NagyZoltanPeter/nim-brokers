@@ -376,6 +376,31 @@ proc worker() {.thread.} =
 | Register an inline body without lambda boilerplate | `listenIt` / `provideIt` / `reprovideIt` / `onSignalIt` |
 | Expose to C/C++/Python/Rust/Go | `(API)` + `registerBrokerLibrary` (see AGENTS.md) |
 
+## Doc comments
+
+`##` is accepted inside every broker body — above the `type`, trailing on a
+field, above the `proc signature` (or the sugar `proc`), at interface level, and
+inside `registerBrokerLibrary`. Write documentation there, not above the macro
+call: only in-body docs are captured.
+
+```nim
+RequestBroker(API):
+  ## Query device liveness.
+  type GetHealth = object
+    ok*: bool ## True when all subsystems run.
+
+  ## Read the current health snapshot.
+  proc signature*(deviceId: int64): Future[Result[GetHealth, string]] {.async.}
+```
+
+The captured text is re-attached to the generated declarations (`nim doc`, IDE
+hover) and, for `(API)` brokers, emitted into `<lib>.h` / `.hpp` (`/** … */`),
+`<lib>.py` (docstrings + `#` field comments), the Rust crate (`///`), the Go
+module (`//`), `<lib>.cddl` (`;` lines) and the `doc` field of every record in
+`<lib>_getSchema()`. Auto-resolved external types keep no doc text.
+
+---
+
 ## Gotchas
 
 - Handlers/providers are `raises: []` — never let an exception escape; return `err()`.

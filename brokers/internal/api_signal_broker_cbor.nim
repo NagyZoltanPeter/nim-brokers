@@ -96,17 +96,19 @@ proc generateApiCborSignalBrokerImpl(body: NimNode, cfg: MtSigCfg): NimNode =
   let typeName = sanitizeIdentName(typeIdent)
   let apiName = toSnakeCase(typeName)
   if parsed.hasInlineFields:
-    registerCborObjectType(typeName, parsed.fieldNames, parsed.fieldTypes)
+    registerCborObjectType(
+      typeName, parsed.fieldNames, parsed.fieldTypes, parsed.docText, parsed.fieldDocs
+    )
   elif parsed.isVoid:
     # `void` → a zero-field object: a payload-less pulse signal.
-    registerCborObjectType(typeName, @[], @[])
+    registerCborObjectType(typeName, @[], @[], parsed.docText)
   else:
     registerCborPrimitiveType(typeName, parsed)
 
   # 3. Emit the one-way adapter and register the signal entry.
   let adapterIdent = ident(typeName & "SignalCborAdapter")
   result.add(emitSignalAdapter(typeIdent, adapterIdent, newLit(apiName), parsed.isVoid))
-  registerCborSignalEntry(apiName, $adapterIdent, typeName)
+  registerCborSignalEntry(apiName, $adapterIdent, typeName, parsed.docText)
 
   when defined(brokerDebug):
     writeBrokerDebug(

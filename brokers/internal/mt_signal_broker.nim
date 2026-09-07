@@ -147,20 +147,21 @@ proc generateMtSignalBroker*(
       quote:
         proc(signalValue: `typeIdent`): Future[void] {.async: (raises: []), gcsafe.}
 
-  result.add(
-    quote do:
-      type
-        `exportedTypeIdent` = `objectDef`
-        `exportedHandlerProcIdent` = `handlerProcTy`
-        `bucketName` = object
-          brokerCtx: BrokerContext
-          ring: ptr VyukovMpscRing[uint32]
-          handlerSignal: ptr BrokerSignalShared
-          threadId: pointer
-          threadGen: uint64 ## disambiguates reused threadvar addresses
-          active: bool
+  let brokerTypes = quote:
+    type
+      `exportedTypeIdent` = `objectDef`
+      `exportedHandlerProcIdent` = `handlerProcTy`
+      `bucketName` = object
+        brokerCtx: BrokerContext
+        ring: ptr VyukovMpscRing[uint32]
+        handlerSignal: ptr BrokerSignalShared
+        threadId: pointer
+        threadGen: uint64 ## disambiguates reused threadvar addresses
+        active: bool
 
-  )
+  # Attach the captured `##` doc text to the re-emitted signal type (#50).
+  attachFirstTypeDefDoc(brokerTypes, parsed.docText)
+  result.add(brokerTypes)
 
   # ── Codec procs (marshal / unmarshal / size of the payload value) ─────
   for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):

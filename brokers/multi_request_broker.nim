@@ -222,7 +222,7 @@ macro MultiRequestBroker*(body: untyped): untyped =
           argParams.add(copyNimTree(paramDef))
         argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
         argFieldName = ident("providerWithArgs")
-    of nnkTypeSection, nnkEmpty:
+    of nnkTypeSection, nnkEmpty, nnkCommentStmt:
       discard
     else:
       error("Unsupported statement inside MultiRequestBroker definition", stmt)
@@ -233,7 +233,11 @@ macro MultiRequestBroker*(body: untyped): untyped =
     zeroArgFieldName = ident("providerNoArgs")
 
   var typeSection = newTree(nnkTypeSection)
-  typeSection.add(newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef))
+  typeSection.add(
+    typeDefWithDoc(
+      newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef), parsed.docText
+    )
+  )
 
   var kindEnum = newTree(nnkEnumTy, newEmptyNode())
   if not zeroArgSig.isNil():

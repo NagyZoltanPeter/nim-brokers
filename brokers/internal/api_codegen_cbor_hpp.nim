@@ -673,6 +673,7 @@ proc generateCborCppHeaderFile*(
     h.add("// ---- Enums ----\n\n")
   for name in enumNames:
     let entry = lookupTypeEntry(name)
+    h.add(cDocComment(entry.doc, ""))
     h.add("enum class " & name & " : int32_t {\n")
     if entry.enumValues.len == 0:
       h.add("};\n\n")
@@ -718,6 +719,7 @@ proc generateCborCppHeaderFile*(
           "' which has no C++ mapping\n\n"
       )
       continue
+    h.add(cDocComment(lookupTypeEntry(name).doc, ""))
     h.add("using " & name & " = " & cpp & ";\n")
   if aliasNames.len > 0:
     h.add("\n")
@@ -726,6 +728,7 @@ proc generateCborCppHeaderFile*(
   var payloadFields: seq[(string, seq[string])] = @[]
   for name in objectNames:
     let entry = lookupTypeEntry(name)
+    h.add(cDocComment(entry.doc, ""))
     h.add("struct " & name & " {\n")
     var allMapped = true
     for f in entry.fields:
@@ -738,6 +741,7 @@ proc generateCborCppHeaderFile*(
             "mapping or change the field type."
         )
       else:
+        h.add(cDocComment(f.doc))
         h.add("  " & cppType & " " & f.name & "{};\n")
     h.add("};\n")
     # A string-keyed mirror struct for structs holding non-string-keyed maps.
@@ -956,6 +960,7 @@ proc generateCborCppHeaderFile*(
     if not ownsReqMain(e):
       continue
     let methodName = snakeToLowerCamel(e.apiName)
+    h.add(cDocComment(e.doc))
     var sigParams = ""
     if e.argFields.len > 0:
       var first = true
@@ -1063,7 +1068,7 @@ proc generateCborCppHeaderFile*(
       return
         "  // TODO: signal '" & s.apiName &
         "' has fields whose Nim types aren't yet mappable to C++.\n"
-    "  Result<void> " & methodName & "(" & sp.params & ");\n"
+    cDocComment(s.doc) & "  Result<void> " & methodName & "(" & sp.params & ");\n"
 
   # Signal method DEFINITION for class `clsName` (main or a sub class). Both use
   # a `ctx_` member + `detail::rawCallOwned(ctx_, …)`, so the body is identical
@@ -1168,6 +1173,7 @@ proc generateCborCppHeaderFile*(
     let callbackAlias = ev.typeName & "Callback"
     let onName = "on" & pascal
     let offName = "off" & pascal
+    h.add(cDocComment(ev.doc))
     h.add("  using " & callbackAlias & " = std::function<void(" & className & "&")
     for f in effectiveFields(ev.typeName):
       h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)
@@ -1242,6 +1248,7 @@ proc generateCborCppHeaderFile*(
           "silently dropped — add a mapping or change the parameter types."
       )
     let methodName = snakeToLowerCamel(e.apiName)
+    result.add(cDocComment(e.doc))
     result.add(
       "  " & subReqRetType(e) & " " & methodName & "(" & subReqSigParams(e) & ");\n"
     )
@@ -1381,6 +1388,7 @@ proc generateCborCppHeaderFile*(
       if pascal.len > 0:
         pascal[0] = toUpperAscii(pascal[0])
       let cbAlias = ev.typeName & "Callback"
+      h.add(cDocComment(ev.doc))
       h.add("  using " & cbAlias & " = std::function<void(" & sub & "&")
       for f in effectiveFields(ev.typeName):
         h.add(", " & eventCallbackParamType(f.nimType) & " " & f.name)

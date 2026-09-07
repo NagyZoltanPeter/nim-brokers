@@ -285,12 +285,14 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   var argSig: NimNode = nil
   var argParams: seq[NimNode] = @[]
   var argProviderName: NimNode = nil
+  var brokerDocText = ""
 
   if not isSugar:
     let parsed = parseSingleTypeDef(body, "RequestBroker", allowRefToNonObject = true)
     typeIdent = parsed.typeIdent
     objectDef = parsed.objectDef
     payloadType = copyNimTree(typeIdent) # legacy: dispatch tag == payload
+    brokerDocText = parsed.docText
 
     for stmt in body:
       case stmt.kind
@@ -348,7 +350,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
               error("Signature parameter must declare a name", paramDef)
             argParams.add(copyNimTree(paramDef))
           argProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderWithArgs")
-      of nnkTypeSection, nnkEmpty:
+      of nnkTypeSection, nnkEmpty, nnkCommentStmt:
         discard
       else:
         error("Unsupported statement inside RequestBroker definition", stmt)
@@ -362,6 +364,7 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
     typeIdent = sg.typeIdent
     objectDef = sg.objectDef
     payloadType = sg.payloadType
+    brokerDocText = sg.docText
     if not sg.zeroArgProc.isNil:
       zeroArgSig = sg.zeroArgProc
       zeroArgProviderName = ident(sanitizeIdentName(typeIdent) & "ProviderNoArgs")
@@ -378,7 +381,11 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
   let typeNameLit = newLit(typeDisplayName)
 
   var typeSection = newTree(nnkTypeSection)
-  typeSection.add(newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef))
+  typeSection.add(
+    typeDefWithDoc(
+      newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef), brokerDocText
+    )
+  )
 
   let returnType =
     case mode

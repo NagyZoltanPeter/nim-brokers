@@ -676,6 +676,7 @@ proc generateCborRustFile*(
   # Enums.
   for name in enumNames:
     let entry = lookupTypeEntry(name)
+    rs.add(lineDocComment(entry.doc, "/// "))
     rs.add(
       "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]\n"
     )
@@ -741,6 +742,7 @@ proc generateCborRustFile*(
           "' which has no Rust mapping\n\n"
       )
       continue
+    rs.add(lineDocComment(lookupTypeEntry(name).doc, "/// "))
     rs.add("pub type " & name & " = " & pyU & ";\n\n")
 
   # Generic text-key <-> typed-key map adapter, emitted only when some object
@@ -787,6 +789,7 @@ proc generateCborRustFile*(
   # Objects.
   for name in objectNames:
     let entry = lookupTypeEntry(name)
+    rs.add(lineDocComment(entry.doc, "/// "))
     rs.add("#[derive(Debug, Clone, Default, Serialize, Deserialize)]\n")
     rs.add("pub struct " & name & " {\n")
     var anyField = false
@@ -799,6 +802,7 @@ proc generateCborRustFile*(
             "' with no Rust mapping. Fields are never silently dropped — add a " &
             "mapping or change the field type."
         )
+      rs.add(lineDocComment(f.doc, "/// ", "    "))
       # Map seq[byte] to serde_bytes::ByteBuf for compact CBOR encoding.
       let useByteBuf = f.nimType.strip().canonOptHead().toLowerAscii() == "seq[byte]"
       if useByteBuf:
@@ -1025,6 +1029,7 @@ proc generateCborRustFile*(
         primRustHint(resp)
       else:
         resp
+    result.add(lineDocComment(e.doc, "/// ", "    "))
     result.add(
       "    pub fn " & methodName & "(" & sigParams & ") -> Result<" & respRust & "> {\n"
     )
@@ -1152,6 +1157,7 @@ proc generateCborRustFile*(
         argsStructDecl.add("            " & n & ": " & nimTypeToRustHint(t) & ",\n")
         argsStructInit.add("            " & n & ",\n")
       argsStructDecl.add("        }\n")
+    result.add(lineDocComment(e.doc, "/// ", "    "))
     result.add(
       "    pub fn " & e.apiName & "(" & sigParams & ") -> Result<" & sub & "> {\n"
     )
@@ -1223,6 +1229,7 @@ proc generateCborRustFile*(
     var sigParams = "&self"
     for f in fields:
       sigParams.add(", " & f.name & ": " & nimTypeToRustHint(f.nimType))
+    result.add(lineDocComment(s.doc, "/// ", "    "))
     result.add("    #[allow(non_snake_case)]\n")
     result.add(
       "    pub fn " & s.apiName & "(" & sigParams &
@@ -1299,6 +1306,7 @@ proc generateCborRustFile*(
         hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
         destructureArgs.add("v." & f.name)
     let fnBound = hintParts.join(", ")
+    rs.add(lineDocComment(ev.doc, "/// ", "    "))
     rs.add(
       "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
         ") + Send + Sync + 'static {\n"
@@ -1466,6 +1474,7 @@ proc generateCborRustFile*(
           hintParts.add(if hint.len > 0: hint else: "::serde_json::Value")
           destructureArgs.add("v." & f.name)
       let fnBound = hintParts.join(", ")
+      rs.add(lineDocComment(ev.doc, "/// ", "    "))
       rs.add(
         "    pub fn " & onName & "<F>(&self, callback: F) -> u64 where F: Fn(" & fnBound &
           ") + Send + Sync + 'static {\n"

@@ -146,7 +146,10 @@ proc generateSignalBroker(body: NimNode): NimNode =
   result.add(
     newTree(
       nnkTypeSection,
-      newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef),
+      typeDefWithDoc(
+        newTree(nnkTypeDef, exportedTypeIdent, newEmptyNode(), objectDef),
+        parsed.docText,
+      ),
       newTree(nnkTypeDef, exportedHandlerProcIdent, newEmptyNode(), handlerProcTy),
       newTree(
         nnkTypeDef,

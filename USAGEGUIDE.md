@@ -23,6 +23,9 @@ footprints. For the short overview start at the [README](README.md).
       - [onSignalIt sugar](#onsignalit-sugar)
     - [BrokerContext](#brokercontext)
     - [BrokerInterface \& BrokerImplement (OOP / DI)](#brokerinterface--brokerimplement-oop--di)
+  - [Doc comments](#doc-comments)
+    - [Where `##` is accepted](#where--is-accepted)
+    - [Where the text ends up](#where-the-text-ends-up)
   - [Multi-thread support](#multi-thread-support)
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
     - [EventBroker (multi-thread)](#eventbroker-multi-thread)
@@ -499,6 +502,58 @@ b.close()
 For FFI libraries, `BrokerInterface(API, IFace):` propagates the `(API)` marker to all inner brokers automatically. The generated wrapper classes follow the same pattern across all languages — the main interface becomes the library class (`Hierlib` in C++ / Python / Rust / Go), and sub-interfaces become independent typed wrapper classes (`Widget`) with their own methods and RAII-style lifetime management. The OOP structure is an *authoring* concern — foreign consumers see the same typed API surface regardless of whether the Nim side uses flat or OOP brokers.
 
 Full documentation — use cases, DI patterns, hierarchical sub-instances, FFI wrapper class layout, memory model notes, and comparison with flat brokers — is in **[doc/OOP_Brokers.md](doc/OOP_Brokers.md)**.
+
+## Doc comments
+
+Broker macro bodies accept ordinary Nim `##` doc comments. The text is captured
+by the macro and re-attached to the declarations it generates, so `nim doc` and
+IDE hover show it — and in the `(API)` lane the *same* text is propagated into
+every generated foreign artifact. One source of truth, no second copy to keep
+in sync.
+
+### Where `##` is accepted
+
+```nim
+RequestBroker(API):
+  ## Query device liveness.        <- above the type: documents the payload type
+  ##
+  ## Multi-line doc blocks work.
+  type GetHealth = object
+    ok*: bool ## True when all subsystems run.   <- trailing: documents the field
+    code*: int32 ## Machine-readable status code.
+
+  ## Read the current health snapshot.           <- above the signature
+  proc signature*(deviceId: int64): Future[Result[GetHealth, string]] {.async.}
+```
+
+The same positions work in every macro and every lane — `EventBroker`,
+`RequestBroker` (plain / `(sync)` / `(mt)` / `(API)`), `MultiRequestBroker`,
+`SignalBroker`, `BrokerInterface` (including its `RequestBroker:` /
+`EventBroker:` sub-blocks) and the `registerBrokerLibrary` body. Proc-sugar
+brokers take the doc above the `proc`; dual-slot brokers document each
+signature separately.
+
+A `##` written **above** the macro call is a plain module doc comment — it is
+*not* captured. Move it inside the body to have it propagate.
+
+### Where the text ends up
+
+| Lane | Destination |
+|------|-------------|
+| all | the generated payload / interface type and the `BrokerInterface` tunneling procs (`nim doc`, IDE hover) |
+| `(API)` | `/** … */` in `<lib>.h` and `<lib>.hpp` |
+| `(API)` | docstrings + `#` field comments in `<lib>.py` |
+| `(API)` | `///` in the generated Rust crate, `//` in the generated Go module |
+| `(API)` | `;` comment lines in `<lib>.cddl` |
+| `(API)` | the `doc` field of every request / event / signal / type / field record returned by `<lib>_getSchema()` |
+
+Worked example: [examples/ffiapi/nimlib/mylib.nim](examples/ffiapi/nimlib/mylib.nim)
+documents its whole broker surface; compare with the generated
+`examples/ffiapi/nimlib/build/mylib.{h,hpp,py,cddl}` after `nimble buildFfiExample`.
+
+> External types referenced from a broker signature (auto-discovered plain Nim
+> `object` / `enum` / `distinct` declarations) are registered without their doc
+> text — only declarations written inside a broker body propagate.
 
 ## Multi-thread support
 

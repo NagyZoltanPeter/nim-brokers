@@ -214,6 +214,26 @@ Each broker macro (`EventBroker`, `RequestBroker`, `MultiRequestBroker` and thei
 2. **Generate** a type section (the value type, handler proc types, broker storage type) and all public API procs (`listen`/`emit`, `setProvider`/`request`/`clearProvider`, etc.).
 3. Store state in a **thread-local global** (`{.threadvar.}`) for single-thread brokers, or **shared memory + threadvar** for multi-thread brokers.
 
+### Doc comments in broker bodies
+
+Every broker macro accepts `##` doc comments inside its body — above the `type`,
+trailing on object fields, above the `proc` signature, at `BrokerInterface`
+level, and inside `registerBrokerLibrary`. `parseSingleTypeDef` captures them
+into `ParsedBrokerType.docText` / `.fieldDocs` and `ParsedRequestSugar.{docText,
+zeroArgDoc, argDoc}` (see `broker_utils.nim`), and the macros re-attach the text
+to the generated payload/interface type and the tunneling procs.
+
+In the `(API)` lane the same text is the single source of truth for every
+generated artifact: `<lib>.h` / `.hpp` (`/** … */` via `cDocComment`),
+`<lib>.py`, the Rust crate and Go module (`lineDocComment`), `<lib>.cddl`
+(`;` lines), and the `doc` field of the runtime descriptor records returned by
+`<lib>_getSchema`. `_listApis` stays name-only by design.
+
+Not captured: docs on external types auto-resolved from a signature, and
+per-argument docs on request parameters. Docs written *above* a macro call are
+ordinary module comments. See `USAGEGUIDE.md` § "Doc comments" and
+`doc/FFI_API.md` § "Doc comments in generated surfaces".
+
 ### BrokerContext system (`brokers/broker_context.nim`)
 
 `BrokerContext` is a `distinct uint32` used to multiplex independent broker instances. `NewBrokerContext()` generates globally unique IDs via an atomic counter (`fetchAdd`, thread-safe).

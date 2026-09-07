@@ -28,6 +28,7 @@ type
   ApiFieldDef* = object ## A single field in a type definition.
     name*: string
     nimType*: string ## "int64", "string", "bool", "seq[DeviceInfo]", etc.
+    doc*: string ## Doc-comment text captured from the field declaration (#50).
     isSeq*: bool ## true when nimType starts with "seq["
     seqElementType*: string ## e.g. "DeviceInfo" when isSeq
     isArray*: bool ## true when nimType is "array[N, T]"
@@ -44,6 +45,7 @@ type
     fields*: seq[ApiFieldDef] ## field definitions (for atkObject)
     enumValues*: seq[ApiEnumValue] ## enum values (for atkEnum)
     underlyingType*: string ## base type (for atkAlias/atkDistinct)
+    doc*: string ## Doc-comment text captured from the type declaration (#50).
 
 # ---------------------------------------------------------------------------
 # Compile-time type registry
@@ -285,12 +287,13 @@ proc makeEnumEntry*(
   result.enumValues = values
 
 proc makeAliasEntry*(
-    name: string, underlyingType: string, kind: ApiTypeKind = atkAlias
+    name: string, underlyingType: string, kind: ApiTypeKind = atkAlias, doc: string = ""
 ): ApiTypeEntry {.compileTime.} =
   ## Construct an ApiTypeEntry for an alias or distinct type.
   result.name = name
   result.kind = kind
   result.underlyingType = underlyingType
+  result.doc = doc
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: bridge to old registration format
