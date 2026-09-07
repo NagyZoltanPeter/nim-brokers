@@ -60,83 +60,103 @@ type SensorId* = distinct int32
 # Request Brokers
 # ---------------------------------------------------------------------------
 
-## InitializeRequest: called after mylib_createContext() to configure the monitoring engine.
-RequestBroker(API):
-  type InitializeRequest = object
-    configPath*: string
-    initialized*: bool
+## Doc comments (`##`) written *inside* a broker body are captured by the macro
+## and propagated into every generated artifact — `mylib.h`, `mylib.hpp`,
+## `mylib.py`, the Rust crate, the Go module, `mylib.cddl` and the
+## `mylib_getSchema()` descriptor. Comments written *above* the macro call (as
+## in the shared-type section above) stay ordinary Nim module docs.
 
+RequestBroker(API):
+  ## Configure the monitoring engine.
+  ##
+  ## Called after `mylib_createContext()`, before any other request.
+  type InitializeRequest = object
+    configPath*: string ## Path the engine was configured with.
+    initialized*: bool ## True once the engine is ready to serve requests.
+
+  ## Initialize the engine from a configuration file.
   proc signature*(
     configPath: string
   ): Future[Result[InitializeRequest, string]] {.async.}
 
-## ShutdownRequest: called by mylib_shutdown() to tear down state.
 RequestBroker(API):
+  ## Tear down library state. Invoked by `mylib_shutdown()`.
   type ShutdownRequest = object
-    status*: int32
+    status*: int32 ## 0 on a clean teardown.
 
+  ## Run the orderly shutdown sequence.
   proc signature*(): Future[Result[ShutdownRequest, string]] {.async.}
 
-## AddDevice: register one or more devices for monitoring.
 RequestBroker(API):
+  ## Register one or more devices for monitoring.
   type AddDevice = object
-    devices*: seq[DeviceInfo]
-    success*: bool
+    devices*: seq[DeviceInfo] ## The devices as stored, with assigned ids.
+    success*: bool ## True when every spec was accepted.
 
+  ## Add a batch of devices and return the stored records.
   proc signature*(
     devices: seq[AddDeviceSpec]
   ): Future[Result[AddDevice, string]] {.async.}
 
-## RemoveDevice: stop monitoring a device and remove it.
 RequestBroker(API):
+  ## Stop monitoring a device and remove it.
   type RemoveDevice = object
-    success*: bool
+    success*: bool ## False when no device carried that id.
 
+  ## Remove the device with the given id.
   proc signature*(deviceId: int64): Future[Result[RemoveDevice, string]] {.async.}
 
-## GetDevice: query a single device by ID.
 RequestBroker(API):
+  ## Query a single device by id.
   type GetDevice = object
-    deviceId*: int64
-    name*: string
-    deviceType*: string
-    address*: string
-    online*: bool
+    deviceId*: int64 ## Id of the device that was found.
+    name*: string ## Human-readable device name.
+    deviceType*: string ## Device class, e.g. "sensor".
+    address*: string ## Transport address the device is reachable at.
+    online*: bool ## Current reachability.
 
+  ## Look up one device.
   proc signature*(deviceId: int64): Future[Result[GetDevice, string]] {.async.}
 
-## ListDevices: return all registered devices as an array.
 RequestBroker(API):
+  ## Return every registered device.
   type ListDevices = object
-    devices*: seq[DeviceInfo]
+    devices*: seq[DeviceInfo] ## All devices, in registration order.
 
+  ## List all registered devices.
   proc signature*(): Future[Result[ListDevices, string]] {.async.}
 
-## GetSensorData: return raw binary sensor data for a device.
-## Exercises: seq[byte] (seq[primitive]) → uint8_t* + int32_t count in C.
 RequestBroker(API):
+  ## Return raw binary sensor data for a device.
+  ##
+  ## Exercises: seq[byte] (seq[primitive]) → uint8_t* + int32_t count in C.
   type GetSensorData = object
-    sensorId*: SensorId
-    rawData*: seq[byte]
-    status*: DeviceStatus
+    sensorId*: SensorId ## Sensor the sample was read from.
+    rawData*: seq[byte] ## Opaque sample bytes.
+    status*: DeviceStatus ## Health of the device at read time.
 
+  ## Read the latest raw sensor buffer.
   proc signature*(deviceId: int64): Future[Result[GetSensorData, string]] {.async.}
 
-## GetDeviceTags: return string labels associated with a device.
-## Exercises: seq[string] → char** + int32_t count in C.
 RequestBroker(API):
+  ## Return the string labels associated with a device.
+  ##
+  ## Exercises: seq[string] → char** + int32_t count in C.
   type GetDeviceTags = object
-    tags*: seq[string]
+    tags*: seq[string] ## Free-form labels attached to the device.
 
+  ## Read a device's tags.
   proc signature*(deviceId: int64): Future[Result[GetDeviceTags, string]] {.async.}
 
-## GetDeviceCapabilities: return a fixed-size capability vector.
-## Exercises: array[4, int32] → int32_t caps[4] in C.
 RequestBroker(API):
+  ## Return a fixed-size capability vector.
+  ##
+  ## Exercises: array[4, int32] → int32_t caps[4] in C.
   type GetDeviceCapabilities = object
-    capabilities*: array[4, int32]
-    capturedAt*: Timestamp
+    capabilities*: array[4, int32] ## Capability bits, one slot per subsystem.
+    capturedAt*: Timestamp ## When the vector was sampled (ms since epoch).
 
+  ## Read a device's capability vector.
   proc signature*(
     deviceId: int64
   ): Future[Result[GetDeviceCapabilities, string]] {.async.}
@@ -145,59 +165,63 @@ RequestBroker(API):
 # Event Brokers
 # ---------------------------------------------------------------------------
 
-## DeviceStatusChanged: emitted when a device's online status changes.
 EventBroker(API):
+  ## Emitted when a device's online status changes.
   type DeviceStatusChanged = object
-    deviceId*: int64
-    name*: string
-    online*: bool
-    timestampMs*: int64
+    deviceId*: int64 ## Device whose status flipped.
+    name*: string ## Human-readable device name.
+    online*: bool ## New reachability state.
+    timestampMs*: int64 ## When the change was observed (ms since epoch).
 
-## DeviceDiscovered: emitted when auto-discovery finds a new device.
 EventBroker(API):
+  ## Emitted when auto-discovery finds a new device.
   type DeviceDiscovered = object
-    deviceId*: int64
-    name*: string
-    deviceType*: string
-    address*: string
+    deviceId*: int64 ## Id assigned to the newly found device.
+    name*: string ## Human-readable device name.
+    deviceType*: string ## Device class, e.g. "sensor".
+    address*: string ## Transport address the device is reachable at.
 
-## SensorAlert: emitted when a sensor reading crosses a threshold.
-## Exercises: enum (DeviceStatus) and distinct (SensorId) in event fields.
 EventBroker(API):
+  ## Emitted when a sensor reading crosses a threshold.
+  ##
+  ## Exercises: enum (DeviceStatus) and distinct (SensorId) in event fields.
   type SensorAlert = object
-    sensorId*: SensorId
-    deviceId*: int64
-    status*: DeviceStatus
-    timestampMs*: Timestamp
+    sensorId*: SensorId ## Sensor that tripped the threshold.
+    deviceId*: int64 ## Device owning that sensor.
+    status*: DeviceStatus ## Device health at alert time.
+    timestampMs*: Timestamp ## When the alert fired (ms since epoch).
 
-## DeviceBatch: emitted when multiple devices change state simultaneously.
-## Exercises: seq[string] and array[4, int32] in event callback fields.
 EventBroker(API):
+  ## Emitted when multiple devices change state simultaneously.
+  ##
+  ## Exercises: seq[string] and array[4, int32] in event callback fields.
   type DeviceBatch = object
-    labels*: seq[string]
-    deviceIds*: seq[int64]
-    capabilities*: array[4, int32]
+    labels*: seq[string] ## One label per affected device.
+    deviceIds*: seq[int64] ## Ids of the affected devices.
+    capabilities*: array[4, int32] ## Aggregated capability bits.
 
 # ---------------------------------------------------------------------------
 # Signal Broker (one-way, fire-and-forget — the library CONSUMES these)
 # ---------------------------------------------------------------------------
 
-## IngestReading: a foreign caller pushes a sensor reading into the library.
-## One-way — no response. The handler records it; `LastReading` reads it back so
-## the example can verify the signal was delivered end-to-end.
 SignalBroker(API):
+  ## A foreign caller pushes a sensor reading into the library.
+  ##
+  ## One-way — no response. The handler records it; `LastReading` reads it back
+  ## so the example can verify the signal was delivered end-to-end.
   type IngestReading = object
-    deviceId*: int64
-    value*: float64
+    deviceId*: int64 ## Device the reading came from.
+    value*: float64 ## The measured value.
 
-## LastReading: readback of the most recent IngestReading signal (+ a running
-## count), so a one-way signal is observable through the request surface.
 RequestBroker(API):
+  ## Readback of the most recent `IngestReading` signal (plus a running count),
+  ## so a one-way signal is observable through the request surface.
   type LastReading = object
-    deviceId*: int64
-    value*: float64
-    count*: int32
+    deviceId*: int64 ## Device of the last ingested reading.
+    value*: float64 ## Value of the last ingested reading.
+    count*: int32 ## How many readings have been ingested so far.
 
+  ## Read back the last ingested sensor reading.
   proc signature*(): Future[Result[LastReading, string]] {.async.}
 
 # ---------------------------------------------------------------------------
