@@ -2182,20 +2182,21 @@ proc registerBrokerLibraryCborImpl(
           "),\n"
       )
     buildSrc.add("      ],\n")
-    buildSrc.add("      responseType: " & escape(r.responseTypeName) & "),\n")
+    buildSrc.add("      responseType: " & escape(r.responseTypeName) & ",\n")
+    buildSrc.add("      doc: " & escape(r.doc) & "),\n")
   buildSrc.add("  ]\n")
   buildSrc.add("  result.events = @[\n")
   for e in eventEntries:
     buildSrc.add(
       "    ApiEventInfo(apiName: " & escape(e.apiName) & ", payloadType: " &
-        escape(e.typeName) & "),\n"
+        escape(e.typeName) & ", doc: " & escape(e.doc) & "),\n"
     )
   buildSrc.add("  ]\n")
   buildSrc.add("  result.signals = @[\n")
   for s in signalEntries:
     buildSrc.add(
       "    ApiSignalInfo(apiName: " & escape(s.apiName) & ", payloadType: " &
-        escape(s.typeName) & "),\n"
+        escape(s.typeName) & ", doc: " & escape(s.doc) & "),\n"
     )
   buildSrc.add("  ]\n")
   buildSrc.add("  result.types = @[\n")
@@ -2215,7 +2216,7 @@ proc registerBrokerLibraryCborImpl(
     for f in t.fields:
       buildSrc.add(
         "        ApiFieldInfo(name: " & escape(f.name) & ", nimType: " &
-          escape(f.nimType) & "),\n"
+          escape(f.nimType) & ", doc: " & escape(f.doc) & "),\n"
       )
     buildSrc.add("      ],\n")
     buildSrc.add("      enumValues: @[\n")
@@ -2225,7 +2226,8 @@ proc registerBrokerLibraryCborImpl(
           "),\n"
       )
     buildSrc.add("      ],\n")
-    buildSrc.add("      underlyingType: " & escape(t.underlyingType) & "),\n")
+    buildSrc.add("      underlyingType: " & escape(t.underlyingType) & ",\n")
+    buildSrc.add("      doc: " & escape(t.doc) & "),\n")
   buildSrc.add("  ]\n")
 
   # Build the lightweight ApiList in the same fashion.

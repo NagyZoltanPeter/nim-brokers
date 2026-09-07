@@ -19,6 +19,7 @@ type
   ApiFieldInfo* = object
     name*: string
     nimType*: string
+    doc*: string ## Doc-comment text captured from the field declaration (#50).
 
   ApiEnumValueInfo* = object
     name*: string
@@ -30,6 +31,7 @@ type
     fields*: seq[ApiFieldInfo]
     enumValues*: seq[ApiEnumValueInfo]
     underlyingType*: string
+    doc*: string ## Doc-comment text captured from the type declaration (#50).
 
   ApiRequestInfo* = object
     apiName*: string
@@ -38,10 +40,12 @@ type
       ## empty string for zero-arg requests.
     argFields*: seq[ApiFieldInfo]
     responseType*: string
+    doc*: string ## Doc-comment text captured from the broker declaration (#50).
 
   ApiEventInfo* = object
     apiName*: string
     payloadType*: string
+    doc*: string ## Doc-comment text captured from the broker declaration (#50).
 
   ApiSignalInfo* = object
     ## A one-way signal the library is ready to *consume* — the inverse of an
@@ -49,6 +53,7 @@ type
     ## distinct type so consumers can tell direction from the descriptor.
     apiName*: string
     payloadType*: string
+    doc*: string ## Doc-comment text captured from the broker declaration (#50).
 
   ApiList* = object ## Lightweight payload returned by `<lib>_listApis`.
     libName*: string
@@ -70,7 +75,7 @@ type
 # indexing can raise KeyError.
 
 proc toJson*(f: ApiFieldInfo): JsonNode =
-  %*{"name": f.name, "nimType": f.nimType}
+  %*{"name": f.name, "nimType": f.nimType, "doc": f.doc}
 
 proc toJson*(v: ApiEnumValueInfo): JsonNode =
   %*{"name": v.name, "ordinal": v.ordinal}
@@ -82,6 +87,7 @@ proc toJson*(t: ApiTypeInfo): JsonNode =
     "fields": newJArray(),
     "enumValues": newJArray(),
     "underlyingType": t.underlyingType,
+    "doc": t.doc,
   }
   for f in t.fields:
     result["fields"].add(f.toJson())
@@ -94,15 +100,16 @@ proc toJson*(r: ApiRequestInfo): JsonNode =
     "argsType": r.argsType,
     "argFields": newJArray(),
     "responseType": r.responseType,
+    "doc": r.doc,
   }
   for f in r.argFields:
     result["argFields"].add(f.toJson())
 
 proc toJson*(e: ApiEventInfo): JsonNode =
-  %*{"apiName": e.apiName, "payloadType": e.payloadType}
+  %*{"apiName": e.apiName, "payloadType": e.payloadType, "doc": e.doc}
 
 proc toJson*(s: ApiSignalInfo): JsonNode =
-  %*{"apiName": s.apiName, "payloadType": s.payloadType}
+  %*{"apiName": s.apiName, "payloadType": s.payloadType, "doc": s.doc}
 
 proc toJson*(a: ApiList): JsonNode =
   %*{

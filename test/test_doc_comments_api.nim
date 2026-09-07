@@ -8,7 +8,7 @@
 ## The `(mt)` forms are declared here too (this binary compiles with
 ## --threads:on) as compile-level acceptance coverage.
 
-import std/[os, strutils]
+import std/[json, os, strutils]
 import testutils/unittests
 import brokers/[event_broker, request_broker, signal_broker, broker_context]
 import brokers/api_library
@@ -125,6 +125,46 @@ suite "doc comments in generated FFI artifacts (#50)":
     check cbdoc_getSchema(addr buf, addr len) == 0'i32
     let schemaJson = takeStr(buf, len)
     check "Health snapshot over the wire." in schemaJson
+
+  test "_getSchema descriptor carries structured doc fields":
+    var buf: pointer = nil
+    var len: int32 = 0
+    check cbdoc_getSchema(addr buf, addr len) == 0'i32
+    let info = parseJson(takeStr(buf, len))
+
+    var seenHealth = false
+    for r in info["requests"]:
+      if r["apiName"].getStr() == "doc_api_health":
+        seenHealth = true
+        check r["doc"].getStr() == "Query api liveness."
+    check seenHealth
+
+    var seenHeartbeat = false
+    for e in info["events"]:
+      if e["apiName"].getStr() == "doc_api_heartbeat":
+        seenHeartbeat = true
+        check e["doc"].getStr() == "Emitted periodically while the library runs."
+    check seenHeartbeat
+
+    var seenNudge = false
+    for s in info["signals"]:
+      if s["apiName"].getStr() == "doc_api_nudge":
+        seenNudge = true
+        check s["doc"].getStr() == "One-way nudge consumed by the library."
+    check seenNudge
+
+    var seenType = false
+    for t in info["types"]:
+      if t["name"].getStr() == "DocApiHealth":
+        seenType = true
+        check t["doc"].getStr() == "Health snapshot over the wire."
+        var seenField = false
+        for f in t["fields"]:
+          if f["name"].getStr() == "ok":
+            seenField = true
+            check f["doc"].getStr() == "True when all subsystems run."
+        check seenField
+    check seenType
 
   test "C header documents apiNames with the captured doc text":
     let h = genFile("cbdoc.h")
