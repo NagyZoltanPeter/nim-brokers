@@ -148,7 +148,13 @@ proc cddlDocLines(doc: string, indent: string = ""): string {.compileTime.} =
   if doc.len == 0:
     return
   for line in doc.splitLines():
-    result.add(indent & "; " & line & "\n")
+    # Keep blank doc lines free of trailing whitespace.
+    result.add(
+      if line.len == 0:
+        indent & ";\n"
+      else:
+        indent & "; " & line & "\n"
+    )
 
 proc emitObjectRule(entry: ApiTypeEntry): string {.compileTime.} =
   result = cddlDocLines(entry.doc)

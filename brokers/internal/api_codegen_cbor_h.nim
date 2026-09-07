@@ -270,7 +270,13 @@ proc generateCborCHeaderFile*(
       if i < docs.len and docs[i].len > 0:
         for line in docs[i].splitLines():
           # A literal `*/` inside the doc text would terminate the comment.
-          h.add(" *       " & line.replace("*/", "* /") & "\n")
+          # Blank doc lines stay free of trailing whitespace.
+          h.add(
+            if line.len == 0:
+              " *\n"
+            else:
+              " *       " & line.replace("*/", "* /") & "\n"
+          )
 
     h.add("/* ----------------------------------------------------------------\n")
     h.add(" * Documented apiNames\n")

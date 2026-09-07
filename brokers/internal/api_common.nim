@@ -36,7 +36,12 @@ proc cDocComment*(doc: string, indent: string = "  "): string {.compileTime.} =
   result.add(indent & "/**\n")
   for line in doc.splitLines():
     # A literal `*/` inside the doc text would terminate the comment.
-    result.add(indent & " * " & line.replace("*/", "* /") & "\n")
+    result.add(
+      if line.len == 0:
+        indent & " *\n"
+      else:
+        indent & " * " & line.replace("*/", "* /") & "\n"
+    )
   result.add(indent & " */\n")
 
 proc lineDocComment*(doc, prefix: string, indent: string = ""): string {.compileTime.} =
@@ -46,7 +51,12 @@ proc lineDocComment*(doc, prefix: string, indent: string = ""): string {.compile
   if doc.len == 0:
     return
   for line in doc.splitLines():
-    result.add(indent & prefix & line & "\n")
+    result.add(
+      if line.len == 0:
+        (indent & prefix).strip(leading = false) & "\n"
+      else:
+        indent & prefix & line & "\n"
+    )
 
 # ---------------------------------------------------------------------------
 # FFI response status codes — single source of truth

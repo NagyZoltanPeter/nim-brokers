@@ -50,7 +50,13 @@ proc pyDocstring(doc, indent: string): string {.compileTime.} =
     return indent & "\"\"\"" & lines[0] & "\"\"\"\n"
   result = indent & "\"\"\"" & lines[0] & "\n"
   for i in 1 ..< lines.len:
-    result.add(indent & lines[i] & "\n")
+    # Blank doc lines stay free of trailing whitespace.
+    result.add(
+      if lines[i].len == 0:
+        "\n"
+      else:
+        indent & lines[i] & "\n"
+    )
   result.add(indent & "\"\"\"\n")
 
 # ---------------------------------------------------------------------------
