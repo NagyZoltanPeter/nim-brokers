@@ -3,28 +3,6 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
-## [Unreleased]
-
-### Added — doc comments in broker macros ([#50])
-
-- Every broker macro (`EventBroker`, `RequestBroker` plain/(sync)/(mt)/(API),
-  `MultiRequestBroker`, `SignalBroker`, `BrokerInterface` and its sub-blocks,
-  `registerBrokerLibrary`) now accepts `##` doc comments — above the `type`,
-  trailing on object fields, above/under the `proc` signatures, and at
-  interface level. Previously a doc comment inside e.g. a `BrokerInterface`
-  `RequestBroker:` sub-block was a compile error ("Unsupported statement").
-- The captured doc text is preserved: it is re-attached to the generated
-  broker payload/interface type and to the `BrokerInterface` tunneling procs,
-  so `nim doc` and IDE hover show it.
-- `(API)` lane: the same doc text (single source of truth) is propagated into
-  every generated artifact — `/** … */` blocks in `<lib>.h` / `<lib>.hpp`,
-  Python docstrings and `#` field comments, Rust `///`, Go `//`, and `;`
-  comment lines in the CDDL schema (file and `_getSchema`).
-- New tests: `test_doc_comments` (acceptance + unchanged runtime behavior) and
-  `test_doc_comments_api` (asserts the doc text in all generated artifacts).
-
-[#50]: https://github.com/NagyZoltanPeter/nim-brokers/issues/50
-
 ## [3.3.0] — 2026-07-14
 
 **Handler body sugar across all lanes: `listenIt` / `onSignalIt` / `provideIt` /

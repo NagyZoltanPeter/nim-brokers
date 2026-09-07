@@ -37,6 +37,9 @@ the elevator pitch see the [README](../README.md).
 - [Threaded brokers `(mt)`](#threaded-brokers-mt)
   - [Cross-thread request](#cross-thread-request)
   - [Cross-thread event](#cross-thread-event)
+- [Doc comments](#doc-comments)
+  - [Document a broker](#document-a-broker)
+  - [Where it shows up](#where-it-shows-up)
 
 ---
 
@@ -429,3 +432,36 @@ proc main() {.async.} =
 
 waitFor main()
 ```
+
+---
+
+## Doc comments
+
+### Document a broker
+
+```nim
+RequestBroker(API):
+  ## Query device liveness.                     # above the type -> payload type
+  type GetHealth = object
+    ok*: bool ## True when all subsystems run.  # trailing -> field
+    code*: int32 ## Machine-readable code.
+
+  ## Read the current health snapshot.          # above the signature -> method
+  proc signature*(deviceId: int64): Future[Result[GetHealth, string]] {.async.}
+```
+
+Works in every macro and lane. A `##` written *above* the macro call is a plain
+module doc comment and is NOT captured — move it inside the body.
+
+### Where it shows up
+
+```text
+all lanes  -> generated type + tunneling procs  (nim doc, IDE hover)
+(API)      -> <lib>.h / .hpp  /** ... */
+              <lib>.py        docstrings + '#' field comments
+              <lib>_rs        ///        <lib>_go  //
+              <lib>.cddl      '; ' comment lines
+              <lib>_getSchema()  "doc" field on every request/event/signal/type/field
+```
+
+Full reference: [USAGEGUIDE.md#doc-comments](../USAGEGUIDE.md#doc-comments).

@@ -128,6 +128,12 @@ the **same call shape across all lanes** — `emit` is always sync, `drop*` is
 always async. Full syntax, all variants, and worked examples are in the
 **[Usage Guide](USAGEGUIDE.md#types-of-brokers)**.
 
+Broker bodies take ordinary `##` doc comments — above the type, trailing on a
+field, above the signature. The text follows the declaration into `nim doc` and,
+in the `(API)` lane, into the generated C/C++/Python/Rust/Go wrappers, the CDDL
+schema and the `_getSchema()` descriptor. See
+**[Doc comments](USAGEGUIDE.md#doc-comments)**.
+
 ## Use it for
 
 - **Decoupling modules / plugin boundaries** — a compile-time-checked contract

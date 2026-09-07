@@ -51,6 +51,7 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [Batch request inputs](#batch-request-inputs)
     - [Event callback ABI](#event-callback-abi)
     - [Data ownership for request results](#data-ownership-for-request-results)
+    - [Doc comments in generated surfaces](#doc-comments-in-generated-surfaces)
   - [Generated Foreign Surfaces](#generated-foreign-surfaces)
     - [C API](#c-api)
       - [Async requests (`<lib>_callAsync`)](#async-requests-lib_callasync)
@@ -1167,6 +1168,65 @@ automatically: they call `_freeBuffer` after CBOR-decoding the
 response, and the event-callback trampoline keeps `payloadBuf` alive
 only for the duration of the user closure. Pure-C consumers calling
 the raw ABI must follow the rules above explicitly.
+
+### Doc comments in generated surfaces
+
+`##` doc comments written **inside** a broker body are captured at macro
+expansion time and propagated into every artifact the codegen emits. Write the
+documentation once, in Nim; the C header, the C++/Python/Rust/Go wrappers, the
+CDDL schema and the runtime descriptor all carry it.
+
+```nim
+RequestBroker(API):
+  ## Query device liveness.
+  type GetHealth = object
+    ok*: bool ## True when all subsystems run.
+    code*: int32 ## Machine-readable status code.
+
+  ## Read the current health snapshot.
+  proc signature*(deviceId: int64): Future[Result[GetHealth, string]] {.async.}
+
+EventBroker(API):
+  ## Emitted periodically while the library runs.
+  type Heartbeat = object
+    seqNo*: int64 ## Monotonic heartbeat counter.
+
+SignalBroker(API):
+  ## One-way nudge consumed by the library.
+  type Nudge = object
+    reason*: string ## Why the nudge was sent.
+```
+
+| Artifact | Rendering |
+|----------|-----------|
+| `<lib>.h` | the doc text under each entry of the documented `apiNames` block |
+| `<lib>.hpp` | `/** … */` on structs, fields, enums, aliases, request/signal methods and event callback surfaces |
+| `<lib>.py` | dataclass and method docstrings, `#` comments on fields, folded into the `on_<event>` docstring |
+| `<lib>_rs/src/lib.rs` | `///` on generated types, fields and methods |
+| `<lib>_go/<lib>.go` | `//` on generated types, fields and methods |
+| `<lib>.cddl` | `;` comment lines on the request / event / signal rules, shared type rules and object rule members |
+| `<lib>_getSchema()` | the `doc` field of every `ApiRequestInfo` / `ApiEventInfo` / `ApiSignalInfo` / `ApiTypeInfo` / `ApiFieldInfo` record |
+
+`<lib>_listApis()` is deliberately unaffected — it stays a lightweight list of
+names; the documented view is `_getSchema`.
+
+Accepted positions: above the `type`, trailing on a field, above the
+`proc signature` (or above the `proc` of a proc-sugar broker; dual-slot brokers
+document each signature separately), and inside the `registerBrokerLibrary`
+body. A `##` above the macro call itself is a plain module doc comment and is
+**not** captured.
+
+Two limits worth knowing:
+
+- External types auto-resolved from a signature (a plain Nim `object` / `enum`
+  / `distinct` declared outside any broker body) are registered without their
+  doc text.
+- Request argument names carry no per-argument doc; document them in the
+  signature's doc block instead.
+
+[examples/ffiapi/nimlib/mylib.nim](../examples/ffiapi/nimlib/mylib.nim)
+documents its whole surface and is the reference for what the generated files
+look like.
 
 ---
 
