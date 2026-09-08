@@ -173,6 +173,15 @@ proc generateMtRequestBroker*(
   let exportedTypeIdent = postfix(copyNimTree(typeIdent), "*")
   let typeDisplayName = sanitizeIdentName(typeIdent)
   let typeNameLit = newLit(typeDisplayName)
+  # Opaque handle for cancellation: (slotIdx shl 32) or slotGen. A value, not
+  # a pointer — nothing to allocate, nothing to free, and a handle whose slot
+  # has since been recycled simply fails the generation check.
+  let requestIdName = ident(typeDisplayName & "RequestId")
+  # Cancel implementation. Lives under a unique name so generated code can call
+  # it without colliding with chronos's `cancel(FutureBase)` template — inside
+  # `quote do` a bare `cancel` binds to that template at the macro's own
+  # definition site.
+  let cancelByIdIdent = ident("cancelById" & typeDisplayName)
 
   let returnType = quote:
     Future[Result[`payloadType`, string]]
@@ -249,6 +258,7 @@ proc generateMtRequestBroker*(
   let payloadBytesLit = newLit(cfg.maxPayloadBytes)
   let maxDynPayloadLit = newLit(cfg.maxDynamicPayloadBytes)
   let responseSlotsLit = newLit(cfg.responseSlots)
+  let requestTimeoutMsLit = newLit(cfg.requestTimeoutMs)
   let responseBytesLit = newLit(cfg.maxResponseBytes)
   let freeListShardsLit = newLit(uint32(cfg.freeListShards))
 
@@ -298,6 +308,12 @@ proc generateMtRequestBroker*(
           )
   msgRecList.add(
     newTree(nnkIdentDefs, ident("responseSlotIdx"), ident("uint32"), newEmptyNode())
+  )
+  # Generation of the response slot at claim time. The provider CASes against
+  # it, so a reply that arrives after the slot was recycled is dropped instead
+  # of overwriting the new owner's response.
+  msgRecList.add(
+    newTree(nnkIdentDefs, ident("responseSlotGen"), ident("uint32"), newEmptyNode())
   )
   msgRecList.add(
     newTree(
@@ -362,7 +378,38 @@ proc generateMtRequestBroker*(
     )
   )
 
+  typeSection.add(
+    newTree(
+      nnkTypeDef,
+      postfix(copyNimTree(requestIdName), "*"),
+      newEmptyNode(),
+      newTree(nnkDistinctTy, ident("uint64")),
+    )
+  )
+
   result.add(typeSection)
+  # `==` is built by hand: inside `quote do` the backticks around an operator
+  # name are interpolation syntax, not an identifier.
+  result.add(
+    newProc(
+      name = postfix(nnkAccQuoted.newTree(ident("==")), "*"),
+      params = @[
+        ident("bool"),
+        newIdentDefs(ident("a"), copyNimTree(requestIdName)),
+        newIdentDefs(ident("b"), copyNimTree(requestIdName)),
+      ],
+      body = newEmptyNode(),
+      pragmas = nnkPragma.newTree(ident("borrow")),
+    )
+  )
+  result.add(
+    quote do:
+      proc isCancellable*(id: `requestIdName`): bool =
+        ## False for a request that was never armed (same-thread call, or a
+        ## prologue that failed) — such an id can never be cancelled.
+        uint64(id) != 0'u64
+
+  )
 
   # ── Codec procs for ReqMsg ───────────────────────────────────────────
   for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, requestMsgName):
@@ -447,8 +494,10 @@ proc generateMtRequestBroker*(
   # ── Timeout knob (per broker type) ──────────────────────────────────
   result.add(
     quote do:
-      var `timeoutVarIdent`*: Duration = chronos.seconds(5)
-        ## Default timeout for cross-thread requests.
+      var `timeoutVarIdent`*: Duration = chronos.milliseconds(`requestTimeoutMsLit`)
+        ## Timeout for cross-thread requests, seeded from the declaration's
+        ## `requestTimeoutMs` kwarg (default 20 s) and mutable at runtime via
+        ## `setRequestTimeout`.
 
       proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
         `timeoutVarIdent` = timeout
@@ -512,10 +561,51 @@ proc generateMtRequestBroker*(
         var `tvWithArgHandlerIdent` {.threadvar.}: seq[`argProviderName`]
     )
 
+  # ── provider-side in-flight registry ────────────────────────────────
+  # Requests currently executing on this provider thread, keyed by the
+  # response slot they will answer. `asyncSpawn` throws the future away, so
+  # without this there is nothing left to cancel once a provider is running.
+  # Owned by the provider thread; only ever touched from its dispatch loop.
+  let tvInFlightIdent = ident("g" & typeDisplayName & "TvInFlight")
+  let registerInFlightIdent = ident("registerInFlight" & typeDisplayName)
+  let unregisterInFlightIdent = ident("unregisterInFlight" & typeDisplayName)
+  let scanCancelledIdent = ident("scanCancelled" & typeDisplayName)
+  result.add(
+    quote do:
+      var `tvInFlightIdent` {.threadvar.}:
+        seq[tuple[sIdx: uint32, sGen: uint32, fut: FutureBase]]
+
+      proc `registerInFlightIdent`(
+          slotIdx: uint32, slotGen: uint32, fut: FutureBase
+      ) {.gcsafe, raises: [].} =
+        {.cast(gcsafe).}:
+          `tvInFlightIdent`.add((sIdx: slotIdx, sGen: slotGen, fut: fut))
+
+      proc `unregisterInFlightIdent`(slotIdx: uint32) {.gcsafe, raises: [].} =
+        {.cast(gcsafe).}:
+          for i in 0 ..< `tvInFlightIdent`.len:
+            if `tvInFlightIdent`[i].sIdx == slotIdx:
+              `tvInFlightIdent`.del(i)
+              break
+
+      proc `scanCancelledIdent`(pool: ptr ResponseSlotPool) {.gcsafe, raises: [].} =
+        ## Runs only when the pool's cancel epoch moved, so the hot path pays
+        ## one relaxed load rather than a scan.
+        {.cast(gcsafe).}:
+          for entry in `tvInFlightIdent`:
+            if pool[].isAbandoned(entry.sIdx, entry.sGen) and not entry.fut.finished():
+              entry.fut.cancelSoon()
+
+  )
+
   # ── sendReply helper (marshals Result into response slot bytes) ──────
   # Protocol:
-  #   1. CAS Empty→Writing via pool.beginWrite. If it fails the
-  #      requester abandoned; release the slot without writing.
+  #   1. CAS (gen, Empty)→(gen, Writing) via pool.beginWrite:
+  #        Acquired  — carry on;
+  #        Abandoned — requester gave up, provider owns the release;
+  #        Stale     — slot already recycled for a newer request; drop the
+  #                    reply and touch nothing (releasing here would hand a
+  #                    live slot to a second owner).
   #   2. Marshal `resp` into slotPayloadPtr(idx).
   #   3. commitWrite (stores size + flips state to Ready, release-ordered).
   #   4. Fire requester's signal.
@@ -524,15 +614,21 @@ proc generateMtRequestBroker*(
       proc `sendReplyIdent`(
           pool: ptr ResponseSlotPool,
           slotIdx: uint32,
+          slotGen: uint32,
           requesterSignal: ptr BrokerSignalShared,
           resp: Result[`payloadType`, string],
       ) {.gcsafe, raises: [].} =
         if pool.isNil or slotIdx == EmptyIdx:
           return
-        if not pool[].beginWrite(slotIdx):
+        case pool[].beginWrite(slotIdx, slotGen)
+        of BeginWriteResult.Abandoned:
           # Requester already abandoned — provider owns the release.
           pool[].release(slotIdx, `shardHintIdent`())
           return
+        of BeginWriteResult.Stale:
+          return
+        of BeginWriteResult.Acquired:
+          discard
         let payloadPtr = pool[].slotPayloadPtr(slotIdx)
         let written =
           try:
@@ -540,7 +636,7 @@ proc generateMtRequestBroker*(
           except Exception:
             -1
         if written >= 0:
-          pool[].commitWrite(slotIdx, uint32(written))
+          pool[].commitWrite(slotIdx, slotGen, uint32(written))
         else:
           # Response exceeded the inline slot — auto-spill onto the heap so the
           # full response is delivered instead of replaced by an err. Falls back
@@ -564,7 +660,7 @@ proc generateMtRequestBroker*(
               if w2 < 0:
                 deallocShared(spillBuf)
               else:
-                pool[].commitWriteOverflow(slotIdx, spillBuf, uint32(w2))
+                pool[].commitWriteOverflow(slotIdx, slotGen, spillBuf, uint32(w2))
                 spilled = true
           if not spilled:
             # Could not spill (over ceiling / OOM / marshal error) — commit a
@@ -579,9 +675,9 @@ proc generateMtRequestBroker*(
               except Exception:
                 -1
             if writtenFb < 0:
-              pool[].commitWrite(slotIdx, 0'u32)
+              pool[].commitWrite(slotIdx, slotGen, 0'u32)
             else:
-              pool[].commitWrite(slotIdx, uint32(writtenFb))
+              pool[].commitWrite(slotIdx, slotGen, uint32(writtenFb))
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
 
@@ -608,6 +704,7 @@ proc generateMtRequestBroker*(
             `sendReplyIdent`(
               `poolIdent`,
               `msgIdent`.responseSlotIdx,
+              `msgIdent`.responseSlotGen,
               `msgIdent`.requesterSignal,
               err(
                 Result[`payloadType`, string],
@@ -615,12 +712,18 @@ proc generateMtRequestBroker*(
               ),
             )
           else:
+            let providerFut = `handlerIdent0`()
+            `registerInFlightIdent`(
+              `msgIdent`.responseSlotIdx, `msgIdent`.responseSlotGen, providerFut
+            )
             let catchedRes = catch:
-              await `handlerIdent0`()
+              await providerFut
+            `unregisterInFlightIdent`(`msgIdent`.responseSlotIdx)
             if catchedRes.isErr():
               `sendReplyIdent`(
                 `poolIdent`,
                 `msgIdent`.responseSlotIdx,
+                `msgIdent`.responseSlotGen,
                 `msgIdent`.requesterSignal,
                 err(
                   Result[`payloadType`, string],
@@ -639,6 +742,7 @@ proc generateMtRequestBroker*(
                       `sendReplyIdent`(
                         `poolIdent`,
                         `msgIdent`.responseSlotIdx,
+                        `msgIdent`.responseSlotGen,
                         `msgIdent`.requesterSignal,
                         err(
                           Result[`payloadType`, string],
@@ -648,8 +752,8 @@ proc generateMtRequestBroker*(
                       )
                       return
               `sendReplyIdent`(
-                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
-                providerRes,
+                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.responseSlotGen,
+                `msgIdent`.requesterSignal, providerRes,
               )
     )
 
@@ -672,6 +776,7 @@ proc generateMtRequestBroker*(
             `sendReplyIdent`(
               `poolIdent`,
               `msgIdent`.responseSlotIdx,
+              `msgIdent`.responseSlotGen,
               `msgIdent`.requesterSignal,
               err(
                 Result[`payloadType`, string],
@@ -680,12 +785,18 @@ proc generateMtRequestBroker*(
               ),
             )
           else:
+            let providerFut = `providerCall`
+            `registerInFlightIdent`(
+              `msgIdent`.responseSlotIdx, `msgIdent`.responseSlotGen, providerFut
+            )
             let catchedRes = catch:
-              await `providerCall`
+              await providerFut
+            `unregisterInFlightIdent`(`msgIdent`.responseSlotIdx)
             if catchedRes.isErr():
               `sendReplyIdent`(
                 `poolIdent`,
                 `msgIdent`.responseSlotIdx,
+                `msgIdent`.responseSlotGen,
                 `msgIdent`.requesterSignal,
                 err(
                   Result[`payloadType`, string],
@@ -704,6 +815,7 @@ proc generateMtRequestBroker*(
                       `sendReplyIdent`(
                         `poolIdent`,
                         `msgIdent`.responseSlotIdx,
+                        `msgIdent`.responseSlotGen,
                         `msgIdent`.requesterSignal,
                         err(
                           Result[`payloadType`, string],
@@ -713,8 +825,8 @@ proc generateMtRequestBroker*(
                       )
                       return
               `sendReplyIdent`(
-                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.requesterSignal,
-                providerRes,
+                `poolIdent`, `msgIdent`.responseSlotIdx, `msgIdent`.responseSlotGen,
+                `msgIdent`.requesterSignal, providerRes,
               )
     )
 
@@ -745,8 +857,13 @@ proc generateMtRequestBroker*(
         let capturedSlab = slab
         let capturedPool = pool
         let capturedCtx = loopCtx
+        var lastCancelEpoch = capturedPool[].cancelEpochValue()
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
+            let epoch = capturedPool[].cancelEpochValue()
+            if epoch != lastCancelEpoch:
+              lastCancelEpoch = epoch
+              `scanCancelledIdent`(capturedPool)
             var cellIdx: uint32
             if not capturedRing.tryDequeue(cellIdx):
               if capturedRing.isClosed():
@@ -769,7 +886,14 @@ proc generateMtRequestBroker*(
               except Exception:
                 false
             if ok:
-              asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
+              if capturedPool[].isAbandoned(msg.responseSlotIdx, msg.responseSlotGen):
+                # Cancelled (or timed out) before we got to it: the requester's
+                # CAS won, so the slot is ours to release and the provider is
+                # never invoked. A ring cannot drop an element, so a dead
+                # request is tombstoned in the slot and skipped here.
+                capturedPool[].release(msg.responseSlotIdx, `shardHintIdent`())
+              else:
+                asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
             else:
               error "Failed to unmarshal request payload", requestType = `typeNameLit`
             # Release the cell back to the slab — the unmarshaled msg
@@ -928,34 +1052,82 @@ proc generateMtRequestBroker*(
 
     )
 
-  # ── request helper: send and await one ReqMsg cross-thread ──────────
-  # Returns the response Result or an err on timeout / queue full.
-  let sendAndAwaitIdent = ident("sendAndAwait" & typeDisplayName)
+  # ── give-up helper: shared by every requester-side bail-out path ─────
+  # Publishes "this requester stopped waiting" on the response slot and
+  # decides who still owes the release:
+  #   abandon CAS won  → provider releases; our poller must retire at once
+  #   abandon CAS lost → provider is mid-write; our poller reaps the slot
+  #                      once it reaches Ready
+  # Firing our own dispatch signal forces a drain pass, so the poller acts on
+  # that decision immediately instead of lingering until some unrelated wake.
+  let giveUpIdent = ident("giveUp" & typeDisplayName)
   result.add(
     quote do:
-      proc `sendAndAwaitIdent`(
+      proc `giveUpIdent`(
+          waitState: ReqWaitState,
+          pool: ptr ResponseSlotPool,
+          slotIdx: uint32,
+          slotGen: uint32,
+          mySignal: ptr BrokerSignalShared,
+      ) {.gcsafe, raises: [].} =
+        waitState.gaveUp = true
+        if not pool[].abandonIfGen(slotIdx, slotGen):
+          waitState.reaping = true
+        fireBrokerSignal(mySignal)
+
+  )
+
+  # ── request prologue: claim + marshal + enqueue (synchronous) ────────
+  # Everything up to and including the provider wake-up, kept out of the async
+  # tail. That is what lets `requestCancellable` hand its id back before the
+  # caller can possibly await: by the time a cancel is expressible, the request
+  # is already armed, so there is no "cancel arrives before arming" window to
+  # close.
+  let prologueName = ident(typeDisplayName & "SendPrologue")
+  let sendPrologueIdent = ident("sendPrologue" & typeDisplayName)
+  result.add(
+    quote do:
+      type `prologueName` = object
+        slotIdx: uint32
+        slotGen: uint32
+        error: string ## empty on success
+
+      proc `sendPrologueIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
           providerSignal: ptr BrokerSignalShared,
+          mySignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
-      ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
-        ensureBrokerDispatchStarted()
-        let mySignal = getOrInitBrokerSignal()
+      ): `prologueName` {.gcsafe, raises: [].} =
         # Reserve the response slot.
         let slotIdx = pool[].claim(`shardHintIdent`())
         if slotIdx == EmptyIdx:
-          return
-            err("RequestBroker(" & `typeNameLit` & "): response slot pool exhausted")
+          return `prologueName`(
+            slotIdx: EmptyIdx,
+            error: "RequestBroker(" & `typeNameLit` & "): response slot pool exhausted",
+          )
+        # Read the generation while the slot is exclusively ours. Every later
+        # action on it — provider reply, give-up, cancel, response poll — is
+        # checked against this value, so a recycled slot can never be mistaken
+        # for this request's.
+        let slotGen = pool[].slotGen(slotIdx)
+        # Record who to wake if a third thread cancels this request. `nil` for
+        # blocking requesters: they poll the slot themselves.
+        pool[].setWaker(slotIdx, mySignal)
         # Reserve a slab cell, marshal ReqMsg into it.
         let cellIdx = slab[].claim(`shardHintIdent`())
         if cellIdx == EmptyIdx:
           pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): request slab exhausted")
+          return `prologueName`(
+            slotIdx: EmptyIdx,
+            error: "RequestBroker(" & `typeNameLit` & "): request slab exhausted",
+          )
         let cellPtr = slab[].cellPtr(cellIdx)
         let payloadPtr = slab[].cellPayloadPtr(cellIdx)
         var msgCopy = msg
         msgCopy.responseSlotIdx = slotIdx
+        msgCopy.responseSlotGen = slotGen
         msgCopy.requesterSignal = mySignal
         let written =
           try:
@@ -974,16 +1146,20 @@ proc generateMtRequestBroker*(
           if needed < 0 or needed > `maxDynPayloadLit`:
             slab[].release(cellIdx, `shardHintIdent`())
             pool[].release(slotIdx, `shardHintIdent`())
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): request payload exceeds maxDynamicPayloadBytes"
+            return `prologueName`(
+              slotIdx: EmptyIdx,
+              error:
+                "RequestBroker(" & `typeNameLit` &
+                "): request payload exceeds maxDynamicPayloadBytes",
             )
           let spillBuf = allocShared0(needed)
           if spillBuf.isNil:
             slab[].release(cellIdx, `shardHintIdent`())
             pool[].release(slotIdx, `shardHintIdent`())
-            return
-              err("RequestBroker(" & `typeNameLit` & "): request spill alloc failed")
+            return `prologueName`(
+              slotIdx: EmptyIdx,
+              error: "RequestBroker(" & `typeNameLit` & "): request spill alloc failed",
+            )
           let w2 =
             try:
               `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
@@ -993,25 +1169,72 @@ proc generateMtRequestBroker*(
             deallocShared(spillBuf)
             slab[].release(cellIdx, `shardHintIdent`())
             pool[].release(slotIdx, `shardHintIdent`())
-            return err("RequestBroker(" & `typeNameLit` & "): request marshal failed")
+            return `prologueName`(
+              slotIdx: EmptyIdx,
+              error: "RequestBroker(" & `typeNameLit` & "): request marshal failed",
+            )
           slab[].setOverflow(cellIdx, spillBuf, uint32(w2))
         cellPtr.refcount.store(1, moRelease)
         if not ring.tryEnqueue(cellIdx):
           slab[].release(cellIdx, `shardHintIdent`())
           pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): provider queue full")
+          return `prologueName`(
+            slotIdx: EmptyIdx,
+            error: "RequestBroker(" & `typeNameLit` & "): provider queue full",
+          )
         fireBrokerSignal(providerSignal)
-        # Register a one-shot response poller for this slot.
+        `prologueName`(slotIdx: slotIdx, slotGen: slotGen, error: "")
+
+  )
+
+  # ── request tail: wait for the response slot ─────────────────────────
+  # Returns the response Result, or an err on timeout / cancellation.
+  let awaitReplyIdent = ident("awaitReply" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `awaitReplyIdent`(
+          pool: ptr ResponseSlotPool,
+          slotIdx: uint32,
+          slotGen: uint32,
+          mySignal: ptr BrokerSignalShared,
+      ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
         let responseFut =
           newFuture[Result[`payloadType`, string]]("request." & `typeNameLit`)
         let capturedPool = pool
         let capturedSlotIdx = slotIdx
+        let capturedSlotGen = slotGen
         let capturedResponseFut = responseFut
+        let waitState = ReqWaitState()
+        let capturedWait = waitState
         registerBrokerPoller(
           proc(): int {.gcsafe, raises: [].} =
             {.cast(gcsafe).}:
-              if not capturedPool[].readyState(capturedSlotIdx):
+              if capturedWait.gaveUp and not capturedWait.reaping:
+                # We abandoned the slot before the provider started writing,
+                # so the provider owns the release and this slot may already
+                # be recycled — or the pool itself freed by the provider
+                # thread's teardown. Retire without touching either.
+                return 2
+              if not capturedWait.reaping and
+                  capturedPool[].isAbandoned(capturedSlotIdx, capturedSlotGen):
+                # Someone else cancelled this request. Their CAS won, so the
+                # provider owes the release; we only resolve the caller.
+                capturedWait.gaveUp = true
+                if not capturedResponseFut.finished:
+                  capturedResponseFut.complete(
+                    err(
+                      Result[`payloadType`, string],
+                      "RequestBroker(" & `typeNameLit` & "): request cancelled",
+                    )
+                  )
+                return 2
+              if not capturedPool[].readyState(capturedSlotIdx, capturedSlotGen):
                 return 0
+              if capturedWait.reaping:
+                # Gave up while the provider was mid-write: the response is
+                # unwanted, but handing the slot back is still our job.
+                capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
+                return 2
               # Unmarshal Result from slot bytes on THIS (requester) thread,
               # so any string/seq inside lives on this thread's GC heap.
               # This is the §2.2 fix: no cross-thread `=copy` of the typed
@@ -1038,14 +1261,14 @@ proc generateMtRequestBroker*(
           await withTimeout(responseFut, `timeoutVarIdent`)
         if completedRes.isErr():
           responseFut.cancelSoon()
-          discard capturedPool[].abandon(capturedSlotIdx)
+          `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
           return err(
             "RequestBroker(" & `typeNameLit` & "): recv failed: " &
               completedRes.error.msg
           )
         if not completedRes.get():
           responseFut.cancelSoon()
-          discard capturedPool[].abandon(capturedSlotIdx)
+          `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
           return err(
             "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
               $`timeoutVarIdent`
@@ -1060,78 +1283,148 @@ proc generateMtRequestBroker*(
 
   )
 
-  # ── blockingRequest helper: same as above but synchronous ────────────
-  let blockingSendAndAwaitIdent = ident("blockingSendAndAwait" & typeDisplayName)
+  # ── cancel implementation (used by the public wrappers below and by
+  # the owned-future cancel callback) ─────────────────────────────────
   result.add(
     quote do:
-      proc `blockingSendAndAwaitIdent`(
+      proc `cancelByIdIdent`(
+          brokerCtx: BrokerContext, id: `requestIdName`
+      ): bool {.gcsafe, raises: [].} =
+        `initProcIdent`()
+        if uint64(id) == 0'u64:
+          return false
+        let slotIdx = uint32(uint64(id) shr 32)
+        let slotGen = uint32(uint64(id) and 0xFFFFFFFF'u64)
+        var won = false
+        var providerSignal: ptr BrokerSignalShared = nil
+        var requesterSignal: ptr BrokerSignalShared = nil
+        withLock(`globalLockIdent`):
+          for i in 0 ..< `globalBucketCountIdent`:
+            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+              let pool = `globalBucketsIdent`[i].responseSlotPool
+              if not pool.isNil:
+                won = pool[].abandonIfGen(slotIdx, slotGen)
+                if won:
+                  pool[].bumpCancelEpoch()
+                  requesterSignal = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
+              providerSignal = `globalBucketsIdent`[i].providerSignal
+              break
+        if won:
+          # Wake the provider so it drops the request (still queued) or cancels
+          # the running provider future, and the requester so it resolves now
+          # rather than at its timeout.
+          fireBrokerSignal(providerSignal)
+          fireBrokerSignal(requesterSignal)
+        won
+
+  )
+
+  # ── send helpers: prologue + tail ───────────────────────────────────
+  let sendAndAwaitIdent = ident("sendAndAwait" & typeDisplayName)
+  let sendCancellableIdent = ident("sendCancellable" & typeDisplayName)
+  let immediateErrIdent = ident("immediateErr" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `immediateErrIdent`(
+          message: string
+      ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
+        ## An already-failed response future, so every `requestCancellable`
+        ## return path yields the same future type.
+        return err(message)
+
+      proc `sendAndAwaitIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
           providerSignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
+      ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
+        ensureBrokerDispatchStarted()
+        let mySignal = getOrInitBrokerSignal()
+        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
+        if pro.error.len > 0:
+          return err(pro.error)
+        return await `awaitReplyIdent`(pool, pro.slotIdx, pro.slotGen, mySignal)
+
+      proc `sendCancellableIdent`(
+          brokerCtx: BrokerContext,
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool,
+          providerSignal: ptr BrokerSignalShared,
+          msg: sink `requestMsgName`,
+      ): tuple[
+        reqId: `requestIdName`,
+        respFut: Future[Result[`payloadType`, string]].Raising([]),
+      ] =
+        ## Synchronous arming, so the id exists before the caller can await.
+        ##
+        ## The future handed to the caller is one we own the cancel schedule
+        ## for, rather than the waiter's own future. Cancelling it — directly,
+        ## or indirectly through a chronos combinator that cancels its losers
+        ## (`withTimeout`, `one`, `race`) — is routed into the broker's own
+        ## cancel path instead of raising `CancelledError` inside a
+        ## `raises: []` waiter that has no handler for it.
+        ensureBrokerDispatchStarted()
+        let mySignal = getOrInitBrokerSignal()
+        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
+        if pro.error.len > 0:
+          return (`requestIdName`(0'u64), `immediateErrIdent`(pro.error))
+        let reqId = `requestIdName`((uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen))
+        let inner = `awaitReplyIdent`(pool, pro.slotIdx, pro.slotGen, mySignal)
+        # `Future[T].Raising([])` cannot be constructed without
+        # OwnCancelSchedule — chronos static-asserts that a manually created
+        # future either raises CancelledError or owns its cancellation.
+        let outer = Future[Result[`payloadType`, string]].Raising([]).init(
+            "requestCancellable." & `typeNameLit`, {FutureFlag.OwnCancelSchedule}
+          )
+        let capturedCtx = brokerCtx
+        let capturedId = reqId
+        let capturedInner = inner
+        let capturedOuter = outer
+        # Captures ctx and id as *values*, never the pool pointer: this runs
+        # later, by which time the provider thread may have freed the pool.
+        # Going through cancelById keeps the lock-covered lookup that makes
+        # that safe.
+        capturedOuter.cancelCallback = proc(udata: pointer) {.gcsafe, raises: [].} =
+          discard `cancelByIdIdent`(capturedCtx, capturedId)
+        # Single completion point: the waiter always resolves (the request
+        # timeout is the backstop), and it is the only thing that completes
+        # the caller's future — including when a cancel lost the race and the
+        # real response arrived anyway.
+        capturedInner.addCallback(
+          proc(udata: pointer) {.gcsafe, raises: [].} =
+            if not capturedOuter.finished():
+              let readRes = catch:
+                capturedInner.read()
+              if readRes.isOk():
+                capturedOuter.complete(readRes.get())
+              else:
+                capturedOuter.complete(
+                  err(
+                    Result[`payloadType`, string],
+                    "RequestBroker(" & `typeNameLit` & "): recv failed: " &
+                      readRes.error.msg,
+                  )
+                )
+        )
+        (reqId, capturedOuter)
+
+  )
+
+  # ── blockingRequest helper: prologue + synchronous wait ─────────────
+  let blockingWaitIdent = ident("blockingWait" & typeDisplayName)
+  let blockingSendAndAwaitIdent = ident("blockingSendAndAwait" & typeDisplayName)
+  let blockingSendCancellableIdent = ident("blockingSendCancellable" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `blockingWaitIdent`(
+          pool: ptr ResponseSlotPool, slotIdx: uint32, slotGen: uint32
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
-        let slotIdx = pool[].claim(`shardHintIdent`())
-        if slotIdx == EmptyIdx:
-          return
-            err("RequestBroker(" & `typeNameLit` & "): response slot pool exhausted")
-        let cellIdx = slab[].claim(`shardHintIdent`())
-        if cellIdx == EmptyIdx:
-          pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): request slab exhausted")
-        let cellPtr = slab[].cellPtr(cellIdx)
-        let payloadPtr = slab[].cellPayloadPtr(cellIdx)
-        var msgCopy = msg
-        msgCopy.responseSlotIdx = slotIdx
-        msgCopy.requesterSignal = nil # no async loop on this thread
-        let written =
-          try:
-            `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
-          except Exception:
-            -1
-        if written >= 0:
-          cellPtr.payloadSize = uint32(written)
-        else:
-          # Auto-spill the request onto the heap instead of failing.
-          let needed =
-            try:
-              `marshalSizeIdent`(msgCopy)
-            except Exception:
-              -1
-          if needed < 0 or needed > `maxDynPayloadLit`:
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return err(
-              "RequestBroker(" & `typeNameLit` &
-                "): request payload exceeds maxDynamicPayloadBytes"
-            )
-          let spillBuf = allocShared0(needed)
-          if spillBuf.isNil:
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return
-              err("RequestBroker(" & `typeNameLit` & "): request spill alloc failed")
-          let w2 =
-            try:
-              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
-            except Exception:
-              -1
-          if w2 < 0:
-            deallocShared(spillBuf)
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return err("RequestBroker(" & `typeNameLit` & "): request marshal failed")
-          slab[].setOverflow(cellIdx, spillBuf, uint32(w2))
-        cellPtr.refcount.store(1, moRelease)
-        if not ring.tryEnqueue(cellIdx):
-          slab[].release(cellIdx, `shardHintIdent`())
-          pool[].release(slotIdx, `shardHintIdent`())
-          return err("RequestBroker(" & `typeNameLit` & "): provider queue full")
-        fireBrokerSignal(providerSignal)
-        # Busy-poll the response slot until ready or timeout.
+        # Busy-poll the response slot until ready, cancelled, or timed out.
         let deadline = Moment.now() + `timeoutVarIdent`
         while Moment.now() < deadline:
-          if pool[].readyState(slotIdx):
+          if pool[].readyState(slotIdx, slotGen):
             var decoded: Result[`payloadType`, string]
             let payloadPtr = pool[].respDataPtr(slotIdx)
             let payloadSize = pool[].respDataLen(slotIdx)
@@ -1145,14 +1438,71 @@ proc generateMtRequestBroker*(
               return decoded
             return
               err("RequestBroker(" & `typeNameLit` & "): response unmarshal failed")
+          if pool[].isAbandoned(slotIdx, slotGen):
+            # Cancelled from another thread. That CAS won, so the provider owns
+            # the release and there is nothing left to wait for.
+            return err("RequestBroker(" & `typeNameLit` & "): request cancelled")
           sleep(1)
-        # Timeout: abandon the slot so a late provider write returns
-        # the slot to the pool instead of leaving it stranded.
-        discard pool[].abandon(slotIdx)
+        # Timeout. If the abandon CAS wins, a late provider write finds the
+        # slot abandoned and releases it. If it loses, the provider is already
+        # mid-write and will never release — the slot is ours to reap, so wait
+        # out a bounded grace window for the commit and hand it back. Skipping
+        # this leaks one slot per late response until the pool is exhausted.
+        if not pool[].abandonIfGen(slotIdx, slotGen):
+          let graceWindow =
+            if `timeoutVarIdent` < chronos.milliseconds(500):
+              `timeoutVarIdent`
+            else:
+              chronos.milliseconds(500)
+          let graceDeadline = Moment.now() + graceWindow
+          var reaped = false
+          while Moment.now() < graceDeadline:
+            if pool[].readyState(slotIdx, slotGen):
+              pool[].release(slotIdx, `shardHintIdent`())
+              reaped = true
+              break
+            sleep(1)
+          if not reaped:
+            warn "response slot not reclaimed: provider never committed",
+              requestType = `typeNameLit`, slot = slotIdx
         return err(
           "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
             $`timeoutVarIdent`
         )
+
+      proc `blockingSendAndAwaitIdent`(
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool,
+          providerSignal: ptr BrokerSignalShared,
+          msg: sink `requestMsgName`,
+      ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
+        # No async loop on this thread, so no waker: the wait below polls.
+        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
+        if pro.error.len > 0:
+          return err(pro.error)
+        `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
+
+      proc `blockingSendCancellableIdent`(
+          ring: ptr VyukovMpscRing[uint32],
+          slab: ptr PayloadSlab,
+          pool: ptr ResponseSlotPool,
+          providerSignal: ptr BrokerSignalShared,
+          msg: sink `requestMsgName`,
+          idOut: ptr `requestIdName`,
+      ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
+        ## The id is published before the wait begins — a blocking caller
+        ## cannot hand it out afterwards, so `idOut` must point at storage the
+        ## canceller can read. The caller's own frame is alive for the whole
+        ## call, which is what makes that pointer safe.
+        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
+        if pro.error.len > 0:
+          if not idOut.isNil:
+            idOut[] = `requestIdName`(0'u64)
+          return err(pro.error)
+        if not idOut.isNil:
+          idOut[] = `requestIdName`((uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen))
+        `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
 
   )
 
@@ -1837,6 +2187,342 @@ proc generateMtRequestBroker*(
       result.add(
         buildProvideTemplates(typeIdent, "replaceProvider", reprovideName, slot)
       )
+
+  # ── cancellation surface ────────────────────────────────────────────
+  # Emitted last: these call `request` / the send helpers, so they must come
+  # after them in the generated stmt list.
+  #
+  # `cancel` performs its CAS **while holding the bucket lock**. That is what
+  # makes it free of use-after-free: `clearProvider` removes the bucket under
+  # the same lock *before* closing the ring, and the pool is only queued for
+  # free once the provider's poll fn observes the closed ring. So a bucket
+  # found under the lock cannot have had its pool freed; a bucket that is gone
+  # means the request is unreachable and `cancel` reports false without
+  # touching any pool memory.
+  let cancelReturnType = quote:
+    tuple[
+      reqId: `requestIdName`, respFut: Future[Result[`payloadType`, string]].Raising([])
+    ]
+
+  result.add(
+    quote do:
+      proc cancel*(
+          _: typedesc[`typeIdent`], brokerCtx: BrokerContext, id: `requestIdName`
+      ): bool =
+        ## Cancel an outstanding cross-thread request. Callable from any
+        ## thread. True means the cancellation was published — the request
+        ## will resolve with "request cancelled" and its provider, if already
+        ## running, is cancelled. False means there was nothing to cancel: the
+        ## response was already being written, or the id is stale.
+        `cancelByIdIdent`(brokerCtx, id)
+
+      proc cancel*(_: typedesc[`typeIdent`], id: `requestIdName`): bool =
+        `cancelByIdIdent`(DefaultBrokerContext, id)
+
+  )
+
+  if not zeroArgSig.isNil():
+    result.add(
+      quote do:
+        proc requestCancellable*(
+            _: typedesc[`typeIdent`], brokerCtx: BrokerContext
+        ): `cancelReturnType` =
+          ## Like `request`, but also returns an id that any thread may pass
+          ## to `cancel`. The id is produced before this proc returns, so it
+          ## is always usable by the time the caller holds it.
+          `initProcIdent`()
+          var ring: ptr VyukovMpscRing[uint32]
+          var slab: ptr PayloadSlab
+          var pool: ptr ResponseSlotPool
+          var providerSignal: ptr BrokerSignalShared
+          var sameThread = false
+          let myThreadGen = currentMtThreadGen()
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  sameThread = true
+                else:
+                  ring = `globalBucketsIdent`[i].ring
+                  slab = `globalBucketsIdent`[i].slab
+                  pool = `globalBucketsIdent`[i].responseSlotPool
+                  providerSignal = `globalBucketsIdent`[i].providerSignal
+                break
+          if sameThread:
+            # Same-thread requests call the provider directly: no queue, no
+            # response slot, nothing to cancel.
+            return (`requestIdName`(0'u64), request(`typeIdent`, brokerCtx))
+          if ring.isNil:
+            return (
+              `requestIdName`(0'u64),
+              `immediateErrIdent`(
+                "RequestBroker(" & `typeNameLit` &
+                  "): no zero-arg provider registered for broker context " & $brokerCtx
+              ),
+            )
+          var msg = `requestMsgName`(requestKind: 0)
+          `sendCancellableIdent`(brokerCtx, ring, slab, pool, providerSignal, msg)
+
+        proc requestCancellable*(_: typedesc[`typeIdent`]): `cancelReturnType` =
+          requestCancellable(`typeIdent`, DefaultBrokerContext)
+
+        proc blockingRequestCancellable*(
+            _: typedesc[`typeIdent`],
+            brokerCtx: BrokerContext,
+            idOut: ptr `requestIdName`,
+        ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
+          ## Blocking variant. `idOut` is written before the wait begins —
+          ## point it at storage another thread can read, since this caller is
+          ## blocked and cannot publish the id itself.
+          `initProcIdent`()
+          if not idOut.isNil:
+            idOut[] = `requestIdName`(0'u64)
+          var ring: ptr VyukovMpscRing[uint32]
+          var slab: ptr PayloadSlab
+          var pool: ptr ResponseSlotPool
+          var providerSignal: ptr BrokerSignalShared
+          var sameThread = false
+          let myThreadGen = currentMtThreadGen()
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                    `globalBucketsIdent`[i].threadGen == myThreadGen:
+                  sameThread = true
+                else:
+                  ring = `globalBucketsIdent`[i].ring
+                  slab = `globalBucketsIdent`[i].slab
+                  pool = `globalBucketsIdent`[i].responseSlotPool
+                  providerSignal = `globalBucketsIdent`[i].providerSignal
+                break
+          if sameThread or ring.isNil:
+            return blockingRequest(`typeIdent`, brokerCtx)
+          var msg = `requestMsgName`(requestKind: 0)
+          `blockingSendCancellableIdent`(ring, slab, pool, providerSignal, msg, idOut)
+
+        proc blockingRequestCancellable*(
+            _: typedesc[`typeIdent`], idOut: ptr `requestIdName`
+        ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
+          blockingRequestCancellable(`typeIdent`, DefaultBrokerContext, idOut)
+
+    )
+
+  if not argSig.isNil():
+    let ccParamDefs = cloneParams(argParams)
+    let ccArgNames = collectParamNames(ccParamDefs)
+    let ccTypedescParam =
+      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent))
+
+    var ccMsgCtor = newTree(nnkObjConstr, requestMsgName)
+    ccMsgCtor.add(newTree(nnkExprColonExpr, ident("requestKind"), newLit(1)))
+    for argName in ccArgNames:
+      ccMsgCtor.add(newTree(nnkExprColonExpr, argName, argName))
+
+    var ccForwardCall = newCall(ident("request"))
+    ccForwardCall.add(copyNimTree(typeIdent))
+    ccForwardCall.add(ident("brokerCtx"))
+    for argName in ccArgNames:
+      ccForwardCall.add(argName)
+
+    let ccBody = quote:
+      `initProcIdent`()
+      var ring: ptr VyukovMpscRing[uint32]
+      var slab: ptr PayloadSlab
+      var pool: ptr ResponseSlotPool
+      var providerSignal: ptr BrokerSignalShared
+      var sameThread = false
+      let myThreadGen = currentMtThreadGen()
+      withLock(`globalLockIdent`):
+        for i in 0 ..< `globalBucketCountIdent`:
+          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                `globalBucketsIdent`[i].threadGen == myThreadGen:
+              sameThread = true
+            else:
+              ring = `globalBucketsIdent`[i].ring
+              slab = `globalBucketsIdent`[i].slab
+              pool = `globalBucketsIdent`[i].responseSlotPool
+              providerSignal = `globalBucketsIdent`[i].providerSignal
+            break
+      if sameThread:
+        return (`requestIdName`(0'u64), `ccForwardCall`)
+      if ring.isNil:
+        return (
+          `requestIdName`(0'u64),
+          `immediateErrIdent`(
+            "RequestBroker(" & `typeNameLit` &
+              "): no provider registered for broker context " & $brokerCtx
+          ),
+        )
+      var msg = `ccMsgCtor`
+      return `sendCancellableIdent`(brokerCtx, ring, slab, pool, providerSignal, msg)
+
+    var ccFormalParams = newTree(nnkFormalParams)
+    ccFormalParams.add(copyNimTree(cancelReturnType))
+    ccFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), copyNimTree(ccTypedescParam), newEmptyNode())
+    )
+    ccFormalParams.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      ccFormalParams.add(paramDef)
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("requestCancellable"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        ccFormalParams,
+        newEmptyNode(),
+        newEmptyNode(),
+        ccBody,
+      )
+    )
+
+    # Non-keyed forwarder.
+    var ccNonKeyedParams = newTree(nnkFormalParams)
+    ccNonKeyedParams.add(copyNimTree(cancelReturnType))
+    ccNonKeyedParams.add(
+      newTree(nnkIdentDefs, ident("_"), copyNimTree(ccTypedescParam), newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      ccNonKeyedParams.add(paramDef)
+
+    var ccNonKeyedCall = newCall(ident("requestCancellable"))
+    ccNonKeyedCall.add(copyNimTree(typeIdent))
+    ccNonKeyedCall.add(ident("DefaultBrokerContext"))
+    for argName in ccArgNames:
+      ccNonKeyedCall.add(argName)
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("requestCancellable"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        ccNonKeyedParams,
+        newEmptyNode(),
+        newEmptyNode(),
+        newStmtList(newTree(nnkReturnStmt, ccNonKeyedCall)),
+      )
+    )
+
+    # Blocking cancellable variant.
+    var bcForwardCall = newCall(ident("blockingRequest"))
+    bcForwardCall.add(copyNimTree(typeIdent))
+    bcForwardCall.add(ident("brokerCtx"))
+    for argName in ccArgNames:
+      bcForwardCall.add(argName)
+
+    let bcBody = quote:
+      `initProcIdent`()
+      if not idOut.isNil:
+        idOut[] = `requestIdName`(0'u64)
+      var ring: ptr VyukovMpscRing[uint32]
+      var slab: ptr PayloadSlab
+      var pool: ptr ResponseSlotPool
+      var providerSignal: ptr BrokerSignalShared
+      var sameThread = false
+      let myThreadGen = currentMtThreadGen()
+      withLock(`globalLockIdent`):
+        for i in 0 ..< `globalBucketCountIdent`:
+          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
+            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
+                `globalBucketsIdent`[i].threadGen == myThreadGen:
+              sameThread = true
+            else:
+              ring = `globalBucketsIdent`[i].ring
+              slab = `globalBucketsIdent`[i].slab
+              pool = `globalBucketsIdent`[i].responseSlotPool
+              providerSignal = `globalBucketsIdent`[i].providerSignal
+            break
+      if sameThread or ring.isNil:
+        return `bcForwardCall`
+      var msg = `ccMsgCtor`
+      return
+        `blockingSendCancellableIdent`(ring, slab, pool, providerSignal, msg, idOut)
+
+    let bcPragmas = quote:
+      {.gcsafe, raises: [].}
+
+    var bcFormalParams = newTree(nnkFormalParams)
+    bcFormalParams.add(
+      newTree(
+        nnkBracketExpr, ident("Result"), copyNimTree(payloadType), ident("string")
+      )
+    )
+    bcFormalParams.add(
+      newTree(nnkIdentDefs, ident("_"), copyNimTree(ccTypedescParam), newEmptyNode())
+    )
+    bcFormalParams.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      bcFormalParams.add(paramDef)
+    bcFormalParams.add(
+      newTree(
+        nnkIdentDefs,
+        ident("idOut"),
+        newTree(nnkPtrTy, copyNimTree(requestIdName)),
+        newEmptyNode(),
+      )
+    )
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("blockingRequestCancellable"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        bcFormalParams,
+        bcPragmas,
+        newEmptyNode(),
+        bcBody,
+      )
+    )
+
+    var bcNonKeyedParams = newTree(nnkFormalParams)
+    bcNonKeyedParams.add(
+      newTree(
+        nnkBracketExpr, ident("Result"), copyNimTree(payloadType), ident("string")
+      )
+    )
+    bcNonKeyedParams.add(
+      newTree(nnkIdentDefs, ident("_"), copyNimTree(ccTypedescParam), newEmptyNode())
+    )
+    for paramDef in cloneParams(argParams):
+      bcNonKeyedParams.add(paramDef)
+    bcNonKeyedParams.add(
+      newTree(
+        nnkIdentDefs,
+        ident("idOut"),
+        newTree(nnkPtrTy, copyNimTree(requestIdName)),
+        newEmptyNode(),
+      )
+    )
+
+    var bcNonKeyedCall = newCall(ident("blockingRequestCancellable"))
+    bcNonKeyedCall.add(copyNimTree(typeIdent))
+    bcNonKeyedCall.add(ident("DefaultBrokerContext"))
+    for argName in ccArgNames:
+      bcNonKeyedCall.add(argName)
+    bcNonKeyedCall.add(ident("idOut"))
+
+    result.add(
+      newTree(
+        nnkProcDef,
+        postfix(ident("blockingRequestCancellable"), "*"),
+        newEmptyNode(),
+        newEmptyNode(),
+        bcNonKeyedParams,
+        copyNimTree(bcPragmas),
+        newEmptyNode(),
+        newStmtList(newTree(nnkReturnStmt, bcNonKeyedCall)),
+      )
+    )
 
   when defined(brokerDebug):
     writeBrokerDebug("RequestBrokerMt", typeDisplayName, result)

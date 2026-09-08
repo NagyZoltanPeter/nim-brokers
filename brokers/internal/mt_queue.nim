@@ -416,16 +416,23 @@ proc decRefAndCheck*(slab: PayloadSlab, idx: uint32): bool {.gcsafe.} =
 # State machine on the slot's `state` byte:
 #   Empty(0) ── requester claimed; provider hasn't written yet
 #     │
-#     ├── (provider) CAS Empty→Ready, write payload, signal requester
+#     ├── (provider) CAS Empty→Writing, write payload, commit → Ready
 #     │       │
 #     │       └── (requester) read payload; release slot
 #     │
-#     └── (requester timeout) CAS Empty→Abandoned
+#     └── (requester gave up) CAS Empty→Abandoned
 #             │
 #             └── (provider) sees Abandoned; releases slot
 #
-# In both terminal cases the slot returns to the pool's free-list
-# exactly once.
+# In both terminal cases the slot returns to the pool's free-list exactly
+# once: **the side that wins the `Empty→…` CAS never releases**. When the
+# requester's CAS loses (provider already in `Writing`) the requester must
+# stay around to reap the slot once it reaches `Ready`.
+#
+# State travels packed with a generation counter in a single 64-bit word.
+# `claim` bumps the generation, so an actor holding a stale (idx, gen) pair —
+# a poller left over from a timed-out request, a late cancel — fails its CAS
+# instead of acting on a slot that has since been recycled for someone else.
 
 type
   ResponseState* {.pure.} = enum
@@ -434,17 +441,29 @@ type
     Ready = 2'u8
     Abandoned = 3'u8
 
+  BeginWriteResult* {.pure.} = enum
+    Acquired ## slot reserved; provider may write
+    Abandoned ## requester gave up first — provider owns the release
+    Stale ## generation mismatch; slot belongs to a newer request, do not touch
+
   ResponseSlotHeader = object
-    state: Atomic[uint8]
-    pad0: array[3, byte] ## align the uint32 payloadSize to a 4-byte boundary
-    payloadSize: uint32
-      ## uint32 (not uint16) so a response slot may exceed 64 KiB.
-      ## state(1) + pad0(3) + payloadSize(4) = 8 bytes → 8-aligned.
+    control: Atomic[uint64]
+      ## (gen: uint32) shl 32 or (state: uint32). One word, so state and
+      ## generation can never be read inconsistently and every transition is
+      ## a single CAS.
+    payloadSize: uint32 ## uint32 (not uint16) so a response slot may exceed 64 KiB.
     overflowLen: uint32 ## spilled response byte count; 0 when the response fit inline.
-    pad1: uint32 ## keep the pointer that follows 8-aligned (overflowLen at +8)
     overflow: pointer
       ## heap-spill buffer for an oversized response; `nil` inline. Owned by the
       ## slot: freed in `release` and walked by `deinitResponseSlotPool`.
+    waker: pointer
+      ## The requesting thread's `BrokerSignalShared`, recorded when the slot is
+      ## armed. A canceller running on a third thread knows only (idx, gen), so
+      ## this is how it finds the thread to wake. `nil` for blocking requesters,
+      ## which poll the slot themselves. Firing a stale or closed signal is a
+      ## documented no-op, so this pointer is safe to keep.
+      ## control(8) + payloadSize(4) + overflowLen(4) + overflow(8) + waker(8)
+      ## = 32 bytes.
 
   ResponseSlotPool* = object
     capacity*: uint32
@@ -452,9 +471,23 @@ type
     slotStride: uint32
     storage: ptr UncheckedArray[byte]
     freeList: ShardedFreeList
+    cancelEpoch: Atomic[uint32]
+      ## Bumped whenever a slot in this pool is abandoned. The provider thread
+      ## compares it against its last-seen value to decide whether to scan its
+      ## in-flight requests for cancellations — one relaxed load on the hot
+      ## path, a scan only after a real cancel.
 
 proc respSlotHeaderSize(): uint32 {.compileTime.} =
   uint32(sizeof(ResponseSlotHeader))
+
+proc packControl(gen: uint32, state: ResponseState): uint64 {.inline, gcsafe.} =
+  (uint64(gen) shl 32) or uint64(uint8(state))
+
+proc controlGen(v: uint64): uint32 {.inline, gcsafe.} =
+  uint32(v shr 32)
+
+proc controlState(v: uint64): ResponseState {.inline, gcsafe.} =
+  ResponseState(uint8(v and 0xFF'u64))
 
 proc slotHeaderPtr(
     pool: ResponseSlotPool, idx: uint32
@@ -476,6 +509,7 @@ proc initResponseSlotPool*(
 ) {.gcsafe.} =
   pool.capacity = capacity
   pool.slotPayloadCap = maxPayloadBytes
+  pool.cancelEpoch.store(0, moRelaxed)
   pool.slotStride = alignUp(respSlotHeaderSize() + maxPayloadBytes, 8'u32)
   pool.storage = cast[ptr UncheckedArray[byte]](createShared(
     byte, int(capacity) * int(pool.slotStride)
@@ -483,8 +517,9 @@ proc initResponseSlotPool*(
   initShardedFreeList(pool.freeList, nShards, capacity)
   for i in 0 ..< capacity:
     let hdr = pool.slotHeaderPtr(i)
-    hdr.state.store(uint8(ResponseState.Empty), moRelaxed)
+    hdr.control.store(packControl(0, ResponseState.Empty), moRelaxed)
     hdr.payloadSize = 0
+    hdr.waker = nil
     push(pool.freeList, i, i)
 
 proc deinitResponseSlotPool*(pool: var ResponseSlotPool) {.gcsafe.} =
@@ -503,6 +538,8 @@ proc deinitResponseSlotPool*(pool: var ResponseSlotPool) {.gcsafe.} =
     pool.storage = nil
 
 proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
+  ## Take a slot off the free-list. Bumps the slot's generation, which
+  ## invalidates any (idx, gen) pair still held by an earlier user.
   let idx = pop(pool.freeList, shardHint)
   if idx != EmptyIdx:
     let hdr = pool.slotHeaderPtr(idx)
@@ -513,8 +550,15 @@ proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
       deallocShared(hdr.overflow)
       hdr.overflow = nil
     hdr.overflowLen = 0
-    hdr.state.store(uint8(ResponseState.Empty), moRelease)
+    hdr.waker = nil
+    let cur = hdr.control.load(moRelaxed)
+    hdr.control.store(packControl(controlGen(cur) + 1, ResponseState.Empty), moRelease)
   idx
+
+proc slotGen*(pool: ResponseSlotPool, idx: uint32): uint32 {.gcsafe.} =
+  ## Generation of `idx` right now. Read it immediately after `claim`, while
+  ## the slot is exclusively yours, and carry it alongside the index.
+  controlGen(pool.slotHeaderPtr(idx).control.load(moAcquire))
 
 proc release*(pool: var ResponseSlotPool, idx: uint32, shardHint: uint32) {.gcsafe.} =
   ## Single chokepoint a slot passes through back to the free-list (requester
@@ -526,25 +570,39 @@ proc release*(pool: var ResponseSlotPool, idx: uint32, shardHint: uint32) {.gcsa
     hdr.overflowLen = 0
   push(pool.freeList, idx, shardHint)
 
-proc beginWrite*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
-  ## Provider: CAS Empty→Writing. Returns false if the requester abandoned
-  ## the slot first (caller should release without writing).
+proc beginWrite*(
+    pool: ResponseSlotPool, idx: uint32, gen: uint32
+): BeginWriteResult {.gcsafe.} =
+  ## Provider: CAS (gen, Empty)→(gen, Writing).
+  ##
+  ## * `Acquired`  — write, then `commitWrite`.
+  ## * `Abandoned` — the requester gave up first; **release without writing**.
+  ## * `Stale`     — the slot has been recycled for a newer request; touch
+  ##   nothing (releasing here would hand a live slot to a second owner).
   let hdr = pool.slotHeaderPtr(idx)
-  var expected = uint8(ResponseState.Empty)
-  hdr.state.compareExchange(
-    expected, uint8(ResponseState.Writing), moAcquireRelease, moAcquire
-  )
+  var expected = packControl(gen, ResponseState.Empty)
+  if hdr.control.compareExchange(
+    expected, packControl(gen, ResponseState.Writing), moAcquireRelease, moAcquire
+  ):
+    return BeginWriteResult.Acquired
+  # `expected` now holds the observed word.
+  if controlGen(expected) == gen and controlState(expected) == ResponseState.Abandoned:
+    BeginWriteResult.Abandoned
+  else:
+    BeginWriteResult.Stale
 
-proc commitWrite*(pool: ResponseSlotPool, idx: uint32, payloadSize: uint32) {.gcsafe.} =
+proc commitWrite*(
+    pool: ResponseSlotPool, idx: uint32, gen: uint32, payloadSize: uint32
+) {.gcsafe.} =
   ## Provider: finalize after writing payload bytes. Stores size + flips
   ## state to Ready (release-ordered, so the bytes-write is visible to
   ## any acquire-loader on the state).
   let hdr = pool.slotHeaderPtr(idx)
   hdr.payloadSize = payloadSize
-  hdr.state.store(uint8(ResponseState.Ready), moRelease)
+  hdr.control.store(packControl(gen, ResponseState.Ready), moRelease)
 
 proc commitWriteOverflow*(
-    pool: ResponseSlotPool, idx: uint32, buf: pointer, len: uint32
+    pool: ResponseSlotPool, idx: uint32, gen: uint32, buf: pointer, len: uint32
 ) {.gcsafe.} =
   ## Provider: finalize an oversized response that spilled to the heap. The
   ## slot takes ownership of `buf` (freed in `release`/`deinitResponseSlotPool`).
@@ -554,7 +612,7 @@ proc commitWriteOverflow*(
   hdr.overflow = buf
   hdr.overflowLen = len
   hdr.payloadSize = 0
-  hdr.state.store(uint8(ResponseState.Ready), moRelease)
+  hdr.control.store(packControl(gen, ResponseState.Ready), moRelease)
 
 proc respDataPtr*(
     pool: ResponseSlotPool, idx: uint32
@@ -574,19 +632,44 @@ proc respDataLen*(pool: ResponseSlotPool, idx: uint32): int {.gcsafe.} =
   else:
     int(hdr.payloadSize)
 
-proc abandon*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
-  ## Requester: CAS Empty→Abandoned. Returns true if abandonment took
-  ## effect (provider hadn't started writing yet). If false, requester
-  ## must still wait for state==Ready and consume normally — provider
-  ## is mid-write or already done.
+proc abandonIfGen*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcsafe.} =
+  ## Requester: CAS (gen, Empty)→(gen, Abandoned). Returns true if
+  ## abandonment took effect — the provider had not started writing, so the
+  ## provider now owns the release and the requester must not touch the slot
+  ## again. Returns false when the provider is mid-write or already done (the
+  ## requester still owes the release once the slot reaches `Ready`), and
+  ## also when the generation no longer matches (nothing to abandon).
   let hdr = pool.slotHeaderPtr(idx)
-  var expected = uint8(ResponseState.Empty)
-  hdr.state.compareExchange(
-    expected, uint8(ResponseState.Abandoned), moAcquireRelease, moAcquire
+  var expected = packControl(gen, ResponseState.Empty)
+  hdr.control.compareExchange(
+    expected, packControl(gen, ResponseState.Abandoned), moAcquireRelease, moAcquire
   )
 
-proc readyState*(pool: ResponseSlotPool, idx: uint32): bool {.gcsafe.} =
-  pool.slotHeaderPtr(idx).state.load(moAcquire) == uint8(ResponseState.Ready)
+proc readyState*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcsafe.} =
+  ## True only for *this* generation's response — a recycled slot reads false.
+  let v = pool.slotHeaderPtr(idx).control.load(moAcquire)
+  controlGen(v) == gen and controlState(v) == ResponseState.Ready
+
+proc setWaker*(pool: ResponseSlotPool, idx: uint32, signal: pointer) {.gcsafe.} =
+  ## Record which thread to wake when this slot is abandoned by someone else.
+  ## Written by the requester while the slot is exclusively its own, before the
+  ## request is enqueued.
+  pool.slotHeaderPtr(idx).waker = signal
+
+proc waker*(pool: ResponseSlotPool, idx: uint32): pointer {.gcsafe.} =
+  pool.slotHeaderPtr(idx).waker
+
+proc bumpCancelEpoch*(pool: var ResponseSlotPool) {.gcsafe.} =
+  discard pool.cancelEpoch.fetchAdd(1, moAcquireRelease)
+
+proc cancelEpochValue*(pool: var ResponseSlotPool): uint32 {.gcsafe.} =
+  pool.cancelEpoch.load(moAcquire)
+
+proc isAbandoned*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcsafe.} =
+  ## Provider: has the requester given up on this exact request? Checked
+  ## before dispatch so work that nobody is waiting for is never started.
+  let v = pool.slotHeaderPtr(idx).control.load(moAcquire)
+  controlGen(v) == gen and controlState(v) == ResponseState.Abandoned
 
 proc payloadSize*(pool: ResponseSlotPool, idx: uint32): uint32 {.gcsafe.} =
   pool.slotHeaderPtr(idx).payloadSize

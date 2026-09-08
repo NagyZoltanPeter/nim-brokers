@@ -77,6 +77,13 @@ RequestBroker(mt, preset = largePayload, responseSlots = 16):
 
   proc signature*(key: string): Future[Result[BlobRes, string]] {.async.}
 
+# Explicit request timeout, seeded at declaration instead of at runtime.
+RequestBroker(mt, responseSlots = 8, requestTimeoutMs = 1500):
+  type TimedRes = object
+    value*: int32
+
+  proc signature*(key: int32): Future[Result[TimedRes, string]] {.async.}
+
 # tinyFootprint preset.
 RequestBroker(mt, preset = tinyFootprint):
   type TinyRes = object
@@ -165,6 +172,16 @@ suite "Multi-thread broker config showcase":
     check res.isOk()
     check res.get.value == 42
     ScalarRes.clearProvider()
+
+  asyncTest "RequestBroker(mt) — requestTimeoutMs kwarg seeds the timeout":
+    # The kwarg only seeds the runtime var, so setRequestTimeout still wins.
+    check TimedRes.requestTimeout() == chronos.milliseconds(1500)
+    TimedRes.setRequestTimeout(chronos.milliseconds(2500))
+    check TimedRes.requestTimeout() == chronos.milliseconds(2500)
+    TimedRes.setRequestTimeout(chronos.milliseconds(1500))
+
+    # A broker that does not pass the kwarg keeps the 20 s default.
+    check ScalarRes.requestTimeout() == chronos.seconds(20)
 
   asyncTest "RequestBroker(mt) — fastBurst preset":
     let setRes = FastRes.setProvider(

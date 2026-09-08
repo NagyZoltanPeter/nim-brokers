@@ -268,6 +268,27 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `RequestBroker(sync):` generates synchronous procs (`{.gcsafe, raises: [].}`) instead of async ones.
 - Provider exceptions are caught and returned as `err(...)`.
 - `clearProvider` removes the provider. In-flight requests that already hold a reference to the provider closure will complete naturally; the caller gets the result or error.
+- **Cancellation (MT lane)**: `requestCancellable([ctx,] args)` returns
+  `(<T>RequestId, Future[...])`; `cancel([ctx,] id)` from any thread abandons
+  the response slot. The id is `distinct uint64` = `(slotIdx shl 32) or gen` —
+  a value, no allocation, no lifetime obligation; a stale id fails the
+  generation CAS and is a no-op. Produced by a synchronous prologue
+  (`sendPrologue<T>`), so a cancel can never precede arming. A queued request
+  is tombstoned and dropped by the poll fn (the provider is never invoked); a
+  running one has its provider future `cancelSoon`-ed via an epoch-gated scan
+  of the provider thread's in-flight registry. Blocking callers use
+  `blockingRequestCancellable(..., idOut)`. Same-thread requests are not
+  cancellable (id `0`). Timeouts ride the same path, so a timed-out request
+  that never started is now dropped rather than executed.
+- **Response slot protocol**: `ResponseSlotHeader.control` packs
+  `(gen: uint32) shl 32 or state` in one `Atomic[uint64]`, so every transition
+  is a single generation-checked CAS. The side that wins the `Empty→…` CAS
+  never releases: if the requester's `abandonIfGen` wins, the provider releases
+  and the requester's poller **retires immediately**; if it loses, the poller
+  stays as a bounded reaper until `Ready`. Retiring matters as much as
+  releasing — a poller left registered can act on a recycled slot or on a pool
+  already freed by the provider thread's teardown. Regression-gated by
+  `test/test_mt_request_slot_lifecycle.nim`.
 - **`provideIt` / `reprovideIt` body sugar** (all lanes): `TypeName.provideIt[(ctx)]: body` registers a provider whose block is the real provider proc body with the declared signature arg names injected (`provideIt` → `setProvider`, keeps the "already set" guard; `reprovideIt` → `replaceProvider`, replace-or-insert). The body must produce a value on every path — `return ok(...)`/`err(...)`, `result = ...`, or a trailing `Result` expression — otherwise it is a **compile error** (`providerBody` check; a fall-through would silently answer `err("")`). Two accepted limits: a `block` containing `break` is conservatively non-terminal, and noreturn calls (`quit`, `raiseAssert`) are not recognized as terminal. Dual-slot brokers get `provideItNoArgs` / `reprovideItNoArgs` for the zero-arg slot. Sync mode: same sugar, body cannot `await`. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
 
 ### MultiRequestBroker specifics
@@ -299,7 +320,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 ### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)
 
 - `RequestBroker(API)` and `EventBroker(API)` generate C ABI entry points and wrapper metadata in addition to the normal broker interfaces.
-- `RequestBroker(API, ...)` / `EventBroker(API, ...)` accept the **same capacity / preset kwargs as their `(mt, ...)` counterparts** — the API broker rides the multi-thread lane internally, so `queueDepth`, `slabCapacity`, `maxPayloadBytes`, `responseSlots`, `maxResponseBytes`, `freeListShards`, and `preset = <name>` are all valid. Omitting kwargs yields `defaultMtEvtCfg()` / `defaultMtReqCfg()`.
+- `RequestBroker(API, ...)` / `EventBroker(API, ...)` accept the **same capacity / preset kwargs as their `(mt, ...)` counterparts** — the API broker rides the multi-thread lane internally, so `queueDepth`, `slabCapacity`, `maxPayloadBytes`, `responseSlots`, `maxResponseBytes`, `freeListShards`, `requestTimeoutMs` (RequestBroker only — seeds the runtime timeout, presets leave it alone), and `preset = <name>` are all valid. Omitting kwargs yields `defaultMtEvtCfg()` / `defaultMtReqCfg()`.
 - `registerBrokerLibrary` ties API request/event brokers into a complete shared-library surface. It is a no-op when compiled without `-d:BrokerFfiApi`, so client code never needs a `when defined(BrokerFfiApi):` guard around it.
 - `api_library` is always imported as part of the `brokers` package; no conditional import is needed in client code.
 - External types used in broker signatures are auto-discovered and registered — plain Nim `object` types do not need any `ApiType` annotation. The deprecated `ApiType` macro still compiles with a warning.

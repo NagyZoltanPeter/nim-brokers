@@ -606,14 +606,14 @@ suite "RequestBroker macro (multi-thread mode)":
 
   asyncTest "setRequestTimeout and requestTimeout getter/setter":
     let original = MTReq.requestTimeout()
-    check original == chronos.seconds(5)
+    check original == chronos.seconds(20)
 
     MTReq.setRequestTimeout(chronos.milliseconds(500))
     check MTReq.requestTimeout() == chronos.milliseconds(500)
 
     # Restore default
-    MTReq.setRequestTimeout(chronos.seconds(5))
-    check MTReq.requestTimeout() == chronos.seconds(5)
+    MTReq.setRequestTimeout(chronos.seconds(20))
+    check MTReq.requestTimeout() == chronos.seconds(20)
 
   asyncTest "cross-thread request times out with slow provider":
     # Set a short timeout
@@ -638,7 +638,7 @@ suite "RequestBroker macro (multi-thread mode)":
     reqThread.joinThread()
     MTReq.clearProvider()
     # Restore default timeout
-    MTReq.setRequestTimeout(chronos.seconds(5))
+    MTReq.setRequestTimeout(chronos.seconds(20))
 
   asyncTest "same-thread request is NOT affected by short timeout":
     # Set a very short timeout (would fail cross-thread if provider is slow)
@@ -659,7 +659,7 @@ suite "RequestBroker macro (multi-thread mode)":
 
     MTReq.clearProvider()
     # Restore default timeout
-    MTReq.setRequestTimeout(chronos.seconds(5))
+    MTReq.setRequestTimeout(chronos.seconds(20))
 
   asyncTest "cross-thread timeout actually unblocks (e2e timing)":
     # Set a 200ms timeout
@@ -684,7 +684,7 @@ suite "RequestBroker macro (multi-thread mode)":
     reqThread.joinThread()
     MTReq.clearProvider()
     # Restore default timeout
-    MTReq.setRequestTimeout(chronos.seconds(5))
+    MTReq.setRequestTimeout(chronos.seconds(20))
 
 ## ---------------------------------------------------------------------------
 ## Multi-thread RequestBroker — void result type

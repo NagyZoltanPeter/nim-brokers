@@ -334,7 +334,8 @@ task test, "Run all single and multi-threaded broker tests":
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
     "test_multi_thread_signal_broker", "test_multi_thread_broker_configs",
     "test_mt_large_payload", "test_mt_drop_async_eager", "test_alloc_race_variants",
-    "test_multi_thread_handler_sugar",
+    "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
+    "test_mt_request_cancel",
   ]
   for f in mtTests:
     for opt in [
