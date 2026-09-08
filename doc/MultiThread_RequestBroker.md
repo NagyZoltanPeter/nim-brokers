@@ -271,8 +271,16 @@ if res.isErr() and "timed out" in res.error():
 
   | Abandon CAS | Provider state | Who releases the slot | Requester's poller |
   |---|---|---|---|
-  | won | had not started writing | provider (its `beginWrite` returns `Abandoned`, it releases without writing) | retires immediately — it must not touch the slot again |
-  | lost | already `Writing` / `Ready` | requester | stays registered as a *reaper*: waits for `Ready`, releases, then retires |
+  | slot was `Empty` | provider had not started writing | provider — its `beginWrite` returns `Abandoned` and it releases without writing | retires immediately |
+  | slot was `Writing` | provider is mid-write | provider — the requester marks `AbandonedWriting`, so the provider's `commitWrite` CAS fails and it releases instead of publishing | retires immediately |
+  | slot was `Ready` | provider already published | requester, on the spot | retires immediately |
+
+  Ownership is therefore decided synchronously, at the moment of giving up —
+  nothing ever waits on the provider to find out whose job the release is. An
+  earlier design had the requester linger for a bounded window when it caught
+  the provider mid-write, which both blocked the caller past its own deadline
+  and leaked the slot outright whenever the provider committed after that
+  window expired.
 
   Either way the slot returns to the pool exactly once. The retirement half
   matters as much as the release: a poller left registered after the slot went
@@ -283,10 +291,19 @@ if res.isErr() and "timed out" in res.error():
   message — is the backstop: a late actor holding a stale `(idx, gen)` pair
   fails its CAS instead of acting on someone else's slot.
 
+- **An abandoned slot stays claimed until the provider releases it.** Giving up
+  settles *who* releases, not *when*: if the provider had not published yet, the
+  slot only returns to the pool when that provider finally reaches its reply. So
+  a timeout much shorter than the provider's service time keeps roughly one slot
+  per outstanding-but-abandoned request tied up, and a small `responseSlots`
+  pool can transiently answer `err(… response slot pool exhausted)` even with a
+  single sequential caller. That is back-pressure, not a leak — size
+  `responseSlots` for in-flight *plus* recently-abandoned requests when the
+  timeout is tight.
+
 - The blocking path (`blockingRequest`) applies the same rule: if its abandon
-  CAS loses, it spins a bounded grace window (min of the timeout and 500 ms)
-  for the provider's commit, releases the slot, and only then returns the
-  timeout error.
+  it settles ownership the same way and returns immediately, without waiting on
+  the provider.
 
 ### 8. Cancelling a cross-thread request
 

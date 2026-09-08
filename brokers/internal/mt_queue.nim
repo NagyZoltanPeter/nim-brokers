@@ -439,7 +439,19 @@ type
     Empty = 0'u8
     Writing = 1'u8 ## reserved by provider; bytes in flight
     Ready = 2'u8
-    Abandoned = 3'u8
+    Abandoned = 3'u8 ## requester gave up before the provider started writing
+    AbandonedWriting = 4'u8
+      ## requester gave up *while* the provider was writing. The provider owns
+      ## the release and discovers this when its `commitWrite` CAS fails. This
+      ## state is what makes ownership decidable the instant a requester gives
+      ## up: without it the requester has to wait around for the provider to
+      ## publish before it can know whose job the release is — and a provider
+      ## slower than that wait leaks the slot.
+
+  SlotGiveUp* {.pure.} = enum
+    ProviderReleases ## provider will release (it had not published yet)
+    CallerReleases ## response was already published; caller releases now
+    Stale ## generation no longer matches — nothing to give up
 
   BeginWriteResult* {.pure.} = enum
     Acquired ## slot reserved; provider may write
@@ -593,17 +605,22 @@ proc beginWrite*(
 
 proc commitWrite*(
     pool: ResponseSlotPool, idx: uint32, gen: uint32, payloadSize: uint32
-) {.gcsafe.} =
-  ## Provider: finalize after writing payload bytes. Stores size + flips
-  ## state to Ready (release-ordered, so the bytes-write is visible to
-  ## any acquire-loader on the state).
+): bool {.gcsafe.} =
+  ## Provider: finalize after writing payload bytes. CASes Writing→Ready
+  ## (release-ordered, so the bytes-write is visible to any acquire-loader).
+  ##
+  ## Returns false when the requester gave up mid-write (`AbandonedWriting`):
+  ## the response is unwanted and **the provider must release the slot**.
   let hdr = pool.slotHeaderPtr(idx)
   hdr.payloadSize = payloadSize
-  hdr.control.store(packControl(gen, ResponseState.Ready), moRelease)
+  var expected = packControl(gen, ResponseState.Writing)
+  hdr.control.compareExchange(
+    expected, packControl(gen, ResponseState.Ready), moAcquireRelease, moAcquire
+  )
 
 proc commitWriteOverflow*(
     pool: ResponseSlotPool, idx: uint32, gen: uint32, buf: pointer, len: uint32
-) {.gcsafe.} =
+): bool {.gcsafe.} =
   ## Provider: finalize an oversized response that spilled to the heap. The
   ## slot takes ownership of `buf` (freed in `release`/`deinitResponseSlotPool`).
   ## Sets inline payloadSize = 0 and flips state to Ready (release-ordered so the
@@ -612,7 +629,11 @@ proc commitWriteOverflow*(
   hdr.overflow = buf
   hdr.overflowLen = len
   hdr.payloadSize = 0
-  hdr.control.store(packControl(gen, ResponseState.Ready), moRelease)
+  var expected = packControl(gen, ResponseState.Writing)
+  # On failure the buffer stays attached to the slot, so `release` frees it.
+  hdr.control.compareExchange(
+    expected, packControl(gen, ResponseState.Ready), moAcquireRelease, moAcquire
+  )
 
 proc respDataPtr*(
     pool: ResponseSlotPool, idx: uint32
@@ -644,6 +665,44 @@ proc abandonIfGen*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcs
   hdr.control.compareExchange(
     expected, packControl(gen, ResponseState.Abandoned), moAcquireRelease, moAcquire
   )
+
+proc giveUpSlot*(
+    pool: ResponseSlotPool, idx: uint32, gen: uint32
+): SlotGiveUp {.gcsafe.} =
+  ## Requester: stop waiting for this response, and settle who releases the
+  ## slot — immediately, without waiting for the provider.
+  ##
+  ##   Empty   → Abandoned         : provider releases at `beginWrite`
+  ##   Writing → AbandonedWriting  : provider releases at `commitWrite`
+  ##   Ready                       : provider is finished; caller releases now
+  ##
+  ## Retries only when the state changed under the CAS.
+  let hdr = pool.slotHeaderPtr(idx)
+  while true:
+    let cur = hdr.control.load(moAcquire)
+    if controlGen(cur) != gen:
+      return SlotGiveUp.Stale
+    case controlState(cur)
+    of ResponseState.Empty:
+      var expected = cur
+      if hdr.control.compareExchange(
+        expected, packControl(gen, ResponseState.Abandoned), moAcquireRelease, moAcquire
+      ):
+        return SlotGiveUp.ProviderReleases
+    of ResponseState.Writing:
+      var expected = cur
+      if hdr.control.compareExchange(
+        expected,
+        packControl(gen, ResponseState.AbandonedWriting),
+        moAcquireRelease,
+        moAcquire,
+      ):
+        return SlotGiveUp.ProviderReleases
+    of ResponseState.Ready:
+      return SlotGiveUp.CallerReleases
+    of ResponseState.Abandoned, ResponseState.AbandonedWriting:
+      # Someone already gave up on this slot; the provider still owns it.
+      return SlotGiveUp.ProviderReleases
 
 proc readyState*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcsafe.} =
   ## True only for *this* generation's response — a recycled slot reads false.

@@ -43,7 +43,11 @@ RequestBroker(
 
 const
   SlowDelay = 800
-  EdgeDelay = 30
+  EdgeDelay = 3
+    ## Deliberately close to the blocking path's 1 ms poll granularity: with a
+    ## coarse delay the give-up almost always finds an untouched slot, and the
+    ## "provider already published / already writing" branches — the ones that
+    ## decide who owes the release — never get exercised.
   BlockDelay = 500
 
 var gQueuedInvoked: Atomic[bool]
@@ -68,7 +72,7 @@ proc slotProvider(input: string): Future[Result[SlotReq, string]] {.async.} =
 
 var gDone: Atomic[bool]
 var gReuseOk: Atomic[bool]
-var gSyncExhausted: Atomic[bool]
+var gSyncRecovered: Atomic[int]
 var gTimedOut: Atomic[bool]
 var gProviderReady: Atomic[bool]
 var gStopProvider: Atomic[bool]
@@ -122,17 +126,27 @@ proc requesterReuse() {.thread.} =
   gDone.store(true)
 
 proc requesterEdgeSync() {.thread.} =
-  ## Blocking path: provider replies at (approximately) the deadline, so some
-  ## iterations land in the window where the requester's abandon CAS loses to
-  ## the provider's `beginWrite`. Every such slot must still come back; with
-  ## a 2-slot pool, two leaks are enough to exhaust it.
-  var exhausted = false
-  for i in 0 ..< 100:
-    let r = SlotReq.blockingRequest("edge:" & $i)
-    if r.isErr() and "exhausted" in r.error:
-      exhausted = true
-      break
-  gSyncExhausted.store(exhausted)
+  ## Blocking path: the provider replies at (approximately) the deadline, so
+  ## iterations land on either side of the give-up race — sometimes the
+  ## requester abandons an untouched slot, sometimes it catches the provider
+  ## already writing, sometimes the reply beats it by a hair.
+  ##
+  ## Transient "response slot pool exhausted" here is *legal* and deliberately
+  ## not asserted on: an abandoned slot stays claimed until the provider gets
+  ## round to replying, so with a 2-slot pool a slow provider can legitimately
+  ## hold both. The invariant that matters is that every slot comes *back*:
+  ## after the storm settles, the pool must be whole again, which the caller
+  ## checks by filling it completely.
+  for i in 0 ..< 400:
+    discard SlotReq.blockingRequest("edge:" & $i)
+  # Let every abandoned slot's provider finish and release it.
+  sleep(200)
+  var recovered = 0
+  for i in 0 ..< 2:
+    let r = SlotReq.blockingRequest("settled-" & $i)
+    if r.isOk() and r.value.echoed == "settled-" & $i:
+      inc recovered
+  gSyncRecovered.store(recovered)
   gDone.store(true)
 
 proc requesterQueuedTimeout() {.thread.} =
@@ -192,19 +206,21 @@ suite "MT RequestBroker — response slot lifecycle":
     SlotReq.clearProvider()
     SlotReq.setRequestTimeout(chronos.seconds(20))
 
-  asyncTest "late reply on the blocking path returns its slot":
+  asyncTest "late replies on the blocking path give every slot back":
     SlotReq.setRequestTimeout(chronos.milliseconds(EdgeDelay))
     check SlotReq.setProvider(slotProvider).isOk()
 
     gDone.store(false)
-    gSyncExhausted.store(false)
+    gSyncRecovered.store(0)
     var th: Thread[void]
     th.createThread(requesterEdgeSync)
     while not gDone.load():
       await sleepAsync(chronos.milliseconds(10))
     th.joinThread()
 
-    check not gSyncExhausted.load()
+    # Both slots served a request again once things settled: nothing was lost
+    # to a give-up that raced the provider's write.
+    check gSyncRecovered.load() == 2
 
     SlotReq.clearProvider()
     SlotReq.setRequestTimeout(chronos.seconds(20))

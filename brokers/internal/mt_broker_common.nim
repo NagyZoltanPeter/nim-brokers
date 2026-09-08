@@ -278,16 +278,12 @@ type ReqWaitState* = ref object
   ## poller — both run on the requester thread, so no synchronisation is
   ## needed and the `ref` never crosses a thread boundary.
   ##
-  ## `gaveUp` is set when the requester stops waiting (timeout today,
-  ## explicit cancel later). `reaping` additionally means the provider had
-  ## already started writing when we gave up, so the release is still ours:
-  ## the poller must stay registered until the slot reaches `Ready` and then
-  ## hand it back. With `gaveUp` and not `reaping`, the provider owns the
-  ## release and the poller must retire at once — leaving it registered is
-  ## what lets it act on a recycled slot, or on a pool that has since been
-  ## freed by the provider thread's teardown.
+  ## Set when the requester stops waiting (timeout, or an explicit cancel).
+  ## The slot's own state machine settles who releases at that moment, so the
+  ## poller's only job afterwards is to retire: leaving it registered is what
+  ## lets it act on a recycled slot, or on a pool that has since been freed by
+  ## the provider thread's teardown.
   gaveUp*: bool
-  reaping*: bool
 
 proc registerBrokerPoller*(fn: ThreadDispatchPollFn) =
   ## Register a poll function with this thread's dispatcher.

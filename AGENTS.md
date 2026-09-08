@@ -283,9 +283,14 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - **Response slot protocol**: `ResponseSlotHeader.control` packs
   `(gen: uint32) shl 32 or state` in one `Atomic[uint64]`, so every transition
   is a single generation-checked CAS. The side that wins the `Empty→…` CAS
-  never releases: if the requester's `abandonIfGen` wins, the provider releases
-  and the requester's poller **retires immediately**; if it loses, the poller
-  stays as a bounded reaper until `Ready`. Retiring matters as much as
+  never releases, and `giveUpSlot` settles ownership synchronously: `Empty` →
+  `Abandoned` (provider releases at `beginWrite`), `Writing` →
+  `AbandonedWriting` (provider's `commitWrite` CAS fails, it releases instead of
+  publishing), `Ready` → the requester releases on the spot. No path waits on
+  the provider, so the requester's poller always **retires immediately**.
+  Note that an abandoned slot stays claimed until its provider gets to it, so a
+  tight timeout against a small `responseSlots` pool can transiently report
+  "exhausted" — back-pressure, not a leak. Retiring matters as much as
   releasing — a poller left registered can act on a recycled slot or on a pool
   already freed by the provider thread's teardown. Regression-gated by
   `test/test_mt_request_slot_lifecycle.nim`.

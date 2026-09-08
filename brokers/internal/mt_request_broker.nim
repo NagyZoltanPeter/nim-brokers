@@ -630,13 +630,16 @@ proc generateMtRequestBroker*(
         of BeginWriteResult.Acquired:
           discard
         let payloadPtr = pool[].slotPayloadPtr(slotIdx)
+        # False from any commit below means the requester gave up mid-write, so
+        # the response is unwanted and the slot is ours to hand back.
+        var published = false
         let written =
           try:
             `marshalRespIdent`(payloadPtr, int(pool[].slotPayloadCap), resp)
           except Exception:
             -1
         if written >= 0:
-          pool[].commitWrite(slotIdx, slotGen, uint32(written))
+          published = pool[].commitWrite(slotIdx, slotGen, uint32(written))
         else:
           # Response exceeded the inline slot — auto-spill onto the heap so the
           # full response is delivered instead of replaced by an err. Falls back
@@ -660,7 +663,8 @@ proc generateMtRequestBroker*(
               if w2 < 0:
                 deallocShared(spillBuf)
               else:
-                pool[].commitWriteOverflow(slotIdx, slotGen, spillBuf, uint32(w2))
+                published =
+                  pool[].commitWriteOverflow(slotIdx, slotGen, spillBuf, uint32(w2))
                 spilled = true
           if not spilled:
             # Could not spill (over ceiling / OOM / marshal error) — commit a
@@ -675,9 +679,14 @@ proc generateMtRequestBroker*(
               except Exception:
                 -1
             if writtenFb < 0:
-              pool[].commitWrite(slotIdx, slotGen, 0'u32)
+              published = pool[].commitWrite(slotIdx, slotGen, 0'u32)
             else:
-              pool[].commitWrite(slotIdx, slotGen, uint32(writtenFb))
+              published = pool[].commitWrite(slotIdx, slotGen, uint32(writtenFb))
+        if not published:
+          # Requester abandoned while we were writing — nobody is waiting for
+          # this response, and the release is ours.
+          pool[].release(slotIdx, `shardHintIdent`())
+          return
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
 
@@ -1053,13 +1062,12 @@ proc generateMtRequestBroker*(
     )
 
   # ── give-up helper: shared by every requester-side bail-out path ─────
-  # Publishes "this requester stopped waiting" on the response slot and
-  # decides who still owes the release:
-  #   abandon CAS won  → provider releases; our poller must retire at once
-  #   abandon CAS lost → provider is mid-write; our poller reaps the slot
-  #                      once it reaches Ready
-  # Firing our own dispatch signal forces a drain pass, so the poller acts on
-  # that decision immediately instead of lingering until some unrelated wake.
+  # Publishes "this requester stopped waiting" on the response slot. The slot
+  # state machine settles ownership on the spot — the provider releases unless
+  # it has already published, in which case we release here — so no bail-out
+  # path ever has to wait for the provider. Firing our own dispatch signal then
+  # forces a drain pass so the response poller retires immediately instead of
+  # lingering until some unrelated wake.
   let giveUpIdent = ident("giveUp" & typeDisplayName)
   result.add(
     quote do:
@@ -1071,8 +1079,8 @@ proc generateMtRequestBroker*(
           mySignal: ptr BrokerSignalShared,
       ) {.gcsafe, raises: [].} =
         waitState.gaveUp = true
-        if not pool[].abandonIfGen(slotIdx, slotGen):
-          waitState.reaping = true
+        if pool[].giveUpSlot(slotIdx, slotGen) == SlotGiveUp.CallerReleases:
+          pool[].release(slotIdx, `shardHintIdent`())
         fireBrokerSignal(mySignal)
 
   )
@@ -1209,14 +1217,12 @@ proc generateMtRequestBroker*(
         registerBrokerPoller(
           proc(): int {.gcsafe, raises: [].} =
             {.cast(gcsafe).}:
-              if capturedWait.gaveUp and not capturedWait.reaping:
-                # We abandoned the slot before the provider started writing,
-                # so the provider owns the release and this slot may already
-                # be recycled — or the pool itself freed by the provider
+              if capturedWait.gaveUp:
+                # Ownership was settled synchronously in giveUp, so the slot may
+                # already be recycled — or the pool itself freed by the provider
                 # thread's teardown. Retire without touching either.
                 return 2
-              if not capturedWait.reaping and
-                  capturedPool[].isAbandoned(capturedSlotIdx, capturedSlotGen):
+              if capturedPool[].isAbandoned(capturedSlotIdx, capturedSlotGen):
                 # Someone else cancelled this request. Their CAS won, so the
                 # provider owes the release; we only resolve the caller.
                 capturedWait.gaveUp = true
@@ -1230,11 +1236,6 @@ proc generateMtRequestBroker*(
                 return 2
               if not capturedPool[].readyState(capturedSlotIdx, capturedSlotGen):
                 return 0
-              if capturedWait.reaping:
-                # Gave up while the provider was mid-write: the response is
-                # unwanted, but handing the slot back is still our job.
-                capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
-                return 2
               # Unmarshal Result from slot bytes on THIS (requester) thread,
               # so any string/seq inside lives on this thread's GC heap.
               # This is the §2.2 fix: no cross-thread `=copy` of the typed
@@ -1443,28 +1444,13 @@ proc generateMtRequestBroker*(
             # the release and there is nothing left to wait for.
             return err("RequestBroker(" & `typeNameLit` & "): request cancelled")
           sleep(1)
-        # Timeout. If the abandon CAS wins, a late provider write finds the
-        # slot abandoned and releases it. If it loses, the provider is already
-        # mid-write and will never release — the slot is ours to reap, so wait
-        # out a bounded grace window for the commit and hand it back. Skipping
-        # this leaks one slot per late response until the pool is exhausted.
-        if not pool[].abandonIfGen(slotIdx, slotGen):
-          let graceWindow =
-            if `timeoutVarIdent` < chronos.milliseconds(500):
-              `timeoutVarIdent`
-            else:
-              chronos.milliseconds(500)
-          let graceDeadline = Moment.now() + graceWindow
-          var reaped = false
-          while Moment.now() < graceDeadline:
-            if pool[].readyState(slotIdx, slotGen):
-              pool[].release(slotIdx, `shardHintIdent`())
-              reaped = true
-              break
-            sleep(1)
-          if not reaped:
-            warn "response slot not reclaimed: provider never committed",
-              requestType = `typeNameLit`, slot = slotIdx
+        # Timeout. Ownership is settled here and now: the provider releases
+        # unless it already published the response, in which case the slot is
+        # ours. Nothing waits on the provider — a blocking caller that lingered
+        # for a late commit would either block past its own deadline or, if it
+        # gave up waiting, leak the slot.
+        if pool[].giveUpSlot(slotIdx, slotGen) == SlotGiveUp.CallerReleases:
+          pool[].release(slotIdx, `shardHintIdent`())
         return err(
           "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
             $`timeoutVarIdent`
