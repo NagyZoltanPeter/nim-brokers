@@ -6,6 +6,7 @@ import std/[atomics, os, strutils]
 
 import brokers/request_broker
 import brokers/internal/mt_broker_common
+import brokers/internal/mt_queue
 
 ## ---------------------------------------------------------------------------
 ## MT RequestBroker — response-slot lifecycle regression gates
@@ -125,6 +126,20 @@ proc requesterReuse() {.thread.} =
   gReuseOk.store(allOk)
   gDone.store(true)
 
+proc fillPool(): Future[int] {.async: (raises: []).} =
+  ## Two concurrent requests against a two-slot pool: both can only succeed if
+  ## *both* slots came back. A sequential probe would be satisfied by one.
+  let f1 = SlotReq.request("settled-a")
+  let f2 = SlotReq.request("settled-b")
+  let r1 = await f1
+  let r2 = await f2
+  var n = 0
+  if r1.isOk() and r1.value.echoed == "settled-a":
+    inc n
+  if r2.isOk() and r2.value.echoed == "settled-b":
+    inc n
+  n
+
 proc requesterEdgeSync() {.thread.} =
   ## Blocking path: the provider replies at (approximately) the deadline, so
   ## iterations land on either side of the give-up race — sometimes the
@@ -139,13 +154,19 @@ proc requesterEdgeSync() {.thread.} =
   ## checks by filling it completely.
   for i in 0 ..< 400:
     discard SlotReq.blockingRequest("edge:" & $i)
-  # Let every abandoned slot's provider finish and release it.
-  sleep(200)
+  # The storm's deadline is deliberately shorter than a round trip; the
+  # recovery probe needs an ordinary one, or a loaded machine fails it on
+  # timing alone and says nothing about slot bookkeeping.
+  SlotReq.setRequestTimeout(chronos.seconds(5))
+  # Retry while abandoned slots are still making their way back from lagging
+  # providers. A slot that was genuinely lost never returns, so no amount of
+  # retrying can paper over a leak.
   var recovered = 0
-  for i in 0 ..< 2:
-    let r = SlotReq.blockingRequest("settled-" & $i)
-    if r.isOk() and r.value.echoed == "settled-" & $i:
-      inc recovered
+  for attempt in 0 ..< 20:
+    sleep(50)
+    recovered = waitFor fillPool()
+    if recovered == 2:
+      break
   gSyncRecovered.store(recovered)
   gDone.store(true)
 
@@ -270,3 +291,81 @@ suite "MT RequestBroker — response slot lifecycle":
     reqThread.joinThread()
 
     SlotReq.setRequestTimeout(chronos.seconds(20))
+
+## ---------------------------------------------------------------------------
+## Response-slot state machine — deterministic unit coverage
+##
+## The end-to-end tests above can only reach the "requester gave up while the
+## provider was mid-write" transition by chance: the window between
+## `beginWrite` and `commitWrite` is a payload marshal wide, hit in well under
+## 1% of timed-out requests. Driving the slot directly pins that contract —
+## and the two neighbouring ones — without racing anything.
+## ---------------------------------------------------------------------------
+
+suite "MT RequestBroker — response slot ownership":
+  test "give-up before the provider starts: provider releases":
+    var pool: ResponseSlotPool
+    initResponseSlotPool(pool, capacity = 2, maxPayloadBytes = 128, nShards = 1)
+    let idx = pool.claim(0)
+    let gen = pool.slotGen(idx)
+
+    check pool.giveUpSlot(idx, gen) == SlotGiveUp.ProviderReleases
+    # The provider finds the slot abandoned and releases it without writing.
+    check pool.beginWrite(idx, gen) == BeginWriteResult.Abandoned
+    pool.release(idx, 0)
+
+    check pool.claim(0) != EmptyIdx
+    deinitResponseSlotPool(pool)
+
+  test "give-up while the provider is writing: provider still releases":
+    var pool: ResponseSlotPool
+    initResponseSlotPool(pool, capacity = 2, maxPayloadBytes = 128, nShards = 1)
+    let idx = pool.claim(0)
+    let gen = pool.slotGen(idx)
+
+    check pool.beginWrite(idx, gen) == BeginWriteResult.Acquired
+    check pool.giveUpSlot(idx, gen) == SlotGiveUp.ProviderReleases
+    # The provider only learns of it here: the commit must not publish, and the
+    # release is the provider's. Reporting success would strand the slot, since
+    # the requester has already stopped watching it.
+    check pool.commitWrite(idx, gen, 4'u32) == false
+    pool.release(idx, 0)
+
+    check pool.claim(0) != EmptyIdx
+    deinitResponseSlotPool(pool)
+
+  test "give-up after the response was published: caller releases":
+    var pool: ResponseSlotPool
+    initResponseSlotPool(pool, capacity = 2, maxPayloadBytes = 128, nShards = 1)
+    let idx = pool.claim(0)
+    let gen = pool.slotGen(idx)
+
+    check pool.beginWrite(idx, gen) == BeginWriteResult.Acquired
+    check pool.commitWrite(idx, gen, 4'u32) == true
+    check pool.readyState(idx, gen)
+    # Nobody else will touch a published slot, so the giver-up owns it.
+    check pool.giveUpSlot(idx, gen) == SlotGiveUp.CallerReleases
+    pool.release(idx, 0)
+
+    check pool.claim(0) != EmptyIdx
+    deinitResponseSlotPool(pool)
+
+  test "a stale generation acts on nothing":
+    var pool: ResponseSlotPool
+    initResponseSlotPool(pool, capacity = 1, maxPayloadBytes = 128, nShards = 1)
+    let idx = pool.claim(0)
+    let staleGen = pool.slotGen(idx)
+    pool.release(idx, 0)
+    # Same index, new owner.
+    let reused = pool.claim(0)
+    check reused == idx
+    let freshGen = pool.slotGen(reused)
+    check freshGen != staleGen
+
+    check pool.giveUpSlot(idx, staleGen) == SlotGiveUp.Stale
+    check pool.beginWrite(idx, staleGen) == BeginWriteResult.Stale
+    check not pool.readyState(idx, staleGen)
+    check not pool.isAbandoned(idx, staleGen)
+    # The new owner is untouched.
+    check pool.beginWrite(reused, freshGen) == BeginWriteResult.Acquired
+    deinitResponseSlotPool(pool)
