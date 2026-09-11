@@ -576,6 +576,23 @@ proc generateEventBroker(body: NimNode): NimNode =
       buildBindTemplates(typeIdent, "listen", "bindListener", @[slot], awaitCall = true)
     )
 
+  # ── listenIt body sugar (issue #46, per-type since #51) ───────────
+  # `T.listenIt[(ctx)]: body` — the block IS the listener proc body, with the
+  # event value injected as `it` (nothing injected for a void event). Emitted
+  # here, next to this type's `listen` overloads, so the forwarded `listen`
+  # binds at the template's definition site (see `buildItSugarTemplates`).
+  result.add(
+    buildItSugarTemplates(
+      typeIdent,
+      "listen",
+      "listenIt",
+      "brokerEvent",
+      futureVoidTy(),
+      procTyPragma(handlerProcTy),
+      isVoid,
+    )
+  )
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBroker", sanitized, result)
     when defined(brokerDebugStdout):
@@ -651,44 +668,10 @@ macro EventBroker*(args: varargs[untyped]): untyped =
       )
     generateEventBroker(body)
 
-# ── listenIt body sugar ──────────────────────────────────────────────
-# Generic over every EventBroker lane (single-thread / mt / API): the template
-# simply forwards to whatever `listen` overload is in scope at the call site.
-# Purely syntactic — identical codegen to the hand-written listener lambda, no
-# new refc/ORC exposure. The extra params stay `untyped` for the same
-# overload-resolution reason documented at `bindTemplateDef`.
-
-template listenIt*(T: typedesc, brokerCtx: untyped, body: untyped): untyped =
-  ## Sugar over `listen(T, brokerCtx, handler)`: the block is the listener's
-  ## real proc body with the event value injected as `it` (nothing is injected
-  ## for `void` event types). `await` is allowed; `raises: []` is enforced
-  ## exactly as for a hand-written listener. Returns `listen`'s Result.
-  mixin listen
-  when compiles(
-    listen(
-      T,
-      brokerCtx,
-      proc(): Future[void] {.async: (raises: []), gcsafe.} =
-        discard,
-    )
-  ):
-    listen(
-      T,
-      brokerCtx,
-      proc(): Future[void] {.async: (raises: []), gcsafe.} =
-        body,
-    )
-  else:
-    listen(
-      T,
-      brokerCtx,
-      proc(brokerEvent: T): Future[void] {.async: (raises: []), gcsafe.} =
-        template it(): T {.inject, used.} =
-          brokerEvent
-
-        body,
-    )
-
-template listenIt*(T: typedesc, body: untyped): untyped =
-  ## `listenIt` on the default broker context.
-  listenIt(T, DefaultBrokerContext, body)
+# `listenIt` is no longer a module-global template: it is emitted per event
+# type by `generateEventBroker` / `generateMtEventBroker`, next to that type's
+# `listen` overloads. A single global template had to reach its `listen` via
+# `mixin`, which resolves at the *instantiation* site — and inside an
+# implicitly generic proc (`BrokerImplement`'s `new` / `create` /
+# `createUnderContext`) that site is whichever module calls it, not the module
+# that wrote the `listenIt`. See issue #51 and `buildItSugarTemplates`.

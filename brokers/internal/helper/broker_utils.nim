@@ -570,6 +570,90 @@ proc buildProvideTemplates*(
     bindTemplateDef(sugar, typeIdent, delegate, withCtx = false, payloadName = "body")
   )
 
+# Shared codegen for the `listenIt` / `onSignalIt` body sugar. These used to be
+# ONE module-global template per broker family carrying `mixin listen` /
+# `mixin onSignal`. `mixin` defers the lookup to the *instantiation* site, and
+# an implicitly generic proc (any `proc f(T: typedesc[X], …)` — which is what
+# `BrokerImplement` emits for `new` / `create` / `createUnderContext`) is
+# instantiated in the scope of whatever module CALLS it. A caller that does not
+# import the event's own module therefore has no matching `listen` in scope and
+# the sugar failed with a type mismatch raised inside `event_broker.nim`
+# (issue #51). Emitting the sugar per type, in the same scope as the `listen` /
+# `onSignal` overloads it forwards to, binds the verb at the template's
+# DEFINITION site, so the right candidate is always in the set.
+
+proc makeItBodyLambda(
+    typeIdent, valueParam, returnType, pragma: NimNode, isVoid: bool
+): NimNode =
+  ## Anonymous listener/handler `proc([<valueParam>: T]): <returnType>
+  ## {.<pragma>.}` whose body injects the event/signal value as `it` (a zero-arg
+  ## alias template — `{.inject.}` on a lambda param does not survive template
+  ## hygiene) and then splices the user's block verbatim. `body` is left as a
+  ## bare ident so it binds to the enclosing sugar template's `body` parameter.
+  var formal = newTree(nnkFormalParams, copyNimTree(returnType))
+  var stmts = newStmtList()
+  if not isVoid:
+    formal.add(
+      newTree(
+        nnkIdentDefs, copyNimTree(valueParam), copyNimTree(typeIdent), newEmptyNode()
+      )
+    )
+    stmts.add(
+      newTree(
+        nnkTemplateDef,
+        ident("it"),
+        newEmptyNode(),
+        newEmptyNode(),
+        newTree(nnkFormalParams, copyNimTree(typeIdent)),
+        newTree(nnkPragma, ident("inject"), ident("used")),
+        newEmptyNode(),
+        newStmtList(copyNimTree(valueParam)),
+      )
+    )
+  stmts.add(ident("body"))
+  newTree(
+    nnkLambda,
+    newEmptyNode(),
+    newEmptyNode(),
+    newEmptyNode(),
+    formal,
+    copyNimTree(pragma),
+    newEmptyNode(),
+    stmts,
+  )
+
+proc buildItSugarTemplates*(
+    typeIdent: NimNode,
+    verbName, sugarName, valueParamName: string,
+    returnType, pragma: NimNode,
+    isVoid: bool,
+): NimNode =
+  ## Emit the ctx-form + no-ctx-form `listenIt`-style sugar templates,
+  ## forwarding to `verbName(T, brokerCtx, <listener lambda>)`. No
+  ## `providerBody` fall-through guard: a listener/handler body is `void`, so
+  ## falling off the end is the normal case.
+  result = newStmtList()
+  let sugar = ident(sugarName)
+  let lam =
+    makeItBodyLambda(typeIdent, ident(valueParamName), returnType, pragma, isVoid)
+  let ctxBody = newStmtList(
+    newCall(ident(verbName), copyNimTree(typeIdent), ident("brokerCtx"), lam)
+  )
+  result.add(
+    bindTemplateDef(sugar, typeIdent, ctxBody, withCtx = true, payloadName = "body")
+  )
+  let delegate = newStmtList(
+    newCall(
+      copyNimTree(sugar),
+      copyNimTree(typeIdent),
+      ident("DefaultBrokerContext"),
+      ident("body"),
+    )
+  )
+  result.add(
+    bindTemplateDef(sugar, typeIdent, delegate, withCtx = false, payloadName = "body")
+  )
+
 proc parseOneTypeDef(
     def: NimNode,
     macroName: string,
