@@ -15,6 +15,10 @@ ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_bytes = "0.11"
+# The generated wrapper is included as a module (`#[path]`), not linked as a
+# crate, so its dependencies must be declared here too. Its async request
+# surface bridges the C response callback to a runtime-agnostic oneshot.
+futures-channel = "0.3"
 
 [[bin]]
 name = "rust_example"
