@@ -770,6 +770,19 @@ proc generateMtSignalBroker*(
       )
     )
 
+    # ── onSignalIt body sugar (issue #46, per-type since #51) ───────
+    result.add(
+      buildItSugarTemplates(
+        typeIdent,
+        "onSignal",
+        "onSignalIt",
+        "brokerSignal",
+        futureVoidTy(),
+        procTyPragma(handlerProcTy),
+        isVoid,
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("SignalBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

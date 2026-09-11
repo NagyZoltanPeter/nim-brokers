@@ -506,6 +506,19 @@ proc generateSignalBroker(body: NimNode): NimNode =
       )
     )
 
+    # ── onSignalIt body sugar (issue #46, per-type since #51) ───────
+    result.add(
+      buildItSugarTemplates(
+        typeIdent,
+        "onSignal",
+        "onSignalIt",
+        "brokerSignal",
+        futureVoidTy(),
+        procTyPragma(handlerProcTy),
+        isVoid,
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("SignalBroker", sanitized, result)
     when defined(brokerDebugStdout):
@@ -573,44 +586,7 @@ macro SignalBroker*(args: varargs[untyped]): untyped =
       error("SignalBroker does not accept kwargs in default mode", kwargs[0])
     generateSignalBroker(body)
 
-# ── onSignalIt body sugar ────────────────────────────────────────────
-# Generic over every SignalBroker lane (single-thread / mt / API): forwards to
-# whatever `onSignal` overload is in scope at the call site. Purely syntactic —
-# identical codegen to the hand-written handler lambda, no new refc/ORC
-# exposure. Extra params stay `untyped` (see `bindTemplateDef`).
-
-template onSignalIt*(T: typedesc, brokerCtx: untyped, body: untyped): untyped =
-  ## Sugar over `onSignal(T, brokerCtx, handler)`: the block is the handler's
-  ## real proc body with the signal value injected as `it` (nothing is
-  ## injected for `void` signal types). `await` is allowed; `raises: []` is
-  ## enforced exactly as for a hand-written handler. Returns `onSignal`'s
-  ## Result.
-  mixin onSignal
-  when compiles(
-    onSignal(
-      T,
-      brokerCtx,
-      proc(): Future[void] {.async: (raises: []), gcsafe.} =
-        discard,
-    )
-  ):
-    onSignal(
-      T,
-      brokerCtx,
-      proc(): Future[void] {.async: (raises: []), gcsafe.} =
-        body,
-    )
-  else:
-    onSignal(
-      T,
-      brokerCtx,
-      proc(brokerSignal: T): Future[void] {.async: (raises: []), gcsafe.} =
-        template it(): T {.inject, used.} =
-          brokerSignal
-
-        body,
-    )
-
-template onSignalIt*(T: typedesc, body: untyped): untyped =
-  ## `onSignalIt` on the default broker context.
-  onSignalIt(T, DefaultBrokerContext, body)
+# `onSignalIt` is no longer a module-global template: it is emitted per signal
+# type by `generateSignalBroker` / `generateMtSignalBroker`, next to that
+# type's `onSignal` overloads. See the matching note in `event_broker.nim` and
+# issue #51.

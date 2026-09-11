@@ -266,3 +266,42 @@ behavior under `--mm:refc` and `--mm:orc` on all platforms. The only codegen
 delta versus a hand-written handler is the injected zero-arg alias templates
 (compile-time only) and, for providers, the possible `result = <expr>` pin
 (semantically identical to the implicit-result the expression already had).
+
+## Step 2 revised — `listenIt` / `onSignalIt` are per-type after all (issue #51)
+
+Step 2 shipped as planned: two module-global templates, one in
+`event_broker.nim` and one in `signal_broker.nim`, each reaching its verb
+through `mixin listen` / `mixin onSignal`. Step 2 also named the escape hatch:
+*"If that turns out brittle in practice, fall back to emitting per-type sugar
+from the macros."* It did, and we took it.
+
+**What broke.** `mixin` defers the lookup to the *instantiation* site. A proc
+with a `typedesc` parameter is implicitly generic, so its body is sem-checked
+in the scope of whichever module calls it — and `BrokerImplement` emits exactly
+that shape for `new`, `create`, and `createUnderContext`. A caller that does not
+import the event's own module has no matching `listen` in scope, so the sugar
+failed with a type mismatch (or `undeclared identifier: 'listen'`) raised inside
+`brokers/event_broker.nim`, listing whatever unrelated `listen` overloads the
+*caller* happened to see. The hand-written `T.listen(ctx, closure)` form kept
+working in the same file because a plain call binds at the generic's definition
+site.
+
+**The fix.** `buildItSugarTemplates` in `broker_utils.nim` emits `listenIt` /
+`onSignalIt` per broker type, next to that type's `listen` / `onSignal`
+overloads — the same definition-site binding that already made `bindListener`
+and `provideIt` immune. The `when compiles(<zero-arg lambda>)` void probe is
+gone too: the macro already knows `isVoid`.
+
+The call-site surface is unchanged (`T.listenIt[(ctx)]: body`), so this is not
+a breaking change for users.
+
+Gated by `test/test_handler_sugar_generic_scope.nim` plus
+`test/issue51_helpers/`, whose whole point is that the test module does **not**
+import the module declaring the events.
+
+**Residual, not fixed here.** The `BrokerInterface` instance facade
+(`self.emit(SomeEvent, v)` / `self.listen(SomeEvent, h)`, `broker_interface.nim`)
+is a template whose `emit` / `listen` binds in the *interface's* module. For an
+event declared in that interface it is fine; for a foreign event type it still
+depends on instantiation-site lookup and can fail the same way inside a generic.
+Workaround, as before: `SomeEvent.emit(self.brokerCtx, v)`.
