@@ -159,7 +159,7 @@ schema and the `_getSchema()` descriptor. See
 ## Platform & Nim version support
 
 Every supported platform × Nim version × memory manager combination is CI-green
-on every PR. Build floor: **Nim ≥ 2.2.0**. Recommended baseline: **Nim ≥ 2.2.10
+on every PR. Build floor: **Nim ≥ 2.2.0**. Recommended baseline: **Nim ≥ 2.2.12
 with `--mm:orc`**; **Nim ≥ 2.2.4 + refc** is also fully supported on every
 platform. See [USAGEGUIDE.md](USAGEGUIDE.md#platform--nim-version-support) and
 [LIMITATION.md](doc/LIMITATION.md) for the Windows-refc caveat and toolchain notes.

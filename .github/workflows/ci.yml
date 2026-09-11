@@ -23,7 +23,7 @@ jobs:
   # (GitHub forbids that field on `uses:` reusable-workflow jobs).
   #
   # Nim 2.0.x is unsupported (refc + foreign-thread regression on macOS;
-  # see README). 2.2.4 and 2.2.10 both gate PRs; devel is per-matrix-entry
+  # see README). 2.2.4 and 2.2.12 both gate PRs; devel is per-matrix-entry
   # continue-on-error so upstream regressions don't block merges.
   #
   # Linux gcc-14 and other architectures (raspberry-pi / android) are
@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        nim: ["2.2.4", "2.2.10", "devel"]
+        nim: ["2.2.4", "2.2.12", "devel"]
         platform:
           - { id: linux-amd64,  runs-on: ubuntu-latest }
           - { id: win-amd64,    runs-on: windows-latest }
@@ -114,7 +114,7 @@ jobs:
   examples:
     runs-on: ubuntu-latest
     env:
-      NIM_VERSION: '2.2.10'
+      NIM_VERSION: '2.2.12'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -201,6 +201,54 @@ jobs:
 
       - name: Run persistence Go example
         run: nimble runPersistenceExampleGo -y --verbose
+
+  # Diagnostic matrix, never a gate (continue-on-error at job level): reports
+  # where refc can still observe a released instance and where it cannot. This
+  # is what forces test_broker_lifecycle's skip guard, and the expected result
+  # differs per platform, so there is no single outcome to assert. ORC is the
+  # control — an ORC failure would mean the retention is real and ours.
+  # See doc/LIMITATION.md §1.2 and test/probe_refc_destroy.nim.
+  refc-destroy-probe:
+    name: probe / ${{ matrix.platform.id }} / Nim ${{ matrix.nim }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        nim: ["2.2.4", "2.2.10", "2.2.12", "devel"]
+        platform:
+          - { id: linux-amd64,  runs-on: ubuntu-latest }
+          - { id: win-amd64,    runs-on: windows-latest }
+          - { id: macos-arm64,  runs-on: macos-latest }
+          - { id: macos-amd64,  runs-on: macos-15-intel  }
+        exclude:
+          - nim: "devel"
+            platform: { id: win-amd64, runs-on: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Probe destroy observability
+        shell: bash
+        run: |
+          # The probe is stdlib-only, so no nimble deps are needed here.
+          for cfg in "--mm:refc -d:release" "--mm:refc" "--mm:orc -d:release" "--mm:orc"; do
+            slug=$(echo "$cfg" | tr -d ' :-')
+            if nim c -r $cfg --hints:off --warnings:off \
+                 --nimcache:"nimcache_$slug" --outdir:build \
+                 test/probe_refc_destroy.nim > "probe_$slug.log" 2>&1; then
+              verdict="PASS"
+            else
+              verdict="FAIL(exit $?)"
+            fi
+            echo "PROBE | ${{ matrix.platform.id }} | nim ${{ matrix.nim }} | $cfg | $verdict"
+            tail -4 "probe_$slug.log" | sed 's/^/         /'
+          done
 
   nph:
     runs-on: ubuntu-latest
