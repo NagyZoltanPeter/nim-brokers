@@ -4,6 +4,40 @@ Status: **implemented** (Part A and Part B phases B-1…B-4). This document is
 kept as the design record — the "current state" table and the risk analyses
 describe the code *before* the change, the fixes describe what landed.
 
+## What shipped differs from this plan
+
+The sections below are kept as the design record — they describe the reasoning
+*before* the change, and two of their decisions did not survive contact with
+CI. Read this list first:
+
+1. **The reaper is gone** (supersedes A-F2's "CAS lost" row, A-F3, and R4).
+   Having the requester wait out a bounded grace window for a mid-write
+   provider both blocked the caller past its own deadline and **leaked the slot
+   outright** whenever the provider committed after the window expired — which
+   a loaded CI runner does routinely. Ownership is now settled synchronously at
+   the moment of giving up, via a new `AbandonedWriting` state: `Empty` →
+   provider releases at `beginWrite`; `Writing` → provider's `commitWrite` CAS
+   fails and it releases instead of publishing; `Ready` → the requester
+   releases on the spot. Nothing waits on the provider, and
+   `ReqWaitState.reaping` no longer exists.
+
+2. **`clearProvider` now fails outstanding requests** (a gap this plan's A-2
+   analysis missed). A-2 only considered the *stale* poller left by a timeout.
+   A **live** requester is just as exposed: it keeps polling the provider's
+   pool until its own timeout, and that pool is freed when the provider thread
+   exits. Confirmed as a plain SIGSEGV, and present on master. `clearProvider`
+   marks waiting slots `ProviderGone` — the mirror of `Abandoned`, where the
+   requester releases — and wakes their requesters.
+
+3. **The A-3 gate asserts something different.** "Never reports slot-pool
+   exhaustion" is not an invariant: an abandoned slot stays claimed until its
+   provider gets to it, so a tight timeout against a small pool legitimately
+   exhausts it. That is back-pressure. The gate now tolerates transient
+   exhaustion and asserts that every slot comes *back* once the storm settles,
+   backed by a deterministic unit suite over the slot state machine, since the
+   mid-write transition is reachable end-to-end only by luck (~0.15% of
+   timed-out requests).
+
 Implementation map:
 
 | Piece | Where |
