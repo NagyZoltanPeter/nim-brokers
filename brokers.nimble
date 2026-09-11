@@ -1355,6 +1355,34 @@ task probeWinTlsUninitRefc,
   "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
   runProbeWinTlsUninit("refc")
 
+# ---------------------------------------------------------------------------
+# refc destroy-observability probe (doc/LIMITATION.md §1.2)
+# ---------------------------------------------------------------------------
+# Diagnostic, not a gate: it reports the matrix rather than asserting one
+# outcome, because the expected result differs per platform and memory
+# manager. ORC is the control — an ORC failure would mean the retention is
+# real and ours, while a refc-only failure is the conservative-sweep artifact
+# that forces test_broker_lifecycle's skip guard.
+task probeRefcDestroy,
+  "Report the refc destroy-observability matrix (orc/refc x debug/release)":
+  for mm in ["refc", "orc"]:
+    for rel in ["", " -d:release"]:
+      let label = "--mm:" & mm & rel
+      let outBin =
+        "build" /
+        ("probe_refc_destroy_" & mm & (if rel.len > 0: "_release" else: "_debug"))
+      exec "nim c --mm:" & mm & rel & " --hints:off --warnings:off --out:" &
+        quoteArg(outBin) & " test/probe_refc_destroy.nim"
+      let (output, code) = gorgeEx(quoteArg(outBin))
+      let verdict =
+        if code == 0:
+          "PASS"
+        else:
+          "FAIL(exit " & $code & ")"
+      echo "probeRefcDestroy [", label, "] -> ", verdict
+      if code != 0:
+        echo output
+
 task runTorpedoExampleRust, "Build the Torpedo Duel FFI library ":
   buildTorpedoExampleLibrary(generateRust = true)
   exec quoteArg(findCargoExe()) &

@@ -39,6 +39,19 @@ them.
 | **macOS amd64**   | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ |
 | **Windows amd64** | ✅ / ✅ ¹ | ✅ / ✅ ¹ | — / — ² |
 
+**Observability caveat (refc).** `test/test_broker_lifecycle.nim` carries a
+skip guard because refc cannot reliably *observe* a released instance, not
+because releasing fails. refc sweeps conservatively: a pointer-shaped value
+left in the C stack or a callee-saved register roots the object, so `=destroy`
+does not run and the test reports a leak that is not there. ORC is precise and
+passes in every configuration, which is what proves the registration really is
+dropped. `test/probe_refc_destroy.nim` isolates the pattern from nim-brokers
+(stdlib only — no brokers, no chronos) and `nimble probeRefcDestroy` reports
+the local matrix; CI runs it across platforms and Nim versions as a
+non-blocking diagnostic. Observed so far: fails under `--mm:refc -d:release`
+on Linux on every 2.2.x tried (2.2.4 … 2.2.12), passes on macOS arm64, under
+refc debug, and under ORC everywhere.
+
 ¹ Windows + refc passes the full CI matrix (`nimble test`, `testApi`,
 `runTypeMapTestLib{Cpp,Py,Rust,Go}`, `runFfiExample{Cpp,Py,Rust,Go}`)
 on Nim 2.2.4 and 2.2.12. **A latent platform hazard does still exist**
