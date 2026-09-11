@@ -32,7 +32,7 @@ them.
 
 ### 1.2 Multi-thread brokers and Broker FFI API
 
-| OS / arch | Nim 2.2.4 (orc / refc) | Nim 2.2.10 (orc / refc) | Nim devel (orc / refc) |
+| OS / arch | Nim 2.2.4 (orc / refc) | Nim 2.2.12 (orc / refc) | Nim devel (orc / refc) |
 |---|:---:|:---:|:---:|
 | **Linux amd64**   | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ |
 | **macOS arm64**   | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ |
@@ -41,12 +41,12 @@ them.
 
 ¹ Windows + refc passes the full CI matrix (`nimble test`, `testApi`,
 `runTypeMapTestLib{Cpp,Py,Rust,Go}`, `runFfiExample{Cpp,Py,Rust,Go}`)
-on Nim 2.2.4 and 2.2.10. **A latent platform hazard does still exist**
+on Nim 2.2.4 and 2.2.12. **A latent platform hazard does still exist**
 — see §2.2 — but broker / FFI code paths don't trip it.
 
 ² Nim devel on Windows is unsupported by `setup-nim-action`; the
 runner can't install it. Not a nim-brokers limitation. If devel
-becomes installable, expect it to behave like 2.2.10.
+becomes installable, expect it to behave like 2.2.12.
 
 The full matrix is exercised on every PR. The `MM=…` env var on the
 parity / FFI-example task families honours single-MM overrides for
@@ -66,7 +66,7 @@ Nim 2.2 fixed that path upstream. We do not test 2.0.x and don't
 intend to.
 
 **Recommendation.** Pin `requires "nim >= 2.2.0"` in downstream
-projects. CI exercises 2.2.4, 2.2.10, and devel.
+projects. CI exercises 2.2.4, 2.2.12, and devel.
 
 ---
 
@@ -92,7 +92,7 @@ push from inside the callback touches null / garbage TLS. ORC
 sidesteps this; refc does not.
 
 **The minimal repro `test/probe_win_tls_uninit.nim` still crashes**
-under refc on Windows across every Nim version we test (2.2.4,
+under refc on Windows on every Nim version probed so far (2.2.4,
 2.2.10) — confirmed empirically via `nimble probeWinTlsUninitRefc`.
 The hazard is real, structural, and unfixable from our side without
 an upstream chronos rewrite of the Windows wait primitive.

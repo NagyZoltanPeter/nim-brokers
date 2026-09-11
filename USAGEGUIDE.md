@@ -1046,7 +1046,7 @@ applies on Windows + refc: don't call Nim allocators from your own
 `RegisterWaitForSingleObject` callbacks — see
 [LIMITATION.md](doc/LIMITATION.md) §2.2 for the hazard analysis.
 
-Recommended baseline: **Nim ≥ 2.2.10 with `--mm:orc`** for the
+Recommended baseline: **Nim ≥ 2.2.12 with `--mm:orc`** for the
 smoothest experience; **Nim ≥ 2.2.4 + refc** also fully supported on
 every platform.
 

@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        nim: ["2.2.4", "2.2.10"]
+        nim: ["2.2.4", "2.2.12"]
         platform:
           - { id: win-amd64,    runs-on: windows-latest }
           - { id: linux-amd64,  runs-on: ubuntu-latest }
