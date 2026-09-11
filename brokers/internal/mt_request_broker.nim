@@ -1222,6 +1222,20 @@ proc generateMtRequestBroker*(
                 # already be recycled — or the pool itself freed by the provider
                 # thread's teardown. Retire without touching either.
                 return 2
+              if capturedPool[].isProviderGone(capturedSlotIdx, capturedSlotGen):
+                # The provider was cleared out from under this request. No one
+                # will answer it and no one else will hand the slot back.
+                capturedWait.gaveUp = true
+                if not capturedResponseFut.finished:
+                  capturedResponseFut.complete(
+                    err(
+                      Result[`payloadType`, string],
+                      "RequestBroker(" & `typeNameLit` &
+                        "): provider was cleared while the request was outstanding",
+                    )
+                  )
+                capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
+                return 2
               if capturedPool[].isAbandoned(capturedSlotIdx, capturedSlotGen):
                 # Someone else cancelled this request. Their CAS won, so the
                 # provider owes the release; we only resolve the caller.
@@ -1439,6 +1453,14 @@ proc generateMtRequestBroker*(
               return decoded
             return
               err("RequestBroker(" & `typeNameLit` & "): response unmarshal failed")
+          if pool[].isProviderGone(slotIdx, slotGen):
+            # Provider cleared mid-request: nothing will answer, and the slot
+            # is ours to hand back.
+            pool[].release(slotIdx, `shardHintIdent`())
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): provider was cleared while the request was outstanding"
+            )
           if pool[].isAbandoned(slotIdx, slotGen):
             # Cancelled from another thread. That CAS won, so the provider owns
             # the release and there is nothing left to wait for.
@@ -1901,6 +1923,7 @@ proc generateMtRequestBroker*(
   let clearBody = quote:
     `initProcIdent`()
     var ring: ptr VyukovMpscRing[uint32]
+    var pool: ptr ResponseSlotPool
     var providerSignal: ptr BrokerSignalShared
     var isProviderThread = false
     let myThreadGen = currentMtThreadGen()
@@ -1909,6 +1932,7 @@ proc generateMtRequestBroker*(
       for i in 0 ..< `globalBucketCountIdent`:
         if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
           ring = `globalBucketsIdent`[i].ring
+          pool = `globalBucketsIdent`[i].responseSlotPool
           providerSignal = `globalBucketsIdent`[i].providerSignal
           isProviderThread = (
             `globalBucketsIdent`[i].threadId == currentMtThreadId() and
@@ -1920,6 +1944,19 @@ proc generateMtRequestBroker*(
         for i in foundIdx ..< `globalBucketCountIdent` - 1:
           `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
         `globalBucketCountIdent` -= 1
+      # Fail outstanding requests fast, under the same lock that publishes the
+      # bucket's disappearance. Leaving them to time out means every waiting
+      # requester keeps polling this pool for up to its full timeout — and the
+      # provider thread frees the pool shortly after this returns.
+      if foundIdx >= 0 and not pool.isNil:
+        discard pool[].markProviderGone()
+    if not pool.isNil:
+      # Wake every requester so it resolves now rather than at its next
+      # unrelated dispatch tick. Firing a stale or closed signal is a no-op.
+      for slotIdx in 0'u32 ..< pool[].capacity:
+        let waker = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
+        if not waker.isNil:
+          fireBrokerSignal(waker)
     if isProviderThread:
       `tvCleanup`
     if not ring.isNil:

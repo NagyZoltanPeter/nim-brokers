@@ -440,6 +440,12 @@ type
     Writing = 1'u8 ## reserved by provider; bytes in flight
     Ready = 2'u8
     Abandoned = 3'u8 ## requester gave up before the provider started writing
+    ProviderGone = 5'u8
+      ## The provider was cleared while this request was outstanding. Nobody
+      ## will ever answer it, so the *requester* releases — the mirror of
+      ## `Abandoned`. Without it an outstanding requester keeps polling a pool
+      ## its provider thread is about to free, for as long as its timeout
+      ## allows.
     AbandonedWriting = 4'u8
       ## requester gave up *while* the provider was writing. The provider owns
       ## the release and discovers this when its `commitWrite` CAS fails. This
@@ -703,11 +709,46 @@ proc giveUpSlot*(
     of ResponseState.Abandoned, ResponseState.AbandonedWriting:
       # Someone already gave up on this slot; the provider still owns it.
       return SlotGiveUp.ProviderReleases
+    of ResponseState.ProviderGone:
+      # There is no provider left to release it.
+      return SlotGiveUp.CallerReleases
 
 proc readyState*(pool: ResponseSlotPool, idx: uint32, gen: uint32): bool {.gcsafe.} =
   ## True only for *this* generation's response — a recycled slot reads false.
   let v = pool.slotHeaderPtr(idx).control.load(moAcquire)
   controlGen(v) == gen and controlState(v) == ResponseState.Ready
+
+proc markProviderGone*(pool: var ResponseSlotPool): int {.gcsafe.} =
+  ## Called when a provider is cleared: flip every slot still waiting for an
+  ## answer to `ProviderGone`, so its requester resolves now instead of
+  ## polling this pool until its own timeout — by which time the provider
+  ## thread may well have freed the pool underneath it.
+  ##
+  ## Only `Empty` slots are touched. `Writing` and `Ready` are already being
+  ## answered; `Abandoned`/`AbandonedWriting` belong to a provider that may
+  ## still be mid-reply. Free slots sit in a terminal state or `Empty` too, but
+  ## marking one is inert: `claim` resets the state and bumps the generation,
+  ## and every reader matches on (idx, gen).
+  result = 0
+  for idx in 0'u32 ..< pool.capacity:
+    let hdr = pool.slotHeaderPtr(idx)
+    let cur = hdr.control.load(moAcquire)
+    if controlState(cur) != ResponseState.Empty:
+      continue
+    var expected = cur
+    if hdr.control.compareExchange(
+      expected,
+      packControl(controlGen(cur), ResponseState.ProviderGone),
+      moAcquireRelease,
+      moAcquire,
+    ):
+      inc result
+
+proc isProviderGone*(
+    pool: ResponseSlotPool, idx: uint32, gen: uint32
+): bool {.gcsafe.} =
+  let v = pool.slotHeaderPtr(idx).control.load(moAcquire)
+  controlGen(v) == gen and controlState(v) == ResponseState.ProviderGone
 
 proc setWaker*(pool: ResponseSlotPool, idx: uint32, signal: pointer) {.gcsafe.} =
   ## Record which thread to wake when this slot is abandoned by someone else.

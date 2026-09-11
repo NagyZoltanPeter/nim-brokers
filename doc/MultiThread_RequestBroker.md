@@ -29,8 +29,8 @@ This generates:
 | `Weather.setProvider(ctx, handler)` | Register a provider on the current thread (keyed context) |
 | `Weather.request(city)` | Issue a request (default context) |
 | `Weather.request(ctx, city)` | Issue a request (keyed context) |
-| `Weather.clearProvider()` | Unregister provider + send shutdown to dispatch poller (default context) |
-| `Weather.clearProvider(ctx)` | Unregister provider + send shutdown to dispatch poller (keyed context) |
+| `Weather.clearProvider()` | Unregister provider, fail its outstanding requests, shut down the dispatch poller (default context) |
+| `Weather.clearProvider(ctx)` | Same, for a keyed context |
 | `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 20 seconds) |
 | `Weather.requestTimeout()` | Get current cross-thread request timeout |
 | `Weather.requestCancellable([ctx,] city)` | Issue a request, returning `(id, future)` — the id is cancellable from any thread |
@@ -199,13 +199,36 @@ let res = blockingAwait MyType.request("hello")
 
 Do **not** use chronos's `await` outside of `{.async.}` procs.
 
-### 5. `clearProvider` must be called from the provider thread
+### 5. `clearProvider` fails outstanding requests immediately
+
+Clearing a provider does not leave requests already in flight to time out. Any
+request still waiting for an answer is resolved at once with
+
+```
+RequestBroker(Weather): provider was cleared while the request was outstanding
+```
+
+That is a correctness requirement, not a convenience: the response slot pool
+belongs to the provider's bucket and is freed when the provider thread exits,
+while a waiting requester's response poller is still reading it. Before this,
+an outstanding requester kept polling that pool for up to its full timeout —
+20 s by default — and dereferenced freed memory if the provider thread went
+away first (reproducible as a plain SIGSEGV, not merely an ASAN report).
+
+Mechanically, `clearProvider` flips every slot still awaiting an answer to
+`ProviderGone` under the same lock that removes the bucket, then fires each
+waiting requester's signal. `ProviderGone` is the mirror of `Abandoned`: since
+no provider remains to hand the slot back, the **requester** releases it.
+Slots already being written or already published are left alone — those
+requests complete normally.
+
+### 6. `clearProvider` must be called from the provider thread
 
 `clearProvider` cleans threadvar entries, which are only accessible from the
 thread that created them. Always call `clearProvider` from the same thread
 that called `setProvider`.
 
-### 6. ORC and refc compatibility
+### 7. ORC and refc compatibility
 
 The broker works with both `--mm:orc` and `--mm:refc`. The global registry
 uses `createShared` / `deallocShared` for raw memory (no GC involvement).
@@ -228,7 +251,7 @@ thread; if that thread is gone, freeing from another thread would
 violate macOS+ORC's TLV-allocator hazard documented in
 `design/LESSONS_LEARNED.md` §1.2. No OS resources held; no hang.
 
-### 7. Cross-thread request timeout
+### 8. Cross-thread request timeout
 
 The timeout can also be seeded at declaration, alongside the capacity kwargs:
 
@@ -305,7 +328,7 @@ if res.isErr() and "timed out" in res.error():
   it settles ownership the same way and returns immediately, without waiting on
   the provider.
 
-### 8. Cancelling a cross-thread request
+### 9. Cancelling a cross-thread request
 
 **`request` is not cancellable — `requestCancellable` is.** The future returned
 by plain `request` (and `blockingRequest`) offers no way to stop the work: it
@@ -404,7 +427,7 @@ cannot publish its own id while blocked.
 Timeouts share this machinery, which changes one behaviour: a request that
 times out while still queued is now **dropped instead of executed**.
 
-### 9. Compile with `--threads:on`
+### 10. Compile with `--threads:on`
 
 Multi-thread mode requires the Nim compiler flag `--threads:on`.
 

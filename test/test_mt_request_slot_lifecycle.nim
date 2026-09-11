@@ -52,6 +52,9 @@ const
   BlockDelay = 500
 
 var gQueuedInvoked: Atomic[bool]
+var gHangSent: Atomic[bool]
+var gClearedFast: Atomic[bool]
+var gClearedElapsedMs: Atomic[int]
 
 proc slotProvider(input: string): Future[Result[SlotReq, string]] {.async.} =
   ## `slow:` sleeps well past the requester's deadline (forces the
@@ -67,6 +70,9 @@ proc slotProvider(input: string): Future[Result[SlotReq, string]] {.async.} =
     await sleepAsync(chronos.milliseconds(EdgeDelay))
   elif input == "block":
     sleep(BlockDelay)
+  elif input == "hang":
+    # Never answers within the test's lifetime.
+    await sleepAsync(chronos.seconds(30))
   ok(SlotReq(echoed: input))
 
 # ── Cross-thread coordination (no closures in {.thread.} procs) ───────────
@@ -196,6 +202,26 @@ proc providerThreadProc() {.thread.} =
   # teardownBrokerThread, which frees it.
   waitFor sleepAsync(chronos.milliseconds(50))
 
+proc providerClearedThreadProc() {.thread.} =
+  doAssert SlotReq.setProvider(slotProvider).isOk()
+  gProviderReady.store(true)
+  while not gHangSent.load():
+    waitFor sleepAsync(chronos.milliseconds(5))
+  waitFor sleepAsync(chronos.milliseconds(100))
+  # Clear while the request is still outstanding, then leave: returning from
+  # this proc runs teardownBrokerThread, which frees the response slot pool.
+  SlotReq.clearProvider()
+  waitFor sleepAsync(chronos.milliseconds(50))
+
+proc requesterOutstandingWhenCleared() {.thread.} =
+  let started = Moment.now()
+  let fut = SlotReq.request("hang")
+  gHangSent.store(true)
+  let r = waitFor fut
+  gClearedElapsedMs.store(int((Moment.now() - started).milliseconds))
+  gClearedFast.store(r.isErr() and "cleared" in r.error)
+  gDone.store(true)
+
 proc requesterOutlivesPool() {.thread.} =
   let r = waitFor SlotReq.request("slow:uaf")
   doAssert r.isErr(), "request should have timed out"
@@ -261,6 +287,37 @@ suite "MT RequestBroker — response slot lifecycle":
     check not gQueuedInvoked.load()
 
     SlotReq.clearProvider()
+    SlotReq.setRequestTimeout(chronos.seconds(20))
+
+  test "clearing a provider fails its outstanding requests at once":
+    # A request with no answer coming must not sit on the provider's response
+    # slot until its own timeout: the provider thread frees that pool when it
+    # exits, and the requester's poller is still reading it.
+    SlotReq.setRequestTimeout(chronos.seconds(5))
+
+    gDone.store(false)
+    gProviderReady.store(false)
+    gHangSent.store(false)
+    gClearedFast.store(false)
+    gClearedElapsedMs.store(0)
+
+    var provThread: Thread[void]
+    provThread.createThread(providerClearedThreadProc)
+    while not gProviderReady.load():
+      sleep(5)
+
+    var reqThread: Thread[void]
+    reqThread.createThread(requesterOutstandingWhenCleared)
+    provThread.joinThread()
+
+    while not gDone.load():
+      sleep(5)
+    reqThread.joinThread()
+
+    check gClearedFast.load()
+    # Resolved by the clear, not by the 5 s deadline.
+    check gClearedElapsedMs.load() < 2000
+
     SlotReq.setRequestTimeout(chronos.seconds(20))
 
   test "no poller outlives the response slot pool":

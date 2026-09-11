@@ -617,6 +617,11 @@ Weather.setRequestTimeout(chronos.seconds(2))  # shorten timeout
 echo Weather.requestTimeout()                   # 2 seconds
 ```
 
+**Clearing a provider:** `clearProvider` resolves any request still in flight
+straight away, with `err("… provider was cleared while the request was
+outstanding")`, rather than leaving it to time out. Requests whose response is
+already being written complete normally.
+
 **Cancelling a cross-thread request:**
 
 Plain `request` / `blockingRequest` are **not cancellable**: they hand back no

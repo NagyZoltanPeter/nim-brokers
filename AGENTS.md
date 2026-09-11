@@ -280,6 +280,15 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   `blockingRequestCancellable(..., idOut)`. Same-thread requests are not
   cancellable (id `0`). Timeouts ride the same path, so a timed-out request
   that never started is now dropped rather than executed.
+- **`clearProvider` fails outstanding requests** (MT lane): every slot still
+  awaiting an answer is flipped to `ProviderGone` under the bucket lock and its
+  requester's signal fired, so in-flight requests resolve at once instead of
+  waiting out their timeout. Required for safety, not just ergonomics — the
+  response pool is freed when the provider thread exits while a waiting
+  requester's poller is still reading it (plain SIGSEGV, pre-existing on
+  master). `ProviderGone` is the mirror of `Abandoned`: the **requester**
+  releases, since no provider is left to. Gated by
+  `test/test_mt_request_slot_lifecycle.nim`.
 - **Response slot protocol**: `ResponseSlotHeader.control` packs
   `(gen: uint32) shl 32 or state` in one `Atomic[uint64]`, so every transition
   is a single generation-checked CAS. The side that wins the `Empty→…` CAS
