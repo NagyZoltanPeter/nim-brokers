@@ -746,6 +746,70 @@ the registry.
 
 Foreign callers only need to call `<lib>_shutdown(ctx)`.
 
+#### Where the provider runs in the teardown sequence
+
+The invocation sits at a deliberate point in `<lib>_shutdown` (issue #49):
+
+1. mark the context inactive — no new `_call` / `_callAsync` / `_subscribe` enters
+2. drain in-flight `_call`s (bounded) — the system goes quiescent
+3. **invoke the declared `shutdownRequest` provider** ← here
+4. hand any event it emitted to the delivery thread (bounded)
+5. set the shutdown flag, join the delivery thread, then the processing thread
+6. free the subscription registry and the couriers
+
+Step 3 is routed as a reserved-apiName control message (`__shutdown_request`)
+through the same courier `__release_instance` uses, for two reasons:
+
+| Constraint | Why |
+|---|---|
+| Must run on the **processing thread** | The provider's MT broker bucket is keyed by that thread's identity; a call from the foreign caller's thread would address the wrong bucket. |
+| Must run while **both threads are alive** | If the provider emits an event as its last act, the delivery thread has to still be there to fan it out. Hence before the shutdown flag, not after. |
+
+Only the **zero-argument** signature is auto-invocable — `_shutdown` has no
+payload to supply. A `shutdownRequest` type declared with only an arg-based
+signature is a compile error naming the fix (a silent skip is the bug this
+closes).
+
+The reserved name never appears in `_listApis`, `_getSchema`, or the CDDL.
+
+#### Failure, timeout, and idempotency
+
+Teardown never aborts because a user provider misbehaved. A provider that returns
+`err`, raises, or exceeds its budget is logged with a chronicles `warn` and the
+flag / join / free sequence proceeds unchanged. `<lib>_shutdown` still returns
+`0`: it reports transport teardown, not application teardown, and a non-zero
+return would make every wrapper's RAII path treat a completed shutdown as a
+failure.
+
+The timeout is enforced on the **processing thread**, racing the provider against
+a chronos timer, because the blocked `_shutdown` side waits on an unbounded
+condition variable. The response slot is therefore completed on every path,
+including expiry, so a hung provider cannot stall teardown.
+
+`ShutdownRequest` also remains an ordinary request on the dispatch surface
+(`lib.shutdownRequest()`), so a library that already drives teardown explicitly
+will see the provider run **twice**. Either make it idempotent or opt out.
+
+#### Configuration
+
+```nim
+registerBrokerLibrary:
+  name: "mylib"
+  initializeRequest: InitializeRequest
+  shutdownRequest: ShutdownRequest
+  invokeShutdownRequest: false   # default true
+  shutdownRequestTimeoutMs: 2000 # default 5000; 0 = infinite
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `invokeShutdownRequest` | `true` | Auto-invoke the declared provider from `<lib>_shutdown`. `false` restores the historical behaviour: the provider is reachable only through an explicit `_call`, and the zero-arg requirement is lifted. |
+| `shutdownRequestTimeoutMs` | `5000` | Processing-thread bound on the provider. `0` = infinite (a hung provider then blocks teardown — only for providers you control). |
+
+`initializeRequest` has **no** symmetric auto-invocation: `_createContext` takes
+only an `errOut` parameter, so there is nowhere to pass a configuration payload
+without an ABI change. Call it explicitly after `_createContext`.
+
 ---
 
 ## Threading Architecture
@@ -945,7 +1009,9 @@ level request-routing behavior that the FFI API builds on.
 still accepted for compatibility.
 You can name you Initialized and Shutdown brokers as you like. The macro just registers them.
 
-It does not itself force those providers to be registered.
+It does not itself force those providers to be registered. A missing
+`ShutdownRequest` provider is not fatal: `<lib>_shutdown` invokes it, the broker
+answers "no provider", and the teardown logs a `warn` and continues.
 
 In practice:
 

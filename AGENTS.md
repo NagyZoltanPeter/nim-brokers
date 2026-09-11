@@ -342,7 +342,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   - `<lib>_initialize()` — once-per-process Nim runtime initialization
   - `<lib>_createContext()` — per-context instance creation
   - `<lib>_shutdown(ctx)` — per-context shutdown
-- `InitializeRequest` is the post-create configuration broker; `ShutdownRequest` is the orderly teardown broker.
+- `InitializeRequest` is the post-create configuration broker; `ShutdownRequest` is the orderly teardown broker. `<lib>_shutdown(ctx)` **invokes the declared `shutdownRequest` provider** (issue #49) on the processing thread, after the in-flight `_call` drain and before the threads are signalled to stop, so both threads are alive for it. Only the zero-arg signature is auto-invocable (arg-only is a compile error); failure or timeout is logged and never aborts teardown; `_shutdown` still returns `0`. Knobs: `invokeShutdownRequest` (default `true`) and `shutdownRequestTimeoutMs` (default `5000`, `0` = infinite). `initializeRequest` is **not** auto-invoked — `_createContext` has no payload parameter. See `doc/FFI_API.md` § "Shutdown".
 - `<lib>_createContext()` is readiness-synchronous: it returns only after the delivery thread has installed its event-courier poller and the processing thread has finished `setupProviders(ctx)` plus per-event listener installation.
 - The generated runtime uses two threads per created library context:
   - **delivery thread** — consumes the per-context event courier ring and invokes foreign callbacks. Spawned first so its broker dispatch signal is published before any emit can fire.

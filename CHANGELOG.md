@@ -3,6 +3,43 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [Unreleased]
+
+### Fixed — `<lib>_shutdown` now invokes the declared `shutdownRequest` provider
+
+- **Behaviour change (issue #49).** `registerBrokerLibrary` has always required a
+  `shutdownRequest:` field and the docs described it as the orderly-teardown
+  hook, but nothing in the generated code ever invoked it: the declaration was a
+  compile-time existence assertion only. A provider that flushed a write-ahead
+  log, closed sockets, or persisted state lost that work on every
+  `<lib>_shutdown`, with no diagnostic. It now runs.
+- It runs on the **processing thread** (which owns its MT broker bucket), after
+  the in-flight `_call` drain and **before** either thread is signalled to stop,
+  so an event emitted as the provider's last act is still fanned out. The
+  invocation rides a reserved apiName (`__shutdown_request`) through the existing
+  courier, and never appears in `_listApis` / `_getSchema` / the CDDL.
+- Failure, a raise, or a timeout is logged (chronicles `warn`) and never aborts
+  teardown; `<lib>_shutdown` still returns `0`. The timeout is enforced on the
+  processing thread (racing a chronos timer) because the `_shutdown` side waits
+  on an unbounded condition variable, so a hung provider cannot stall teardown.
+- Only the **zero-argument** signature is auto-invocable. A `shutdownRequest`
+  declared with only an arg-based signature is now a compile error naming the fix
+  (guarded by `test/reject/reject_shutdownreq_noargless.nim`).
+- New config keys: `invokeShutdownRequest` (default `true`) and
+  `shutdownRequestTimeoutMs` (default `5000`, `0` = infinite). Libraries that
+  already drive teardown through an explicit `_call` should either make the
+  provider idempotent or set `invokeShutdownRequest: false` — otherwise it now
+  runs twice.
+- `initializeRequest` is unchanged and still not auto-invoked: `_createContext`
+  has no payload parameter, so symmetry would need an ABI change.
+- Internal: the ctx registry gained a `dispatchLive` flag. The emit-side courier
+  lookup keys on it instead of `active`, separating "no new foreign calls"
+  (cleared first in `_shutdown`) from "the library's own threads are alive"
+  (cleared after both joins) — without it, an event emitted by the teardown
+  provider found no courier and was dropped.
+- New tests: `test_api_shutdown_request`, `test_api_shutdown_request_optout`,
+  both wired into `nimble testApi`.
+
 ## [3.3.0] — 2026-07-14
 
 **Handler body sugar across all lanes: `listenIt` / `onSignalIt` / `provideIt` /

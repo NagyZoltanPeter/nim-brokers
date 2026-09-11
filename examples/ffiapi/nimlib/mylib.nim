@@ -274,6 +274,10 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
   let shutdownProviderRes = ShutdownRequest.setProvider(
     ctx,
     proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      # `mylib_shutdown()` invokes this provider on the processing thread before
+      # either thread is signalled to stop (issue #49). The log line makes the
+      # invocation observable when you run any of the example consumers.
+      info "mylib ShutdownRequest provider running", devices = gDevices.len
       gInitialized = false
       gDevices = @[]
       return ok(ShutdownRequest(status: 0)),
