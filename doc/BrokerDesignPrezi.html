@@ -1371,7 +1371,7 @@ OnFilterSubscribeEvent.emit(
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Timeout protection</strong></td>
-          <td>Cross-thread <code>request</code> returns <code>err</code> after a configurable timeout (default 5&thinsp;s) if the provider is unresponsive &mdash; no indefinite hangs</td>
+          <td>Cross-thread <code>request</code> returns <code>err</code> after a configurable timeout (default 20&thinsp;s) if the provider is unresponsive &mdash; no indefinite hangs</td>
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Transparent fan-out</strong></td>
@@ -1442,7 +1442,7 @@ OnFilterSubscribeEvent.emit(
       <li class="fragment"><strong>Cross-thread request</strong> &mdash; args go into a request slab cell + ring; reply comes back via a reserved <strong>response slot</strong>. No allocation on the hot path.</li>
       <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; the shared dispatch loop drains the ring and calls the local provider closure</li>
       <li class="fragment"><strong>Same-thread fast path</strong> &mdash; provider is invoked directly with zero ring/slab overhead</li>
-      <li class="fragment"><strong>Failure modes</strong> &mdash; <code>err</code> on payload too large, ring full, response-slot pool exhausted, or timeout (default 5&thinsp;s, configurable via <code>T.setRequestTimeout</code>)</li>
+      <li class="fragment"><strong>Failure modes</strong> &mdash; <code>err</code> on payload too large, ring full, response-slot pool exhausted, or timeout (default 20&thinsp;s, configurable via <code>T.setRequestTimeout</code>)</li>
       <li class="fragment"><strong>Capacity knobs</strong> &mdash; <code>queueDepth</code>, <code>slabCapacity</code>, <code>responseSlots</code>, payload/response size caps; or pick a named <code>preset</code></li>
     </ul>
   </section>

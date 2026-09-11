@@ -273,6 +273,18 @@ proc fireBrokerSignal*(signal: ptr BrokerSignalShared) {.gcsafe, raises: [].} =
   discard signal.signal.fireSync()
   discard signal.state.fetchSub(1'u64, moRelease)
 
+type ReqWaitState* = ref object
+  ## Shared between a cross-thread request's awaiting body and its response
+  ## poller — both run on the requester thread, so no synchronisation is
+  ## needed and the `ref` never crosses a thread boundary.
+  ##
+  ## Set when the requester stops waiting (timeout, or an explicit cancel).
+  ## The slot's own state machine settles who releases at that moment, so the
+  ## poller's only job afterwards is to retire: leaving it registered is what
+  ## lets it act on a recycled slot, or on a pool that has since been freed by
+  ## the provider thread's teardown.
+  gaveUp*: bool
+
 proc registerBrokerPoller*(fn: ThreadDispatchPollFn) =
   ## Register a poll function with this thread's dispatcher.
   ## Must be called from the owning thread.

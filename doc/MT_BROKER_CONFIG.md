@@ -83,6 +83,13 @@ Total event-broker idle RAM ≈
 | `responseSlots` | 256 | Concurrent **outstanding** requests (slot held caller-side from request issue until reply is decoded — RTT-bound). | more than `responseSlots` in-flight at once | `1 × slotStride` per slot |
 | `maxResponseBytes` | type-driven (broker type) | Per-response marshal buffer | large reply → encode fails | multiplier on responseSlots RAM |
 | `freeListShards` | 2 | Same as event | rarely matters | `~16 B per shard` |
+| `requestTimeoutMs` | 20 000 | Seeds the per-type cross-thread request timeout | provider slower than the budget → `err(… timed out …)`, and the request is dropped if it has not been dispatched yet | none |
+
+Unlike every other knob here, `requestTimeoutMs` is not baked into the
+generated code — it only sets the initial value of the runtime variable that
+`T.setRequestTimeout(duration)` mutates, so it is a default rather than a
+limit. Presets deliberately leave it alone: it is a latency policy, not a
+memory profile.
 
 Total request-broker idle RAM ≈
 `queueDepth × 24 + slabCapacity × align8(headerBytes + maxPayloadBytes) +
@@ -97,6 +104,7 @@ responseSlots × align8(slotHeaderBytes + maxResponseBytes)`.
 | `responseSlots` | matches your **concurrent-in-flight** ceiling. RTT-bound, slow to recycle. |
 | `maxPayloadBytes` / `maxResponseBytes` | upper bound on a single marshaled payload. Leave on default and let the type classifier size it. |
 | `freeListShards` | leave alone unless profiling shows CAS contention. |
+| `requestTimeoutMs` | how long a caller should wait before giving up. Long enough to cover a slow provider under load; short enough that a wedged provider does not pin the caller. |
 
 ## 4. Type-driven default sizing
 

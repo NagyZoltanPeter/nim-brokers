@@ -610,12 +610,78 @@ Compile with `--threads:on` (and `--mm:orc` or `--mm:refc`).
 
 **Cross-thread request timeout:**
 
-Cross-thread requests have a configurable timeout (default: 5 seconds). If the provider thread is unresponsive, `request()` returns `err` instead of hanging. Same-thread requests are unaffected.
+Cross-thread requests have a configurable timeout (default: 20 seconds). If the provider thread is unresponsive, `request()` returns `err` instead of hanging. Same-thread requests are unaffected.
 
 ```nim
 Weather.setRequestTimeout(chronos.seconds(2))  # shorten timeout
 echo Weather.requestTimeout()                   # 2 seconds
 ```
+
+**Clearing a provider:** `clearProvider` resolves any request still in flight
+straight away, with `err("… provider was cleared while the request was
+outstanding")`, rather than leaving it to time out. Requests whose response is
+already being written complete normally.
+
+**Cancelling a cross-thread request:**
+
+Plain `request` / `blockingRequest` are **not cancellable**: they hand back no
+id, and cancelling their future does nothing useful — the waiter behind it is
+`{.async: (raises: []).}`, so `fut.cancelSoon()`, or a combinator that cancels
+its losers (`withTimeout`, `one`, `race`), drives an unhandled `CancelledError`
+rather than stopping the request. Such a request ends only when the provider
+answers or the timeout fires. Use `requestCancellable` from the start if
+cancellation or combinator use is in prospect; it is otherwise identical and
+costs one extra future per call.
+
+`requestCancellable` returns an opaque request id alongside the response
+future. Any thread may pass that id to `cancel`:
+
+```nim
+let (id, fut) = Weather.requestCancellable("Berlin")
+# ... on this or any other thread:
+if Weather.cancel(id):
+  echo "cancellation published"
+let res = await fut        # err("RequestBroker(Weather): request cancelled")
+```
+
+The id is a plain `distinct uint64` (`slotIdx shl 32 or generation`) — there is
+nothing to allocate or free, and it is produced synchronously, before the call
+can suspend, so a cancel can never arrive "too early". `cancel` returns:
+
+| Result | Meaning |
+|---|---|
+| `true` | Cancellation published. A request still queued is dropped without ever reaching the provider; a request already running has its provider future cancelled at its next `await`. The caller's future resolves with `err(... request cancelled)`. |
+| `false` | Nothing to cancel — the provider was already writing the response (the request completes normally), or the id is stale because that request finished and its slot has since been recycled. |
+
+`false` is **not an error** — it just means there was nothing left to cancel,
+so `discard Weather.cancel(id)` is a legitimate call.
+
+The future may also be cancelled directly, **on the requester's own thread**:
+it owns its cancel schedule and its cancel callback routes into the same path
+as `cancel(id)`, so `fut.cancelSoon()` — and combinators that cancel their
+losers, such as `withTimeout` / `one` / `race` — cancel the request and resolve
+the future with `err(… request cancelled)`. The id stays the primary door
+because chronos futures are thread-affine (`cancelSoon` is same-thread only)
+and it reports whether the cancellation landed. The future from plain
+`request()` is not cancellable this way.
+
+Cancellation is cooperative on the provider side: a provider with no `await`
+points, or one that swallows `CancelledError`, runs to completion. The
+requester resolves either way.
+
+Two limits in this first cut:
+
+- **Same-thread requests are not cancellable** — they call the provider
+  directly, with no queue and no response slot. `requestCancellable` returns id
+  `0` (`isCancellable(id) == false`) and behaves exactly like `request`.
+- **Blocking callers** use `blockingRequestCancellable(args, idOut)`; since such
+  a caller is blocked and cannot publish its own id, `idOut` must point at
+  storage another thread can read.
+
+Timeouts now use the same machinery, which changes one behaviour: a request
+that times out (or is cancelled) while still queued is **dropped at the
+provider instead of being executed**. Previously the provider ran it and the
+answer was discarded.
 
 **Performance considerations:**
 
@@ -709,7 +775,17 @@ RequestBroker(mt, queueDepth = 16, responseSlots = 8,
               maxResponseBytes = 512):
   type LedState = object
   proc query*(id: uint8): Future[Result[LedState, string]] {.async.}
+
+# A tighter request deadline than the 20 s default, set at declaration:
+RequestBroker(mt, responseSlots = 64, requestTimeoutMs = 2000):
+  type Reading = object
+    value*: float64
+  proc read*(sensor: string): Future[Result[Reading, string]] {.async.}
 ```
+
+`requestTimeoutMs` is the one knob that is not baked in: it seeds the runtime
+variable behind `setRequestTimeout` / `requestTimeout`, so it is a default
+rather than a limit, and presets leave it untouched.
 
 Every MT broker callsite emits a compile-time `hint` line showing the
 resolved capacity values, their origin (`default` / `kwarg` /

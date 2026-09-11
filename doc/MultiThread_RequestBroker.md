@@ -29,10 +29,13 @@ This generates:
 | `Weather.setProvider(ctx, handler)` | Register a provider on the current thread (keyed context) |
 | `Weather.request(city)` | Issue a request (default context) |
 | `Weather.request(ctx, city)` | Issue a request (keyed context) |
-| `Weather.clearProvider()` | Unregister provider + send shutdown to dispatch poller (default context) |
-| `Weather.clearProvider(ctx)` | Unregister provider + send shutdown to dispatch poller (keyed context) |
-| `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 5 seconds) |
+| `Weather.clearProvider()` | Unregister provider, fail its outstanding requests, shut down the dispatch poller (default context) |
+| `Weather.clearProvider(ctx)` | Same, for a keyed context |
+| `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 20 seconds) |
 | `Weather.requestTimeout()` | Get current cross-thread request timeout |
+| `Weather.requestCancellable([ctx,] city)` | Issue a request, returning `(id, future)` — the id is cancellable from any thread |
+| `Weather.blockingRequestCancellable([ctx,] city, idOut)` | Blocking variant; publishes the id through `idOut` before it blocks |
+| `Weather.cancel([ctx,] id)` | Cancel an outstanding cross-thread request |
 
 ---
 
@@ -196,13 +199,36 @@ let res = blockingAwait MyType.request("hello")
 
 Do **not** use chronos's `await` outside of `{.async.}` procs.
 
-### 5. `clearProvider` must be called from the provider thread
+### 5. `clearProvider` fails outstanding requests immediately
+
+Clearing a provider does not leave requests already in flight to time out. Any
+request still waiting for an answer is resolved at once with
+
+```
+RequestBroker(Weather): provider was cleared while the request was outstanding
+```
+
+That is a correctness requirement, not a convenience: the response slot pool
+belongs to the provider's bucket and is freed when the provider thread exits,
+while a waiting requester's response poller is still reading it. Before this,
+an outstanding requester kept polling that pool for up to its full timeout —
+20 s by default — and dereferenced freed memory if the provider thread went
+away first (reproducible as a plain SIGSEGV, not merely an ASAN report).
+
+Mechanically, `clearProvider` flips every slot still awaiting an answer to
+`ProviderGone` under the same lock that removes the bucket, then fires each
+waiting requester's signal. `ProviderGone` is the mirror of `Abandoned`: since
+no provider remains to hand the slot back, the **requester** releases it.
+Slots already being written or already published are left alone — those
+requests complete normally.
+
+### 6. `clearProvider` must be called from the provider thread
 
 `clearProvider` cleans threadvar entries, which are only accessible from the
 thread that created them. Always call `clearProvider` from the same thread
 that called `setProvider`.
 
-### 6. ORC and refc compatibility
+### 7. ORC and refc compatibility
 
 The broker works with both `--mm:orc` and `--mm:refc`. The global registry
 uses `createShared` / `deallocShared` for raw memory (no GC involvement).
@@ -225,16 +251,26 @@ thread; if that thread is gone, freeing from another thread would
 violate macOS+ORC's TLV-allocator hazard documented in
 `design/LESSONS_LEARNED.md` §1.2. No OS resources held; no hang.
 
-### 7. Cross-thread request timeout
+### 8. Cross-thread request timeout
 
-Cross-thread requests have a configurable timeout (default: **5 seconds**). If the
+The timeout can also be seeded at declaration, alongside the capacity kwargs:
+
+```nim
+RequestBroker(mt, responseSlots = 64, requestTimeoutMs = 2000):
+  ...
+```
+
+`requestTimeoutMs` only sets the initial value of the same runtime variable, so
+`setRequestTimeout` still overrides it at any point. Presets do not touch it.
+
+Cross-thread requests have a configurable timeout (default: **20 seconds**). If the
 provider thread does not respond within the timeout, `request()` returns an error
 result instead of hanging indefinitely. This protects against blocked or
 unresponsive provider threads.
 
 ```nim
 # Check current timeout
-echo Weather.requestTimeout()          # 5 seconds (default)
+echo Weather.requestTimeout()          # 20 seconds (default)
 
 # Set a shorter timeout
 Weather.setRequestTimeout(chronos.seconds(2))
@@ -251,17 +287,147 @@ if res.isErr() and "timed out" in res.error():
   the provider directly and are not affected by the timeout setting.
 - The timeout variable is per-type, module-level — it is shared across all threads
   and all `BrokerContext` instances for that broker type.
-- When a timeout occurs, the requester calls `pool.abandon(slotIdx)` —
-  CAS `Empty → Abandoned` on the response slot's state. If the abandon
-  succeeds, the provider's eventual `beginWrite` CAS will fail (state is
-  Abandoned, not Empty); the provider releases the slot back to the
-  pool without writing. If the abandon CAS fails (provider already in
-  `Writing` or `Ready` state), the requester's response poller may still
-  process the late response normally — but its future has been
-  cancelled, so it just decRefs the slot and discards. Either way the
-  slot returns to the pool cleanly; no leak per timed-out request.
+- When a timeout occurs, the requester calls `pool.abandonIfGen(slotIdx, gen)` —
+  CAS `(gen, Empty) → (gen, Abandoned)` on the response slot's control word.
+  The CAS result decides who still owes the release, and the requester's
+  response poller follows that decision:
 
-### 8. Compile with `--threads:on`
+  | Abandon CAS | Provider state | Who releases the slot | Requester's poller |
+  |---|---|---|---|
+  | slot was `Empty` | provider had not started writing | provider — its `beginWrite` returns `Abandoned` and it releases without writing | retires immediately |
+  | slot was `Writing` | provider is mid-write | provider — the requester marks `AbandonedWriting`, so the provider's `commitWrite` CAS fails and it releases instead of publishing | retires immediately |
+  | slot was `Ready` | provider already published | requester, on the spot | retires immediately |
+
+  Ownership is therefore decided synchronously, at the moment of giving up —
+  nothing ever waits on the provider to find out whose job the release is. An
+  earlier design had the requester linger for a bounded window when it caught
+  the provider mid-write, which both blocked the caller past its own deadline
+  and leaked the slot outright whenever the provider committed after that
+  window expired.
+
+  Either way the slot returns to the pool exactly once. The retirement half
+  matters as much as the release: a poller left registered after the slot went
+  back to the free list can act on a *recycled* slot (stealing another
+  request's response, or releasing a slot twice), and can outlive the pool
+  itself once the provider thread tears its bucket down. The response slot's
+  generation counter — bumped on every `claim` and carried in the request
+  message — is the backstop: a late actor holding a stale `(idx, gen)` pair
+  fails its CAS instead of acting on someone else's slot.
+
+- **An abandoned slot stays claimed until the provider releases it.** Giving up
+  settles *who* releases, not *when*: if the provider had not published yet, the
+  slot only returns to the pool when that provider finally reaches its reply. So
+  a timeout much shorter than the provider's service time keeps roughly one slot
+  per outstanding-but-abandoned request tied up, and a small `responseSlots`
+  pool can transiently answer `err(… response slot pool exhausted)` even with a
+  single sequential caller. That is back-pressure, not a leak — size
+  `responseSlots` for in-flight *plus* recently-abandoned requests when the
+  timeout is tight.
+
+- The blocking path (`blockingRequest`) applies the same rule: if its abandon
+  it settles ownership the same way and returns immediately, without waiting on
+  the provider.
+
+### 9. Cancelling a cross-thread request
+
+**`request` is not cancellable — `requestCancellable` is.** The future returned
+by plain `request` (and `blockingRequest`) offers no way to stop the work: it
+carries no id, and cancelling the future itself does nothing useful — the
+waiter behind it is `{.async: (raises: []).}`, for which chronos emits no
+`CancelledError` branch, so `cancelSoon` on it, or handing it to a combinator
+that cancels its losers (`withTimeout`, `one`, `race`), drives an unhandled
+`CancelledError` instead of stopping the request. Such a request ends only when
+the provider answers or the timeout fires. If cancellation or combinator use is
+in prospect, issue the request through `requestCancellable` from the start —
+the two are otherwise identical, and the cancellable form costs one extra
+future per call.
+
+`requestCancellable` returns an opaque id next to the response future; `cancel`
+takes that id from any thread.
+
+```nim
+let (id, fut) = Weather.requestCancellable("Berlin")
+...
+discard Weather.cancel(id)
+let res = await fut     # err("RequestBroker(Weather): request cancelled")
+```
+
+The id is `distinct uint64` = `(slotIdx shl 32) or generation`. It is a value,
+not a pointer: nothing is allocated, nothing has to be freed, and an id whose
+slot has since been recycled fails the generation check and cancels nothing.
+It is produced by a **synchronous prologue** — claim slot, marshal, enqueue,
+signal — so by the time the caller holds the id the request is already armed
+and a cancel cannot race ahead of arming.
+
+What happens depends on where the request is when the cancel lands:
+
+| Request state | Effect |
+|---|---|
+| still in the ring | tombstoned: the poll fn sees the abandoned slot, releases it and never invokes the provider. A Vyukov MPSC ring cannot remove an element, so cancellation marks the slot rather than the queue entry |
+| running in the provider | the provider future is `cancelSoon`-ed, so it raises `CancelledError` at its next `await` |
+| response already being written | `cancel` returns `false`; the request completes normally |
+
+`cancel` performs its CAS while holding the bucket lock. `clearProvider`
+removes the bucket under that same lock *before* closing the ring, and the pool
+is only queued for free once the provider's poll fn observes the closed ring —
+so a bucket found under the lock cannot have had its pool freed, and a bucket
+that is gone means `cancel` returns `false` without dereferencing anything.
+
+Provider-side scanning is epoch-gated: abandoning a slot bumps the pool's
+`cancelEpoch`, and the provider's poll fn compares it against its last-seen
+value, so the hot path costs one relaxed load and the in-flight scan runs only
+after a real cancel.
+
+`cancel` returning `false` is **not an error**. It reports that there was
+nothing left to cancel: either the provider had already begun writing the
+response (the request completes normally, with its real result), or the id is
+stale — that request finished and its slot has since been recycled, so the
+generation CAS matched nothing. Neither case needs handling beyond ignoring
+the return value; `discard Weather.cancel(id)` is a legitimate call.
+
+**Cancelling the future works too — on the requester's own thread.** The
+future returned by `requestCancellable` owns its cancel schedule
+(`FutureFlag.OwnCancelSchedule`) and its `cancelCallback` routes into the same
+path as `cancel(id)`. So `respFut.cancelSoon()` cancels the request, and the
+future resolves with `err(… request cancelled)` rather than raising
+`CancelledError` inside a `raises: []` waiter that has no handler for it.
+
+That also makes the future safe to hand to chronos combinators that cancel
+their losers:
+
+```nim
+discard await withTimeout(fut, 500.milliseconds)   # cancels the request on expiry
+let res = await fut                                # err(… request cancelled)
+```
+
+(`withTimeout` reports `true` here: the cancellation *finishes* the future
+rather than leaving it pending, so read the outcome from the `Result`, not from
+`withTimeout`'s return value.)
+
+The callback captures the broker context and the id as **values**, never the
+pool pointer, and goes through the same lock-covered lookup as `cancel(id)` —
+a deferred callback dereferencing a captured pool would reintroduce the
+use-after-free that the slot protocol above closes.
+
+Two things the future form cannot do, which is why the id remains the primary
+door: chronos futures are thread-affine, so `cancelSoon` only works on the
+requester's own thread, and it returns nothing — `cancel(id)` is callable from
+any thread and tells you whether the cancellation landed. The future returned
+by plain `request()` is **not** cancellable this way; use `requestCancellable`
+if you need it.
+
+Cancellation is **cooperative**: a provider with no `await` points, or one that
+swallows `CancelledError`, runs to completion. The requester resolves either
+way.
+
+Limits: same-thread requests are not cancellable (no queue, no slot — id `0`),
+and a blocking caller must use `blockingRequestCancellable(..., idOut)` since it
+cannot publish its own id while blocked.
+
+Timeouts share this machinery, which changes one behaviour: a request that
+times out while still queued is now **dropped instead of executed**.
+
+### 10. Compile with `--threads:on`
 
 Multi-thread mode requires the Nim compiler flag `--threads:on`.
 
@@ -312,7 +478,7 @@ sequenceDiagram
 
   RT ->> RT: waitFor withTimeout responseFut timeout
     activate RT
-  Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout default 5s
+  Note left of RT: BLOCKS<br/>spins chronos event loop<br/>until response or timeout default 20s
 
   H -->> DL: Result T string
     deactivate H
@@ -337,7 +503,7 @@ sequenceDiagram
 | `slab.claim(cell)` + `pool.claim(slot)` | Requester | Near-instant | Atomic free-list pop; fails only on exhaustion (back-pressure) |
 | `marshalReqMsg(...) + ring.tryEnqueue` | Requester | Near-instant | Memcpy/marshal + atomic CAS into ring slot; fails on ring full (back-pressure) |
 | `fireBrokerSignal(providerSignal)` | Requester | Near-instant | Fires OS fd |
-| `waitFor withTimeout(responseFut, timeout)` | Requester | **Blocks** | Until provider responds or timeout (default 5s) |
+| `waitFor withTimeout(responseFut, timeout)` | Requester | **Blocks** | Until provider responds or timeout (default 20s) |
 | `ring.tryDequeue` | Provider | Non-blocking | Returns false if empty; called from dispatchLoop |
 | `asyncSpawn handleMsg(...)` | Provider | Non-blocking | Dispatched on provider's event loop |
 | `pool.beginWrite + marshal + commitWrite` | Provider | Near-instant | Atomic CAS + memcpy + atomic release-store on state |

@@ -43,6 +43,12 @@ type
     responseSlots*: int
     maxResponseBytes*: int
     freeListShards*: int
+    requestTimeoutMs*: int
+      ## Initial value of the per-type cross-thread request timeout. Unlike the
+      ## capacity knobs this one is not baked in: it only seeds the runtime
+      ## `var` that `setRequestTimeout` mutates, so it is a *default*, not a
+      ## limit. Presets leave it alone — it is a latency policy, not a memory
+      ## profile.
     queueDepthOrigin*: string
     slabCapacityOrigin*: string
     maxPayloadBytesOrigin*: string
@@ -50,6 +56,7 @@ type
     responseSlotsOrigin*: string
     maxResponseBytesOrigin*: string
     freeListShardsOrigin*: string
+    requestTimeoutMsOrigin*: string
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -72,6 +79,7 @@ const
   DefaultMtReqResponseSlots* = 256
   DefaultMtReqMaxResponseBytes* = 64 * 1024
   DefaultMtReqFreeListShards* = 2
+  DefaultMtReqTimeoutMs* = 20_000
 
 # ---------------------------------------------------------------------------
 # Built-in presets
@@ -194,6 +202,7 @@ proc defaultMtReqCfg*(): MtReqCfg =
     responseSlots: DefaultMtReqResponseSlots,
     maxResponseBytes: DefaultMtReqMaxResponseBytes,
     freeListShards: DefaultMtReqFreeListShards,
+    requestTimeoutMs: DefaultMtReqTimeoutMs,
     queueDepthOrigin: "default",
     slabCapacityOrigin: "default",
     maxPayloadBytesOrigin: "default",
@@ -201,6 +210,7 @@ proc defaultMtReqCfg*(): MtReqCfg =
     responseSlotsOrigin: "default",
     maxResponseBytesOrigin: "default",
     freeListShardsOrigin: "default",
+    requestTimeoutMsOrigin: "default",
   )
 
 # ---------------------------------------------------------------------------
@@ -317,7 +327,7 @@ proc parseMtEvtKwargs*(kwargs: openArray[NimNode]): MtEvtCfg =
 
 const ValidReqKwargs = [
   "queueDepth", "slabCapacity", "maxPayloadBytes", "maxDynamicPayloadBytes",
-  "responseSlots", "maxResponseBytes", "freeListShards",
+  "responseSlots", "maxResponseBytes", "freeListShards", "requestTimeoutMs",
 ]
 
 proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
@@ -368,6 +378,12 @@ proc applyReqKwarg(cfg: var MtReqCfg, kw: string, n: NimNode) =
       error("RequestBroker kwarg 'freeListShards' must be in 1..64, got " & $v, n)
     cfg.freeListShards = v
     cfg.freeListShardsOrigin = "kwarg"
+  of "requestTimeoutMs":
+    let v = intValOrFail(n, kw)
+    if v <= 0:
+      error("RequestBroker kwarg 'requestTimeoutMs' must be > 0, got " & $v, n)
+    cfg.requestTimeoutMs = v
+    cfg.requestTimeoutMsOrigin = "kwarg"
   else:
     error(
       "Unknown RequestBroker(mt) kwarg '" & kw & "'. Valid: " & ValidReqKwargs.join(
@@ -546,7 +562,8 @@ proc fmtReqCfgSummary*(typeName: string, cfg: MtReqCfg): string =
     cfg.maxPayloadBytesOrigin & "], responseSlots=" & $cfg.responseSlots & " [" &
     cfg.responseSlotsOrigin & "], maxResponseBytes=" & $cfg.maxResponseBytes & " [" &
     cfg.maxResponseBytesOrigin & "], freeListShards=" & $cfg.freeListShards & " [" &
-    cfg.freeListShardsOrigin & "] — idle RAM: ring≈" & fmtBytes(est.ring) &
+    cfg.freeListShardsOrigin & "], requestTimeoutMs=" & $cfg.requestTimeoutMs & " [" &
+    cfg.requestTimeoutMsOrigin & "] — idle RAM: ring≈" & fmtBytes(est.ring) &
     ", slab≈" & fmtBytes(est.slab) & ", respPool≈" & fmtBytes(est.respPool) &
     ", total≈" & fmtBytes(est.total)
 
