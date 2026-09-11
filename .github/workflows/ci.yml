@@ -23,7 +23,7 @@ jobs:
   # (GitHub forbids that field on `uses:` reusable-workflow jobs).
   #
   # Nim 2.0.x is unsupported (refc + foreign-thread regression on macOS;
-  # see README). 2.2.4 and 2.2.10 both gate PRs; devel is per-matrix-entry
+  # see README). 2.2.4 and 2.2.12 both gate PRs; devel is per-matrix-entry
   # continue-on-error so upstream regressions don't block merges.
   #
   # Linux gcc-14 and other architectures (raspberry-pi / android) are
@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        nim: ["2.2.4", "2.2.10", "devel"]
+        nim: ["2.2.4", "2.2.12", "devel"]
         platform:
           - { id: linux-amd64,  runs-on: ubuntu-latest }
           - { id: win-amd64,    runs-on: windows-latest }
@@ -114,7 +114,7 @@ jobs:
   examples:
     runs-on: ubuntu-latest
     env:
-      NIM_VERSION: '2.2.10'
+      NIM_VERSION: '2.2.12'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
