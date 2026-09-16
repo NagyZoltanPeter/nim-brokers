@@ -485,11 +485,13 @@ proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
   ## `_shutdown`, so without this every context lifecycle leaks 2 handles
   ## regardless of --mm:refc vs --mm:orc.
   ##
-  ## Call as the LAST action of a broker thread proc, AFTER
-  ## `stopBrokerDispatchHere()` has closed the per-thread `ThreadSignalPtr`
-  ## and the dispatch loop has exited; at that point the dispatcher holds no
-  ## live registered handles, so closing it only reclaims the dispatcher
-  ## handle itself.
+  ## Call only on a thread you created, as the LAST action of its thread
+  ## proc, AFTER `teardownBrokerThread()` has stopped the dispatch loop and
+  ## closed the per-thread signal; at that point the dispatcher holds no live
+  ## registered handles, so closing it only reclaims the dispatcher handle
+  ## itself. Never call it on a thread owned by someone else (an FFI
+  ## library's worker, a host thread, the main thread): chronos keeps the
+  ## closed handle as the thread's dispatcher, so the owner's next poll fails.
   {.cast(gcsafe).}:
     let disp = getThreadDispatcher()
     if disp.isNil:
@@ -512,8 +514,12 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
   ##      callback would otherwise dereference this thread's freed refc heap.
   ##   2. drainPendingRingFrees() — releases (ring, slab, pool) triples of
   ##      brokers cleared on this thread, after the 50 ms sender grace window.
-  ##   3. closeThreadDispatcherSelector() — reclaims the chronos dispatcher
-  ##      OS handle. The thread must not run chronos again afterwards.
+  ##
+  ## It leaves the thread's chronos dispatcher open: the thread may belong to
+  ## someone else who still drives it, e.g. code after an explicit call or a
+  ## destruction hook that runs after this one. A thread's creator reclaims
+  ## the handle with `closeThreadDispatcherSelector()`, as the api_library
+  ## processing/delivery threads do.
   ##
   ## Runs automatically for Nim-created threads via the onThreadDestruction
   ## hook registered by ensureBrokerDispatchStarted (before refc's
@@ -536,4 +542,3 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
     gBrokerThreadSignal = nil
     closeBrokerSignalShared(sig)
   drainPendingRingFrees()
-  closeThreadDispatcherSelector()

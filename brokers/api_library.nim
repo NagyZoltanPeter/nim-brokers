@@ -1296,10 +1296,12 @@ proc registerBrokerLibraryCborImpl(
         # eventCourierPoll and returns before the loop exits. Buffers
         # still queued in the courier ring at this point are freed by
         # `drainAndFree(arg.eventCourier)` in `_shutdown`.
-        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees
-        # + closeThreadDispatcherSelector, latched so the automatic
-        # onThreadDestruction hook does not run it a second time.
+        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees,
+        # latched so the automatic onThreadDestruction hook does not run it a
+        # second time. This thread is ours, so its dispatcher handle is ours to
+        # close too.
         teardownBrokerThread()
+        closeThreadDispatcherSelector()
 
   )
 
@@ -1576,10 +1578,12 @@ proc registerBrokerLibraryCborImpl(
         # thread exits. `_shutdown` waits for `courier.inFlight` to reach 0
         # (while this thread is still handling) before it sets
         # `shutdownFlag`, so no courier message is in flight here.
-        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees
-        # + closeThreadDispatcherSelector, latched so the automatic
-        # onThreadDestruction hook does not run it a second time.
+        # teardownBrokerThread = stopBrokerDispatchHere + drainPendingRingFrees,
+        # latched so the automatic onThreadDestruction hook does not run it a
+        # second time. This thread is ours, so its dispatcher handle is ours to
+        # close too.
         teardownBrokerThread()
+        closeThreadDispatcherSelector()
 
   )
 

@@ -128,8 +128,11 @@ versions only by single-shot CI sampling:
   unmapped. Identical semantics under refc and orc, all platforms.
 - `teardownBrokerThread()` (in `brokers/internal/mt_broker_common.nim`)
   runs stop-dispatch-loop → close signal wrapper →
-  `drainPendingRingFrees` → close chronos dispatcher handle, **before**
-  the thread's refc heap dies. It is registered automatically via
+  `drainPendingRingFrees`, **before** the thread's refc heap dies. It
+  leaves the thread's chronos dispatcher open, since the thread may belong
+  to someone else who still drives it; `closeThreadDispatcherSelector()`
+  reclaims that handle, and only a thread's creator calls it (the
+  `api_library` processing/delivery threads do). It is registered automatically via
   `onThreadDestruction` for Nim-created threads; **foreign/FFI threads
   and the main thread must call it explicitly** (Nim's destruction
   handlers never run for them).
