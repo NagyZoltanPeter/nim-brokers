@@ -495,9 +495,48 @@ proc registerBrokerLibraryCborImpl(
   # resetting before reading would leave us with an empty list. A future
   # multi-library-per-compilation scenario would need a different pattern
   # (e.g., snapshot a length and slice from there next time).
-  let entries = gApiCborRequestEntries
+  let allRequestEntries = gApiCborRequestEntries
   let eventEntries = gApiCborEventEntries
   let signalEntries = gApiCborSignalEntries
+
+  # ------------------------------------------------------------------
+  # Issue #49 — the teardown hook belongs to the library AUTHOR, not to the
+  # library's users. `<lib>_shutdown` invokes it as part of its own sequence, so
+  # publishing the same provider as an ordinary request would only let a foreign
+  # caller tear application state down mid-life and then keep using the library.
+  # Drop it from the public surface here: the dispatch table, the known-name
+  # predicate, `_listApis` / `_getSchema`, the CDDL, and every generated wrapper
+  # are all derived from `entries`, so one filter covers all of them. The
+  # adapter proc itself is still emitted (the per-broker macro ran before this
+  # one and cannot know the library config); it simply becomes unreachable.
+  #
+  # With `invokeShutdownRequest: false` nothing auto-invokes the provider, so the
+  # request stays public — an explicit `_call` is then the only way to reach it.
+  # ------------------------------------------------------------------
+  let shutdownTagName = sanitizeIdentName(shutdownReqIdent)
+  var entries: seq[CborRequestEntry] = @[]
+  if config.invokeShutdownRequest:
+    for e in allRequestEntries:
+      if e.responseTypeName == shutdownTagName:
+        if e.argFields.len > 0:
+          # An argument-based slot can never be auto-invoked — `_shutdown` has no
+          # payload to supply — so it would be a second, publicly callable
+          # teardown entry point. It also silently renames the zero-arg slot's
+          # wire name (`shutdown_request` becomes `shutdown_request_zero`),
+          # breaking callers of the original name.
+          error(
+            "registerBrokerLibrary: shutdownRequest type '" & shutdownTagName &
+              "' declares an argument-based signature (apiName '" & e.apiName &
+              "'). The teardown hook is invoked by `" & shutdownFuncName &
+              "` through its zero-argument signature and is not part of the " &
+              "public API surface, so an argument-based slot can never run. " &
+              "Remove it, or set `invokeShutdownRequest: false` to keep this " &
+              "broker as an ordinary request."
+          )
+        continue
+      entries.add(e)
+  else:
+    entries = allRequestEntries
 
   # The dispatch proc is async and returns just `seq[byte]`. To signal
   # "unknown apiName" without raising or capturing a `var bool`, the
@@ -2121,6 +2160,15 @@ proc registerBrokerLibraryCborImpl(
           if not reqBuf.isNil:
             deallocShared(reqBuf)
           return -2'i32
+        # Reserved control names (`__shutdown_request`, `__release_instance`) are
+        # internal: `_shutdown` and `_releaseInstance` enqueue them onto the
+        # courier themselves and never come through here. Refuse them from the
+        # foreign surface so neither teardown path can be triggered out of band
+        # (issue #49).
+        if nameLen >= 2 and apiNameC[0] == '_' and apiNameC[1] == '_':
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return ApiStatusUnknownApi
 
         # Resolve ctx -> courier. `inFlight` is bumped under the SAME lock
         # `_shutdown` uses to flip `active`, so once shutdown has run no
@@ -2259,6 +2307,11 @@ proc registerBrokerLibraryCborImpl(
           if not reqBuf.isNil:
             deallocShared(reqBuf)
           return -2'i32
+        # Reserved control names are internal — see `_call`.
+        if nameLen >= 2 and apiNameC[0] == '_' and apiNameC[1] == '_':
+          if not reqBuf.isNil:
+            deallocShared(reqBuf)
+          return ApiStatusUnknownApi
 
         # Resolve ctx -> courier, same routing + `inFlight` gate as `_call`.
         let libCtxKey = ctx and 0x0000FFFF'u32

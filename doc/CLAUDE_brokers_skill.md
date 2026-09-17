@@ -462,8 +462,9 @@ registerBrokerLibrary:
   name: "mylib"                  # MUST match --nimMainPrefix and the .so basename
   version: "1.0.0"              # baked into <lib>_version() static string
   initializeRequest: InitializeRequest   # post-create config broker (optional)
-  shutdownRequest: ShutdownRequest        # teardown broker; <lib>_shutdown() invokes
-                                          # its zero-arg provider (issue #49)
+  shutdownRequest: ShutdownRequest        # author-only teardown hook; <lib>_shutdown()
+                                          # invokes its (single, zero-arg) provider and
+                                          # it is NOT published as a request (issue #49)
 {.pop.}
 ```
 

@@ -96,12 +96,14 @@ suite "CBOR FFI discovery API":
     let info = parseJson(jsonStr)
     check info["libName"].getStr() == "cbdisc"
     let reqs = info["requests"]
-    check reqs.len == 3
+    # Issue #49: the teardown hook is author-only. `<lib>_shutdown` invokes it,
+    # so it is no longer published as a request — hence 2, not 3.
+    check reqs.len == 2
     var reqNames: seq[string]
     for r in reqs:
       reqNames.add(r.getStr())
     check "initialize_request" in reqNames
-    check "shutdown_request" in reqNames
+    check "shutdown_request" notin reqNames
     check "echo" in reqNames
     let evts = info["events"]
     check evts.len == 1
@@ -119,7 +121,13 @@ suite "CBOR FFI discovery API":
     check info["cddl"].getStr().len > 0
     check "Echo = {" in info["cddl"].getStr()
     check "Heartbeat = {" in info["cddl"].getStr()
-    check info["requests"].len == 3
+    # Issue #49: the author-only teardown hook is not published, so the schema
+    # carries `initialize_request` and `echo` only.
+    check info["requests"].len == 2
+    var schemaReqNames: seq[string]
+    for r in info["requests"]:
+      schemaReqNames.add(r["apiName"].getStr())
+    check "shutdown_request" notin schemaReqNames
     check info["events"].len == 1
 
     var seenEcho = false

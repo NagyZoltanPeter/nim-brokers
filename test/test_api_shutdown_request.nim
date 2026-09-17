@@ -19,6 +19,7 @@ import std/[atomics, monotimes, os]
 # Selective: a plain `import std/times` would shadow chronos's `milliseconds`
 # for the whole module, including the code `registerBrokerLibrary` generates here.
 from std/times import inMilliseconds
+from std/strutils import contains
 import results
 import testutils/unittests
 import brokers/[event_broker, request_broker, broker_context, api_library]
@@ -145,13 +146,10 @@ proc onFarewell(
   if not userData.isNil:
     discard cast[ptr Atomic[int]](userData)[].fetchAdd(1, moRelease)
 
-proc callShutdownRequest(ctx: uint32): int32 =
-  ## Drive the teardown provider through the ordinary dispatch surface — the
-  ## only way to reach it before this fix.
+proc rawCall(ctx: uint32, apiName: string): int32 =
   var respBuf: pointer = nil
   var respLen: int32 = 0
-  result =
-    sdreq_call(ctx, "shutdown_request".cstring, nil, 0'i32, addr respBuf, addr respLen)
+  result = sdreq_call(ctx, apiName.cstring, nil, 0'i32, addr respBuf, addr respLen)
   if not respBuf.isNil:
     sdreq_freeBuffer(respBuf)
 
@@ -250,20 +248,36 @@ suite "API shutdown request invocation (issue #49)":
     # the provider's 5 s sleep, which is what an unbounded wait would cost.
     check took < 3000
 
-  test "an explicit shutdown_request call plus _shutdown runs it twice":
+  test "the teardown hook is not reachable from the foreign surface":
     setMode(smOk)
     var err: cstring = nil
     let ctx = sdreq_createContext(addr err)
     check ctx != 0'u32
 
-    check callShutdownRequest(ctx) == 0'i32
+    # The hook belongs to the library author: `_shutdown` runs it, and it is not
+    # published as a request. Neither its wire name nor the reserved control name
+    # can be called out of band, so no foreign caller can tear application state
+    # down mid-life and keep using the library.
+    check rawCall(ctx, "shutdown_request") == ApiStatusUnknownApi
+    check rawCall(ctx, "__shutdown_request") == ApiStatusUnknownApi
+    check rawCall(ctx, "__release_instance") == ApiStatusUnknownApi
+    check gShutCalls.load(moAcquire) == 0
+
+    # `_shutdown` is the one path, and it runs the provider exactly once.
+    check sdreq_shutdown(ctx) == 0'i32
     check gShutCalls.load(moAcquire) == 1
 
-    # Auto-invocation is unconditional; a library that drives teardown itself
-    # either makes its provider idempotent or opts out with
-    # `invokeShutdownRequest: false` (see test_api_shutdown_request_optout).
-    check sdreq_shutdown(ctx) == 0'i32
-    check gShutCalls.load(moAcquire) == 2
+  test "the teardown hook is absent from discovery":
+    var buf: pointer = nil
+    var blen: int32 = 0
+    check sdreq_listApis(addr buf, addr blen) == 0'i32
+    var listed = newString(blen.int)
+    if blen > 0:
+      copyMem(addr listed[0], buf, blen.int)
+    sdreq_freeBuffer(buf)
+    check listed.len > 0
+    check "initialize_request" in listed
+    check "shutdown_request" notin listed
 
   test "an unregistered provider does not break teardown":
     setMode(smOk)

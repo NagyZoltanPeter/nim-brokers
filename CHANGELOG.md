@@ -22,23 +22,38 @@ All notable changes to **nim-brokers** are documented here. The project follows
   teardown; `<lib>_shutdown` still returns `0`. The timeout is enforced on the
   processing thread (racing a chronos timer) because the `_shutdown` side waits
   on an unbounded condition variable, so a hung provider cannot stall teardown.
-- Only the **zero-argument** signature is auto-invocable. A `shutdownRequest`
-  declared with only an arg-based signature is now a compile error naming the fix
-  (guarded by `test/reject/reject_shutdownreq_noargless.nim`).
+- **Breaking: the teardown hook is no longer part of the public API surface.** It
+  exists to give the library author a place to tidy up when a context goes down;
+  publishing the same provider as an ordinary request only let a foreign caller
+  tear application state down mid-life and keep using the library. It is now
+  absent from the dispatch table, `_listApis`, `_getSchema`, the CDDL, and the
+  C++ / Python / Rust / Go wrappers (no `lib.shutdownRequest()` method), and both
+  `_call` and `_callAsync` answer `-4` for `shutdown_request` as well as for any
+  reserved `__`-prefixed control name. The payload type is still emitted in the
+  shared-types section. Migration: call `<lib>_shutdown(ctx)`, which runs the
+  hook and the transport teardown together; or set
+  `invokeShutdownRequest: false` to keep the old published request.
+- The declaration must now carry **exactly one zero-argument signature**.
+  Arg-only and dual-slot (zero-arg + arg) are compile errors, guarded by
+  `test/reject/reject_shutdownreq_{noargless,dualslot}.nim`. A dual-slot
+  declaration was doubly wrong: the arg slot could never be auto-invoked, and its
+  presence silently renamed the zero-arg slot's wire name from
+  `shutdown_request` to `shutdown_request_zero`.
 - New config keys: `invokeShutdownRequest` (default `true`) and
-  `shutdownRequestTimeoutMs` (default `5000`, `0` = infinite). Libraries that
-  already drive teardown through an explicit `_call` should either make the
-  provider idempotent or set `invokeShutdownRequest: false` — otherwise it now
-  runs twice.
-- `initializeRequest` is unchanged and still not auto-invoked: `_createContext`
-  has no payload parameter, so symmetry would need an ABI change.
+  `shutdownRequestTimeoutMs` (default `5000`, `0` = infinite). Setting the first
+  to `false` reverts to the historical behaviour in full: no auto-invocation, and
+  the broker stays a published request.
+- `initializeRequest` is unchanged and stays fully public: `_createContext` has
+  no payload parameter, initialization normally needs arguments, and skipping it
+  fails loudly, so the consumer still calls `initialize_request` explicitly.
 - Internal: the ctx registry gained a `dispatchLive` flag. The emit-side courier
   lookup keys on it instead of `active`, separating "no new foreign calls"
   (cleared first in `_shutdown`) from "the library's own threads are alive"
   (cleared after both joins) — without it, an event emitted by the teardown
   provider found no courier and was dropped.
-- New tests: `test_api_shutdown_request`, `test_api_shutdown_request_optout`,
-  both wired into `nimble testApi`.
+- New tests: `test_api_shutdown_request` (10 cases) and
+  `test_api_shutdown_request_optout`, both wired into `nimble testApi`;
+  `test_api_discovery` now asserts the hook is **absent** from `_listApis`.
 
 ## [3.3.0] — 2026-07-14
 

@@ -8,6 +8,7 @@ import std/atomics
 import results
 import testutils/unittests
 import brokers/[request_broker, broker_context, api_library]
+from std/strutils import contains
 
 var gShutCalls: Atomic[int]
 
@@ -62,6 +63,18 @@ proc callShutdownRequest(ctx: uint32): int32 =
     sdoff_freeBuffer(respBuf)
 
 suite "API shutdown request opt-out (issue #49)":
+  test "opting out keeps the broker on the public API surface":
+    # The inverse of the default: with no auto-invocation, an explicit `_call` is
+    # the only way to reach the provider, so it must stay published.
+    var buf: pointer = nil
+    var blen: int32 = 0
+    check sdoff_listApis(addr buf, addr blen) == 0'i32
+    var listed = newString(blen.int)
+    if blen > 0:
+      copyMem(addr listed[0], buf, blen.int)
+    sdoff_freeBuffer(buf)
+    check "shutdown_request" in listed
+
   test "_shutdown does not invoke the provider":
     gShutCalls.store(0, moRelease)
     var err: cstring = nil
