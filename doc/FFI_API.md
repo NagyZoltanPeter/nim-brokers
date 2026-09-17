@@ -820,9 +820,10 @@ The payload type itself is still emitted in the shared-types section of the
 generated header and CDDL, since types come from the type registry rather than
 from the request list.
 
-`invokeShutdownRequest: false` inverts all of this: nothing auto-invokes the
-provider, so the broker stays an ordinary published request and an explicit
-`_call` is the only way to reach it.
+If you need a teardown-adjacent operation the *consumer* drives — a flush, a
+drain, a checkpoint — declare a separate `RequestBroker(API)` for it. That keeps
+the caller-driven operation and the library's own teardown hook distinct, instead
+of overloading one provider with both roles.
 
 #### Configuration
 
@@ -831,13 +832,11 @@ registerBrokerLibrary:
   name: "mylib"
   initializeRequest: InitializeRequest
   shutdownRequest: ShutdownRequest
-  invokeShutdownRequest: false   # default true
   shutdownRequestTimeoutMs: 2000 # default 5000; 0 = infinite
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `invokeShutdownRequest` | `true` | Auto-invoke the declared provider from `<lib>_shutdown`, and keep it off the public API surface. `false` restores the historical behaviour: no auto-invocation, the broker stays a published request reachable only through an explicit `_call`, and the single-zero-arg-signature requirement is lifted. |
 | `shutdownRequestTimeoutMs` | `5000` | Processing-thread bound on the provider. `0` = infinite (a hung provider then blocks teardown — only for providers you control). |
 
 `initializeRequest` has **no** symmetric auto-invocation: `_createContext` takes

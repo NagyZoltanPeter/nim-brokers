@@ -607,7 +607,6 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_api_signal_broker", "sigtest"),
     ("test_api_event_teardown_isolation", "cbevt"),
     ("test_api_shutdown_request", "sdreq"),
-    ("test_api_shutdown_request_optout", "sdoff"),
     ("test_api_discovery", "apidisc"),
     ("test_doc_comments_api", "cbdoc"),
     ("test_broker_interface_api", "brokerifaceapi"),

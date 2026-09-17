@@ -3,58 +3,6 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
-## [Unreleased]
-
-### Fixed — `<lib>_shutdown` now invokes the declared `shutdownRequest` provider
-
-- **Behaviour change (issue #49).** `registerBrokerLibrary` has always required a
-  `shutdownRequest:` field and the docs described it as the orderly-teardown
-  hook, but nothing in the generated code ever invoked it: the declaration was a
-  compile-time existence assertion only. A provider that flushed a write-ahead
-  log, closed sockets, or persisted state lost that work on every
-  `<lib>_shutdown`, with no diagnostic. It now runs.
-- It runs on the **processing thread** (which owns its MT broker bucket), after
-  the in-flight `_call` drain and **before** either thread is signalled to stop,
-  so an event emitted as the provider's last act is still fanned out. The
-  invocation rides a reserved apiName (`__shutdown_request`) through the existing
-  courier, and never appears in `_listApis` / `_getSchema` / the CDDL.
-- Failure, a raise, or a timeout is logged (chronicles `warn`) and never aborts
-  teardown; `<lib>_shutdown` still returns `0`. The timeout is enforced on the
-  processing thread (racing a chronos timer) because the `_shutdown` side waits
-  on an unbounded condition variable, so a hung provider cannot stall teardown.
-- **Breaking: the teardown hook is no longer part of the public API surface.** It
-  exists to give the library author a place to tidy up when a context goes down;
-  publishing the same provider as an ordinary request only let a foreign caller
-  tear application state down mid-life and keep using the library. It is now
-  absent from the dispatch table, `_listApis`, `_getSchema`, the CDDL, and the
-  C++ / Python / Rust / Go wrappers (no `lib.shutdownRequest()` method), and both
-  `_call` and `_callAsync` answer `-4` for `shutdown_request` as well as for any
-  reserved `__`-prefixed control name. The payload type is still emitted in the
-  shared-types section. Migration: call `<lib>_shutdown(ctx)`, which runs the
-  hook and the transport teardown together; or set
-  `invokeShutdownRequest: false` to keep the old published request.
-- The declaration must now carry **exactly one zero-argument signature**.
-  Arg-only and dual-slot (zero-arg + arg) are compile errors, guarded by
-  `test/reject/reject_shutdownreq_{noargless,dualslot}.nim`. A dual-slot
-  declaration was doubly wrong: the arg slot could never be auto-invoked, and its
-  presence silently renamed the zero-arg slot's wire name from
-  `shutdown_request` to `shutdown_request_zero`.
-- New config keys: `invokeShutdownRequest` (default `true`) and
-  `shutdownRequestTimeoutMs` (default `5000`, `0` = infinite). Setting the first
-  to `false` reverts to the historical behaviour in full: no auto-invocation, and
-  the broker stays a published request.
-- `initializeRequest` is unchanged and stays fully public: `_createContext` has
-  no payload parameter, initialization normally needs arguments, and skipping it
-  fails loudly, so the consumer still calls `initialize_request` explicitly.
-- Internal: the ctx registry gained a `dispatchLive` flag. The emit-side courier
-  lookup keys on it instead of `active`, separating "no new foreign calls"
-  (cleared first in `_shutdown`) from "the library's own threads are alive"
-  (cleared after both joins) — without it, an event emitted by the teardown
-  provider found no courier and was dropped.
-- New tests: `test_api_shutdown_request` (10 cases) and
-  `test_api_shutdown_request_optout`, both wired into `nimble testApi`;
-  `test_api_discovery` now asserts the hook is **absent** from `_listApis`.
-
 ## [3.3.0] — 2026-07-14
 
 **Handler body sugar across all lanes: `listenIt` / `onSignalIt` / `provideIt` /

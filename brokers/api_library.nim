@@ -71,7 +71,6 @@ proc parseLibraryConfig(
   mainClass: string,
   asyncTimeoutMs: int,
   asyncQueueDepth: int,
-  invokeShutdownRequest: bool,
   shutdownRequestTimeoutMs: int,
 ] {.compileTime.} =
   var name = ""
@@ -87,11 +86,8 @@ proc parseLibraryConfig(
   var asyncQueueDepth = 64
   # Issue #49: `<lib>_shutdown` invokes the declared `shutdownRequest` provider
   # on the processing thread before either thread is signalled to stop, so a
-  # provider that flushes state actually runs. Opt out with
-  # `invokeShutdownRequest: false` (libraries that drive teardown themselves via
-  # an explicit `_call`). The timeout bounds the provider on the PROCESSING
-  # thread (0 = infinite) so a hung provider cannot stall teardown.
-  var invokeShutdownRequest = true
+  # provider that flushes state actually runs. The timeout bounds the provider on
+  # the PROCESSING thread (0 = infinite) so a hung provider cannot stall teardown.
   var shutdownRequestTimeoutMs = 5000
   # AST emitted into the generated `<lib>_version()` proc: a string literal, or
   # a const identifier (e.g. a `{.strdefine.}` `git_version`) the caller defines.
@@ -170,21 +166,6 @@ proc parseLibraryConfig(
           asyncQueueDepth = int(v.intVal)
         else:
           error("asyncQueueDepth must be a positive integer literal", v)
-      of "invokeshutdownrequest":
-        var v = value
-        if v.kind == nnkStmtList and v.len == 1:
-          v = v[0]
-        case v.kind
-        of nnkIdent, nnkSym:
-          case ($v).toLowerAscii()
-          of "true":
-            invokeShutdownRequest = true
-          of "false":
-            invokeShutdownRequest = false
-          else:
-            error("invokeShutdownRequest must be `true` or `false`", v)
-        else:
-          error("invokeShutdownRequest must be `true` or `false`", v)
       of "shutdownrequesttimeoutms":
         var v = value
         if v.kind == nnkStmtList and v.len == 1:
@@ -244,7 +225,6 @@ proc parseLibraryConfig(
     mainClass: mainClass,
     asyncTimeoutMs: asyncTimeoutMs,
     asyncQueueDepth: asyncQueueDepth,
-    invokeShutdownRequest: invokeShutdownRequest,
     shutdownRequestTimeoutMs: shutdownRequestTimeoutMs,
   )
 
@@ -276,7 +256,6 @@ proc registerBrokerLibraryCborImpl(
       mainClass: string,
       asyncTimeoutMs: int,
       asyncQueueDepth: int,
-      invokeShutdownRequest: bool,
       shutdownRequestTimeoutMs: int,
     ],
 ): NimNode
@@ -313,7 +292,6 @@ proc registerBrokerLibraryCborImpl(
         mainClass: string,
         asyncTimeoutMs: int,
         asyncQueueDepth: int,
-        invokeShutdownRequest: bool,
         shutdownRequestTimeoutMs: int,
       ],
 ): NimNode =
@@ -454,24 +432,21 @@ proc registerBrokerLibraryCborImpl(
         .}
   )
 
-  # Issue #49: `<lib>_shutdown` auto-invokes the teardown provider through its
+  # Issue #49: `<lib>_shutdown` invokes the teardown provider through its
   # ZERO-ARGUMENT signature — it has no payload to supply. A shutdownRequest
   # declared with only an arg-based signature is a hard error rather than a
-  # silent skip (a silent skip is the very gap this closes). Opting out with
-  # `invokeShutdownRequest: false` lifts the requirement.
-  if config.invokeShutdownRequest:
-    result.add(
-      quote do:
-        when not compiles(`shutdownReqIdent`.request(default(BrokerContext))):
-          {.
-            error:
-              "registerBrokerLibrary: shutdownRequest type '" &
-              astToStr(`shutdownReqIdent`) & "' has no zero-argument signature, so `" &
-              `shutdownFuncNameLit` & "` cannot invoke it. Declare `proc signature*(): " &
-              "Future[Result[<T>, string]] {.async.}` on its RequestBroker(API), " &
-              "or set `invokeShutdownRequest: false` in registerBrokerLibrary."
-          .}
-    )
+  # silent skip (a silent skip is the very gap this closes).
+  result.add(
+    quote do:
+      when not compiles(`shutdownReqIdent`.request(default(BrokerContext))):
+        {.
+          error:
+            "registerBrokerLibrary: shutdownRequest type '" &
+            astToStr(`shutdownReqIdent`) & "' has no zero-argument signature, so `" &
+            `shutdownFuncNameLit` & "` cannot invoke it. Declare `proc signature*(): " &
+            "Future[Result[<T>, string]] {.async.}` on its RequestBroker(API)."
+        .}
+  )
 
   # Foreign-thread GC bootstrap (once per compilation unit).
   result.add(emitEnsureForeignThreadGc())
@@ -508,35 +483,30 @@ proc registerBrokerLibraryCborImpl(
   # predicate, `_listApis` / `_getSchema`, the CDDL, and every generated wrapper
   # are all derived from `entries`, so one filter covers all of them. The
   # adapter proc itself is still emitted (the per-broker macro ran before this
-  # one and cannot know the library config); it simply becomes unreachable.
-  #
-  # With `invokeShutdownRequest: false` nothing auto-invokes the provider, so the
-  # request stays public — an explicit `_call` is then the only way to reach it.
+  # one and cannot know which type the library names as its teardown hook); it
+  # simply becomes unreachable.
   # ------------------------------------------------------------------
   let shutdownTagName = sanitizeIdentName(shutdownReqIdent)
   var entries: seq[CborRequestEntry] = @[]
-  if config.invokeShutdownRequest:
-    for e in allRequestEntries:
-      if e.responseTypeName == shutdownTagName:
-        if e.argFields.len > 0:
-          # An argument-based slot can never be auto-invoked — `_shutdown` has no
-          # payload to supply — so it would be a second, publicly callable
-          # teardown entry point. It also silently renames the zero-arg slot's
-          # wire name (`shutdown_request` becomes `shutdown_request_zero`),
-          # breaking callers of the original name.
-          error(
-            "registerBrokerLibrary: shutdownRequest type '" & shutdownTagName &
-              "' declares an argument-based signature (apiName '" & e.apiName &
-              "'). The teardown hook is invoked by `" & shutdownFuncName &
-              "` through its zero-argument signature and is not part of the " &
-              "public API surface, so an argument-based slot can never run. " &
-              "Remove it, or set `invokeShutdownRequest: false` to keep this " &
-              "broker as an ordinary request."
-          )
-        continue
-      entries.add(e)
-  else:
-    entries = allRequestEntries
+  for e in allRequestEntries:
+    if e.responseTypeName == shutdownTagName:
+      if e.argFields.len > 0:
+        # An argument-based slot can never be invoked — `_shutdown` has no
+        # payload to supply — so it would be a second, publicly callable
+        # teardown entry point. It also silently renames the zero-arg slot's
+        # wire name (`shutdown_request` becomes `shutdown_request_zero`),
+        # breaking callers of the original name.
+        error(
+          "registerBrokerLibrary: shutdownRequest type '" & shutdownTagName &
+            "' declares an argument-based signature (apiName '" & e.apiName &
+            "'). The teardown hook is invoked by `" & shutdownFuncName &
+            "` through its zero-argument signature and is not part of the " &
+            "public API surface, so an argument-based slot can never run. " &
+            "Remove it — if you need a caller-driven operation, declare a " &
+            "separate RequestBroker(API) for it."
+        )
+      continue
+    entries.add(e)
 
   # The dispatch proc is async and returns just `seq[byte]`. To signal
   # "unknown apiName" without raising or capturing a `var bool`, the
@@ -1436,152 +1406,130 @@ proc registerBrokerLibraryCborImpl(
   #
   # `<lib>CborInvokeShutdownProvider` is the processing-thread half.
   # `<lib>CborRunShutdownRequest` is the `_shutdown` (foreign caller) half.
-  # With `invokeShutdownRequest: false` both collapse to no-ops.
   # ------------------------------------------------------------------
-  if config.invokeShutdownRequest:
-    result.add(
-      quote do:
-        proc `invokeShutdownProvIdent`(
-            ctx: BrokerContext
-        ): Future[int32] {.async: (raises: []), gcsafe.} =
-          ## Await the declared zero-arg teardown provider for `ctx`, bounded by
-          ## `shutdownRequestTimeoutMs` (0 = infinite). The bound lives HERE and
-          ## not on the blocked `_shutdown`, whose `waitSlot` is an unbounded
-          ## `Cond` wait — so the slot is always completed within the budget and
-          ## a hung provider cannot stall teardown.
-          ##
-          ## `race`, not `withTimeout`, for the same reason the `_callAsync` path
-          ## uses it: `withTimeout` cancels the dispatch and the broker/provider
-          ## machinery swallows that cancellation into a normal completion,
-          ## masking the timeout. The loser is left running and its late result
-          ## is dropped.
-          ##
-          ## Never raises and never reports failure upward as anything but a
-          ## status — teardown proceeds unconditionally.
-          const timeoutMs = `shutdownReqTimeoutMsLit`
-          let provFut = `shutdownReqIdent`.request(ctx)
-          var timedOut = false
-          if timeoutMs != 0:
-            # `sleepAsync(ms: int)` rather than `milliseconds(...)`: this code is
-            # emitted into the consumer's module, where a plain
-            # `import std/times` would shadow chronos's `milliseconds`.
-            let timerFut = sleepAsync(timeoutMs)
-            let raceRes = catch:
-              await race(provFut, timerFut)
-            timedOut = (not raceRes.isErr()) and (not provFut.finished())
-            if not timerFut.finished():
-              timerFut.cancelSoon()
-          var status = ApiStatusOk
-          if timedOut:
-            provFut.cancelSoon()
-            warn "shutdown request provider exceeded its budget — continuing teardown",
-              library = `libNameLit`, timeoutMs = timeoutMs
-            status = ApiStatusTimeout
+  result.add(
+    quote do:
+      proc `invokeShutdownProvIdent`(
+          ctx: BrokerContext
+      ): Future[int32] {.async: (raises: []), gcsafe.} =
+        ## Await the declared zero-arg teardown provider for `ctx`, bounded by
+        ## `shutdownRequestTimeoutMs` (0 = infinite). The bound lives HERE and
+        ## not on the blocked `_shutdown`, whose `waitSlot` is an unbounded
+        ## `Cond` wait — so the slot is always completed within the budget and
+        ## a hung provider cannot stall teardown.
+        ##
+        ## `race`, not `withTimeout`, for the same reason the `_callAsync` path
+        ## uses it: `withTimeout` cancels the dispatch and the broker/provider
+        ## machinery swallows that cancellation into a normal completion,
+        ## masking the timeout. The loser is left running and its late result
+        ## is dropped.
+        ##
+        ## Never raises and never reports failure upward as anything but a
+        ## status — teardown proceeds unconditionally.
+        const timeoutMs = `shutdownReqTimeoutMsLit`
+        let provFut = `shutdownReqIdent`.request(ctx)
+        var timedOut = false
+        if timeoutMs != 0:
+          # `sleepAsync(ms: int)` rather than `milliseconds(...)`: this code is
+          # emitted into the consumer's module, where a plain
+          # `import std/times` would shadow chronos's `milliseconds`.
+          let timerFut = sleepAsync(timeoutMs)
+          let raceRes = catch:
+            await race(provFut, timerFut)
+          timedOut = (not raceRes.isErr()) and (not provFut.finished())
+          if not timerFut.finished():
+            timerFut.cancelSoon()
+        var status = ApiStatusOk
+        if timedOut:
+          provFut.cancelSoon()
+          warn "shutdown request provider exceeded its budget — continuing teardown",
+            library = `libNameLit`, timeoutMs = timeoutMs
+          status = ApiStatusTimeout
+        else:
+          let provRes = catch:
+            await provFut
+          if provRes.isErr():
+            warn "shutdown request provider raised — continuing teardown",
+              library = `libNameLit`, detail = provRes.error.msg
+            status = ApiStatusProviderErr
           else:
-            let provRes = catch:
-              await provFut
-            if provRes.isErr():
-              warn "shutdown request provider raised — continuing teardown",
-                library = `libNameLit`, detail = provRes.error.msg
+            let r = provRes.get()
+            if r.isErr():
+              warn "shutdown request provider failed — continuing teardown",
+                library = `libNameLit`, detail = r.error
               status = ApiStatusProviderErr
-            else:
-              let r = provRes.get()
-              if r.isErr():
-                warn "shutdown request provider failed — continuing teardown",
-                  library = `libNameLit`, detail = r.error
-                status = ApiStatusProviderErr
-          # Yield the processing thread's event loop one turn before answering.
-          # `emit` is sync + `asyncSpawn`, so an event the provider emitted as
-          # its last act is a READY coroutine that has not run yet; the
-          # generated FFI listener is suspension-free up to the courier
-          # enqueue, so one loop turn is enough to get it into the ring. The
-          # `_shutdown` side then waits for the delivery thread to consume it
-          # before stopping the threads.
-          let yieldRes = catch:
-            await sleepAsync(1)
-          discard yieldRes
-          return status
+        # Yield the processing thread's event loop one turn before answering.
+        # `emit` is sync + `asyncSpawn`, so an event the provider emitted as
+        # its last act is a READY coroutine that has not run yet; the
+        # generated FFI listener is suspension-free up to the courier
+        # enqueue, so one loop turn is enough to get it into the ring. The
+        # `_shutdown` side then waits for the delivery thread to consume it
+        # before stopping the threads.
+        let yieldRes = catch:
+          await sleepAsync(1)
+        discard yieldRes
+        return status
 
-        proc `runShutdownReqProcIdent`(
-            arg: ptr `procThreadArgIdent`, ctx: uint32
-        ) {.gcsafe, raises: [].} =
-          ## `_shutdown` half. Called once `active` is false and the in-flight
-          ## `_call` drain has completed (the system is quiescent) but BEFORE
-          ## `shutdownFlag` is set — so the processing thread is alive to run the
-          ## provider and the delivery thread is alive to fan out any event the
-          ## provider emits as its last act. Every failure path logs and returns:
-          ## teardown never aborts because a user provider misbehaved.
-          if arg.isNil:
-            return
-          let courier = arg.courier
-          if courier.isNil:
-            return
-          discard courier.inFlight.fetchAdd(1, moAcquireRelease)
-          let slotIdx = claimSlot(courier)
-          if slotIdx < 0:
-            discard courier.inFlight.fetchSub(1, moAcquireRelease)
-            warn "no response slot free — skipping the shutdown request provider",
-              library = `libNameLit`
-            return
-          var msg: CborCallMsg
-          const sdName = `shutdownReqApiNameLit`
-          copyMem(addr msg.apiName[0], cstring(sdName), sdName.len)
-          msg.reqBuf = nil
-          msg.reqLen = 0
-          msg.slotIdx = int32(slotIdx)
-          msg.targetCtx = ctx
-          if not tryEnqueue(addr courier.ring, msg):
-            releaseSlot(courier, slotIdx)
-            discard courier.inFlight.fetchSub(1, moAcquireRelease)
-            warn "courier ring full — skipping the shutdown request provider",
-              library = `libNameLit`
-            return
-          if not arg.courierSignal.isNil:
-            fireBrokerSignal(arg.courierSignal)
-          # The processing thread completes this slot on every path, including
-          # its own timeout, and it is still looping (`shutdownFlag` is set only
-          # after this returns), so the wait is bounded by
-          # `shutdownRequestTimeoutMs` plus scheduling.
-          let res = waitSlot(courier, slotIdx)
+      proc `runShutdownReqProcIdent`(
+          arg: ptr `procThreadArgIdent`, ctx: uint32
+      ) {.gcsafe, raises: [].} =
+        ## `_shutdown` half. Called once `active` is false and the in-flight
+        ## `_call` drain has completed (the system is quiescent) but BEFORE
+        ## `shutdownFlag` is set — so the processing thread is alive to run the
+        ## provider and the delivery thread is alive to fan out any event the
+        ## provider emits as its last act. Every failure path logs and returns:
+        ## teardown never aborts because a user provider misbehaved.
+        if arg.isNil:
+          return
+        let courier = arg.courier
+        if courier.isNil:
+          return
+        discard courier.inFlight.fetchAdd(1, moAcquireRelease)
+        let slotIdx = claimSlot(courier)
+        if slotIdx < 0:
+          discard courier.inFlight.fetchSub(1, moAcquireRelease)
+          warn "no response slot free — skipping the shutdown request provider",
+            library = `libNameLit`
+          return
+        var msg: CborCallMsg
+        const sdName = `shutdownReqApiNameLit`
+        copyMem(addr msg.apiName[0], cstring(sdName), sdName.len)
+        msg.reqBuf = nil
+        msg.reqLen = 0
+        msg.slotIdx = int32(slotIdx)
+        msg.targetCtx = ctx
+        if not tryEnqueue(addr courier.ring, msg):
           releaseSlot(courier, slotIdx)
           discard courier.inFlight.fetchSub(1, moAcquireRelease)
-          # The control path answers with a status and no payload; free one
-          # defensively rather than leaking if that ever changes.
-          if not res.respBuf.isNil:
-            deallocShared(res.respBuf)
-          # A teardown provider may emit an event as its last act. The delivery
-          # thread fans out only while `shutdownFlag` is clear — once it is set
-          # the poller stops and leftovers are merely freed by `drainAndFree`
-          # below — so hand off what the provider produced before the caller
-          # flips the flag. Costs nothing when the provider emitted nothing:
-          # the ring is already empty on the first check.
-          const eventDrainMs = 250
-          var drainedMs = 0
-          while pendingEvents(arg.eventCourier) > 0 and drainedMs < eventDrainMs:
-            sleep(1)
-            inc drainedMs
+          warn "courier ring full — skipping the shutdown request provider",
+            library = `libNameLit`
+          return
+        if not arg.courierSignal.isNil:
+          fireBrokerSignal(arg.courierSignal)
+        # The processing thread completes this slot on every path, including
+        # its own timeout, and it is still looping (`shutdownFlag` is set only
+        # after this returns), so the wait is bounded by
+        # `shutdownRequestTimeoutMs` plus scheduling.
+        let res = waitSlot(courier, slotIdx)
+        releaseSlot(courier, slotIdx)
+        discard courier.inFlight.fetchSub(1, moAcquireRelease)
+        # The control path answers with a status and no payload; free one
+        # defensively rather than leaking if that ever changes.
+        if not res.respBuf.isNil:
+          deallocShared(res.respBuf)
+        # A teardown provider may emit an event as its last act. The delivery
+        # thread fans out only while `shutdownFlag` is clear — once it is set
+        # the poller stops and leftovers are merely freed by `drainAndFree`
+        # below — so hand off what the provider produced before the caller
+        # flips the flag. Costs nothing when the provider emitted nothing:
+        # the ring is already empty on the first check.
+        const eventDrainMs = 250
+        var drainedMs = 0
+        while pendingEvents(arg.eventCourier) > 0 and drainedMs < eventDrainMs:
+          sleep(1)
+          inc drainedMs
 
-    )
-  else:
-    result.add(
-      quote do:
-        proc `invokeShutdownProvIdent`(
-            ctx: BrokerContext
-        ): Future[int32] {.async: (raises: []), gcsafe.} =
-          ## `invokeShutdownRequest: false` — the declared teardown provider is
-          ## never auto-invoked, `_shutdown` enqueues no control message, and
-          ## this path is unreachable.
-          discard ctx
-          return ApiStatusOk
-
-        proc `runShutdownReqProcIdent`(
-            arg: ptr `procThreadArgIdent`, ctx: uint32
-        ) {.gcsafe, raises: [].} =
-          ## `invokeShutdownRequest: false` — no-op.
-          discard arg
-          discard ctx
-
-    )
+  )
 
   # ------------------------------------------------------------------
   # Processing thread proc (one per ctx). Runs setupProviders then loops

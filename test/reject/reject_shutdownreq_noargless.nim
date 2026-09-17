@@ -1,7 +1,8 @@
 # `<lib>_shutdown` auto-invokes the teardown provider through its ZERO-ARGUMENT
 # signature (issue #49) — it has no payload to supply. A shutdownRequest declared
 # with only an arg-based signature must be a hard error, not a silent skip.
-# Opting out with `invokeShutdownRequest: false` is the escape hatch.
+# If you need a caller-driven teardown-ish operation, declare a separate
+# RequestBroker(API) for it.
 import results, chronos
 import brokers/[request_broker, broker_context, api_library]
 
