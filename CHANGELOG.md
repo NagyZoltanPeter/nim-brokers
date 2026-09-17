@@ -3,6 +3,23 @@
 All notable changes to **nim-brokers** are documented here. The project follows
 [Semantic Versioning](https://semver.org/). Dates are ISO-8601.
 
+## [Unreleased]
+
+### Fixed
+
+- **`teardownBrokerThread()` no longer closes the thread's chronos
+  dispatcher.** It closed it as its last step, but it runs on any thread that
+  used brokers — automatically through `onThreadDestruction`, or explicitly on
+  FFI/main threads — and those threads can belong to someone else who still
+  drives the dispatcher. chronos keeps the closed handle as the thread's
+  dispatcher, so the owner's next poll aborted with `poll(): Unable to get OS
+  events`: a destruction hook running after the broker one, code after an
+  explicit teardown, or an FFI library (nim-ffi) closing its worker thread's
+  handle a second time after the join. `closeThreadDispatcherSelector()` is now
+  called only by the threads brokers creates, the `api_library`
+  processing/delivery threads, right after their teardown, so their per-context
+  fd reclamation is unchanged.
+
 ## [3.3.0] — 2026-07-14
 
 **Handler body sugar across all lanes: `listenIt` / `onSignalIt` / `provideIt` /
