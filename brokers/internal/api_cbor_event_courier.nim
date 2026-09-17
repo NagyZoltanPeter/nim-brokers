@@ -177,6 +177,18 @@ proc newCborEventCourier*(ringCap: int): ptr CborEventCourier =
   c.dropAccount = initCborEventDropAccount()
   c
 
+proc pendingEvents*(c: ptr CborEventCourier): int =
+  ## Messages enqueued but not yet dequeued by the delivery thread. Used by
+  ## `_shutdown` (issue #49) to hand off events the teardown provider emitted
+  ## before `shutdownFlag` stops the delivery-side poller: a dequeued message's
+  ## fan-out completes synchronously inside the poller, so reaching 0 means
+  ## every queued callback either ran or is running to completion.
+  if c.isNil:
+    return 0
+  acquire(c.ring.lock)
+  result = c.ring.count
+  release(c.ring.lock)
+
 proc drainAndFree*(c: ptr CborEventCourier) =
   ## Free any messages still in the ring (deallocating their `buf`),
   ## then free the ring storage and the courier itself. MUST be called

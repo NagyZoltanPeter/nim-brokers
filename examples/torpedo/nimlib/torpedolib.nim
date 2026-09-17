@@ -1026,9 +1026,15 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
 
   # --- ShutdownRequest ---
   # Tears down the captain: drops the peer link and nils the threadvar.
+  # `torpedolib_shutdown()` invokes this provider on the processing thread before
+  # either thread is signalled to stop (issue #49), so this cleanup runs on every
+  # clean shutdown — including the wrappers' RAII paths — without the consumer
+  # having to call `shutdown_request` itself.
   let shutdownProviderRes = ShutdownRequest.setProvider(
     ctx,
     proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      info "torpedolib ShutdownRequest provider running",
+        captainAlive = not gCaptain.isNil
       if not gCaptain.isNil:
         gCaptain.dropPeerLink()
         gCaptain = nil

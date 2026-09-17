@@ -420,7 +420,10 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
     echo "  reject OK (correctly rejected): " & f
   # API-mode rejects (reduced-A): cross-interface apiName collisions only
   # manifest under -d:BrokerFfiApi --threads:on.
-  let apiRejects = ["reject_iface_apicollision"]
+  let apiRejects = [
+    "reject_iface_apicollision", "reject_shutdownreq_noargless",
+    "reject_shutdownreq_dualslot",
+  ]
   for f in apiRejects:
     let (outp, code) = gorgeEx(
       "nim c --hints:off -d:BrokerFfiApi --threads:on --path:. --outdir:build/reject test/reject/" &
@@ -604,6 +607,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_api_callAsync", "acbtest"),
     ("test_api_signal_broker", "sigtest"),
     ("test_api_event_teardown_isolation", "cbevt"),
+    ("test_api_shutdown_request", "sdreq"),
     ("test_api_discovery", "apidisc"),
     ("test_doc_comments_api", "cbdoc"),
     ("test_broker_interface_api", "brokerifaceapi"),

@@ -722,11 +722,22 @@ Typical responsibilities:
 #### Dynamic provider registration via `InitializeRequest`
 
 In `setupProviders(ctx)`, the `InitializeRequest` and `ShutdownRequest`
-providers must be registered on the context so they are immediately
-callable through the typed wrapper (`lib.initializeRequest(...)` /
-`lib.shutdownRequest()`) — which under the hood dispatches via
-`<lib>_call(ctx, "initialize_request", ...)` /
-`<lib>_call(ctx, "shutdown_request", ...)`.
+providers must both be registered on the context — but only one of them is part
+of the public API surface:
+
+| Broker | Who calls it | Foreign surface |
+|---|---|---|
+| `InitializeRequest` | the **consumer**, explicitly, after `_createContext` | `lib.initializeRequest(...)` → `<lib>_call(ctx, "initialize_request", ...)` |
+| `ShutdownRequest` | `<lib>_shutdown(ctx)` itself | none — not published as a request |
+
+`InitializeRequest` is not auto-invoked: `_createContext(errOut)` has no payload
+parameter, and initialization normally needs arguments. Skipping it is a loud
+failure rather than a silent one, since the library is fully alive at that point
+and providers written the usual way refuse work until it has run.
+
+`ShutdownRequest` is the mirror image: the consumer cannot usefully own it (the
+wrappers tear down from a destructor), so the library owns it and the hook is
+kept off the public surface entirely — see [Shutdown](#shutdown).
 
 `InitializeRequest` can also be used as a dynamic registration point
 for additional providers — call `setProvider` on the other broker
@@ -745,6 +756,92 @@ then stops the delivery and processing threads and marks the context inactive in
 the registry.
 
 Foreign callers only need to call `<lib>_shutdown(ctx)`.
+
+#### Where the provider runs in the teardown sequence
+
+The invocation sits at a deliberate point in `<lib>_shutdown` (issue #49):
+
+1. mark the context inactive — no new `_call` / `_callAsync` / `_subscribe` enters
+2. drain in-flight `_call`s (bounded) — the system goes quiescent
+3. **invoke the declared `shutdownRequest` provider** ← here
+4. hand any event it emitted to the delivery thread (bounded)
+5. set the shutdown flag, join the delivery thread, then the processing thread
+6. free the subscription registry and the couriers
+
+Step 3 is routed as a reserved-apiName control message (`__shutdown_request`)
+through the same courier `__release_instance` uses, for two reasons:
+
+| Constraint | Why |
+|---|---|
+| Must run on the **processing thread** | The provider's MT broker bucket is keyed by that thread's identity; a call from the foreign caller's thread would address the wrong bucket. |
+| Must run while **both threads are alive** | If the provider emits an event as its last act, the delivery thread has to still be there to fan it out. Hence before the shutdown flag, not after. |
+
+The declaration must carry exactly one **zero-argument** signature, since
+`_shutdown` has no payload to supply. The reserved control name never appears in
+`_listApis`, `_getSchema`, or the CDDL. See
+[the hook is author-only](#the-hook-is-author-only-not-part-of-the-api) below for
+the full surface rules.
+
+#### Failure, timeout, and idempotency
+
+Teardown never aborts because a user provider misbehaved. A provider that returns
+`err`, raises, or exceeds its budget is logged with a chronicles `warn` and the
+flag / join / free sequence proceeds unchanged. `<lib>_shutdown` still returns
+`0`: it reports transport teardown, not application teardown, and a non-zero
+return would make every wrapper's RAII path treat a completed shutdown as a
+failure.
+
+The timeout is enforced on the **processing thread**, racing the provider against
+a chronos timer, because the blocked `_shutdown` side waits on an unbounded
+condition variable. The response slot is therefore completed on every path,
+including expiry, so a hung provider cannot stall teardown.
+
+#### The hook is author-only, not part of the API
+
+`ShutdownRequest` exists to give the **library author** a place to tidy up when a
+context goes down. Publishing the same provider as an ordinary request would only
+let a foreign caller tear application state down mid-life and then keep using the
+library, so it is not published at all:
+
+- absent from `_listApis`, `_getSchema`, and the CDDL;
+- no method on the C++, Python, Rust, or Go wrapper;
+- `<lib>_call(ctx, "shutdown_request", ...)` returns `-4` (unknown apiName), as
+  does `_callAsync`;
+- the reserved control names (`__shutdown_request`, `__release_instance`) are
+  refused on both call entry points — `_shutdown` and `_releaseInstance` enqueue
+  them onto the courier themselves and never come through `_call`.
+
+Consequently the declaration must have **exactly one zero-argument signature**.
+An argument-based slot is a compile error: it could never be invoked, and it
+would additionally rename the zero-arg slot's wire name (`shutdown_request`
+becomes `shutdown_request_zero`), breaking callers of the original.
+
+The payload type itself is still emitted in the shared-types section of the
+generated header and CDDL, since types come from the type registry rather than
+from the request list.
+
+If you need a teardown-adjacent operation the *consumer* drives — a flush, a
+drain, a checkpoint — declare a separate `RequestBroker(API)` for it. That keeps
+the caller-driven operation and the library's own teardown hook distinct, instead
+of overloading one provider with both roles.
+
+#### Configuration
+
+```nim
+registerBrokerLibrary:
+  name: "mylib"
+  initializeRequest: InitializeRequest
+  shutdownRequest: ShutdownRequest
+  shutdownRequestTimeoutMs: 2000 # default 5000; 0 = infinite
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `shutdownRequestTimeoutMs` | `5000` | Processing-thread bound on the provider. `0` = infinite (a hung provider then blocks teardown — only for providers you control). |
+
+`initializeRequest` has **no** symmetric auto-invocation: `_createContext` takes
+only an `errOut` parameter, so there is nowhere to pass a configuration payload
+without an ABI change. Call it explicitly after `_createContext`.
 
 ---
 
@@ -941,11 +1038,15 @@ level request-routing behavior that the FFI API builds on.
 ## Requirements on `InitializeRequest` and `ShutdownRequest`
 
 `registerBrokerLibrary` requires that the types named in `initializeRequest:` and
-`shutdownRequest:` exist at compile time. The legacy `destroyRequest:` alias is
+`shutdownRequest:` exist at compile time, and that `shutdownRequest:` declares
+exactly one zero-argument signature (it is the author-only teardown hook
+`<lib>_shutdown` invokes). The legacy `destroyRequest:` alias is
 still accepted for compatibility.
 You can name you Initialized and Shutdown brokers as you like. The macro just registers them.
 
-It does not itself force those providers to be registered.
+It does not itself force those providers to be registered. A missing
+`ShutdownRequest` provider is not fatal: `<lib>_shutdown` invokes it, the broker
+answers "no provider", and the teardown logs a `warn` and continues.
 
 In practice:
 
