@@ -1351,7 +1351,8 @@ proc registerBrokerLibraryCborImpl(
         # foreign response callback for each `<lib>_callAsync`. Runs on this
         # (delivery) thread, off the processing thread, exactly like event
         # fanout. `m.buf` is library-owned and freed after the callback returns;
-        # the per-call `asyncDepth` reservation is released here.
+        # the per-call `asyncDepth` reservation is released as soon as the
+        # response leaves the ring — see below.
         proc respCourierPoll(): int {.gcsafe, raises: [].} =
           var didWork = 0
           while true:
@@ -1359,13 +1360,24 @@ proc registerBrokerLibraryCborImpl(
             if not tryDequeueResp(arg.respCourier, m):
               break
             didWork = 1
+            # Release the depth reservation BEFORE invoking the callback. The
+            # reservation bounds how many responses can be resident in the
+            # response ring; this one has just been popped, so it occupies
+            # neither ring and the slot is already free. Releasing after the
+            # callback instead would leave a window in which a wrapper that
+            # bounds itself at exactly `asyncQueueDepth` (the callback may
+            # merely schedule a wake-up and return, as the Python wrapper's
+            # `call_soon_threadsafe` does) reissues a call while this
+            # reservation is still held, and gets a spurious EAGAIN. Ordering
+            # closes that window, so no wrapper needs a margin for it. It also
+            # stops a slow foreign callback from throttling the whole window.
+            asyncDepthDec(arg.courier)
             let cbPtr = m.cb
             if not cbPtr.isNil:
               let cbTyped = cast[`responseCallbackTypeIdent`](cbPtr)
               cbTyped(m.userData, m.reqId, m.status, m.buf, m.bufLen)
             if not m.buf.isNil:
               deallocShared(m.buf)
-            asyncDepthDec(arg.courier)
           didWork
 
         registerBrokerPoller(eventCourierPoll)

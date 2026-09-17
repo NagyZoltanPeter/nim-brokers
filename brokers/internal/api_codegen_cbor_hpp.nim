@@ -1197,10 +1197,10 @@ proc generateCborCppHeaderFile*(
   h.add("  // callback, not reqId — so it is not part of the typed surface).\n")
   h.add("  std::atomic<uint64_t> asyncReqId_{0};\n")
   h.add("  // <method>Future backpressure: acquire before issue, release in the\n")
-  h.add("  // completion callback. Initialised to asyncQueueDepth - 1 because the\n")
-  h.add("  // library releases its own depth slot only AFTER the callback returns\n")
-  h.add("  // (single delivery thread => at most one such in-flight release), so\n")
-  h.add("  // the margin of one makes a post-release reissue race-free.\n")
+  h.add("  // completion callback. Kept at asyncQueueDepth - 1: the library now\n")
+  h.add("  // releases its own depth slot before invoking the callback, so a\n")
+  h.add("  // post-release reissue is already race-free and the margin of one is\n")
+  h.add("  // only conservatism, not a correctness requirement.\n")
   h.add(
     "  std::counting_semaphore<> asyncWindow_{static_cast<std::ptrdiff_t>(\n" &
       "      asyncQueueDepth > 1 ? asyncQueueDepth - 1 : 1)};\n"
