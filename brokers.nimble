@@ -319,7 +319,8 @@ task test, "Run all single and multi-threaded broker tests":
     "test_event_broker", "test_request_broker", "test_request_broker_sugar",
     "test_request_broker_sync_void", "test_multi_request_broker", "test_signal_broker",
     "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
-    "test_broker_interface_signal", "test_handler_sugar", "test_doc_comments",
+    "test_broker_interface_signal", "test_handler_sugar",
+    "test_handler_sugar_generic_scope", "test_doc_comments",
   ]
   for f in tests:
     for opt in [

@@ -971,6 +971,21 @@ proc generateMtEventBroker*(
       buildBindTemplates(typeIdent, "listen", "bindListener", @[slot], awaitCall = true)
     )
 
+    # ── listenIt body sugar (issue #46, per-type since #51) ─────────
+    # Same shape as the single-thread lane; `isVoid = false` because the MT
+    # listener proc type always carries the event value.
+    result.add(
+      buildItSugarTemplates(
+        typeIdent,
+        "listen",
+        "listenIt",
+        "brokerEvent",
+        futureVoidTy(),
+        procTyPragma(listenerProcTy),
+        isVoid = false,
+      )
+    )
+
   when defined(brokerDebug):
     writeBrokerDebug("EventBrokerMt", typeDisplayName, result)
     when defined(brokerDebugStdout):

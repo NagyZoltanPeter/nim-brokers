@@ -192,6 +192,13 @@ let scoped = GreetingEvent.listenIt(myCtx):
 The body keeps full handler semantics: `await` is allowed and `raises: []` is
 enforced exactly as for a hand-written listener.
 
+`listenIt` is generated per event type, alongside that type's `listen`
+overloads, so it is available wherever the event type itself is. That also
+makes it usable inside a generic proc — including the implicitly generic
+`new` / `create` / `createUnderContext` a `BrokerImplement` emits — whose
+caller does not import the event's module (issue #51). The same holds for
+`onSignalIt`.
+
 ### RequestBroker
 
 Single-provider request/response: one provider registers; callers make typed requests. Supports both **async** (default) and **sync** modes.
