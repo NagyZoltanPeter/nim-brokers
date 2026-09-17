@@ -322,6 +322,13 @@ task test, "Run all single and multi-threaded broker tests":
     "test_broker_interface_signal", "test_handler_sugar",
     "test_handler_sugar_generic_scope", "test_doc_comments",
   ]
+  # Run every file before reporting. `test` raises OSError on a failing
+  # compile or a non-zero exit, which used to abort the whole task at the
+  # first failure — so everything after it, including every multi-thread
+  # file, silently never ran and one red cell hid the rest of the suite.
+  # Collect the failures and fail once, at the end.
+  var failed: seq[string]
+
   for f in tests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -329,7 +336,11 @@ task test, "Run all single and multi-threaded broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:orc",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release -d:gcAssert -d:sysAssert --mm:refc",
     ]:
-      test opt, f
+      try:
+        test opt, f
+      except OSError:
+        echo "=== FAIL  " & f & " [" & opt & "] ==="
+        failed.add(f & " [" & opt & "]")
 
   let mtTests = [
     "test_multi_thread_request_broker", "test_multi_thread_event_broker",
@@ -345,7 +356,17 @@ task test, "Run all single and multi-threaded broker tests":
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:orc --threads:on",
       "-d:nimUnittestOutputLevel:VERBOSE -d:release --mm:refc --threads:on",
     ]:
-      test opt, f
+      try:
+        test opt, f
+      except OSError:
+        echo "=== FAIL  " & f & " [" & opt & "] ==="
+        failed.add(f & " [" & opt & "]")
+
+  if failed.len > 0:
+    echo "=== FAILED: " & $failed.len & " test run(s) ==="
+    for f in failed:
+      echo "  " & f
+    quit(1)
 
 task testAllocRace,
   "Regression gate: worker-thread teardown UAF reproducer, N trials per variant":
@@ -1360,6 +1381,58 @@ task probeWinTlsUninitOrc,
 task probeWinTlsUninitRefc,
   "Run the §2.1 TLS-uninit probe under --mm:refc (expected to crash on Windows)":
   runProbeWinTlsUninit("refc")
+
+# ----------------------------------------------------------------------------
+# probeRefcDestroy — instrument check for LIMITATION.md §1.2
+# ----------------------------------------------------------------------------
+# Reports, per (mm x debug/release), how the survivor count of a bulk
+# create/deregister loop scales with the loop length: flat (a conservative-
+# scan artifact, benign) or growing with N (a real reference, ours to fix).
+#
+# The CLEAN/BOUNDED split is platform- and codegen-dependent, so it is
+# reported rather than asserted. Only RETAINED (or a probe that cannot pin the
+# instances in the first place) fails the task. This is what fixes the
+# tolerance test_broker_lifecycle applies under refc.
+task probeRefcDestroy,
+  "Report the refc destroy-observability matrix (orc/refc x debug/release)":
+  mkDir "build"
+  var bad: seq[string]
+  for mm in ["refc", "orc"]:
+    for rel in ["", " -d:release"]:
+      let label = "--mm:" & mm & rel
+      let outBin =
+        "build" /
+        ("probe_refc_destroy_" & mm & (if rel.len > 0: "_release" else: "_debug"))
+      let outBinExe =
+        when defined(windows):
+          outBin & ".exe"
+        else:
+          outBin
+      # `--out:` with a path overrides `--outdir:`, so put the path directly
+      # on `--out:` to land the binary under build/.
+      exec "nim c --mm:" & mm & rel & " --hints:off --out:" & quoteArg(outBin) & " " &
+        quoteArg("test/probe_refc_destroy.nim")
+      let (output, code) = gorgeEx(quoteArg(outBinExe))
+      let verdict =
+        case code
+        of 0:
+          "CLEAN (no survivors at any N)"
+        of 10:
+          "BOUNDED (survivors stay under the tolerance — scan artifact)"
+        of 20:
+          "RETAINED (survivors scale with N — a real reference is held)"
+        of 2:
+          "INVALID (the registrations did not pin the instances)"
+        else:
+          "UNEXPECTED exit " & $code
+      echo "probeRefcDestroy [", label, "] -> ", verdict
+      if code != 0 and code != 10:
+        echo output
+        bad.add(label & " -> " & verdict)
+  if bad.len > 0:
+    echo "::error::probeRefcDestroy: ",
+      bad.len, " configuration(s) did not release the instance"
+    quit(1)
 
 task runTorpedoExampleRust, "Build the Torpedo Duel FFI library ":
   buildTorpedoExampleLibrary(generateRust = true)
