@@ -52,6 +52,57 @@ The full matrix is exercised on every PR. The `MM=…` env var on the
 parity / FFI-example task families honours single-MM overrides for
 local re-runs.
 
+**Observing release under refc.** `test/test_broker_lifecycle.nim`
+asserts that an instance held alive only by a provider closure in a
+global table becomes collectable once the registration is dropped.
+That property has two halves, and they are not equally observable.
+
+*The registration was dropped* is exact everywhere, with no GC
+involved: a request on that context must fail with "no provider
+registered". Nothing about the memory manager, the Nim release or the
+platform can affect it.
+
+*The instance was freed* is observed through `=destroy` on a marker
+field after `GC_fullCollect()`. That is exact under ORC, which is
+precise. Under `--mm:refc` it is not: refc scans the C stack
+conservatively, so a pointer-shaped value left in a stack slot or a
+callee-saved register by the scope that just returned still roots the
+instance, `=destroy` never runs, and the test reports a leak that is
+not there.
+
+The second half is therefore asserted **in bulk**. A conservative false
+root can only pin an instance whose address is still lying in a stale
+stack slot, and a tight create/close loop overwrites the previous
+iteration's frame — so the survivor count is bounded by a small
+constant however large the loop, while a genuine retention scales with
+it. The test runs 200 cycles and allows at most 5 survivors under refc,
+and requires exactly 0 under ORC.
+
+Measured with `test/probe_refc_destroy.nim` (stdlib only — no brokers,
+no chronos) on Linux amd64:
+
+| Configuration | Survivors after N cycles | Reason |
+|---|---|---|
+| `--mm:orc`, debug or release | 0 at every N | precise reachability, no conservative roots |
+| `--mm:refc`, debug | 0 at every N | frame layout leaves no usable residue |
+| `--mm:refc -d:release` | exactly 1, flat from N=1 to N=500 | the most recent frame's residue, and only that |
+
+Identical on Nim 2.2.4, 2.2.10 and 2.2.12. The single refc survivor is
+also transient: it is reclaimed as soon as later work overwrites its
+slot.
+
+**A correction.** An earlier revision of this section claimed the
+trigger was "(memory manager x codegen x frame layout), not the
+compiler release". That was wrong, and CI disproved it. With an exact
+per-instance assertion, the test failed on precisely Nim 2.2.4 and
+devel on Linux/Windows under refc while 2.2.10 passed — which is exactly
+what the old version-keyed skip list described. The list was an accurate
+description of a real boundary; what was wrong with it was the response,
+not the observation. Skipping the whole file meant the exactly-checkable
+half was not checked either, and the list still had to be amended for
+each new toolchain that tripped it (2.2.12 did). Asserting in bulk
+removes the need for any such list.
+
 ---
 
 ## 2. Active constraints
