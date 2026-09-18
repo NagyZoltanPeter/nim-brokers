@@ -487,8 +487,9 @@ proc tryEnqueueAsync*(c: ptr CborCourier, msg: CborAsyncCallMsg): bool =
   ## outstanding async calls so the response ring cannot overflow) and pushes
   ## the message. Returns false — having reserved nothing — when the async ring
   ## is full or the in-flight ceiling is reached (EAGAIN). On success the caller
-  ## owns the depth reservation; it is released by `asyncDepthDec` after the
-  ## foreign callback fires. `msg.reqBuf` ownership transfers on success.
+  ## owns the depth reservation; it is released by `asyncDepthDec` as soon as
+  ## the response is popped off the response ring, before the foreign callback
+  ## is invoked. `msg.reqBuf` ownership transfers on success.
   if c.asyncDepth.fetchAdd(1, moAcquireRelease) >= c.asyncCap:
     discard c.asyncDepth.fetchSub(1, moRelease)
     return false
@@ -503,8 +504,14 @@ proc tryDequeueAsync*(c: ptr CborCourier, dst: var CborAsyncCallMsg): bool =
   tryPop(c.asyncRing, dst)
 
 proc asyncDepthDec*(c: ptr CborCourier) =
-  ## Delivery-thread side: release one in-flight depth reservation after the
-  ## foreign response callback has fired.
+  ## Delivery-thread side: release one in-flight depth reservation.
+  ##
+  ## Called as soon as the response has been popped off the response ring —
+  ## *before* the foreign callback is invoked, not after. At that point the
+  ## message occupies neither ring, so the reservation has nothing left to
+  ## bound, and holding it across the callback would let a wrapper that bounds
+  ## itself at exactly `asyncCap` collide with its own still-held reservation
+  ## when the callback merely schedules a wake-up and returns.
   discard c.asyncDepth.fetchSub(1, moRelease)
 
 # ---------------------------------------------------------------------------

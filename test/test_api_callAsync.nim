@@ -149,6 +149,57 @@ proc allocReq(bytes: openArray[byte]): pointer =
     copyMem(result, unsafeAddr bytes[0], bytes.len)
 
 # ---------------------------------------------------------------------------
+# Reissue-from-inside-the-callback plumbing
+# ---------------------------------------------------------------------------
+# The per-call depth reservation must be released when the response leaves the
+# response ring, NOT after the foreign callback returns. A wrapper that bounds
+# itself at exactly `asyncQueueDepth` (the Python one does) would otherwise
+# collide with its own still-held reservation whenever the callback merely
+# schedules a wake-up and the next call is issued before the delivery thread
+# gets past the callback. Having the callback itself issue the next call turns
+# that race into a deterministic check — see the regression test below.
+
+const ReissueNotAttempted = 127'i32
+
+var
+  gReissueArmed: Atomic[int]
+  gReissueRc: Atomic[int32]
+  gReissueRc2: Atomic[int32]
+  gReissueTarget2: ptr AsyncResult = nil
+  gReissueBuf2: pointer = nil
+  gReissueCtx: uint32 = 0
+  gReissueBuf: pointer = nil
+  gReissueLen: int32 = 0
+  gReissueTarget: ptr AsyncResult = nil
+
+proc onRespReissue(
+    userData: pointer, reqId: uint64, status: int32, respBuf: pointer, respLen: int32
+) {.cdecl, gcsafe, raises: [].} =
+  # Exactly one callback reissues, and it does so before the normal
+  # bookkeeping so `gReissueRc` is published before any waiter sees `done`.
+  # The payload was encoded up-front: this must not allocate.
+  if gReissueArmed.exchange(0, moAcquireRelease) == 1:
+    # The generated C entry point carries no gcsafe annotation — it is meant to
+    # be called from foreign code, where Nim's checker never looks. A real
+    # wrapper reissues from its callback exactly like this.
+    {.cast(gcsafe).}:
+      let rc = acbtest_callAsync(
+        gReissueCtx, "add_numbers".cstring, gReissueBuf, gReissueLen, 0xC0FFEE'u64,
+        0'u32, onResp, gReissueTarget,
+      )
+      gReissueRc.store(rc, moRelease)
+      # Second reissue from the same callback: the slot freed by this response
+      # has just been consumed by the call above, so the window is full again
+      # and this one must be refused. Proves the ceiling still binds even
+      # when the caller is the callback itself.
+      let rc2 = acbtest_callAsync(
+        gReissueCtx, "add_numbers".cstring, gReissueBuf2, gReissueLen, 0xC0FFEF'u64,
+        0'u32, onResp, gReissueTarget2,
+      )
+      gReissueRc2.store(rc2, moRelease)
+  onResp(userData, reqId, status, respBuf, respLen)
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -384,6 +435,96 @@ suite "API library async call (CBOR mode)":
       deallocShared(held[i])
 
     discard acbtest_shutdown(ctx)
+
+  test "a callback reissuing at a full window is not refused (depth released at dequeue)":
+    # Regression gate for the depth-release ordering. While the reservation was
+    # released only after the callback returned, this was a deterministic -6:
+    # at the instant the first completion callback runs, all `Depth`
+    # reservations are still held. Releasing at dequeue leaves `Depth - 1`
+    # held, so the reissue is accepted. Neither outcome depends on timing —
+    # callbacks are serialised on the single delivery thread, so the armed
+    # callback is by definition the first response to leave the ring.
+    var err: cstring = nil
+    let ctx = acbtest_createContext(addr err)
+    check ctx != 0'u32
+
+    type AddArgs = object
+      a*: int32
+      b*: int32
+
+    const Depth = 16
+
+    # Encode the reissued call up-front; the callback must not allocate.
+    let reArgs = cborEncode(AddArgs(a: 7'i32, b: 35'i32))
+    gReissueCtx = ctx
+    gReissueBuf = allocReq(reArgs.value)
+    gReissueLen = int32(reArgs.value.len)
+    gReissueTarget = newResult()
+    gReissueBuf2 = allocReq(reArgs.value)
+    gReissueTarget2 = newResult()
+    gReissueRc2.store(ReissueNotAttempted, moRelease)
+    gReissueRc.store(ReissueNotAttempted, moRelease)
+    gReissueArmed.store(1, moRelease)
+
+    # Fill the window exactly.
+    var held: array[Depth, ptr AsyncResult]
+    for i in 0 ..< Depth:
+      held[i] = newResult()
+      let argBuf = cborEncode(AddArgs(a: int32(i), b: 0'i32))
+      let inBuf = allocReq(argBuf.value)
+      let rc = acbtest_callAsync(
+        ctx,
+        "add_slow".cstring,
+        inBuf,
+        int32(argBuf.value.len),
+        uint64(i),
+        0'u32,
+        onRespReissue,
+        held[i],
+      )
+      check rc == 0'i32
+
+    for i in 0 ..< Depth:
+      check waitDone(held[i])
+      check held[i].gotStatus == 0'i32
+      deallocShared(held[i])
+
+    # The reissue was attempted, from inside a completion callback, with the
+    # window otherwise full — and it was accepted.
+    check gReissueArmed.load(moAcquire) == 0
+    let reissueRc = gReissueRc.load(moAcquire)
+    check reissueRc == 0'i32
+    # The window bound still holds from inside the callback.
+    check gReissueRc2.load(moAcquire) == -6'i32
+    # NB: `_callAsync` deallocates the request buffer on every return path,
+    # rejections included — the caller must never free it itself. Doing so is a
+    # double free that corrupts the heap and surfaces later as a SIGSEGV inside
+    # an unrelated `rawAlloc`.
+    deallocShared(gReissueTarget2)
+    gReissueTarget2 = nil
+    gReissueBuf2 = nil
+
+    if reissueRc == 0'i32:
+      check waitDone(gReissueTarget)
+      check gReissueTarget.gotStatus == 0'i32
+      let dec = cborDecodeResultEnvelope(respBytes(gReissueTarget), AddNumbers)
+      check dec.isOk()
+      check dec.value.sum == 42'i64
+      deallocShared(gReissueTarget)
+      gReissueTarget = nil
+      gReissueBuf = nil
+      discard acbtest_shutdown(ctx)
+    else:
+      # Regression: the reservation is being released after the callback again.
+      # The checks above have already failed, so stop here — do NOT attempt an
+      # orderly shutdown. Reverting the ordering locally made `_shutdown` block
+      # indefinitely in this state (delivery thread parked in `awaitShutdown`),
+      # and the mechanism has not been characterised. Leaking the context in a
+      # test binary that is about to move on is much preferable to a CI job that
+      # dies on its timeout with no usable output.
+      deallocShared(gReissueTarget)
+      gReissueTarget = nil
+      gReissueBuf = nil
 
   test "generous timeout lets the slow provider complete normally":
     var err: cstring = nil
