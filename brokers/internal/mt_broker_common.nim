@@ -542,3 +542,27 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
     gBrokerThreadSignal = nil
     closeBrokerSignalShared(sig)
   drainPendingRingFrees()
+
+# ---------------------------------------------------------------------------
+# Thread join + handle release
+# ---------------------------------------------------------------------------
+
+when defined(windows):
+  import std/winlean
+
+proc joinAndReleaseThread*[TArg](t: var Thread[TArg]) =
+  ## `joinThread` plus the handle release Windows needs and Nim omits.
+  ##
+  ## On Windows `joinThread` is `waitForSingleObject(t.sys, -1)` and nothing
+  ## else (`lib/std/typedthreads.nim`) — verified unchanged in Nim 2.2.4,
+  ## 2.2.10 and 2.2.12. `CreateThread` hands back a kernel HANDLE that waiting
+  ## does not release, so every joined thread leaks one handle for the life of
+  ## the process. A library context spawns two threads (delivery + processing),
+  ## which is why `<lib>_createContext` / `<lib>_shutdown` cycles leaked
+  ## handles at exactly 2 per cycle — see `test/test_api_library_init.nim`.
+  ##
+  ## On POSIX `pthread_join` reaps the thread itself, so this is a plain
+  ## `joinThread` there.
+  joinThread(t)
+  when defined(windows):
+    discard closeHandle(Handle(t.handle))
