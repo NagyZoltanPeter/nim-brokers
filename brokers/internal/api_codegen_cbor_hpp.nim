@@ -1197,13 +1197,16 @@ proc generateCborCppHeaderFile*(
   h.add("  // callback, not reqId — so it is not part of the typed surface).\n")
   h.add("  std::atomic<uint64_t> asyncReqId_{0};\n")
   h.add("  // <method>Future backpressure: acquire before issue, release in the\n")
-  h.add("  // completion callback. Kept at asyncQueueDepth - 1: the library now\n")
-  h.add("  // releases its own depth slot before invoking the callback, so a\n")
-  h.add("  // post-release reissue is already race-free and the margin of one is\n")
-  h.add("  // only conservatism, not a correctness requirement.\n")
+  h.add("  // completion callback. Sized to the full asyncQueueDepth: the library\n")
+  h.add("  // releases its own depth slot when the response leaves the response\n")
+  h.add("  // ring, before invoking the callback, so a reissue from inside the\n")
+  h.add("  // callback can never collide with its own still-held reservation.\n")
+  h.add("  // (It was asyncQueueDepth - 1 while the library released after the\n")
+  h.add("  // callback; that margin is no longer needed and cost one slot of a\n")
+  h.add("  // window the API documents as asyncQueueDepth.)\n")
   h.add(
     "  std::counting_semaphore<> asyncWindow_{static_cast<std::ptrdiff_t>(\n" &
-      "      asyncQueueDepth > 1 ? asyncQueueDepth - 1 : 1)};\n"
+      "      asyncQueueDepth > 0 ? asyncQueueDepth : 1)};\n"
   )
   for ev in mainEvents:
     let dispatcherType = ev.typeName & "Dispatcher"
