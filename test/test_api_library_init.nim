@@ -283,17 +283,14 @@ suite "API library init (CBOR mode)":
     # dispatcher handle per processing/delivery thread). Allow a generous
     # slack for steady-state noise — anything well below `cycles` still
     # proves we're not leaking per-cycle.
-    when defined(windows) and (NimMajor, NimMinor, NimPatch) == (2, 2, 4):
-      # Known Nim 2.2.4 Windows-only runtime leak unrelated to this fix:
-      # `joinThread` does not close the OS thread HANDLE, so we leak
-      # ~2 HANDLEs per (spawn delivery + spawn processing) cycle. CI
-      # diagnostics confirmed `CloseHandle(getIoHandler(disp)) == 1`
-      # (success) for every dispatcher, so the chronos IOCP close this
-      # test guards is working. The residual leak is fixed in Nim 2.2.10
-      # — every other tested matrix (macOS, Linux, Windows + Nim 2.2.10
-      # and later) reports delta close to 0.
-      echo "[fd-leak] skipping assertion on Nim 2.2.4 + Windows ",
-        "(known joinThread/CloseHandle leak, fixed in 2.2.10; ",
-        "chronos IOCP close itself verified rc=1)"
-    else:
-      check delta <= cycles div 2
+    # This used to be skipped on Windows + Nim 2.2.4, on the stated grounds
+    # that the `joinThread`/`CloseHandle` leak behind it was "fixed in Nim
+    # 2.2.10". It was not. `joinThread` on Windows is `waitForSingleObject`
+    # and nothing else in 2.2.4, 2.2.10 and 2.2.12 alike, so the leak was
+    # present on every release — the assertion simply went unheard on 2.2.10,
+    # where nimble v0.22.2 exits 0 even when a task raises. All three measured
+    # `delta=40` at 20 cycles, i.e. the full 2-per-cycle leak.
+    #
+    # The library now closes the handle itself (`joinAndReleaseThread`), so
+    # the assertion holds on every platform and version and needs no carve-out.
+    check delta <= cycles div 2

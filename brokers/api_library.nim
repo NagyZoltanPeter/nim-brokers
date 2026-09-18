@@ -1917,7 +1917,7 @@ proc registerBrokerLibraryCborImpl(
             inc waitedMs
           if status != 1:
             arg.shutdownFlag.store(1, moRelease)
-            joinThread(entry.delivThread)
+            joinAndReleaseThread(entry.delivThread)
             if not errOut.isNil:
               if not arg.deliveryErrorMessage.isNil:
                 errOut[] = arg.deliveryErrorMessage
@@ -1940,7 +1940,7 @@ proc registerBrokerLibraryCborImpl(
               "Failed to spawn processing thread: " & createRes.error.msg
             )
           arg.shutdownFlag.store(1, moRelease)
-          joinThread(entry.delivThread)
+          joinAndReleaseThread(entry.delivThread)
           freeCborCourier(arg.courier)
           drainAndFree(arg.eventCourier)
           freeCborRespCourier(arg.respCourier)
@@ -1961,8 +1961,8 @@ proc registerBrokerLibraryCborImpl(
 
         if status != 1:
           arg.shutdownFlag.store(1, moRelease)
-          joinThread(entry.delivThread)
-          joinThread(entry.procThread)
+          joinAndReleaseThread(entry.delivThread)
+          joinAndReleaseThread(entry.procThread)
           if not errOut.isNil:
             if not arg.processingErrorMessage.isNil:
               errOut[] = arg.processingErrorMessage
@@ -2024,8 +2024,8 @@ proc registerBrokerLibraryCborImpl(
         # Part D: join delivery thread first — it must finish any
         # in-flight foreign callbacks before we tear down the processing
         # thread (which owns the providers that emitted those events).
-        joinThread(entryToShutdown.delivThread)
-        joinThread(entryToShutdown.procThread)
+        joinAndReleaseThread(entryToShutdown.delivThread)
+        joinAndReleaseThread(entryToShutdown.procThread)
         # Both emitter threads are gone: close the emit-side courier lookup
         # before anything is freed. Nothing can reach it after this point, so
         # the frees below cannot race an emit.
