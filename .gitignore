@@ -12,3 +12,6 @@ build/
 __pycache__/
 *.pyc
 .token-savior-cache.json
+
+# Local-only scratch: plans, notes and drafts that are not part of the repo
+.local/
