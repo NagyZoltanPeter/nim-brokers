@@ -5,20 +5,73 @@ All notable changes to **nim-brokers** are documented here. The project follows
 
 ## [Unreleased]
 
+## [3.4.0] — 2026-09-18
+
+**Cancellable cross-thread requests, `Opt[T]` parity, and `##` doc comments
+carried into every generated surface — plus a Windows handle leak and a CI
+reporting gap that had been hiding real failures.**
+
+### Breaking — FFI API lane
+
+- **`shutdown_request` is no longer part of the public FFI surface** (#49). It
+  is gone from the dispatch table, `_listApis`, `_getSchema`, the CDDL and all
+  five wrappers; `_call` and `_callAsync` answer `-4` for it and for any
+  reserved `__`-prefixed control name. Call `<lib>_shutdown(ctx)` instead — it
+  runs the hook and the transport teardown together. A `shutdownRequest`
+  declaration must now carry exactly one zero-argument signature; arg-only and
+  dual-slot are compile errors. Released as a minor bump deliberately: the API
+  lane has no known external consumers yet.
+
+### Added
+
+- **Cancellable cross-thread requests** (MT lane): `requestCancellable` returns
+  `(<T>RequestId, Future)`, and `cancel([ctx,] id)` abandons the response slot
+  from any thread. Blocking callers use `blockingRequestCancellable`. A queued
+  request is dropped without invoking the provider; a running one has its
+  provider future `cancelSoon`-ed. Timeouts ride the same path.
+- **`Opt[T]` reaches full parity with `Option[T]`** across every lane,
+  including FFI.
+- **`##` doc comments in broker bodies** (#50) are captured and emitted into
+  the generated C / C++ / Python / Rust / Go wrappers, the CDDL, and the `doc`
+  fields of the runtime descriptors returned by `_getSchema`.
+- **`<lib>_shutdown(ctx)` invokes the declared `shutdownRequest` provider**
+  (#49), on the processing thread, after the in-flight `_call` drain and before
+  the threads stop. Failure or timeout is logged and never aborts teardown;
+  knob `shutdownRequestTimeoutMs` (default 5000, `0` = infinite).
+
 ### Fixed
 
-- **`teardownBrokerThread()` no longer closes the thread's chronos
-  dispatcher.** It closed it as its last step, but it runs on any thread that
-  used brokers — automatically through `onThreadDestruction`, or explicitly on
-  FFI/main threads — and those threads can belong to someone else who still
-  drives the dispatcher. chronos keeps the closed handle as the thread's
-  dispatcher, so the owner's next poll aborted with `poll(): Unable to get OS
-  events`: a destruction hook running after the broker one, code after an
-  explicit teardown, or an FFI library (nim-ffi) closing its worker thread's
-  handle a second time after the join. `closeThreadDispatcherSelector()` is now
-  called only by the threads brokers creates, the `api_library`
-  processing/delivery threads, right after their teardown, so their per-context
-  fd reclamation is unchanged.
+- **Windows: `createContext`/`shutdown` leaked two OS HANDLEs per cycle.** Nim's
+  Windows `joinThread` waits on the thread handle but never closes it, in 2.2.4,
+  2.2.10 and 2.2.12 alike; the library now closes it itself.
+- **FFI async: spurious `-6` / "async window full".** The per-call depth
+  reservation is released when the response leaves the ring, not after the
+  foreign callback returns, so a wrapper bounded at exactly `asyncQueueDepth`
+  can reissue from its callback. The C++ wrapper's window is now the full
+  `asyncQueueDepth` rather than one less.
+- **`teardownBrokerThread` no longer closes the thread's chronos dispatcher.**
+  It runs on any thread that used brokers, including ones owned by someone else
+  who still drives the dispatcher; only broker-created threads close theirs.
+- **MT `clearProvider` fails its outstanding requests** instead of stranding
+  them until timeout — required for safety, since the response pool is freed
+  when the provider thread exits.
+- **MT response-slot ownership** is settled synchronously on give-up, and a
+  timed-out request's poller retires immediately instead of leaving a phantom
+  slot.
+- `listenIt` / `onSignalIt` are emitted per broker type (#51).
+- The persistence and torpedo Rust examples declare `futures-channel` and build
+  again.
+
+### Changed — toolchain and CI
+
+- **Nim 2.2.12 replaces 2.2.10** in the gating matrix and as the recommended
+  baseline.
+- **A failing nimble task can no longer report success.** nimble v0.22.2 (shipped
+  with Nim 2.2.10) exits 0 even when a task raises, which had been hiding a
+  broken Rust example and the Windows handle leak above. Every nimble task step
+  now runs through `ci/nimble-strict.sh`.
+- **`nimble test` runs every file before failing**, instead of aborting at the
+  first failure and silently skipping the rest of the suite.
 
 ## [3.3.0] — 2026-07-14
 
@@ -913,6 +966,7 @@ wrappers.**
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[3.4.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.4.0
 [3.3.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
 [3.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.2.0
 [3.1.4]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.1.4
