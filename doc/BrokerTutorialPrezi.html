@@ -795,16 +795,39 @@ proc main() {.async.} =
   <h2>RequestBroker(mt) — operational rules</h2>
   <ul>
     <li>The provider runs on the thread that called <code>setProvider</code> and serves requests <strong>sequentially</strong> on its event loop — throughput is bounded by handler time.</li>
-    <li><strong>Cross-thread timeout</strong> — default 5 s; unresponsive provider ⇒ <code>err</code>, not a hang:</li>
+    <li><strong>Cross-thread timeout</strong> — default 20 s, per type; unresponsive provider ⇒ <code>err</code>, not a hang. A request still queued at expiry is <strong>dropped</strong>, never run:</li>
   </ul>
   <pre><code class="language-nim" data-trim>
-Weather.setRequestTimeout(chronos.seconds(2))
+RequestBroker(mt, requestTimeoutMs = 2000):   # seed it at the declaration…
+  ...
+Weather.setRequestTimeout(chronos.seconds(2)) # …or change it at runtime
 echo Weather.requestTimeout()          # 2 seconds — same-thread calls unaffected
 </code></pre>
   <ul>
     <li>Same-thread path = direct provider call through threadvar state — zero ring/slab traffic.</li>
+    <li><code>clearProvider</code> resolves every waiting request at once with <code>err("… provider was cleared …")</code> — no one waits out the timeout.</li>
   </ul>
   <div class="callout warn"><p><strong>New visible failure mode:</strong> the bounded ring / response pool can return <code>err(...)</code> on overflow — unlike an unbounded <code>Channel[T]</code> that grows silently. Handle it, and size for bursts (next slides).</p></div>
+</section>
+
+<section>
+  <h2>RequestBroker(mt) — cancel it, or give it a deadline</h2>
+  <pre><code class="language-nim" data-trim>
+let (id, fut) = Weather.requestCancellable("Berlin")  # id: plain distinct uint64
+# ... hand `id` to ANY thread:
+discard Weather.cancel(id)       # true = published · false = nothing left to cancel
+let res = await fut              # err("RequestBroker(Weather): request cancelled")
+
+# Per-CALL deadline: the future owns its cancel schedule, so a combinator that
+# cancels it runs the broker cancel — never an unhandled CancelledError.
+let (_, f2) = Weather.requestCancellable("Paris")
+discard await withTimeout(f2, chronos.milliseconds(300))
+let r2 = await f2                # the answer, or err(… request cancelled)
+</code></pre>
+  <div class="cols cols-2" style="margin-top:0.4em;">
+    <div class="callout warn"><p>Plain <code>request()</code> is <strong>not cancellable</strong> — <code>withTimeout</code> / <code>race</code> / <code>cancelSoon</code> on it does not stop the request. Reach for <code>requestCancellable</code> up front.</p></div>
+    <div class="callout"><p>Queued ⇒ dropped, provider never runs · running ⇒ provider future cancelled at its next <code>await</code>. Same-thread: id <code>0</code>, not cancellable. Blocking: <code>blockingRequestCancellable(args, addr id)</code>.</p></div>
+  </div>
 </section>
 
 <section>
@@ -821,6 +844,28 @@ echo Weather.requestTimeout()          # 2 seconds — same-thread calls unaffec
 </section>
 
 <section>
+  <h2>SignalBroker(mt) — one handler thread, any producer</h2>
+  <pre><code class="language-nim" data-trim>
+SignalBroker(mt, queueDepth = 256):    # EventBroker(mt) kwargs / presets
+  type Ingest = object
+    value*: float
+
+proc producer() {.thread.} =
+  if Ingest.signal(value = 0.5).isErr: # any thread · plain proc, never await
+    discard                            # "no signal handler installed" | "queue full"
+
+# on the handler thread (keeps its chronos loop alive):
+discard Ingest.onSignalIt:
+  echo "got ", it.value
+</code></pre>
+  <ul>
+    <li>The handler runs on the thread that called <code>onSignal</code>; same-thread signals skip the ring.</li>
+    <li>Cross-thread: one slab encode + one ring enqueue to the single target — no fan-out, no reply.</li>
+    <li>No handler ⇒ <code>signal()</code> fails fast on a lock-free check. Drop and replace/mock the handler from the <strong>owning thread</strong>.</li>
+  </ul>
+</section>
+
+<section>
   <h2>Tuning: size it at the declaration</h2>
   <pre><code class="language-nim" data-trim>
 # Wide ring + slab for bursty broadcast — built-in preset:
@@ -834,19 +879,20 @@ RequestBroker(mt, queueDepth = 16, responseSlots = 8, maxResponseBytes = 512):
   proc query*(id: uint8): Future[Result[LedState, string]] {.async.}
 </code></pre>
   <ul>
-    <li>Defaults are <strong>type-driven</strong> — sensible sizes derived from the payload shape.</li>
+    <li>Defaults are <strong>type-driven</strong> — sensible sizes derived from the payload shape. <code>SignalBroker(mt)</code> takes the EventBroker(mt) knobs; <code>requestTimeoutMs</code> seeds the request timeout (presets leave it alone).</li>
     <li>Every MT callsite emits a <strong>compile-time hint</strong>: resolved capacities, their origin (<code>default</code> / <code>kwarg</code> / <code>preset:&lt;n&gt;</code> / <code>auto:&lt;reason&gt;</code>) and an <strong>idle-RAM estimate</strong> — you see at build time what the broker reserves.</li>
   </ul>
   <p class="text-muted" style="font-size:0.62em;">Full knob/preset/failure-mode reference: doc/MT_BROKER_CONFIG.md</p>
 </section>
 
 <section>
-  <h2>MT checklist — the six things people get wrong</h2>
+  <h2>MT checklist — the seven things people get wrong</h2>
   <ul>
     <li><code>--threads:on</code> + <code>--mm:orc|refc</code>; prefer <code>-d:release</code> + orc for throughput.</li>
     <li><code>emit</code>/<code>signal</code> stay <strong>sync</strong> — never await; <code>drop*</code> stays <strong>async</strong> — always await (or <code>waitFor</code> from <code>{.thread.}</code> procs).</li>
     <li>Overflow of a bounded ring/pool is an <code>err</code> — <strong>branch on it</strong>; don't discard blindly.</li>
     <li>Keep the provider thread's loop responsive — it serves sequentially.</li>
+    <li>Need to cancel, or a per-call deadline? <code>requestCancellable</code> — a combinator on plain <code>request()</code> stops nothing.</li>
     <li><code>dropListener</code> from the registering thread; <code>dropAllListeners</code> from anywhere.</li>
     <li>Bursty or large payloads? Set <code>preset</code>/<code>queueDepth</code>/<code>maxPayloadBytes</code> — read the compile-time hint line.</li>
   </ul>
@@ -991,7 +1037,8 @@ func (w *Weather) OffStormWarning(h EventHandle)  // 0 = remove all
       <ul>
         <li><code>mylib_createContext()</code> — creates one broker-backed context, does one-time runtime init internally.</li>
         <li>Two threads per context: <strong>processing</strong> (request providers) + <strong>delivery</strong> (listener registration, foreign-language callbacks).</li>
-        <li><code>InitializeRequest</code> / <code>ShutdownRequest</code> — post-create configuration and orderly teardown, as ordinary broker requests.</li>
+        <li><code>InitializeRequest</code> — post-create configuration, a public request the consumer calls.</li>
+        <li><code>ShutdownRequest</code> — author-only teardown hook: <code>mylib_shutdown(ctx)</code> runs it; it is not on the FFI surface (<code>_call</code> ⇒ <code>-4</code>).</li>
       </ul>
     </div>
     <div>

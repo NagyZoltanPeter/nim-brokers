@@ -1244,7 +1244,7 @@ OnFilterSubscribeEvent.emit(
   <section>
     <h2>Enabling Multi-Thread Mode</h2>
 
-    <p>Both <span class="chip chip-blue">EventBroker</span> and <span class="chip chip-green">RequestBroker</span> accept an <code>(mt)</code> driver annotation. The public API stays almost identical &mdash; the macro swaps the internal plumbing.</p>
+    <p><span class="chip chip-blue">EventBroker</span>, <span class="chip chip-green">RequestBroker</span> and <span class="chip" style="background:rgba(176,133,245,0.15);color:#b085f5;border:1px solid rgba(176,133,245,0.4);">SignalBroker</span> accept an <code>(mt)</code> driver annotation. The public API stays almost identical &mdash; the macro swaps the internal plumbing.</p>
 
     <div class="cols cols-2" style="margin-top:0.6em;">
       <div>
@@ -1367,7 +1367,7 @@ OnFilterSubscribeEvent.emit(
       <tbody>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Same public API</strong></td>
-          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes. MT adds <code>setRequestTimeout</code> / <code>requestTimeout</code>.</td>
+          <td><code>emit</code>, <code>listen</code>, <code>request</code>, <code>setProvider</code>, <code>dropAllListeners</code> &mdash; identical call-sites; only the macro declaration changes. MT adds <code>setRequestTimeout</code> / <code>requestTimeout</code> and cancellation: <code>requestCancellable</code> / <code>cancel</code> / <code>blockingRequestCancellable</code>.</td>
         </tr>
         <tr class="fragment">
           <td style="color:var(--logos-green);"><strong>Timeout protection</strong></td>
@@ -1442,7 +1442,8 @@ OnFilterSubscribeEvent.emit(
       <li class="fragment"><strong>Cross-thread request</strong> &mdash; args go into a request slab cell + ring; reply comes back via a reserved <strong>response slot</strong>. No allocation on the hot path.</li>
       <li class="fragment"><strong>Provider thread must run a Chronos loop</strong> &mdash; the shared dispatch loop drains the ring and calls the local provider closure</li>
       <li class="fragment"><strong>Same-thread fast path</strong> &mdash; provider is invoked directly with zero ring/slab overhead</li>
-      <li class="fragment"><strong>Failure modes</strong> &mdash; <code>err</code> on payload too large, ring full, response-slot pool exhausted, or timeout (default 20&thinsp;s, configurable via <code>T.setRequestTimeout</code>)</li>
+      <li class="fragment"><strong>Failure modes</strong> &mdash; <code>err</code> on payload too large, ring full, response-slot pool exhausted, timeout (default 20&thinsp;s, per type: <code>requestTimeoutMs</code> kwarg / <code>T.setRequestTimeout</code>), <code>request cancelled</code>, or <code>provider was cleared while the request was outstanding</code> (<code>clearProvider</code> fails waiters at once)</li>
+      <li class="fragment"><strong>Cancellation</strong> &mdash; <code>let (id, fut) = T.requestCancellable(args)</code>; <code>T.cancel(id)</code> from any thread. Queued &rArr; dropped, provider never runs; running &rArr; provider future cancelled. The future is also safe under <code>withTimeout</code> / <code>race</code> (per-call deadline). Plain <code>request()</code> is not cancellable; same-thread requests neither.</li>
       <li class="fragment"><strong>Capacity knobs</strong> &mdash; <code>queueDepth</code>, <code>slabCapacity</code>, <code>responseSlots</code>, payload/response size caps; or pick a named <code>preset</code></li>
     </ul>
   </section>
@@ -1459,9 +1460,26 @@ OnFilterSubscribeEvent.emit(
       <li class="fragment"><strong>Per-listener-thread ring + slab</strong> &mdash; one shared ring + slab per (ctx, listener-thread); all listeners on that thread share it</li>
       <li class="fragment"><strong>Single-cell fan-out</strong> &mdash; one slab cell per emit, refcounted across listeners &mdash; <strong>no per-listener deep-copy</strong></li>
       <li class="fragment"><strong>Listener concurrency</strong> &mdash; within a thread, listeners for an event run concurrently (not serialised)</li>
-      <li class="fragment"><strong>Async emit</strong> &mdash; <code>emit</code> is <code>{.async: (raises: []).}</code>; same-thread dispatches via <code>asyncSpawn</code>, cross-thread via the ring + signal</li>
+      <li class="fragment"><strong>Sync emit</strong> &mdash; <code>emit</code> is sync <code>void</code> (never await it); same-thread dispatches via <code>asyncSpawn</code>, cross-thread via the ring + signal</li>
       <li class="fragment"><strong>Ordering</strong> &mdash; per-target-thread FIFO; cross-thread ordering is per-target, not global</li>
       <li class="fragment"><strong>Capacity knobs</strong> &mdash; <code>queueDepth</code>, <code>slabCapacity</code>, <code>maxPayloadBytes</code>, plus named <code>preset</code>s</li>
+    </ul>
+  </section>
+
+  <!-- 6.8b  SignalBroker (mt) specifics -->
+  <section>
+    <h2>SignalBroker <code>(mt)</code> &mdash; Specifics</h2>
+
+    <div class="callout" style="margin-bottom:0.6em;">
+      <p>One handler on one thread; <code>signal()</code> from <strong>any</strong> thread. EventBroker(mt)'s transport with RequestBroker(mt)'s single registry.</p>
+    </div>
+
+    <ul>
+      <li class="fragment"><strong>Handler thread</strong> &mdash; the thread that called <code>onSignal</code> owns the bucket and ring; it must keep a Chronos loop running</li>
+      <li class="fragment"><strong>Same-thread fast path</strong> &mdash; direct <code>asyncSpawn</code>; cross-thread &mdash; one slab encode + one ring enqueue to the single target</li>
+      <li class="fragment"><strong>Sync signal</strong> &mdash; <code>signal()</code> is a plain proc returning <code>Result[void, string]</code>: <code>ok</code> = accepted, <code>err</code> = <code>"no signal handler installed"</code> (lock-free fast-fail) | <code>"queue full"</code></li>
+      <li class="fragment"><strong>Owning-thread operations</strong> &mdash; <code>dropSignalHandler</code>, <code>replaceSignalHandler</code>, <code>getCurrentSignalHandler</code>, <code>withMockSignalHandler</code></li>
+      <li class="fragment"><strong>Capacity knobs</strong> &mdash; the EventBroker(mt) set: <code>queueDepth</code>, <code>slabCapacity</code>, <code>maxPayloadBytes</code>, <code>freeListShards</code>, <code>preset</code></li>
     </ul>
   </section>
 
@@ -1746,7 +1764,7 @@ RequestBroker(mt, queueDepth = 1024,
           <li><code>mylib_createContext()</code> starts the delivery thread first, then the processing thread</li>
           <li>Creation blocks until both threads report readiness</li>
           <li>When create returns, listener registration and API requests are immediately usable</li>
-          <li><code>mylib_shutdown(ctx)</code> first invokes <code>ShutdownRequest</code> on the processing thread</li>
+          <li><code>mylib_shutdown(ctx)</code> first invokes the author-only <code>ShutdownRequest</code> hook on the processing thread (failure / timeout is logged, never aborts teardown)</li>
           <li>After that, shutdown joins the delivery thread and then the processing thread</li>
         </ul>
       </div>
@@ -1869,7 +1887,7 @@ lib.shutdown();
           <li><code>Result&lt;T&gt;</code> wrappers preserve the broker success/error model</li>
           <li>Callbacks are owner-aware in both wrappers: C++ lambdas receive <code>Mylib&amp; owner</code>, Python callbacks receive <code>owner: Mylib</code></li>
           <li>Event callbacks are routed through the owning <code>Mylib</code> instance, so registration and delivery stay instance-specific</li>
-          <li>The library consumer never needs to call <code>ShutdownRequest</code> directly; <code>shutdown()</code> handles teardown</li>
+          <li>The library consumer cannot call <code>ShutdownRequest</code> &mdash; it is off the FFI surface (<code>_call</code> &rArr; <code>-4</code>, absent from wrappers); <code>shutdown()</code> runs it as part of teardown</li>
         </ul>
 
         <div class="callout warn" style="margin-top:0.7em;">

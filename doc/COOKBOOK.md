@@ -36,7 +36,11 @@ the elevator pitch see the [README](../README.md).
   - [Use it, and mock it in a test](#use-it-and-mock-it-in-a-test)
 - [Threaded brokers `(mt)`](#threaded-brokers-mt)
   - [Cross-thread request](#cross-thread-request)
+  - [Request timeout](#request-timeout)
+  - [Cancellable request](#cancellable-request)
+  - [Per-call deadline](#per-call-deadline)
   - [Cross-thread event](#cross-thread-event)
+  - [Cross-thread signal](#cross-thread-signal)
 - [Doc comments](#doc-comments)
   - [Document a broker](#document-a-broker)
   - [Where it shows up](#where-it-shows-up)
@@ -408,6 +412,76 @@ proc main() {.async.} =
 waitFor main()
 ```
 
+### Request timeout
+
+```nim
+# Cross-thread requests give up after a per-type timeout (default 20 s) and
+# return err("… cross-thread request timed out after …") instead of hanging.
+# Seed it at the declaration…
+RequestBroker(mt, requestTimeoutMs = 2000):
+  type Quote = object
+    price*: float
+  proc signature*(sym: string): Future[Result[Quote, string]] {.async.}
+
+# …and/or change it at runtime. Per type, shared by all threads.
+Quote.setRequestTimeout(chronos.seconds(5))
+echo Quote.requestTimeout()                     # 5 seconds
+
+# A request that times out while still queued is DROPPED — the provider never
+# runs it. Same-thread requests call the provider directly: no timeout.
+#
+# clearProvider() does not wait for the timeout: every request still waiting
+# resolves at once with err("… provider was cleared while the request was
+# outstanding").
+```
+
+### Cancellable request
+
+```nim
+# Plain request() is NOT cancellable. Ask for an id up front instead:
+let (id, fut) = Weather.requestCancellable("Berlin")  # (WeatherRequestId, Future)
+
+# `id` is a plain value (distinct uint64) — hand it to ANY thread.
+if Weather.cancel(id):         # true  = cancellation published
+  echo "cancelled"             # false = nothing to cancel (already answering /
+                               #         stale id) — not an error, discard is fine
+let res = await fut            # err("RequestBroker(Weather): request cancelled")
+
+# Queued → dropped, provider never runs. Running → the provider future is
+# cancelled at its next await (cooperative: a provider with no await, or one
+# that swallows CancelledError, runs to completion). The caller resolves
+# either way.
+#
+# Same-thread requests are not cancellable: id is 0,
+# isCancellable(id) == false, and it behaves exactly like request().
+#
+# Blocking caller (no event loop): the id is written through idOut BEFORE the
+# call blocks, so point it at storage another thread can read.
+var gId: WeatherRequestId                       # global / shared
+proc blockedWorker() {.thread.} =
+  let r = Weather.blockingRequestCancellable("Berlin", addr gId)  # Result, blocks
+# … another thread: discard Weather.cancel(gId)
+```
+
+### Per-call deadline
+
+```nim
+# The broker timeout is per TYPE. For a per-CALL deadline, wrap the
+# requestCancellable future in a chronos combinator. Its future owns its
+# cancel schedule, so when withTimeout cancels it on expiry, the broker
+# cancel runs and the future resolves with err(… request cancelled) — never
+# an unhandled CancelledError.
+proc fetchWithDeadline(city: string): Future[Result[Weather, string]] {.async.} =
+  let (_, fut) = Weather.requestCancellable(city)
+  discard await withTimeout(fut, chronos.milliseconds(300))
+  return await fut   # the answer, or err(… request cancelled) past the deadline
+                     # (withTimeout's bool is not a reliable "timed out" flag here)
+
+# Also works with one / race, and fut.cancelSoon() on the requester's thread.
+# NEVER do this with plain request(): its waiter is raises: [] and the
+# request keeps running until the provider answers or the type timeout fires.
+```
+
 ### Cross-thread event
 
 ```nim
@@ -431,6 +505,36 @@ proc main() {.async.} =
   await Alert.dropAllListeners()
 
 waitFor main()
+```
+
+### Cross-thread signal
+
+```nim
+import chronos, brokers/signal_broker
+
+# Same capacity kwargs / presets as EventBroker(mt).
+SignalBroker(mt, queueDepth = 256):
+  type Ingest = object
+    value*: float
+
+proc producer() {.thread.} =                     # any thread may signal
+  let r = Ingest.signal(value = 0.5)             # plain proc — never await
+  if r.isErr: echo r.error                       # "no signal handler installed"
+                                                 # | "queue full" (backpressure)
+
+proc main() {.async.} =
+  # The handler runs on the thread that called onSignal; keep its loop alive.
+  discard Ingest.onSignalIt:
+    echo "got ", it.value
+  var t: Thread[void]
+  t.createThread(producer)
+  await sleepAsync(50.milliseconds)
+  t.joinThread()
+  await Ingest.dropSignalHandler()               # from the owning thread
+
+waitFor main()
+# replaceSignalHandler / getCurrentSignalHandler / withMockSignalHandler are
+# owning-thread only in the (mt) lane.
 ```
 
 ---
