@@ -354,10 +354,56 @@ proc worker() {.thread.} =
 ```
 
 - Same-thread calls take a direct fast path; cross-thread go through a per-bucket
-  channel drained by one dispatch coroutine. fd cost is **O(threads)**, not per-broker.
-- A thread that listens must keep its event loop alive (the broker dispatches on it).
+  lock-free ring drained by one dispatch coroutine. fd cost is **O(threads)**, not per-broker.
+- A thread that listens / provides / handles signals must keep its event loop
+  alive (the broker dispatches on it).
 - MT brokers accept capacity kwargs: `EventBroker(mt, queueDepth = ..., slabCapacity = ...,
-  maxPayloadBytes = ..., preset = "...")`. Omit for defaults.
+  maxPayloadBytes = ..., preset = fastBurst)` (preset is an identifier:
+  `defaultBalanced` / `fastBurst` / `largePayload` / `tinyFootprint`). Omit for
+  defaults. `SignalBroker(mt)` takes the same set; `RequestBroker(mt)` adds
+  `responseSlots`, `maxResponseBytes`, `requestTimeoutMs`.
+
+### `RequestBroker(mt)` — timeout and cancellation
+
+```nim
+RequestBroker(mt, requestTimeoutMs = 2000):     # per-type timeout, default 20 s
+  type Weather = object
+    tempC*: float
+  proc signature*(city: string): Future[Result[Weather, string]] {.async.}
+
+Weather.setRequestTimeout(chronos.seconds(5))   # runtime override, all threads
+
+# Cancellable: plain request() is NOT — ask for an id up front.
+let (id, fut) = Weather.requestCancellable("Berlin")
+discard Weather.cancel(id)       # any thread; true = published, false = nothing to cancel
+let res = await fut              # err("RequestBroker(Weather): request cancelled")
+
+# Per-call deadline: combinators on the cancellable future run the broker cancel.
+let (_, f2) = Weather.requestCancellable("Paris")
+discard await withTimeout(f2, chronos.milliseconds(300))
+let r2 = await f2                # read the outcome here, NOT withTimeout's bool
+
+# Blocking caller: the id is published through idOut before the call blocks.
+var gId: WeatherRequestId        # storage another thread can read
+let r3 = Weather.blockingRequestCancellable("Rome", addr gId)
+```
+
+- Timeout / cancel of a request still **queued** drops it — the provider never
+  runs. A running provider has its future cancelled at its next `await`
+  (cooperative).
+- Same-thread requests are not cancellable: id is `0`, `isCancellable(id)` is
+  false, behaves like `request`.
+- `clearProvider` resolves every waiting request at once with
+  `err("… provider was cleared while the request was outstanding")`.
+- Never put `withTimeout` / `race` / `cancelSoon` on a plain `request()` future:
+  it does not stop the request.
+
+### `SignalBroker(mt)`
+
+The handler runs on the thread that called `onSignal`; `signal()` works from
+any thread (still a plain proc returning `Result[void, string]`; `"queue full"`
+is the bounded-ring backpressure). `dropSignalHandler` and the
+replace/mock trio belong on the owning thread.
 
 ---
 
@@ -410,6 +456,8 @@ module (`//`), `<lib>.cddl` (`;` lines) and the `doc` field of every record in
   with `T(value)` and read with the base-type conversion.
 - Keep all interaction with one context on one thread (single-thread brokers are
   thread-local); cross-thread requires the `(mt)` variant.
+- `(mt)` cross-thread request needs cancelling or a per-call deadline? Use
+  `requestCancellable` — combinators on plain `request()` stop nothing.
 
 ---
 

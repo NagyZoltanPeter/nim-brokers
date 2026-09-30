@@ -1,7 +1,7 @@
 # Multi-thread broker configuration
 
-Reference for tuning `EventBroker(mt)` and `RequestBroker(mt)` capacity,
-payload sizing, and idle memory footprint.
+Reference for tuning `EventBroker(mt)`, `RequestBroker(mt)` and
+`SignalBroker(mt)` capacity, payload sizing, and idle memory footprint.
 
 > See also: [MT_BROKER_REFACTOR_RETROSPECTIVE.md](MT_BROKER_REFACTOR_RETROSPECTIVE.md)
 > §8 for the design rationale and the memory-mitigation heuristics this
@@ -94,6 +94,23 @@ memory profile.
 Total request-broker idle RAM ≈
 `queueDepth × 24 + slabCapacity × align8(headerBytes + maxPayloadBytes) +
 responseSlots × align8(slotHeaderBytes + maxResponseBytes)`.
+
+### SignalBroker(mt)
+
+Accepts exactly the **EventBroker(mt) knob set** — `queueDepth`,
+`slabCapacity`, `maxPayloadBytes`, `freeListShards`, and `preset = <name>`
+(using the EventBroker(mt) column of the preset table) — with the same
+defaults. There is no response pool and no timeout: a signal is one-way.
+
+```nim
+SignalBroker(mt, queueDepth = 1024, slabCapacity = 2048):
+  type Ingest = object
+    value*: float
+```
+
+The ring belongs to the handler's bucket (one per context); the slab is shared
+by the broker type, as in EventBroker(mt). The only overflow symptom is `signal()` returning `err("queue full")`, which the
+producer sees synchronously. Idle RAM follows the event-broker formula above.
 
 ### Sizing intuition
 
@@ -309,7 +326,11 @@ EventBroker(mt, preset = tinyFootprint):
 |---|---|---|
 | Chronicles `WRN event dropped: listener queue full` | Burst emit rate > listener drain rate over the ring's depth | bump `queueDepth` and/or `slabCapacity`; or pick `preset = fastBurst` |
 | `RequestBroker(...): provider queue full` error returned | Same as above on the request path | bump `queueDepth`, or throttle issue rate |
-| `RequestBroker(...): no response slot available` error | More concurrent in-flight requests than `responseSlots` | bump `responseSlots` to match your concurrency ceiling |
+| `RequestBroker(...): response slot pool exhausted` error | More concurrent in-flight requests than `responseSlots` — or, transiently, timed-out / cancelled requests whose slot the provider has not yet reached | bump `responseSlots` to match your concurrency ceiling; avoid a timeout far below the provider's service time on a small pool |
+| `RequestBroker(...): cross-thread request timed out after …` error | Provider slower than `requestTimeoutMs` / `setRequestTimeout` | raise the timeout, or make the provider faster; a request still queued at expiry is dropped, never run |
+| `RequestBroker(...): request cancelled` error | `cancel(id)` or cancelling the `requestCancellable` future (incl. `withTimeout` / `one` / `race`) | expected — the caller asked for it |
+| `RequestBroker(...): provider was cleared while the request was outstanding` error | `clearProvider` ran while the request waited | expected on shutdown; re-issue once a provider is set |
+| `SignalBroker`: `signal()` returns `err("queue full")` | Signal rate > handler drain rate over the ring's depth | bump `queueDepth` / `slabCapacity`, or `preset = fastBurst` |
 | Compile-time `unclassifiable:<name>` warning | Type classifier couldn't introspect an alias / external type | provide explicit `maxPayloadBytes = N` / `maxResponseBytes = N` |
 | Idle RAM higher than expected | Auto-classified large field (e.g. `seq[byte]` → 64 KB cells × 1024 slab) | use `preset = largePayload` (narrows slab) or explicit `slabCapacity` |
 

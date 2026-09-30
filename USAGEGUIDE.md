@@ -29,6 +29,7 @@ footprints. For the short overview start at the [README](README.md).
   - [Multi-thread support](#multi-thread-support)
     - [RequestBroker (multi-thread)](#requestbroker-multi-thread)
     - [EventBroker (multi-thread)](#eventbroker-multi-thread)
+    - [SignalBroker (multi-thread)](#signalbroker-multi-thread)
     - [Tuning multi-thread brokers](#tuning-multi-thread-brokers)
   - [Broker FFI API](#broker-ffi-api)
     - [FFI API detailed documentation](#ffi-api-detailed-documentation)
@@ -391,7 +392,7 @@ if r.isErr:
 await IngestSample.dropSignalHandler()
 ```
 
-> `ok()` is a best-effort acknowledgement, not a delivery guarantee — for confirmation, use `RequestBroker` with a `void` response. `SignalBroker(mt)` and `SignalBroker(API)` provide the multi-thread and FFI variants, mirroring the other brokers.
+> `ok()` is a best-effort acknowledgement, not a delivery guarantee — for confirmation, use `RequestBroker` with a `void` response. `SignalBroker(mt)` ([below](#signalbroker-multi-thread)) and `SignalBroker(API)` provide the multi-thread and FFI variants, mirroring the other brokers.
 
 #### onSignalIt sugar
 
@@ -685,10 +686,21 @@ Two limits in this first cut:
   a caller is blocked and cannot publish its own id, `idOut` must point at
   storage another thread can read.
 
-Timeouts now use the same machinery, which changes one behaviour: a request
-that times out (or is cancelled) while still queued is **dropped at the
-provider instead of being executed**. Previously the provider ran it and the
-answer was discarded.
+Timeouts use the same machinery: a request that times out (or is cancelled)
+while still queued is **dropped at the provider instead of being executed**.
+
+**Per-call deadline.** `setRequestTimeout` is per type, shared by every thread.
+For a deadline on one call, wrap the `requestCancellable` future in a chronos
+combinator — on expiry it cancels the future, which runs the broker cancel:
+
+```nim
+let (_, fut) = Weather.requestCancellable("Berlin")
+discard await withTimeout(fut, chronos.milliseconds(300))
+let res = await fut   # the answer, or err(… request cancelled) past the deadline
+```
+
+Read the outcome from `res`, not from `withTimeout`'s `bool`: the cancel
+resolves the future, so `withTimeout` can report `true` even on expiry.
 
 **Performance considerations:**
 
@@ -763,11 +775,52 @@ every lane, so the same source compiles whether or not you add the `(mt)` tag.
 
 See [Multi-Thread EventBroker](doc/MultiThread_EventBroker.md) for architecture diagrams and memory layout details. Run `nimble perftest` for benchmarks.
 
+### SignalBroker (multi-thread)
+
+One handler, installed on one thread; `signal()` from **any** thread. The
+handler runs on the thread that called `onSignal`, so that thread must keep its
+event loop alive. Same-thread signals dispatch directly via `asyncSpawn`;
+cross-thread signals are encoded into a slab cell and enqueued on the handler
+thread's ring — the EventBroker(mt) transport without the fan-out.
+
+```nim
+import chronos
+import brokers/signal_broker
+
+SignalBroker(mt, queueDepth = 256):   # same kwargs / presets as EventBroker(mt)
+  type Ingest = object
+    value*: float
+
+proc producer() {.thread.} =
+  let r = Ingest.signal(value = 0.5)  # plain proc, never await
+  if r.isErr:
+    echo r.error                      # "no signal handler installed" | "queue full"
+
+proc main() {.async.} =
+  discard Ingest.onSignalIt:          # handler lives on THIS thread
+    echo "got ", it.value
+  var t: Thread[void]
+  t.createThread(producer)
+  await sleepAsync(chronos.milliseconds(50))
+  t.joinThread()
+  await Ingest.dropSignalHandler()    # from the owning thread
+
+waitFor main()
+```
+
+- `ok()` still means **accepted**, not handled. With no handler, `signal()`
+  fails fast on a lock-free check, without touching the ring.
+- `"queue full"` is the visible backpressure signal of the bounded ring; size it
+  with `queueDepth` / `slabCapacity` / `preset`.
+- `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler`
+  are **owning-thread only** in this lane. Call `dropSignalHandler` from the
+  owning thread too — it is the thread that frees the ring.
+
 ### Tuning multi-thread brokers
 
-Both `EventBroker(mt)` and `RequestBroker(mt)` accept optional kwargs to
-size the cross-thread dispatch ring, payload slab, and (for requests)
-the response slot pool. Sensible defaults are auto-selected from the
+`EventBroker(mt)`, `RequestBroker(mt)` and `SignalBroker(mt)` accept optional
+kwargs to size the cross-thread dispatch ring, payload slab, and (for requests)
+the response slot pool. `SignalBroker(mt)` takes the EventBroker(mt) set. Sensible defaults are auto-selected from the
 broker's type shape — see the type-driven sizing table — but bursty,
 large-payload, or memory-constrained deployments will want to override.
 
