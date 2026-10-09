@@ -14,7 +14,7 @@ let scope = newBrokerScope()              # owns a fresh ctx (or adopts one)
 ?GetVolume.provideIt(scope):    return ok(GetVolume(level: self.volume))
 ?Mute.onSignalIt(scope):        self.volume = 0
 ...
-await scope.close()                       # LIFO, idempotent
+await scope.close()                       # LIFO; scope is open again after
 ```
 
 Purely additive. Every existing ctx-based overload is unchanged.
@@ -23,12 +23,12 @@ Purely additive. Every existing ctx-based overload is unchanged.
 
 | # | Rule |
 |---|------|
-| S1 | Registration through a scope = the ctx overload on `scope.ctx`. The undo is recorded **only on `ok`**. On a closed scope → `err("BrokerScope closed")`, nothing registered. |
-| S2 | `close()` runs undos in **reverse registration order**. It is **idempotent**: repeated or concurrent callers get the **same** `Future`. The undo list is detached (`move`) before the first `await`, so a handler that closes its own scope is safe. |
+| S1 | Registration through a scope = the ctx overload on `scope.ctx`. The undo is recorded **only on `ok`**. While a close is running → `err("BrokerScope is closing")`, nothing registered. |
+| S2 | `close()` runs undos in **reverse registration order**. Concurrent callers wait on the **same** teardown. The undo list is detached (`move`) before the first `await`, so a handler that closes its own scope is safe. When the teardown finishes, the scope is empty and **open again (re-openable)**; registrations are rejected only *during* the teardown, since they would otherwise land in neither batch. |
 | S3 | **Release, not clear.** Each undo removes *exactly the closure this scope installed*, only if it is still installed **and** still owned here. Anything else is a **logged no-op** (`alreadyGone` → `debug`, `takenOver` / `ownerChanged` → `warn`): dropped already, replaced by a mock or another owner, or cleared from another thread and re-provided by someone else. Out-of-scope lifecycle management always wins and is never an error, but it is never silent. The warn carries `brokerType`, `kind` (listener / signalHandler / provider / provider slot), `brokerCtx` and `outcome` (`alreadyGone` / `takenOver` / `ownerChanged`; see §4.2). |
 | S4 | Ownership identity = closure identity (`==`, fn ptr + env). For MT lanes it is additionally the bucket's `(threadId, threadGen)`, checked **under the global lock in the same critical section as the removal**. |
 | S5 | **Dual-slot RequestBroker:** release touches **only the slot the scope registered**. The bucket is torn down only when both slots are empty. |
-| S6 | `replaceProvider(scope, p)` / `reprovideIt(scope)` / `replaceSignalHandler(scope, h)`: replace-or-insert, then track release-of-`p`. `close()` **does not restore** the displaced provider or handler (that is `withMockProvider`'s job). Single-occupancy registrations (provider slot, signal handler) are tracked under a **key** `"<T>/<slot>"`; re-registering the same key from the same scope **overwrites** its undo instead of appending. Otherwise the stale first undo would hit our own replacement and emit a false `takenOver` warn. Listeners and Multi providers are additive: unkeyed, always appended. |
+| S6 | `replaceProvider(scope, p)` / `reprovideIt(scope)` / `replaceSignalHandler(scope, h)`: replace-or-insert, then track release-of-`p`. `close()` **does not restore** the displaced provider or handler (that is `withMockProvider`'s job). Undos are unkeyed. A slot registered twice through one scope records two undos; run newest-first, the older one finds its closure gone (`alreadyGone`, debug) and is a no-op. A keyed overwrite was implemented first and then removed as not worth its string allocations. |
 | S7 | Thread affinity: a scope belongs to the thread that created it. Misuse from another thread is logged with chronicles `error` and nothing happens, with no assert. **Registration** → `err("BrokerScope used off its owning thread")`, nothing registered. **`close()`** → returns an already-completed `Future`; the scope is **not** marked closed and the undo list is kept, so the owning thread can still close it properly. Under `--threads:off` there is no check. |
 | S8 | `close()` returns `Future[void]`, with no `Result`. Every release is `raises: []` and infallible by S3. |
 
@@ -66,18 +66,15 @@ type
   BrokerScope* = ref object
     ctx: BrokerContext
     when compileOption("threads"): owner: pointer
-    undo: seq[tuple[key: string, fn: BrokerUndo]]   # key "" = unkeyed
-    closing: Future[void]           # nil = open
+    undo: seq[BrokerUndo]
+    closing: Future[void]           # non-nil only while a close runs
 
 proc newBrokerScope*(ctx = NewBrokerContext()): BrokerScope
 func ctx*(s: BrokerScope): BrokerContext
 func isOpen*(s: BrokerScope): bool
 proc onOwningThread*(s: BrokerScope, op: string): bool  # false → chronicles error logged (S7)
-proc track*(s: BrokerScope, u: BrokerUndo)      # append (listeners, multi providers)
-proc track*(s: BrokerScope, key: string, u: BrokerUndo)  # overwrite-by-key (S6); keeps the
-                                                         # original LIFO position
-# both exported: generated code expands in user modules
-proc close*(s: BrokerScope): Future[void]       # S2
+proc track*(s: BrokerScope, u: BrokerUndo)      # exported: generated code expands in user modules
+proc close*(s: BrokerScope): Future[void]       # S2; scope re-opens when done
 ```
 
 - `ref object`, so no accidental copies (a value copy would duplicate the undo list).
@@ -134,7 +131,7 @@ Body shape (all identical):
 
 ```nim
 if not scope.onOwningThread("<verb>"): return err("BrokerScope used off its owning thread")
-if not scope.isOpen: return err("BrokerScope closed")
+if not scope.isOpen: return err("BrokerScope is closing")
 let r = <T>.<verb>(scope.ctx, handler)        # existing ctx overload
 if r.isOk:
   let ctx = scope.ctx                          # capture values, never the scope
@@ -190,7 +187,7 @@ Platforms: no platform-specific code. The MT thread identity reuses
    this machine before; if the index is stale, report it rather than block.)
 2. **`broker_scope.nim` + core test** (`test/test_broker_scope.nim`, part 1):
    LIFO via `track`, idempotent/concurrent `close` (same Future),
-   self-close from inside an undo, closed-scope rejection.
+   self-close from inside an undo, rejection while closing, re-open.
    → verify: `nim c -r --path:. --outdir:build test/test_broker_scope.nim`, refc + orc.
 3. **Release procs (§4.2)**, ST then MT, including the `requireOwner` parameter on
    MT `dropImpl` / `clearBody`.
@@ -225,7 +222,7 @@ Platforms: no platform-specific code. The MT thread identity reuses
 | **H2/H3** thread B `clearProvider`/`dropSignalHandler` on the scope's ctx, then B provides/handles the same ctx → A's close leaves B's intact; A's stale tv purged | — | ✓ |
 | MT per-slot release with the other slot set → bucket kept, in-flight requests on the other slot unaffected | — | ✓ |
 | Last-slot release → in-flight requests resolve `ProviderGone` immediately | — | ✓ |
-| `reprovideIt(scope)` twice → the keyed undo is overwritten (one entry); close clears with **no** warn | ✓ | ✓ |
+| `reprovideIt(scope)` twice → close clears; the older undo is an `alreadyGone` no-op | ✓ | ✓ |
 | Off-thread registration → `err`, nothing registered; off-thread `close()` → completed Future, scope still open; owner-thread `close()` afterwards releases everything | — | ✓ |
 | **H5** multi: external `removeProvider` + new provider at a reused index → survives close | ✓ | — |
 

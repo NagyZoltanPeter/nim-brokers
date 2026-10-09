@@ -748,7 +748,7 @@ macro MultiRequestBroker*(body: untyped): untyped =
       )
 
   # ── BrokerScope: release + scope overloads ────────────────────────
-  # Providers are additive, so the undo is unkeyed. The release removes the
+  # The release removes the
   # handle only while its slot still holds the closure the scope installed:
   # indices restart once a non-default bucket empties, so a stale handle alone
   # could name another owner's provider.
@@ -791,7 +791,7 @@ macro MultiRequestBroker*(body: untyped): untyped =
             if not scope.onOwningThread("setProvider"):
               return err("BrokerScope used off its owning thread")
             if not scope.isOpen:
-              return err("BrokerScope closed")
+              return err("BrokerScope is closing")
             let brokerCtx = scope.ctx
             let handle = ?setProvider(`typeIdent`, brokerCtx, handler)
             scope.track(

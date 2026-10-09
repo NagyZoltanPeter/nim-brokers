@@ -385,7 +385,6 @@ proc generateSignalBroker(body: NimNode): NimNode =
   # The release drops the handler only while it is still the closure the scope
   # installed (a mock / replace / re-onSignal by someone else wins).
   let releaseHandlerIdent = ident("release" & sanitized & "SignalHandler")
-  let scopeKeyLit = newLit($typeIdent & "/signalHandler")
   result.add(
     quote do:
       proc `releaseHandlerIdent`(
@@ -405,18 +404,17 @@ proc generateSignalBroker(body: NimNode): NimNode =
         if not scope.onOwningThread("onSignal"):
           return err("BrokerScope used off its owning thread")
         if not scope.isOpen:
-          return err("BrokerScope closed")
+          return err("BrokerScope is closing")
         let brokerCtx = scope.ctx
         ?onSignal(`typeIdent`, brokerCtx, handler)
         scope.track(
-          `scopeKeyLit`,
           proc() {.async: (raises: []), gcsafe.} =
             reportBrokerRelease(
               await `releaseHandlerIdent`(brokerCtx, handler),
               `typeNameLit`,
               "signalHandler",
               brokerCtx,
-            ),
+            )
         )
         ok()
 
@@ -426,18 +424,17 @@ proc generateSignalBroker(body: NimNode): NimNode =
         if not scope.onOwningThread("replaceSignalHandler"):
           return err("BrokerScope used off its owning thread")
         if not scope.isOpen:
-          return err("BrokerScope closed")
+          return err("BrokerScope is closing")
         let brokerCtx = scope.ctx
         ?replaceSignalHandler(`typeIdent`, brokerCtx, handler)
         scope.track(
-          `scopeKeyLit`,
           proc() {.async: (raises: []), gcsafe.} =
             reportBrokerRelease(
               await `releaseHandlerIdent`(brokerCtx, handler),
               `typeNameLit`,
               "signalHandler",
               brokerCtx,
-            ),
+            )
         )
         ok()
 

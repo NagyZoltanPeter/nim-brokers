@@ -62,30 +62,9 @@ suite "BrokerScope core":
             order.add(n)
         )
     waitFor scope.close()
-    waitFor scope.close()
+    waitFor scope.close() # empty now: runs nothing
     check order == @[3, 2, 1]
-    check not scope.isOpen
-
-  test "keyed track overwrites in place":
-    let scope = newBrokerScope()
-    var ran: seq[string] = @[]
-    scope.track(
-      "k",
-      proc() {.async: (raises: []), gcsafe.} =
-        ran.add("first"),
-    )
-    scope.track(
-      proc() {.async: (raises: []), gcsafe.} =
-        ran.add("unkeyed")
-    )
-    scope.track(
-      "k",
-      proc() {.async: (raises: []), gcsafe.} =
-        ran.add("second"),
-    )
-    waitFor scope.close()
-    # "k" keeps its original (first) position, so it runs last.
-    check ran == @["unkeyed", "second"]
+    check scope.isOpen
 
   test "concurrent closers wait on the same teardown":
     let scope = newBrokerScope()
@@ -104,19 +83,44 @@ suite "BrokerScope core":
     check done
     waitFor a
 
-  test "closed scope rejects registration":
+  test "registration is rejected while a close is running":
     let scope = newBrokerScope()
-    waitFor scope.close()
+    var during: seq[bool] = @[]
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        try:
+          await sleepAsync(chronos.milliseconds(10))
+        except CancelledError:
+          discard
+    )
+    let closing = scope.close()
+    check not scope.isOpen
     let l = ScopeEvt.listenIt(scope):
       discard
-    check l.isErr()
+    during.add(l.isErr())
     let s = ScopeSig.onSignalIt(scope):
       discard
-    check s.isErr()
-    let r1 = ScopeReq.provideIt(scope):
+    during.add(s.isErr())
+    let r = ScopeReq.provideIt(scope):
       return ok(ScopeReq(v: 1))
-    check r1.isErr()
+    during.add(r.isErr())
+    check during == @[true, true, true]
+    check l.error == "BrokerScope is closing"
     check not ScopeReq.isProvided(scope.ctx)
+    waitFor closing
+    check scope.isOpen
+
+  test "re-open: register, close, register again, close again":
+    let scope = newBrokerScope()
+    for round in 1 .. 2:
+      let v = round
+      let r = ScopeReq.provideIt(scope):
+        return ok(ScopeReq(v: v))
+      check r.isOk()
+      check (waitFor ScopeReq.request(scope.ctx)).get().v == round
+      waitFor scope.close()
+      check not ScopeReq.isProvided(scope.ctx)
+      check scope.isOpen
 
   test "adopts an existing context":
     let ctx = NewBrokerContext()

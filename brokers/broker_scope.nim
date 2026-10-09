@@ -5,7 +5,8 @@
 ## scope overloads every broker generates (`listen`, `onSignal`,
 ## `replaceSignalHandler`, `setProvider`, `replaceProvider`, and all their
 ## `...It` body sugars). A single `await scope.close()` then releases them all,
-## last-registered first.
+## last-registered first, and leaves the scope empty and open for reuse.
+## Registrations attempted *while* a close is running are rejected.
 ##
 ## Release, not clear: each undo removes *exactly the closure this scope
 ## installed*, and only while it is still installed (and, for the MT lanes,
@@ -45,8 +46,8 @@ type
     when compileOption("threads"):
       ownerId: pointer
       ownerGen: uint64
-    undo: seq[tuple[key: string, fn: BrokerUndo]] ## key "" = unkeyed
-    closing: Future[void].Raising([]) ## nil = open
+    undo: seq[BrokerUndo]
+    closing: Future[void].Raising([]) ## non-nil only while a close is running
 
 proc newBrokerScope*(ctx: BrokerContext = NewBrokerContext()): BrokerScope =
   ## Create a scope on `ctx` (a fresh context by default) owned by the calling
@@ -60,6 +61,7 @@ func ctx*(s: BrokerScope): BrokerContext =
   s.ctx
 
 func isOpen*(s: BrokerScope): bool =
+  ## False only while a `close()` is running.
   s.closing.isNil
 
 proc onOwningThread*(s: BrokerScope, op: string): bool =
@@ -73,19 +75,10 @@ proc onOwningThread*(s: BrokerScope, op: string): bool =
     true
 
 proc track*(s: BrokerScope, u: BrokerUndo) =
-  ## Low-level: append an undo (additive registrations — listeners, multi
-  ## providers).
-  s.undo.add((key: "", fn: u))
-
-proc track*(s: BrokerScope, key: string, u: BrokerUndo) =
-  ## Low-level: record the undo for a single-occupancy registration (provider
-  ## slot, signal handler). Re-registering the same key overwrites its undo in
-  ## place, keeping the original teardown position.
-  for i in 0 ..< s.undo.len:
-    if s.undo[i].key == key:
-      s.undo[i].fn = u
-      return
-  s.undo.add((key: key, fn: u))
+  ## Low-level: record an undo (used by generated code). A slot registered twice
+  ## through one scope records two undos; run newest-first, the older one finds
+  ## its closure already gone and is a no-op.
+  s.undo.add(u)
 
 proc reportBrokerRelease*(
     outcome: BrokerReleaseOutcome, brokerType, kind: string, brokerCtx: BrokerContext
@@ -104,20 +97,26 @@ proc reportBrokerRelease*(
     warn "BrokerScope.close: registration now owned by another thread; left in place",
       brokerType = brokerType, kind = kind, brokerCtx = $brokerCtx
 
-proc runUndos(undo: seq[tuple[key: string, fn: BrokerUndo]]) {.async: (raises: []).} =
+proc runUndos(undo: seq[BrokerUndo]) {.async: (raises: []).} =
   for i in countdown(undo.high, 0):
-    await undo[i].fn()
+    await undo[i]()
 
 proc close*(s: BrokerScope) {.async: (raises: []).} =
-  ## Release every registration made through the scope, last first.
-  ## Idempotent: repeated and concurrent callers all wait on the same teardown.
-  ## Off the owning thread it logs an error and returns, leaving the scope open.
+  ## Release every registration made through the scope, last first. When it
+  ## returns the scope is empty and open again. Concurrent callers wait on the
+  ## same teardown. Off the owning thread it logs an error and returns.
   if not s.onOwningThread("close"):
     return
-  if s.closing.isNil:
-    # Detach the list before the first await, so a handler closing its own
-    # scope (or a racing registration) cannot mutate it mid-walk.
-    s.closing = runUndos(move(s.undo))
-  await s.closing
+  if not s.closing.isNil:
+    await s.closing
+    return
+  # Detach the list before the first await: a handler closing its own scope
+  # cannot mutate it mid-walk, and registrations are rejected until it is done.
+  let teardown = runUndos(move(s.undo))
+  if teardown.finished():
+    return # every undo was suspension-free; never entered the closing state
+  s.closing = teardown
+  await teardown
+  s.closing = nil
 
 {.pop.}

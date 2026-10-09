@@ -418,7 +418,7 @@ proc generateEventBroker(body: NimNode): NimNode =
         if not scope.onOwningThread("listen"):
           return err("BrokerScope used off its owning thread")
         if not scope.isOpen:
-          return err("BrokerScope closed")
+          return err("BrokerScope is closing")
         let brokerCtx = scope.ctx
         let handle = ?`listenImplIdent`(brokerCtx, handler)
         scope.track(

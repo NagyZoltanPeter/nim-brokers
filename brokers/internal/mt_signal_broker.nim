@@ -763,7 +763,6 @@ proc generateMtSignalBroker*(
   # be stale: if the bucket is gone or owned elsewhere, purge the entry locally
   # and leave the shared registry alone.
   let releaseHandlerIdent = ident("release" & typeDisplayName & "SignalHandler")
-  let scopeKeyLit = newLit(typeDisplayName & "/signalHandler")
   result.add(
     quote do:
       proc `releaseHandlerIdent`(
@@ -789,18 +788,17 @@ proc generateMtSignalBroker*(
         if not scope.onOwningThread("onSignal"):
           return err("BrokerScope used off its owning thread")
         if not scope.isOpen:
-          return err("BrokerScope closed")
+          return err("BrokerScope is closing")
         let brokerCtx = scope.ctx
         ?`onSignalImplIdent`(brokerCtx, handler)
         scope.track(
-          `scopeKeyLit`,
           proc() {.async: (raises: []), gcsafe.} =
             reportBrokerRelease(
               await `releaseHandlerIdent`(brokerCtx, handler),
               `typeNameLit`,
               "signalHandler",
               brokerCtx,
-            ),
+            )
         )
         ok()
 
@@ -810,18 +808,17 @@ proc generateMtSignalBroker*(
         if not scope.onOwningThread("replaceSignalHandler"):
           return err("BrokerScope used off its owning thread")
         if not scope.isOpen:
-          return err("BrokerScope closed")
+          return err("BrokerScope is closing")
         let brokerCtx = scope.ctx
         ?replaceSignalHandler(`typeIdent`, brokerCtx, handler)
         scope.track(
-          `scopeKeyLit`,
           proc() {.async: (raises: []), gcsafe.} =
             reportBrokerRelease(
               await `releaseHandlerIdent`(brokerCtx, handler),
               `typeNameLit`,
               "signalHandler",
               brokerCtx,
-            ),
+            )
         )
         ok()
 

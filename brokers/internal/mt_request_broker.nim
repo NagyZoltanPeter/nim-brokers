@@ -2211,7 +2211,6 @@ proc generateMtRequestBroker*(
       let ownCtx = s.ownCtx
       let ownHandler = s.ownHandler
       let kindLit = newLit(s.slotName)
-      let keyLit = newLit(typeDisplayName & "/" & s.slotName)
       let otherSlotSet =
         if s.otherCtx.isNil():
           newLit(false)
@@ -2257,18 +2256,17 @@ proc generateMtRequestBroker*(
             if not scope.onOwningThread("setProvider"):
               return err("BrokerScope used off its owning thread")
             if not scope.isOpen:
-              return err("BrokerScope closed")
+              return err("BrokerScope is closing")
             let brokerCtx = scope.ctx
             ?setProvider(`typeIdent`, brokerCtx, handler)
             scope.track(
-              `keyLit`,
               proc() {.async: (raises: []), gcsafe.} =
                 reportBrokerRelease(
                   await `releaseIdent`(brokerCtx, handler),
                   `typeNameLit`,
                   `kindLit`,
                   brokerCtx,
-                ),
+                )
             )
             ok()
 
@@ -2278,18 +2276,17 @@ proc generateMtRequestBroker*(
             if not scope.onOwningThread("replaceProvider"):
               return err("BrokerScope used off its owning thread")
             if not scope.isOpen:
-              return err("BrokerScope closed")
+              return err("BrokerScope is closing")
             let brokerCtx = scope.ctx
             ?replaceProvider(`typeIdent`, brokerCtx, handler)
             scope.track(
-              `keyLit`,
               proc() {.async: (raises: []), gcsafe.} =
                 reportBrokerRelease(
                   await `releaseIdent`(brokerCtx, handler),
                   `typeNameLit`,
                   `kindLit`,
                   brokerCtx,
-                ),
+                )
             )
             ok()
 
