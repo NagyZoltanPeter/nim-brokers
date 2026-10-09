@@ -160,7 +160,7 @@ import std/[macros, strutils, options]
 from std/sequtils import keepItIf
 import chronos
 import results
-import ./internal/helper/broker_utils, ./broker_context
+import ./internal/helper/broker_utils, ./broker_context, ./broker_scope
 import ./internal/broker_debug
 
 when compileOption("threads"):
@@ -174,7 +174,7 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_request_broker_cbor
   export api_request_broker_cbor
 
-export results, chronos, keepItIf, broker_context, options
+export results, chronos, keepItIf, broker_context, broker_scope, options
 # The generated provideIt/reprovideIt templates expand `providerBody` at the
 # user's call site, so the checker macro must be visible there.
 export providerBody
@@ -1096,6 +1096,98 @@ proc generateRequestBroker(body: NimNode, mode: RequestBrokerMode): NimNode =
               clearProvider(t, brokerCtx)
 
     )
+
+  # ── BrokerScope: per-slot release + scope overloads ────────────────
+  # The release clears only the slot the scope registered, and only while it
+  # still holds the closure the scope installed (a mock / replace / another
+  # owner wins). `releaseProvider` overloads on the slot's handler type, like
+  # `replaceProvider`.
+  block:
+    let releaseIdent = ident("release" & sanitizeIdentName(typeIdent) & "Provider")
+    var slots: seq[tuple[providerTy, getter, field: NimNode, slotName: string]] = @[]
+    if not zeroArgSig.isNil():
+      slots.add(
+        (
+          zeroArgProviderName,
+          ident("getCurrentProviderNoArgs"),
+          ident("providersNoArgs"),
+          "providerNoArgs",
+        )
+      )
+    if not argSig.isNil():
+      slots.add(
+        (
+          argProviderName,
+          ident("getCurrentProvider"),
+          ident("providersWithArgs"),
+          "provider",
+        )
+      )
+    for s in slots:
+      let providerTy = s.providerTy
+      let getter = s.getter
+      let field = s.field
+      let kindLit = newLit(s.slotName)
+      let keyLit = newLit(typeDisplayName & "/" & s.slotName)
+      result.add(
+        quote do:
+          proc `releaseIdent`(
+              brokerCtx: BrokerContext, handler: `providerTy`
+          ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+            let current = `getter`(`typeIdent`, brokerCtx)
+            if current.isNone():
+              return broAlreadyGone
+            if current.get() != handler:
+              return broTakenOver
+            if brokerCtx == DefaultBrokerContext:
+              `accessProcIdent`().`field`[0].handler = default(`providerTy`)
+            else:
+              `accessProcIdent`().`field`.keepItIf(it.brokerCtx != brokerCtx)
+            broReleased
+
+          proc setProvider*(
+              _: typedesc[`typeIdent`], scope: BrokerScope, handler: `providerTy`
+          ): Result[void, string] =
+            if not scope.onOwningThread("setProvider"):
+              return err("BrokerScope used off its owning thread")
+            if not scope.isOpen:
+              return err("BrokerScope closed")
+            let brokerCtx = scope.ctx
+            ?setProvider(`typeIdent`, brokerCtx, handler)
+            scope.track(
+              `keyLit`,
+              proc() {.async: (raises: []), gcsafe.} =
+                reportBrokerRelease(
+                  await `releaseIdent`(brokerCtx, handler),
+                  `typeNameLit`,
+                  `kindLit`,
+                  brokerCtx,
+                ),
+            )
+            ok()
+
+          proc replaceProvider*(
+              _: typedesc[`typeIdent`], scope: BrokerScope, handler: `providerTy`
+          ): Result[void, string] =
+            if not scope.onOwningThread("replaceProvider"):
+              return err("BrokerScope used off its owning thread")
+            if not scope.isOpen:
+              return err("BrokerScope closed")
+            let brokerCtx = scope.ctx
+            ?replaceProvider(`typeIdent`, brokerCtx, handler)
+            scope.track(
+              `keyLit`,
+              proc() {.async: (raises: []), gcsafe.} =
+                reportBrokerRelease(
+                  await `releaseIdent`(brokerCtx, handler),
+                  `typeNameLit`,
+                  `kindLit`,
+                  brokerCtx,
+                ),
+            )
+            ok()
+
+      )
 
   # ── bind / rebind provider sugar (issue #42) ──────────────────────
   # `bindProvider` = sugar for `setProvider`, `rebindProvider` = sugar for

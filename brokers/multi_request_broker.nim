@@ -103,10 +103,10 @@ import std/[macros, strutils, tables, sugar]
 import chronos
 import results
 import ./internal/helper/broker_utils
-import ./broker_context
+import ./broker_context, ./broker_scope
 import ./internal/broker_debug
 
-export results, chronos, broker_context
+export results, chronos, broker_context, broker_scope
 # The generated provideIt templates expand `providerBody` at the user's call
 # site, so the checker macro must be visible there.
 export providerBody
@@ -744,6 +744,66 @@ macro MultiRequestBroker*(body: untyped): untyped =
               _: typedesc[`typeIdent`], `removeHandleDefaultSym`: `providerHandleIdent`
           ) =
             removeProvider(`typeIdent`, DefaultBrokerContext, `removeHandleDefaultSym`)
+
+      )
+
+  # ── BrokerScope: release + scope overloads ────────────────────────
+  # Providers are additive, so the undo is unkeyed. The release removes the
+  # handle only while its slot still holds the closure the scope installed:
+  # indices restart once a non-default bucket empties, so a stale handle alone
+  # could name another owner's provider.
+  block:
+    let releaseIdent = ident("release" & sanitized & "Provider")
+    var slots: seq[tuple[providerTy, field, kind: NimNode]] = @[]
+    if not zeroArgSig.isNil():
+      slots.add((zeroArgProviderName, zeroArgFieldName, zeroKindIdent))
+    if not argSig.isNil():
+      slots.add((argProviderName, argFieldName, argKindIdent))
+    for s in slots:
+      let providerTy = s.providerTy
+      let field = s.field
+      let kind = s.kind
+      result.add(
+        quote do:
+          proc `releaseIdent`(
+              brokerCtx: BrokerContext,
+              handle: `providerHandleIdent`,
+              handler: `providerTy`,
+          ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+            let broker = `accessProcIdent`()
+            if broker.isNil() or handle.kind != `kind`:
+              return broAlreadyGone
+            let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
+            if bucketIdx < 0:
+              return broAlreadyGone
+            let idx = int(handle.id) - 1
+            if idx < 0 or idx >= broker.buckets[bucketIdx].`field`.len or
+                broker.buckets[bucketIdx].`field`[idx].isNil():
+              return broAlreadyGone
+            if broker.buckets[bucketIdx].`field`[idx] != handler:
+              return broTakenOver
+            removeProvider(`typeIdent`, brokerCtx, handle)
+            broReleased
+
+          proc setProvider*(
+              _: typedesc[`typeIdent`], scope: BrokerScope, handler: `providerTy`
+          ): Result[`providerHandleIdent`, string] =
+            if not scope.onOwningThread("setProvider"):
+              return err("BrokerScope used off its owning thread")
+            if not scope.isOpen:
+              return err("BrokerScope closed")
+            let brokerCtx = scope.ctx
+            let handle = ?setProvider(`typeIdent`, brokerCtx, handler)
+            scope.track(
+              proc() {.async: (raises: []), gcsafe.} =
+                reportBrokerRelease(
+                  await `releaseIdent`(brokerCtx, handle, handler),
+                  `typeNameLit`,
+                  "provider",
+                  brokerCtx,
+                )
+            )
+            ok(handle)
 
       )
 

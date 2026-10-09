@@ -32,13 +32,16 @@ import results
 import
   ./helper/broker_utils,
   ../broker_context,
+  ../broker_scope,
   ./mt_broker_common,
   ./mt_queue,
   ./mt_codec,
   ./mt_config,
   ./broker_debug
 
-export results, chronos, broker_context, chronicles, mt_broker_common, mt_config
+export
+  results, chronos, broker_context, broker_scope, chronicles, mt_broker_common,
+  mt_config
 
 # Ring-slot sentinel: a slot's payload `uint32` is normally a slab cell
 # index, but this reserved value carries a "clear local tvHandlers"
@@ -855,6 +858,54 @@ proc generateMtEventBroker*(
         {.cast(gcsafe).}:
           withLock(`dropAllHookLockIdent`):
             `dropAllHookIdent` = hook
+
+  )
+
+  # ── BrokerScope: release + scope overload ─────────────────────────────
+  # Listeners live in this thread's threadvar table, so identity is checked
+  # there: the handle's id must still map to the closure the scope installed
+  # (ids restart once a ctx's table empties). The drop itself is the existing
+  # suspension-free impl.
+  let releaseListenerIdent = ident("release" & typeDisplayName & "Listener")
+  result.add(
+    quote do:
+      proc `releaseListenerIdent`(
+          brokerCtx: BrokerContext,
+          handle: `listenerHandleIdent`,
+          handler: `handlerProcIdent`,
+      ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+        if handle.threadId != currentMtThreadId():
+          return broOwnerChanged
+        for i in 0 ..< `tvListenerCtxIdent`.len:
+          if `tvListenerCtxIdent`[i] == brokerCtx:
+            let current = `tvListenerHandlersIdent`[i].getOrDefault(handle.id)
+            if current.isNil():
+              return broAlreadyGone
+            if current != handler:
+              return broTakenOver
+            `dropListenerImplIdent`(brokerCtx, handle)
+            return broReleased
+        broAlreadyGone
+
+      proc listen*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[`listenerHandleIdent`, string] =
+        if not scope.onOwningThread("listen"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope closed")
+        let brokerCtx = scope.ctx
+        let handle = ?`listenImplIdent`(brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseListenerIdent`(brokerCtx, handle, handler),
+              `typeNameLit`,
+              "listener",
+              brokerCtx,
+            )
+        )
+        ok(handle)
 
   )
 

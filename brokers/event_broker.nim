@@ -86,7 +86,7 @@
 
 import std/[macros, strutils, tables]
 import chronos, chronicles, results
-import ./internal/helper/broker_utils, ./broker_context
+import ./internal/helper/broker_utils, ./broker_context, ./broker_scope
 import ./internal/broker_debug
 
 when compileOption("threads"):
@@ -98,7 +98,7 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_event_broker_cbor
   export api_event_broker_cbor
 
-export chronicles, results, chronos, broker_context
+export chronicles, results, chronos, broker_context, broker_scope
 
 type EventBrokerMode = enum
   ebDefault
@@ -385,6 +385,52 @@ proc generateEventBroker(body: NimNode): NimNode =
           _: typedesc[`typeIdent`], brokerCtx: BrokerContext
       ): Future[void] {.async: (raises: []).} =
         await `dropAllListenersImplIdent`(brokerCtx)
+
+  )
+
+  # ── BrokerScope: release + scope overload ──────────────────────────
+  # The release drops the listener only while `handle.id` still maps to the
+  # closure the scope installed. Ids restart at 1 once a non-default bucket
+  # empties, so a stale handle alone could name someone else's listener.
+  let releaseListenerIdent = ident("release" & sanitized & "Listener")
+  result.add(
+    quote do:
+      proc `releaseListenerIdent`(
+          brokerCtx: BrokerContext,
+          handle: `listenerHandleIdent`,
+          handler: `handlerProcIdent`,
+      ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+        let broker = `accessProcIdent`()
+        let bucketIdx = `findBucketIdxIdent`(broker, brokerCtx)
+        if bucketIdx < 0:
+          return broAlreadyGone
+        let current = broker.buckets[bucketIdx].listeners.getOrDefault(handle.id)
+        if current.isNil():
+          return broAlreadyGone
+        if current != handler:
+          return broTakenOver
+        await `dropListenerImplIdent`(brokerCtx, handle)
+        broReleased
+
+      proc listen*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[`listenerHandleIdent`, string] =
+        if not scope.onOwningThread("listen"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope closed")
+        let brokerCtx = scope.ctx
+        let handle = ?`listenImplIdent`(brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseListenerIdent`(brokerCtx, handle, handler),
+              `typeNameLit`,
+              "listener",
+              brokerCtx,
+            )
+        )
+        ok(handle)
 
   )
 
