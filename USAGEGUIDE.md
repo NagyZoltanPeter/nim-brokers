@@ -481,7 +481,7 @@ Semantics:
 | | |
 |---|---|
 | Registration | Same as the ctx overload on `scope.ctx`. The undo is recorded only on success: a rejected `setProvider` / `onSignal` (already set) leaves the existing owner alone. While a `close()` is running, registration returns `err("BrokerScope is closing")`. |
-| `close()` | Releases in reverse registration order. Concurrent callers wait on the same teardown. Afterwards the scope is empty and **open again**: the same scope can register and close any number of times. |
+| `close()` | Releases in reverse registration order. Concurrent callers wait on the same teardown; cancelling a caller only stops its own wait, never the teardown. Afterwards the scope is empty and **open again**: the same scope can register and close any number of times. |
 | Release, not clear | Each undo removes **exactly the closure this scope installed**, and only while it is still installed. For a dual-slot RequestBroker it clears only the scope's slot. |
 | Changes made outside the scope | They win and are never an error. Registration already removed (e.g. an early `dropListener` with the handle `listen(scope, …)` returned) → `debug` log. Taken over by a mock, a `replace…` or another owner → `warn`, left in place. MT: owned by another thread now → `warn`, left in place. |
 | `replace*` through a scope | `close()` does **not** restore the displaced provider/handler (that is `withMockProvider`'s job). Replacing the same slot twice from one scope records two undos; the older one finds its closure gone at close and is a no-op. |

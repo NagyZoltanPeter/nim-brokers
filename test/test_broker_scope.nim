@@ -122,6 +122,85 @@ suite "BrokerScope core":
       check not ScopeReq.isProvided(scope.ctx)
       check scope.isOpen
 
+  test "cancelling the starter's close() does not cancel the teardown":
+    let scope = newBrokerScope()
+    var sawCancel = false
+    var done = false
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        try:
+          await sleepAsync(chronos.milliseconds(20))
+        except CancelledError:
+          sawCancel = true
+        done = true
+    )
+    let f = scope.close()
+    check not scope.isOpen
+    waitFor f.cancelAndWait()
+    check not sawCancel
+    waitFor sleepAsync(chronos.milliseconds(50))
+    check done
+    check not sawCancel
+    check scope.isOpen
+
+  test "cancelling a concurrent waiter leaves the teardown intact":
+    let scope = newBrokerScope()
+    var sawCancel = false
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        try:
+          await sleepAsync(chronos.milliseconds(20))
+        except CancelledError:
+          sawCancel = true
+    )
+    let a = scope.close()
+    let b = scope.close()
+    waitFor b.cancelAndWait()
+    check not a.finished()
+    waitFor a
+    check not sawCancel
+    check scope.isOpen
+
+  test "registration from the synchronous phase of close is rejected":
+    let scope = newBrokerScope()
+    var r: Result[void, string]
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        # Runs synchronously inside close(), before any suspension.
+        r = ScopeReq.setProvider(
+          scope,
+          proc(): Future[Result[ScopeReq, string]] {.async.} =
+            ok(ScopeReq(v: 1)),
+        )
+    )
+    waitFor scope.close()
+    check r.isErr()
+    check r.error == "BrokerScope is closing"
+    check not ScopeReq.isProvided(scope.ctx)
+    check scope.isOpen
+
+  test "re-entrant close() from inside an undo returns without deadlock":
+    let scope = newBrokerScope()
+    var inner, outer = false
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        try:
+          await sleepAsync(chronos.milliseconds(5))
+        except CancelledError:
+          discard
+        outer = true
+    )
+    scope.track(
+      proc() {.async: (raises: []), gcsafe.} =
+        await scope.close() # synchronous phase: must not wait on itself
+        inner = true
+    )
+    let ok = waitFor withTimeout(scope.close(), chronos.seconds(2))
+    check ok
+    check inner
+    check outer
+    check scope.isOpen
+
   test "adopts an existing context":
     let ctx = NewBrokerContext()
     check newBrokerScope(ctx).ctx == ctx

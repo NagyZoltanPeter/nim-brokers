@@ -47,7 +47,8 @@ type
       ownerId: pointer
       ownerGen: uint64
     undo: seq[BrokerUndo]
-    closing: Future[void].Raising([]) ## non-nil only while a close is running
+    tearingDown: bool ## true for the whole close, synchronous phase included
+    closing: Future[void].Raising([]) ## set only once the teardown has suspended
 
 proc newBrokerScope*(ctx: BrokerContext = NewBrokerContext()): BrokerScope =
   ## Create a scope on `ctx` (a fresh context by default) owned by the calling
@@ -58,11 +59,12 @@ proc newBrokerScope*(ctx: BrokerContext = NewBrokerContext()): BrokerScope =
     result.ownerGen = currentMtThreadGen()
 
 func ctx*(s: BrokerScope): BrokerContext =
+  ## Immutable; safe to read from any thread.
   s.ctx
 
 func isOpen*(s: BrokerScope): bool =
-  ## False only while a `close()` is running.
-  s.closing.isNil
+  ## False only while a `close()` is running. Owning thread only.
+  not s.tearingDown
 
 proc onOwningThread*(s: BrokerScope, op: string): bool =
   ## True when called on the scope's owning thread; otherwise logs an error.
@@ -97,26 +99,37 @@ proc reportBrokerRelease*(
     warn "BrokerScope.close: registration now owned by another thread; left in place",
       brokerType = brokerType, kind = kind, brokerCtx = $brokerCtx
 
-proc runUndos(undo: seq[BrokerUndo]) {.async: (raises: []).} =
+proc runTeardown(s: BrokerScope, undo: seq[BrokerUndo]) {.async: (raises: []).} =
+  ## Never awaited directly (callers `join` it), so a cancelled `close()` caller
+  ## cannot cancel undos mid-way. Resets the scope's state itself, whatever
+  ## happens to the waiters.
   for i in countdown(undo.high, 0):
     await undo[i]()
+  s.closing = nil
+  s.tearingDown = false
 
 proc close*(s: BrokerScope) {.async: (raises: []).} =
-  ## Release every registration made through the scope, last first. When it
-  ## returns the scope is empty and open again. Concurrent callers wait on the
-  ## same teardown. Off the owning thread it logs an error and returns.
+  ## Release every registration made through the scope, last first. When the
+  ## teardown finishes the scope is empty and open again. Concurrent callers
+  ## wait on the same teardown; cancelling a caller only stops its wait. Off the
+  ## owning thread it logs an error and returns.
   if not s.onOwningThread("close"):
     return
-  if not s.closing.isNil:
-    await s.closing
+  if not s.tearingDown:
+    # Flag first: registrations are rejected from the very first undo on, and
+    # the list is detached before anything can mutate it.
+    s.tearingDown = true
+    let teardown = runTeardown(s, move(s.undo))
+    if teardown.finished():
+      return # every undo was suspension-free; state already reset
+    s.closing = teardown
+  elif s.closing.isNil:
+    # Re-entered from the synchronous part of our own teardown: waiting here
+    # would wait on ourselves.
     return
-  # Detach the list before the first await: a handler closing its own scope
-  # cannot mutate it mid-walk, and registrations are rejected until it is done.
-  let teardown = runUndos(move(s.undo))
-  if teardown.finished():
-    return # every undo was suspension-free; never entered the closing state
-  s.closing = teardown
-  await teardown
-  s.closing = nil
+  try:
+    await s.closing.join()
+  except CancelledError:
+    discard # this caller gave up waiting; the teardown carries on
 
 {.pop.}
