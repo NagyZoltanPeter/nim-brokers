@@ -289,6 +289,15 @@ When a broker type is declared as a native type, alias, or externally-defined ty
   master). `ProviderGone` is the mirror of `Abandoned`: the **requester**
   releases, since no provider is left to. Gated by
   `test/test_mt_request_slot_lifecycle.nim`.
+- **Owner-only clear / replace** (MT lane): only the thread that installed a
+  provider (the bucket's `(threadId, threadGen)`) may clear or replace it. A
+  foreign `clearProvider` is a no-op logged at `error`; a foreign
+  `replaceProvider` / `setProvider` returns `err`; a foreign `withMockProvider`
+  trips a `doAssert`. A provider thread that exits without clearing is cleared
+  by `teardownBrokerThread` (per-type `registerBrokerThreadCleanup` hook), so
+  outstanding requests fail fast and the ctx can be provided again. Same rules
+  for SignalBroker(mt) handlers. Gated by `test/test_mt_owner_only_clear.nim`;
+  see `doc/design/MT_OWNER_ONLY_CLEAR_PLAN.md`.
 - **Response slot protocol**: `ResponseSlotHeader.control` packs
   `(gen: uint32) shl 32 or state` in one `Atomic[uint64]`, so every transition
   is a single generation-checked CAS. The side that wins the `Empty→…` CAS
@@ -320,7 +329,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `ok()` = **accepted** (best-effort snapshot: a handler exists + the queue had room), never "handled". `err` = definitely not delivered: `"no signal handler installed"` or `"queue full"`. Handler exceptions are swallowed with a chronicles warn.
 - `dropSignalHandler()` is async `Future[void]` (uniform with `dropListener`; suspension-free body). Mock/replace trio: `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler` (MT variants are owning-thread only).
 - **`onSignalIt` body sugar** (all lanes): `TypeName.onSignalIt[(ctx)]: body` installs the handler with the signal value injected as `it` (nothing for `void` payloads); duplicate-guard and return value are `onSignal`'s. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
-- **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` closes it → the poll fn hands it to the per-thread pending-free registry, freed at `teardownBrokerThread`.
+- **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` (owning thread only — a foreign drop is a logged no-op) closes it → the poll fn hands it to the per-thread pending-free registry, freed at `teardownBrokerThread`, which also drops any handler the thread still owns.
 
 ### BrokerScope (`brokers/broker_scope.nim`)
 

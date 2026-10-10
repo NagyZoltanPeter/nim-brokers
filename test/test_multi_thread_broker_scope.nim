@@ -1,9 +1,10 @@
 {.used.}
 
 ## BrokerScope on the multi-thread lanes: same-thread release, per-slot
-## release, off-thread misuse (logged no-op), and a foreign thread clearing a
-## scope's registration and then re-providing / re-handling the same ctx (the
-## scope's stale threadvar entry must not tear the new owner down).
+## release, off-thread misuse (logged no-op), and a foreign thread trying to
+## clear a scope's registration and take the ctx over — refused, since clears
+## are owner-only (doc/design/MT_OWNER_ONLY_CLEAR_PLAN.md), so the scope keeps
+## and later releases its own registration.
 ## See doc/design/BROKER_SCOPE_PLAN.md §3 (H2/H3) and §7.
 
 import testutils/unittests
@@ -42,50 +43,44 @@ proc drain() =
 
 var gCtx: BrokerContext
 var gReady: Atomic[bool]
-var gDone: Atomic[bool]
 var gSigHits: Atomic[int]
 
 var gScopePtr: pointer
 var gOffListenErr: Atomic[bool]
 var gOffSignalErr: Atomic[bool]
 var gOffClosed: Atomic[bool]
+var gThiefTookOver: Atomic[bool]
 
 proc waitReady() =
   while not gReady.load():
     waitFor sleepAsync(chronos.milliseconds(1))
 
-# Takes the scope's provider away from another thread, then provides the same
-# ctx itself and serves until told to stop.
+# Tries to take the scope's provider away from another thread and provide the
+# same ctx itself. Both steps are refused: clears are owner-only.
 proc providerThiefThread() {.thread.} =
   proc inner() {.async.} =
-    ScopeMtReq.clearProvider(gCtx)
+    ScopeMtReq.clearProvider(gCtx) # not the owner: logged no-op
     let r = ScopeMtReq.setProvider(
       gCtx,
       proc(): Future[Result[ScopeMtReq, string]] {.async.} =
         ok(ScopeMtReq(v: 2)),
     )
-    doAssert r.isOk()
+    gThiefTookOver.store(r.isOk())
     gReady.store(true)
-    while not gDone.load():
-      await sleepAsync(chronos.milliseconds(1))
-    ScopeMtReq.clearProvider(gCtx)
 
   waitFor inner()
 
 # Same for the signal handler.
 proc handlerThiefThread() {.thread.} =
   proc inner() {.async.} =
-    await ScopeMtSig.dropSignalHandler(gCtx)
+    await ScopeMtSig.dropSignalHandler(gCtx) # not the owner: logged no-op
     let r = ScopeMtSig.onSignal(
       gCtx,
       proc(s: ScopeMtSig): Future[void] {.async: (raises: []).} =
-        discard gSigHits.fetchAdd(1),
+        discard,
     )
-    doAssert r.isOk()
+    gThiefTookOver.store(r.isOk())
     gReady.store(true)
-    while not gDone.load():
-      await sleepAsync(chronos.milliseconds(1))
-    await ScopeMtSig.dropSignalHandler(gCtx)
 
   waitFor inner()
 
@@ -212,7 +207,7 @@ suite "BrokerScope MT — cross thread":
     waitFor scope.close()
     check not ScopeMtSig.hasSignalHandler(scope.ctx)
 
-  test "H2: foreign clear + re-provide survives the scope's close":
+  test "H2: a foreign clear cannot take the scope's provider; close releases it":
     let scope = newBrokerScope()
     let mine: ScopeMtReqProviderNoArgs = proc(): Future[Result[ScopeMtReq, string]] {.
         async
@@ -221,36 +216,33 @@ suite "BrokerScope MT — cross thread":
     check ScopeMtReq.setProvider(scope, mine).isOk()
     gCtx = scope.ctx
     gReady.store(false)
-    gDone.store(false)
+    gThiefTookOver.store(true)
     var th: Thread[void]
     createThread(th, providerThiefThread)
     waitReady()
-    # Our threadvar still holds `mine` (the foreign clear cannot reach it), so
-    # only the shared bucket's owner check keeps us off the thief's provider.
-    check ScopeMtReq.getCurrentProviderNoArgs(scope.ctx).isSome()
-    check waitFor(releaseScopeMtReqProvider(scope.ctx, mine)) == broOwnerChanged
-    check ScopeMtReq.getCurrentProviderNoArgs(scope.ctx).isNone() # stale purged
-    waitFor scope.close() # -> alreadyGone now (debug)
-    check (waitFor ScopeMtReq.request(scope.ctx)).get().v == 2
-    gDone.store(true)
     joinThread(th)
+    check not gThiefTookOver.load()
+    check ScopeMtReq.getCurrentProviderNoArgs(scope.ctx).isSome()
+    check (waitFor ScopeMtReq.request(scope.ctx)).get().v == 1
+    waitFor scope.close()
+    check not ScopeMtReq.isProvided(scope.ctx)
 
-  test "H3: foreign drop + re-handle survives the scope's close":
+  test "H3: a foreign drop cannot take the scope's handler; close releases it":
     let scope = newBrokerScope()
     let mine = ScopeMtSig.onSignalIt(scope):
-      discard
+      discard gSigHits.fetchAdd(1)
     check mine.isOk()
     gCtx = scope.ctx
     gReady.store(false)
-    gDone.store(false)
+    gThiefTookOver.store(true)
     gSigHits.store(0)
     var th: Thread[void]
     createThread(th, handlerThiefThread)
     waitReady()
-    waitFor scope.close() # ownerChanged -> warn, left in place
-    check ScopeMtSig.hasSignalHandler(scope.ctx)
+    joinThread(th)
+    check not gThiefTookOver.load()
     check ScopeMtSig.signal(scope.ctx, ScopeMtSig(n: 1)).isOk()
     waitFor sleepAsync(chronos.milliseconds(100))
     check gSigHits.load() == 1
-    gDone.store(true)
-    joinThread(th)
+    waitFor scope.close()
+    check not ScopeMtSig.hasSignalHandler(scope.ctx)
