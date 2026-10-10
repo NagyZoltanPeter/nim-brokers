@@ -41,6 +41,7 @@ import results
 import
   ./helper/broker_utils,
   ../broker_context,
+  ../broker_scope,
   ./mt_broker_common,
   ./mt_queue,
   ./mt_codec,
@@ -48,7 +49,8 @@ import
   ./broker_debug
 
 export
-  results, chronos, broker_context, chronicles, mt_broker_common, mt_config, options
+  results, chronos, broker_context, broker_scope, chronicles, mt_broker_common,
+  mt_config, options
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -478,7 +480,12 @@ proc generateMtSignalBroker*(
   # the owning thread's threadvar, and decrements the handler-present counter.
   result.add(
     quote do:
-      proc `dropImplIdent`(brokerCtx: BrokerContext) {.gcsafe.} =
+      proc `dropImplIdent`(
+          brokerCtx: BrokerContext, requireOwner = false
+      ): BrokerReleaseOutcome {.gcsafe, discardable.} =
+        ## `requireOwner` (BrokerScope release): remove the bucket only when this
+        ## thread owns it, decided in the same critical section as the removal so
+        ## no other thread can drop + re-register in between.
         `initProcIdent`()
         var ring: ptr VyukovMpscRing[uint32]
         var handlerSig: ptr BrokerSignalShared
@@ -500,13 +507,18 @@ proc generateMtSignalBroker*(
               foundIdx = i
               found = true
               break
+          if foundIdx >= 0 and requireOwner and not isOwner:
+            foundIdx = -1
           if foundIdx >= 0:
             for j in foundIdx ..< `globalBucketCountIdent` - 1:
               `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
             `globalBucketCountIdent` -= 1
 
         if not found:
-          return
+          return broAlreadyGone
+        if requireOwner and not isOwner:
+          return broOwnerChanged
+        result = broReleased
 
         if isOwner:
           {.cast(gcsafe).}:
@@ -656,12 +668,12 @@ proc generateMtSignalBroker*(
       proc dropSignalHandler*(
           _: typedesc[`typeIdent`], brokerCtx: BrokerContext
       ): Future[void] {.async: (raises: []).} =
-        `dropImplIdent`(brokerCtx)
+        discard `dropImplIdent`(brokerCtx)
 
       proc dropSignalHandler*(
           _: typedesc[`typeIdent`]
       ): Future[void] {.async: (raises: []).} =
-        `dropImplIdent`(DefaultBrokerContext)
+        discard `dropImplIdent`(DefaultBrokerContext)
 
       proc hasSignalHandler*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext): bool =
         `initProcIdent`()
@@ -739,6 +751,76 @@ proc generateMtSignalBroker*(
             discard replaceSignalHandler(t, brokerCtx, savedMockSignalHandler.get)
           else:
             discard dropSignalHandler(t, brokerCtx)
+
+  )
+
+  # ── BrokerScope: release + scope overloads ────────────────────────────
+  # Emitted before the bind / `It` sugar templates, which bind the verb
+  # overload set at their definition site. The release checks closure
+  # identity in this thread's threadvar, then drops with `requireOwner` so the
+  # bucket-ownership check and the removal share one lock section. A foreign
+  # `dropSignalHandler` skips the owner's threadvar cleanup, so our entry can
+  # be stale: if the bucket is gone or owned elsewhere, purge the entry locally
+  # and leave the shared registry alone.
+  let releaseHandlerIdent = ident("release" & typeDisplayName & "SignalHandler")
+  result.add(
+    quote do:
+      proc `releaseHandlerIdent`(
+          brokerCtx: BrokerContext, handler: `handlerProcIdent`
+      ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+        let current = `findHandlerIdent`(brokerCtx)
+        if current.isNil():
+          return broAlreadyGone
+        if current != handler:
+          return broTakenOver
+        let outcome = `dropImplIdent`(brokerCtx, requireOwner = true)
+        if outcome != broReleased:
+          for i in countdown(`tvCtxIdent`.len - 1, 0):
+            if `tvCtxIdent`[i] == brokerCtx:
+              `tvCtxIdent`.del(i)
+              `tvHandlerIdent`.del(i)
+              break
+        outcome
+
+      proc onSignal*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[void, string] =
+        if not scope.onOwningThread("onSignal"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope is closing")
+        let brokerCtx = scope.ctx
+        ?`onSignalImplIdent`(brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseHandlerIdent`(brokerCtx, handler),
+              `typeNameLit`,
+              "signalHandler",
+              brokerCtx,
+            )
+        )
+        ok()
+
+      proc replaceSignalHandler*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[void, string] =
+        if not scope.onOwningThread("replaceSignalHandler"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope is closing")
+        let brokerCtx = scope.ctx
+        ?replaceSignalHandler(`typeIdent`, brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseHandlerIdent`(brokerCtx, handler),
+              `typeNameLit`,
+              "signalHandler",
+              brokerCtx,
+            )
+        )
+        ok()
 
   )
 
