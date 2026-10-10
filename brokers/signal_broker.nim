@@ -64,7 +64,7 @@
 
 import std/[macros, strutils, options]
 import chronos, chronicles, results
-import ./internal/helper/broker_utils, ./broker_context
+import ./internal/helper/broker_utils, ./broker_context, ./broker_scope
 import ./internal/broker_debug
 
 when compileOption("threads"):
@@ -75,7 +75,7 @@ when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_signal_broker_cbor
   export api_signal_broker_cbor
 
-export chronicles, results, chronos, broker_context, options
+export chronicles, results, chronos, broker_context, broker_scope, options
 
 type SignalBrokerMode = enum
   sbDefault
@@ -378,6 +378,65 @@ proc generateSignalBroker(body: NimNode): NimNode =
             discard replaceSignalHandler(t, brokerCtx, savedMockSignalHandler.get)
           else:
             discard dropSignalHandler(t, brokerCtx)
+
+  )
+
+  # ── BrokerScope: release + scope overloads ─────────────────────────────
+  # The release drops the handler only while it is still the closure the scope
+  # installed (a mock / replace / re-onSignal by someone else wins).
+  let releaseHandlerIdent = ident("release" & sanitized & "SignalHandler")
+  result.add(
+    quote do:
+      proc `releaseHandlerIdent`(
+          brokerCtx: BrokerContext, handler: `handlerProcIdent`
+      ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+        let current = `findHandlerIdent`(`accessProcIdent`(), brokerCtx)
+        if current.isNil():
+          return broAlreadyGone
+        if current != handler:
+          return broTakenOver
+        await dropSignalHandler(`typeIdent`, brokerCtx)
+        broReleased
+
+      proc onSignal*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[void, string] =
+        if not scope.onOwningThread("onSignal"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope is closing")
+        let brokerCtx = scope.ctx
+        ?onSignal(`typeIdent`, brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseHandlerIdent`(brokerCtx, handler),
+              `typeNameLit`,
+              "signalHandler",
+              brokerCtx,
+            )
+        )
+        ok()
+
+      proc replaceSignalHandler*(
+          _: typedesc[`typeIdent`], scope: BrokerScope, handler: `handlerProcIdent`
+      ): Result[void, string] =
+        if not scope.onOwningThread("replaceSignalHandler"):
+          return err("BrokerScope used off its owning thread")
+        if not scope.isOpen:
+          return err("BrokerScope is closing")
+        let brokerCtx = scope.ctx
+        ?replaceSignalHandler(`typeIdent`, brokerCtx, handler)
+        scope.track(
+          proc() {.async: (raises: []), gcsafe.} =
+            reportBrokerRelease(
+              await `releaseHandlerIdent`(brokerCtx, handler),
+              `typeNameLit`,
+              "signalHandler",
+              brokerCtx,
+            )
+        )
+        ok()
 
   )
 

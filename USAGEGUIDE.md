@@ -22,6 +22,7 @@ footprints. For the short overview start at the [README](README.md).
     - [SignalBroker](#signalbroker)
       - [onSignalIt sugar](#onsignalit-sugar)
     - [BrokerContext](#brokercontext)
+    - [BrokerScope](#brokerscope)
     - [BrokerInterface \& BrokerImplement (OOP / DI)](#brokerinterface--brokerimplement-oop--di)
   - [Doc comments](#doc-comments)
     - [Where `##` is accepted](#where--is-accepted)
@@ -442,6 +443,54 @@ await MyEvent.dropAllListeners(ctxB)
 When no `BrokerContext` argument is passed, the `DefaultBrokerContext` is used.
 
 A global context lock is available via `lockGlobalBrokerContext` for serialized cross-module coordination within `chronos` async procs.
+
+### BrokerScope
+
+A component that registers many listeners, signal handlers and providers
+can bundle them, together with their `BrokerContext`, in one `BrokerScope`
+and tear them all down with one call. Pass the scope wherever a context is
+accepted, to `listen`, `onSignal`, `replaceSignalHandler`, `setProvider` and
+`replaceProvider`, and to every `...It` / `bind...` sugar:
+
+```nim
+type Radio = ref object
+  scope: BrokerScope
+  volume: int
+
+proc new(T: typedesc[Radio]): Result[Radio, string] =
+  let self = Radio(scope: newBrokerScope())   # fresh ctx; or newBrokerScope(ctx)
+  let l = VolumeChanged.listenIt(self.scope):
+    self.volume = it.level
+  discard ?l
+  let p = GetVolume.provideIt(self.scope):
+    return ok(GetVolume(level: self.volume))
+  ?p
+  let s = Mute.onSignalIt(self.scope):
+    self.volume = 0
+  ?s
+  ok(self)
+
+proc stop(self: Radio) {.async: (raises: []).} =
+  await self.scope.close()     # signal handler, provider, listener (last first)
+```
+
+`self.scope.ctx` is the context to emit, signal or request on.
+
+Semantics:
+
+| | |
+|---|---|
+| Registration | Same as the ctx overload on `scope.ctx`. The undo is recorded only on success: a rejected `setProvider` / `onSignal` (already set) leaves the existing owner alone. While a `close()` is running, registration returns `err("BrokerScope is closing")`. |
+| `close()` | Releases in reverse registration order. Concurrent callers wait on the same teardown; cancelling a caller only stops its own wait, never the teardown. Afterwards the scope is empty and **open again**: the same scope can register and close any number of times. |
+| Release, not clear | Each undo removes **exactly the closure this scope installed**, and only while it is still installed. For a dual-slot RequestBroker it clears only the scope's slot. |
+| Changes made outside the scope | They win and are never an error. Registration already removed (e.g. an early `dropListener` with the handle `listen(scope, …)` returned) → `debug` log. Taken over by a mock, a `replace…` or another owner → `warn`, left in place. MT: owned by another thread now → `warn`, left in place. |
+| `replace*` through a scope | `close()` does **not** restore the displaced provider/handler (that is `withMockProvider`'s job). Replacing the same slot twice from one scope records two undos; the older one finds its closure gone at close and is a no-op. |
+| Thread affinity | A scope belongs to the thread that created it. Using it from another thread logs an `error` and does nothing: a registration returns `err`, and `close()` returns without closing. |
+
+There is no implicit teardown on destruction (undos are async). A scope
+that is never closed keeps its registrations, exactly like a forgotten
+`dropListener`. Ownership is closure identity, so the same top-level proc
+registered by two owners is indistinguishable.
 
 ### BrokerInterface & BrokerImplement (OOP / DI)
 

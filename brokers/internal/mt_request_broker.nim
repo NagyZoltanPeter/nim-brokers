@@ -25,12 +25,13 @@
 import std/[macros, strutils, locks, os, atomics, options]
 import chronos, chronicles
 import results
-import ./helper/broker_utils, ../broker_context
+import ./helper/broker_utils, ../broker_context, ../broker_scope
 
 import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
 import ./broker_debug
 export
-  results, chronos, chronicles, broker_context, mt_broker_common, mt_config, options
+  results, chronos, chronicles, broker_context, broker_scope, mt_broker_common,
+  mt_config, options
 # The generated provideIt/reprovideIt templates expand `providerBody` at the
 # user's call site, so the checker macro must be visible there.
 export providerBody
@@ -1931,11 +1932,19 @@ proc generateMtRequestBroker*(
             break
     )
 
+  # Owner-only clear: the bucket is torn down only when this thread owns it,
+  # decided in the same critical section as the removal so no other thread can
+  # clear + re-provide in between. A non-owner gets `broOwnerChanged` and the
+  # provider stays installed. `requireOwner` only says the caller expects that
+  # outcome (BrokerScope release); the public `clearProvider` passes false, so
+  # a foreign call is logged as the misuse it is.
+  let requireOwnerParam = ident("requireOwner")
   let clearBody = quote:
     `initProcIdent`()
     var ring: ptr VyukovMpscRing[uint32]
     var pool: ptr ResponseSlotPool
     var providerSignal: ptr BrokerSignalShared
+    var found = false
     var foreignOwned = false
     let myThreadId = currentMtThreadId()
     let myThreadGen = currentMtThreadGen()
@@ -1943,8 +1952,9 @@ proc generateMtRequestBroker*(
       var foundIdx = -1
       for i in 0 ..< `globalBucketCountIdent`:
         if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
-          # Owner-only: the bucket's provider closure lives in its owner's
-          # threadvars, so only the owner can retire it consistently.
+          found = true
+          # The provider closure lives in its owner's threadvars, so only the
+          # owner can retire it consistently.
           if `globalBucketsIdent`[i].threadId != myThreadId or
               `globalBucketsIdent`[i].threadGen != myThreadGen:
             foreignOwned = true
@@ -1965,9 +1975,12 @@ proc generateMtRequestBroker*(
       if foundIdx >= 0 and not pool.isNil:
         discard pool[].markProviderGone()
     if foreignOwned:
-      error "clearProvider ignored: called from a thread that does not own the provider",
-        requestType = `typeNameLit`, brokerCtx = uint32(`brokerCtxParam`)
-      return
+      if not `requireOwnerParam`:
+        error "clearProvider ignored: called from a thread that does not own the provider",
+          requestType = `typeNameLit`, brokerCtx = uint32(`brokerCtxParam`)
+      return broOwnerChanged
+    if not found:
+      return broAlreadyGone
     if not pool.isNil:
       # Wake every requester so it resolves now rather than at its next
       # unrelated dispatch tick. Firing a stale or closed signal is a no-op.
@@ -1979,31 +1992,32 @@ proc generateMtRequestBroker*(
     if not ring.isNil:
       ring.close()
       fireBrokerSignal(providerSignal)
+    broReleased
 
-  var formalParamsClear = newTree(nnkFormalParams)
-  formalParamsClear.add(newEmptyNode())
-  formalParamsClear.add(
-    newTree(
-      nnkIdentDefs,
-      ident("_"),
-      newTree(nnkBracketExpr, ident("typedesc"), copyNimTree(typeIdent)),
-      newEmptyNode(),
-    )
-  )
-  formalParamsClear.add(
-    newTree(nnkIdentDefs, brokerCtxParam, ident("BrokerContext"), newEmptyNode())
-  )
+  let clearImplIdent = ident("clear" & typeDisplayName & "ProviderImpl")
   result.add(
     newTree(
       nnkProcDef,
-      postfix(ident("clearProvider"), "*"),
+      clearImplIdent,
       newEmptyNode(),
       newEmptyNode(),
-      formalParamsClear,
-      newEmptyNode(),
+      newTree(
+        nnkFormalParams,
+        ident("BrokerReleaseOutcome"),
+        newTree(nnkIdentDefs, brokerCtxParam, ident("BrokerContext"), newEmptyNode()),
+        newTree(nnkIdentDefs, requireOwnerParam, newEmptyNode(), ident("false")),
+      ),
+      newTree(nnkPragma, ident("discardable")),
       newEmptyNode(),
       clearBody,
     )
+  )
+
+  result.add(
+    quote do:
+      proc clearProvider*(_: typedesc[`typeIdent`], `brokerCtxParam`: BrokerContext) =
+        discard `clearImplIdent`(`brokerCtxParam`)
+
   )
 
   result.add(
@@ -2189,6 +2203,132 @@ proc generateMtRequestBroker*(
               clearProvider(t, brokerCtx)
 
     )
+
+  # ── BrokerScope: per-slot release + scope overloads ─────────────────
+  # Emitted before the bind / `It` sugar templates, which bind the verb
+  # overload set at their definition site. The release checks closure
+  # identity in this (owning) thread's slot threadvar, then:
+  #   - other slot still provided here → drop only our slot's threadvar entry;
+  #     the bucket stays and requests for our signature already answer "no
+  #     provider registered for input signature" (poll fn lookup).
+  #   - last slot → the owner-checked clear (`requireOwner`), which fails
+  #     in-flight requests with ProviderGone exactly like `clearProvider`.
+  # Clears are owner-only, so another thread cannot retire our bucket; the
+  # shared bucket still decides (gone / owned elsewhere) and only our local
+  # entry is purged in those cases.
+  block:
+    let releaseIdent = ident("release" & typeDisplayName & "Provider")
+    var slots: seq[
+      tuple[providerTy, getter, ownCtx, ownHandler, otherCtx: NimNode, slotName: string]
+    ] = @[]
+    if not zeroArgSig.isNil():
+      slots.add(
+        (
+          zeroArgProviderName,
+          ident("getCurrentProviderNoArgs"),
+          tvNoArgCtxIdent,
+          tvNoArgHandlerIdent,
+          (if argSig.isNil(): nil else: tvWithArgCtxIdent),
+          "providerNoArgs",
+        )
+      )
+    if not argSig.isNil():
+      slots.add(
+        (
+          argProviderName,
+          ident("getCurrentProvider"),
+          tvWithArgCtxIdent,
+          tvWithArgHandlerIdent,
+          (if zeroArgSig.isNil(): nil else: tvNoArgCtxIdent),
+          "provider",
+        )
+      )
+    for s in slots:
+      let providerTy = s.providerTy
+      let getter = s.getter
+      let ownCtx = s.ownCtx
+      let ownHandler = s.ownHandler
+      let kindLit = newLit(s.slotName)
+      let otherSlotSet =
+        if s.otherCtx.isNil():
+          newLit(false)
+        else:
+          infix(newCall(ident("find"), s.otherCtx, ident("brokerCtx")), ">=", newLit(0))
+      result.add(
+        quote do:
+          proc `releaseIdent`(
+              `brokerCtxParam`: BrokerContext, handler: `providerTy`
+          ): Future[BrokerReleaseOutcome] {.async: (raises: []).} =
+            let current = `getter`(`typeIdent`, brokerCtx)
+            if current.isNone():
+              return broAlreadyGone
+            if current.get() != handler:
+              return broTakenOver
+            var outcome: BrokerReleaseOutcome
+            if `otherSlotSet`:
+              outcome = broAlreadyGone
+              let myThreadGen = currentMtThreadGen()
+              withLock(`globalLockIdent`):
+                for j in 0 ..< `globalBucketCountIdent`:
+                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx:
+                    outcome =
+                      if `globalBucketsIdent`[j].threadId == currentMtThreadId() and
+                          `globalBucketsIdent`[j].threadGen == myThreadGen:
+                        broReleased
+                      else:
+                        broOwnerChanged
+                    break
+            else:
+              outcome = `clearImplIdent`(brokerCtx, requireOwner = true)
+              if outcome == broReleased:
+                return broReleased # clear already purged both slot threadvars
+            let idx = `ownCtx`.find(brokerCtx)
+            if idx >= 0:
+              `ownCtx`.del(idx)
+              `ownHandler`.del(idx)
+            outcome
+
+          proc setProvider*(
+              _: typedesc[`typeIdent`], scope: BrokerScope, handler: `providerTy`
+          ): Result[void, string] =
+            if not scope.onOwningThread("setProvider"):
+              return err("BrokerScope used off its owning thread")
+            if not scope.isOpen:
+              return err("BrokerScope is closing")
+            let brokerCtx = scope.ctx
+            ?setProvider(`typeIdent`, brokerCtx, handler)
+            scope.track(
+              proc() {.async: (raises: []), gcsafe.} =
+                reportBrokerRelease(
+                  await `releaseIdent`(brokerCtx, handler),
+                  `typeNameLit`,
+                  `kindLit`,
+                  brokerCtx,
+                )
+            )
+            ok()
+
+          proc replaceProvider*(
+              _: typedesc[`typeIdent`], scope: BrokerScope, handler: `providerTy`
+          ): Result[void, string] =
+            if not scope.onOwningThread("replaceProvider"):
+              return err("BrokerScope used off its owning thread")
+            if not scope.isOpen:
+              return err("BrokerScope is closing")
+            let brokerCtx = scope.ctx
+            ?replaceProvider(`typeIdent`, brokerCtx, handler)
+            scope.track(
+              proc() {.async: (raises: []), gcsafe.} =
+                reportBrokerRelease(
+                  await `releaseIdent`(brokerCtx, handler),
+                  `typeNameLit`,
+                  `kindLit`,
+                  brokerCtx,
+                )
+            )
+            ok()
+
+      )
 
   # ── bind / rebind provider sugar (issue #42) ──────────────────────
   # Sugar over setProvider / replaceProvider for class-method providers. MT is

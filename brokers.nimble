@@ -320,7 +320,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_request_broker_sync_void", "test_multi_request_broker", "test_signal_broker",
     "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
     "test_broker_interface_signal", "test_handler_sugar",
-    "test_handler_sugar_generic_scope", "test_doc_comments",
+    "test_handler_sugar_generic_scope", "test_doc_comments", "test_broker_scope",
   ]
   # Run every file before reporting. `test` raises OSError on a failing
   # compile or a non-zero exit, which used to abort the whole task at the
@@ -348,7 +348,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_mt_large_payload", "test_mt_drop_async_eager", "test_alloc_race_variants",
     "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
     "test_mt_request_cancel", "test_mt_thread_dispatcher_ownership",
-    "test_mt_owner_only_clear",
+    "test_multi_thread_broker_scope", "test_mt_owner_only_clear",
   ]
   for f in mtTests:
     for opt in [
@@ -1196,6 +1196,14 @@ task testMtSignalBrokerAsanOrc,
 task testMtSignalBrokerAsanRefc,
   "Run multi-thread signal broker tests under AddressSanitizer (clang, refc, debug)":
   testAsan("refc", "test_multi_thread_signal_broker")
+
+task testMtBrokerScopeAsanOrc,
+  "Run multi-thread BrokerScope tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_multi_thread_broker_scope")
+
+task testMtBrokerScopeAsanRefc,
+  "Run multi-thread BrokerScope tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_multi_thread_broker_scope")
 
 task testMtOwnerOnlyClearAsanOrc,
   "Run MT owner-only clear/drop tests under AddressSanitizer (clang, orc, debug)":

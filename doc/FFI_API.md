@@ -1126,6 +1126,11 @@ That proc is the main hook for:
 - remembering the active provider context
 - installing lazily created providers if desired
 
+`(API)` brokers ride the multi-thread lane, so the `BrokerScope` overloads
+(`setProvider(scope, …)`, `provideIt(scope)`, …; see `USAGEGUIDE.md` §
+"BrokerScope") are available here too. They are a Nim-side registration
+helper only: nothing on the FFI surface, headers or wrappers changes.
+
 ### Batch request inputs
 
 For request parameters that need to cross the foreign-function boundary
