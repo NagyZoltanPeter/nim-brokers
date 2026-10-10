@@ -472,31 +472,41 @@ proc stopBrokerDispatchHere*() =
   gBrokerDispatchStopRequested = false
 
 proc closeThreadDispatcherSelector*() {.gcsafe, raises: [].} =
-  ## Close the calling thread's chronos dispatcher OS handle:
-  ## - POSIX (kqueue / epoll / poll engine): the `Selector` fd
+  ## Close the calling thread's chronos dispatcher OS handles:
+  ## - POSIX (kqueue / epoll / poll engine): the `Selector` fd, plus (chronos
+  ##   >= 4.4.0) the cross-thread wake-up descriptor — an `eventfd` on Linux,
+  ##   a `socketpair` (2 fds) on macOS / BSD
   ## - Windows (IOCP engine):                 the IOCP `HANDLE`
   ##
-  ## chronos (4.2.2) has no `PDispatcher` teardown and neither `SelectorImpl`
-  ## (POSIX) nor the Windows IOCP `PDispatcher` has a `=destroy` — the
-  ## per-thread handle opened by `newDispatcher` (`kqueue()` / `epoll_create()`
-  ## / `CreateIoCompletionPort`) is never closed, so it leaks once per thread
-  ## that ever ran a chronos loop. The broker per-context threads
+  ## Neither `SelectorImpl` (POSIX) nor the Windows IOCP `PDispatcher` has a
+  ## `=destroy`, so the per-thread handles opened by `newDispatcher` leak once
+  ## per thread that ever ran a chronos loop. The broker per-context threads
   ## (processing + delivery) are spawned and joined per `_createContext` /
-  ## `_shutdown`, so without this every context lifecycle leaks 2 handles
-  ## regardless of --mm:refc vs --mm:orc.
+  ## `_shutdown`, so without this every context lifecycle leaks them, for
+  ## both threads, regardless of --mm:refc vs --mm:orc.
+  ##
+  ## chronos >= 4.4.0 ships `closeDispatcher`, which releases all of them; it
+  ## is used when available. Closing only the selector there leaks the wake-up
+  ## descriptor (4 fds per context cycle on macOS, 2 on Linux). Older chronos
+  ## (4.2.x) has no teardown and no wake-up descriptor, so the selector /
+  ## IOCP handle is closed directly.
   ##
   ## Call only on a thread you created, as the LAST action of its thread
   ## proc, AFTER `teardownBrokerThread()` has stopped the dispatch loop and
   ## closed the per-thread signal; at that point the dispatcher holds no live
-  ## registered handles, so closing it only reclaims the dispatcher handle
-  ## itself. Never call it on a thread owned by someone else (an FFI
-  ## library's worker, a host thread, the main thread): chronos keeps the
-  ## closed handle as the thread's dispatcher, so the owner's next poll fails.
+  ## registered handles, so closing it only reclaims the dispatcher's own
+  ## handles. `closeDispatcher` raises a Defect if any descriptor is still
+  ## registered, so this ordering is load-bearing. Never call it on a thread
+  ## owned by someone else (an FFI library's worker, a host thread, the main
+  ## thread): chronos keeps the closed dispatcher as the thread's dispatcher,
+  ## so the owner's next poll fails.
   {.cast(gcsafe).}:
     let disp = getThreadDispatcher()
     if disp.isNil:
       return
-    when defined(windows):
+    when compiles(closeDispatcher(disp)):
+      discard closeDispatcher(disp)
+    elif defined(windows):
       # chronos `HANDLE = distinct uint`; cast through pointer for our
       # inline CloseHandle prototype (Win32 `HANDLE` is `void*` ABI-wise).
       discard closeHandle(cast[pointer](getIoHandler(disp)))
