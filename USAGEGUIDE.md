@@ -813,8 +813,14 @@ waitFor main()
 - `"queue full"` is the visible backpressure signal of the bounded ring; size it
   with `queueDepth` / `slabCapacity` / `preset`.
 - `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler`
-  are **owning-thread only** in this lane. Call `dropSignalHandler` from the
-  owning thread too — it is the thread that frees the ring.
+  are **owning-thread only** in this lane, and so is `dropSignalHandler` — the
+  owning thread is the one that frees the ring. This is enforced: a
+  `dropSignalHandler` from another thread is ignored (logged at `error`), a
+  foreign `replaceSignalHandler` returns `err`, a foreign
+  `withMockSignalHandler` raises `AssertionDefect`. A thread that exits without
+  dropping its handler has it dropped by `teardownBrokerThread`. The same rules
+  apply to `RequestBroker(mt)` providers (`clearProvider` / `replaceProvider` /
+  `withMockProvider`).
 
 ### Tuning multi-thread brokers
 

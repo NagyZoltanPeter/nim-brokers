@@ -318,6 +318,16 @@ proc generateMtSignalBroker*(
 
   )
 
+  # ── owned-bucket cleanup at thread exit (forward decl) ────────────────
+  # Defined after dropImpl; registered with the thread's teardown by
+  # setupBucket so a handler thread that exits without dropping still retires
+  # its handlers (owner-only drop, MT_OWNER_ONLY_CLEAR_PLAN).
+  let autoClearIdent = ident("dropOwnedHandlers" & typeDisplayName & "Sig")
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].}
+  )
+
   # ── setupBucket (owning thread; allocates ring, registers poller) ─────
   result.add(
     quote do:
@@ -347,6 +357,7 @@ proc generateMtSignalBroker*(
           )
           `globalBucketCountIdent` += 1
         registerBrokerPoller(`pollFnMakerIdent`(ring, brokerCtx))
+        registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
         ok(ring)
 
@@ -482,7 +493,7 @@ proc generateMtSignalBroker*(
         `initProcIdent`()
         var ring: ptr VyukovMpscRing[uint32]
         var handlerSig: ptr BrokerSignalShared
-        var isOwner = false
+        var foreignOwned = false
         var found = false
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
@@ -491,12 +502,14 @@ proc generateMtSignalBroker*(
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
                 `globalBucketsIdent`[i].active:
+              # Owner-only: the handler closure lives in its owner's
+              # threadvars, so only the owner can retire it consistently.
+              if `globalBucketsIdent`[i].threadId != myThreadId or
+                  `globalBucketsIdent`[i].threadGen != myThreadGen:
+                foreignOwned = true
+                break
               ring = `globalBucketsIdent`[i].ring
               handlerSig = `globalBucketsIdent`[i].handlerSignal
-              isOwner = (
-                `globalBucketsIdent`[i].threadId == myThreadId and
-                `globalBucketsIdent`[i].threadGen == myThreadGen
-              )
               foundIdx = i
               found = true
               break
@@ -505,20 +518,43 @@ proc generateMtSignalBroker*(
               `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
             `globalBucketCountIdent` -= 1
 
+        if foreignOwned:
+          error "dropSignalHandler ignored: called from a thread that does not own the handler",
+            signalType = `typeNameLit`, brokerCtx = uint32(brokerCtx)
+          return
+
         if not found:
           return
 
-        if isOwner:
-          {.cast(gcsafe).}:
-            for i in countdown(`tvCtxIdent`.len - 1, 0):
-              if `tvCtxIdent`[i] == brokerCtx:
-                `tvCtxIdent`.del(i)
-                `tvHandlerIdent`.del(i)
-                break
+        {.cast(gcsafe).}:
+          for i in countdown(`tvCtxIdent`.len - 1, 0):
+            if `tvCtxIdent`[i] == brokerCtx:
+              `tvCtxIdent`.del(i)
+              `tvHandlerIdent`.del(i)
+              break
         discard `presentIdent`.fetchSub(1, moRelease)
         if not ring.isNil:
           ring.close()
           fireBrokerSignal(handlerSig)
+
+  )
+
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].} =
+        let myThreadId = currentMtThreadId()
+        let myThreadGen = currentMtThreadGen()
+        var owned: seq[BrokerContext]
+        {.cast(gcsafe).}:
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].active and
+                  `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                owned.add(`globalBucketsIdent`[i].brokerCtx)
+        for ownedCtx in owned:
+          `dropImplIdent`(ownedCtx)
+        owned.len
 
   )
 
@@ -731,7 +767,10 @@ proc generateMtSignalBroker*(
         ## Owning-thread only. Install `mock` for the duration of `body`, then
         ## restore the captured handler (or drop it if none was set).
         let savedMockSignalHandler = getCurrentSignalHandler(t, brokerCtx)
-        discard replaceSignalHandler(t, brokerCtx, mock)
+        let mockInstalled = replaceSignalHandler(t, brokerCtx, mock)
+        doAssert mockInstalled.isOk(),
+          "withMockSignalHandler: " & mockInstalled.error &
+            " (only the handler's owning thread may mock it)"
         try:
           body
         finally:

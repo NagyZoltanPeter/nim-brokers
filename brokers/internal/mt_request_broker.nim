@@ -912,6 +912,16 @@ proc generateMtRequestBroker*(
 
   )
 
+  # ── owned-bucket cleanup at thread exit (forward decl) ───────────────
+  # Defined after clearProvider; registered with the thread's teardown by
+  # setupBucket so a provider thread that exits without clearing still
+  # retires its providers (owner-only clear, MT_OWNER_ONLY_CLEAR_PLAN).
+  let autoClearIdent = ident("clearOwnedProviders" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].}
+  )
+
   # ── setProvider impl helper (reused by 4 public overloads) ───────────
   # Allocates ring + slab + pool on the calling thread, registers the
   # bucket, and starts the poller.  Returns Result[void, string].
@@ -964,6 +974,7 @@ proc generateMtRequestBroker*(
           )
           `globalBucketCountIdent` += 1
         registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, brokerCtx))
+        registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
         ok()
 
@@ -1925,19 +1936,22 @@ proc generateMtRequestBroker*(
     var ring: ptr VyukovMpscRing[uint32]
     var pool: ptr ResponseSlotPool
     var providerSignal: ptr BrokerSignalShared
-    var isProviderThread = false
+    var foreignOwned = false
+    let myThreadId = currentMtThreadId()
     let myThreadGen = currentMtThreadGen()
     withLock(`globalLockIdent`):
       var foundIdx = -1
       for i in 0 ..< `globalBucketCountIdent`:
         if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
+          # Owner-only: the bucket's provider closure lives in its owner's
+          # threadvars, so only the owner can retire it consistently.
+          if `globalBucketsIdent`[i].threadId != myThreadId or
+              `globalBucketsIdent`[i].threadGen != myThreadGen:
+            foreignOwned = true
+            break
           ring = `globalBucketsIdent`[i].ring
           pool = `globalBucketsIdent`[i].responseSlotPool
           providerSignal = `globalBucketsIdent`[i].providerSignal
-          isProviderThread = (
-            `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-            `globalBucketsIdent`[i].threadGen == myThreadGen
-          )
           foundIdx = i
           break
       if foundIdx >= 0:
@@ -1950,6 +1964,10 @@ proc generateMtRequestBroker*(
       # provider thread frees the pool shortly after this returns.
       if foundIdx >= 0 and not pool.isNil:
         discard pool[].markProviderGone()
+    if foreignOwned:
+      error "clearProvider ignored: called from a thread that does not own the provider",
+        requestType = `typeNameLit`, brokerCtx = uint32(`brokerCtxParam`)
+      return
     if not pool.isNil:
       # Wake every requester so it resolves now rather than at its next
       # unrelated dispatch tick. Firing a stale or closed signal is a no-op.
@@ -1957,8 +1975,7 @@ proc generateMtRequestBroker*(
         let waker = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
         if not waker.isNil:
           fireBrokerSignal(waker)
-    if isProviderThread:
-      `tvCleanup`
+    `tvCleanup`
     if not ring.isNil:
       ring.close()
       fireBrokerSignal(providerSignal)
@@ -1993,6 +2010,24 @@ proc generateMtRequestBroker*(
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
+  )
+
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].} =
+        let myThreadId = currentMtThreadId()
+        let myThreadGen = currentMtThreadGen()
+        var owned: seq[BrokerContext]
+        {.cast(gcsafe).}:
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                owned.add(`globalBucketsIdent`[i].brokerCtx)
+          for ownedCtx in owned:
+            clearProvider(`typeIdent`, ownedCtx)
+        owned.len
 
   )
 
@@ -2087,7 +2122,10 @@ proc generateMtRequestBroker*(
           ## Owning-thread only. Install `mock` for the duration of `body`, then
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProviderNoArgs(t, brokerCtx)
-          discard replaceProvider(t, brokerCtx, mock)
+          let mockInstalled = replaceProvider(t, brokerCtx, mock)
+          doAssert mockInstalled.isOk(),
+            "withMockProvider: " & mockInstalled.error &
+              " (only the provider's owning thread may mock it)"
           try:
             body
           finally:
@@ -2138,7 +2176,10 @@ proc generateMtRequestBroker*(
           ## Owning-thread only. Install `mock` for the duration of `body`, then
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProvider(t, brokerCtx)
-          discard replaceProvider(t, brokerCtx, mock)
+          let mockInstalled = replaceProvider(t, brokerCtx, mock)
+          doAssert mockInstalled.isOk(),
+            "withMockProvider: " & mockInstalled.error &
+              " (only the provider's owning thread may mock it)"
           try:
             body
           finally:

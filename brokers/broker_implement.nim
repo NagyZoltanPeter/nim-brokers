@@ -469,8 +469,16 @@ macro BrokerImplement*(args: varargs[untyped]): untyped =
   result.add(createNode)
 
   # close() — clear this instance's providers (breaks the refc cycle) and free
-  # its ctx. Idempotent.
+  # its ctx. Idempotent. MT providers / signal handlers are owner-only, so on
+  # the multi-thread lanes it must run on the thread that created the instance.
   var closeSrc = "proc close*(self: " & implStr & ") =\n"
+  closeSrc.add(
+    "  ## Clears this instance's providers, signal handlers and listeners.\n" &
+      "  ## Idempotent. With multi-thread brokers call it on the thread that\n" &
+      "  ## created the instance: providers and signal handlers can only be\n" &
+      "  ## cleared by their owning thread (a call from another thread is\n" &
+      "  ## logged and leaves them installed).\n"
+  )
   closeSrc.add("  if self.brokerCtx == DefaultBrokerContext: return\n")
   for (verb, brokerName, margs, payload, async) in methods:
     closeSrc.add("  " & brokerName & ".clearProvider(self.brokerCtx)\n")

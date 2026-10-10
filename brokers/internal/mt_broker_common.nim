@@ -290,26 +290,44 @@ proc registerBrokerPoller*(fn: ThreadDispatchPollFn) =
   ## Must be called from the owning thread.
   gBrokerThreadPollers.add(fn)
 
+type BrokerThreadCleanupFn* = proc(): int {.nimcall, gcsafe, raises: [].}
+  ## Per broker type: retire every provider / signal handler the calling
+  ## thread still owns, exactly as an owner `clearProvider` /
+  ## `dropSignalHandler` would. Returns how many it retired.
+
+var gBrokerThreadCleanups {.threadvar.}: seq[BrokerThreadCleanupFn]
+
+proc registerBrokerThreadCleanup*(fn: BrokerThreadCleanupFn) =
+  ## Register a broker type's owned-bucket cleanup with this thread's
+  ## teardown. Idempotent per (thread, broker type).
+  for f in gBrokerThreadCleanups:
+    if f == fn:
+      return
+  gBrokerThreadCleanups.add(fn)
+
+proc drainBrokerPollers() =
+  ## Keep polling every registered poller until all channels are empty.
+  var anyWork = true
+  while anyWork:
+    anyWork = false
+    var i = 0
+    while i < gBrokerThreadPollers.len:
+      let r = gBrokerThreadPollers[i]()
+      case r
+      of 2:
+        # Poller is done — remove it.
+        gBrokerThreadPollers.del(i)
+      of 1:
+        anyWork = true
+        inc i
+      else:
+        inc i
+
 proc brokerDispatchLoop*(signal: ptr BrokerSignalShared) {.async: (raises: []).} =
   ## Single dispatch loop per chronos thread.  Drains all registered broker
   ## channel pollers whenever the shared signal fires.
   while true:
-    # Drain: keep polling until every channel is empty.
-    var anyWork = true
-    while anyWork:
-      anyWork = false
-      var i = 0
-      while i < gBrokerThreadPollers.len:
-        let r = gBrokerThreadPollers[i]()
-        case r
-        of 2:
-          # Poller is done — remove it.
-          gBrokerThreadPollers.del(i)
-        of 1:
-          anyWork = true
-          inc i
-        else:
-          inc i
+    drainBrokerPollers()
     # FFI-caller teardown hook: an external caller (stopBrokerDispatchHere)
     # asked the loop to exit. Drain pass is complete, exit cleanly.
     if gBrokerDispatchStopRequested:
@@ -507,6 +525,9 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
   ## Ordered, idempotent teardown of ALL per-thread broker dispatch state.
   ## Call as the LAST broker-related action of a thread, from sync context:
   ##
+  ##   0. retires the request providers / signal handlers this thread still
+  ##      owns (registered via registerBrokerThreadCleanup), then runs one
+  ##      poll pass so their closed rings are queued for freeing.
   ##   1. stopBrokerDispatchHere() — drives chronos until brokerDispatchLoop
   ##      exits; the loop's exit path closes the per-thread signal wrapper
   ##      (waiting out concurrent firers) and, on Windows, dismantles the
@@ -533,6 +554,17 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
   if gBrokerThreadTeardownDone:
     return
   gBrokerThreadTeardownDone = true
+  # Owner-only clear: only this thread may retire the request providers and
+  # signal handlers it installed, so do it now for any it left behind — the
+  # ctx becomes free again and outstanding requests fail fast instead of
+  # timing out. One poll pass then lets each closed ring's poll fn queue its
+  # (ring, slab, pool) for drainPendingRingFrees below; the loop is not
+  # relied on, since it exits on the stop request without polling.
+  var retired = 0
+  for fn in gBrokerThreadCleanups:
+    retired += fn()
+  if retired > 0:
+    drainBrokerPollers()
   stopBrokerDispatchHere()
   # Defensive: if a signal wrapper exists but the loop never ran (or already
   # exited without clearing it), close it here so the OS handle is reclaimed
