@@ -335,6 +335,31 @@ Thread setup helpers (callable before the event loop starts):
 Async scoped swap (needs chronos loop): `lockGlobalBrokerContext` /
 `lockNewGlobalBrokerContext` templates.
 
+### `BrokerScope` — one-call teardown of a component's registrations
+
+Pass a `BrokerScope` wherever a ctx is accepted (`listen`, `onSignal`,
+`replaceSignalHandler`, `setProvider`, `replaceProvider`, and every `…It` /
+`bind…` sugar); `await scope.close()` undoes them all, newest first.
+
+```nim
+let scope = newBrokerScope()            # fresh ctx; or newBrokerScope(ctx)
+let l = VolumeChanged.listenIt(scope):
+  echo it.level
+discard ?l
+let p = GetVolume.provideIt(scope):
+  return ok(GetVolume(level: 1))
+?p
+let v = await GetVolume.request(scope.ctx)   # emit / signal / request on scope.ctx
+await scope.close()                     # empty and re-openable afterwards
+```
+
+- Undos **release, not clear**: each removes only the closure this scope
+  installed. Something replaced/mocked/cleared outside the scope wins (logged
+  `debug`/`warn`, never an error). `close()` does not restore a provider the
+  scope's `replace*` displaced.
+- Thread-affine: use from another thread logs `error` and does nothing.
+- No implicit close on destruction — a scope never closed keeps its registrations.
+
 ---
 
 ## Multi-thread variants `(mt)`
@@ -404,6 +429,16 @@ The handler runs on the thread that called `onSignal`; `signal()` works from
 any thread (still a plain proc returning `Result[void, string]`; `"queue full"`
 is the bounded-ring backpressure). `dropSignalHandler` and the
 replace/mock trio belong on the owning thread.
+
+### Owner-only clear / replace (`RequestBroker(mt)`, `SignalBroker(mt)`)
+
+Only the thread that installed a provider / signal handler may remove or swap
+it. From any other thread: `clearProvider` / `dropSignalHandler` → no-op logged
+at `error`; `replaceProvider` / `setProvider` / `replaceSignalHandler` → `err`;
+`withMockProvider` / `withMockSignalHandler` → `doAssert`. A provider thread
+that exits without clearing is cleaned up by `teardownBrokerThread` (automatic
+for Nim-created threads): its outstanding requests fail at once and the ctx can
+be provided again by any thread.
 
 ---
 

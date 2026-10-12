@@ -178,12 +178,15 @@ versions only by single-shot CI sampling:
   threads. Firing after close is a no-op; wrapper memory is never
   unmapped. Identical semantics under refc and orc, all platforms.
 - `teardownBrokerThread()` (in `brokers/internal/mt_broker_common.nim`)
-  runs stop-dispatch-loop → close signal wrapper →
-  `drainPendingRingFrees`, **before** the thread's refc heap dies. It
-  leaves the thread's chronos dispatcher open, since the thread may belong
-  to someone else who still drives it; `closeThreadDispatcherSelector()`
-  reclaims that handle, and only a thread's creator calls it (the
-  `api_library` processing/delivery threads do). It is registered automatically via
+  runs retire-owned-providers/signal-handlers → stop-dispatch-loop →
+  close signal wrapper → `drainPendingRingFrees`, **before** the thread's
+  refc heap dies. It leaves the thread's chronos dispatcher open, since
+  the thread may belong to someone else who still drives it;
+  `closeThreadDispatcherSelector()` reclaims that handle, and only a
+  thread's creator calls it (the `api_library` processing/delivery
+  threads do). Where chronos ships `closeDispatcher()` (unreleased master
+  since #614) it is used instead, so the dispatcher's cross-thread
+  wake-up descriptor is released too. It is registered automatically via
   `onThreadDestruction` for Nim-created threads; **foreign/FFI threads
   and the main thread must call it explicitly** (Nim's destruction
   handlers never run for them).

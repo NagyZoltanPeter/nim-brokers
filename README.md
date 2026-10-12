@@ -128,6 +128,10 @@ the **same call shape across all lanes** — `emit` is always sync, `drop*` is
 always async. Full syntax, all variants, and worked examples are in the
 **[Usage Guide](USAGEGUIDE.md#types-of-brokers)**.
 
+A component that registers many listeners, handlers and providers can pass one
+`BrokerScope` in place of the context and release all of them with a single
+`await scope.close()`. See **[BrokerScope](USAGEGUIDE.md#brokerscope)**.
+
 Broker bodies take ordinary `##` doc comments — above the type, trailing on a
 field, above the signature. The text follows the declaration into `nim doc` and,
 in the `(API)` lane, into the generated C/C++/Python/Rust/Go wrappers, the CDDL

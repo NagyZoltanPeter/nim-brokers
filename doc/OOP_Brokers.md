@@ -74,6 +74,10 @@ independently.
 2. Drops all event listeners registered through the instance's event facade.
 3. Marks the instance as closed (idempotent — safe to call twice).
 
+On the multi-thread lanes (`(mt)` / `(API)` inner brokers) `close()` must run on
+the thread that created the instance: provider clears are owner-only, so a
+`close()` from another thread logs an error and leaves the providers installed.
+
 This breaks the `instance -> provider closure -> instance` reference cycle that
 would otherwise leak under `--mm:refc`. Under `--mm:orc` the cycle collector
 would eventually collect it, but explicit `close()` gives deterministic cleanup

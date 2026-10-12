@@ -5,6 +5,72 @@ All notable changes to **nim-brokers** are documented here. The project follows
 
 ## [Unreleased]
 
+## [3.4.1] — 2026-10-12
+
+**`BrokerScope`, owner-only clear/replace on the MT lane, and a dispatcher
+fd leak on newer chronos.** Ships three merged PRs (#62, #63, #64).
+
+### Added
+
+- **`BrokerScope`** (#62) bundles a `BrokerContext` with the registrations made
+  through it. Every broker in every lane (ST, `(mt)`, `(API)`) gets scope
+  overloads of `listen`, `onSignal` / `replaceSignalHandler`, `setProvider` /
+  `replaceProvider` per slot and MultiRequest `setProvider`; the `…It` /
+  `bind…` sugar accepts a scope unchanged. `await scope.close()` undoes them
+  newest first and leaves the scope empty and re-openable. Undos release only
+  the closure the scope installed: a registration removed, replaced or mocked
+  outside the scope wins and is logged (`debug` / `warn`), never an error.
+  `close()` is cancel-safe (callers `join` the teardown) and rejects
+  registrations (`"BrokerScope is closing"`) from its first undo. Thread-affine:
+  use from another thread logs `error` and does nothing.
+
+### Fixed
+
+- **MT: `clearProvider` / `dropSignalHandler` from a non-owning thread** (#64)
+  removed the bucket but left the owner's threadvar entry behind, so requests
+  still queued on the owner ran on a provider whose callers had already been
+  failed, and the owner's `getCurrentProvider` / `replaceProvider` /
+  `withMockProvider` acted on a provider that was no longer installed. Clear
+  and drop are now **owner-only** for `RequestBroker(mt)` and
+  `SignalBroker(mt)` (and therefore the `(API)` lane): a foreign call is a
+  no-op logged at `error`. Foreign `replaceProvider` / `setProvider` /
+  `replaceSignalHandler` return `err` (now pinned by tests); `withMockProvider`
+  / `withMockSignalHandler` `doAssert` the mock install instead of silently
+  running the body against the real provider.
+  - Migration: code that cleared a provider from another thread must move the
+    call to the provider's thread. The dead-owner recovery path is now
+    `teardownBrokerThread`, which retires every provider / handler the exiting
+    thread still owns — outstanding requests fail at once and the ctx can be
+    provided again. `BrokerImplement.close()` must run on the creating thread
+    on the MT lanes.
+- **FFI: chronos dispatcher wake-up fds leaked per context cycle** (#63) on
+  chronos master since #614 (unreleased; its nimble file still says 4.4.0),
+  whose `newDispatcher()` opens a cross-thread wake-up descriptor — 4 fds per
+  `_createContext` / `_shutdown` on macOS, 2 on Linux.
+  `closeThreadDispatcherSelector` now calls chronos's `closeDispatcher()` when
+  it exists; every released chronos (≤ 4.4.1) keeps the previous path, which
+  is complete there.
+- **`broker_context`: global ctx lock released via `AsyncLock.release2`** when
+  chronos provides it (master #721, unreleased), which deprecates
+  `AsyncLockError`. Released chronos keeps the existing path; behaviour is
+  unchanged.
+
+### Docs
+
+- `USAGEGUIDE.md`, `doc/MultiThread_RequestBroker.md`, `doc/FFI_API.md`,
+  `doc/COOKBOOK.md`, `doc/MT_BROKER_CONFIG.md`, the AI skill doc and both slide
+  decks aligned with v3.4.0 (MT timeout/cancellation, `SignalBroker(mt)`,
+  author-only `ShutdownRequest`). `BrokerScope` and owner-only clear are
+  covered in `README.md`, `USAGEGUIDE.md`, `doc/MultiThread_RequestBroker.md`,
+  `doc/OOP_Brokers.md`, `doc/LIMITATION.md` and the skill doc. New design notes:
+  `doc/design/BROKER_SCOPE_PLAN.md`, `doc/design/MT_OWNER_ONLY_CLEAR_PLAN.md`.
+
+### Tests
+
+- `test_broker_scope`, `test_multi_thread_broker_scope` and
+  `test_mt_owner_only_clear` join `nimble test`; new ASAN tasks
+  `testMtBrokerScopeAsan{Orc,Refc}` and `testMtOwnerOnlyClearAsan{Orc,Refc}`.
+
 ## [3.4.0] — 2026-09-18
 
 **Cancellable cross-thread requests, `Opt[T]` parity, and `##` doc comments
@@ -966,6 +1032,7 @@ wrappers.**
   runtime (delivery + processing).
 - `typemappingtestlib` parity harness for C / C++ / Python.
 
+[3.4.1]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.4.1
 [3.4.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.4.0
 [3.3.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.3.0
 [3.2.0]: https://github.com/NagyZoltanPeter/nim-brokers/releases/tag/v3.2.0
