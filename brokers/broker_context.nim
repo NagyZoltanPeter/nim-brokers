@@ -132,6 +132,18 @@ proc initThreadBrokerContext*(): BrokerContext =
 # Async scoped context (backward compat)
 # ---------------------------------------------------------------------------
 
+proc releaseGlobalBrokerContextLock() =
+  ## chronos master (#721) adds `release2` and deprecates `AsyncLockError`;
+  ## no release up to v4.4.1 has `release2`. Both paths Defect on a lock that
+  ## is not held.
+  when declared(release2):
+    globalBrokerContextLock.release2()
+  else:
+    try:
+      globalBrokerContextLock.release()
+    except AsyncLockError:
+      doAssert false, "globalBrokerContextLock.release(): lock not held"
+
 template lockGlobalBrokerContext*(brokerCtx: BrokerContext, body: untyped): untyped =
   ## Runs `body` while holding the global broker context lock with the provided
   ## `brokerCtx` installed as the globally accessible context.
@@ -150,10 +162,7 @@ template lockGlobalBrokerContext*(brokerCtx: BrokerContext, body: untyped): unty
       body
     finally:
       globalBrokerContextValue = previousBrokerCtx
-      try:
-        globalBrokerContextLock.release()
-      except AsyncLockError:
-        doAssert false, "globalBrokerContextLock.release(): lock not held"
+      releaseGlobalBrokerContextLock()
 
 template lockNewGlobalBrokerContext*(body: untyped): untyped =
   ## Runs `body` while holding the global broker context lock with a freshly
