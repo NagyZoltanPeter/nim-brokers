@@ -29,7 +29,7 @@ This generates:
 | `Weather.setProvider(ctx, handler)` | Register a provider on the current thread (keyed context) |
 | `Weather.request(city)` | Issue a request (default context) |
 | `Weather.request(ctx, city)` | Issue a request (keyed context) |
-| `Weather.clearProvider()` | Unregister provider, fail its outstanding requests, shut down the dispatch poller (default context) |
+| `Weather.clearProvider()` | Unregister provider, fail its outstanding requests, shut down the dispatch poller (default context). Owning thread only (§6) |
 | `Weather.clearProvider(ctx)` | Same, for a keyed context |
 | `Weather.setRequestTimeout(duration)` | Set cross-thread request timeout (default: 20 seconds) |
 | `Weather.requestTimeout()` | Get current cross-thread request timeout |
@@ -222,11 +222,33 @@ no provider remains to hand the slot back, the **requester** releases it.
 Slots already being written or already published are left alone — those
 requests complete normally.
 
-### 6. `clearProvider` must be called from the provider thread
+### 6. Only the provider thread can clear or replace its provider
 
-`clearProvider` cleans threadvar entries, which are only accessible from the
-thread that created them. Always call `clearProvider` from the same thread
-that called `setProvider`.
+The provider closure lives in the owning thread's threadvars, which no other
+thread can reach, so ownership is enforced:
+
+| Call from a thread that does not own the provider | Result |
+|---|---|
+| `clearProvider(ctx)` | ignored — logged at `error` level, the provider stays installed and keeps serving |
+| `replaceProvider(ctx, handler)` | `err("… provider already set from another thread")` |
+| `setProvider(ctx, handler)` | same `err` |
+| `withMockProvider(ctx, mock): …` | `AssertionDefect` before the body runs |
+
+Before this was enforced, a foreign `clearProvider` removed the bucket but
+left the owner's threadvar entry behind: requests still queued on the owner
+then ran on the cleared provider after their callers had been told they
+failed, and the owner's `getCurrentProvider` / `withMockProvider` /
+`replaceProvider` acted on a provider that was no longer installed.
+
+**Provider thread exits without clearing.** `teardownBrokerThread` — run
+automatically for Nim-created threads, explicitly for foreign/FFI threads —
+clears every provider the thread still owns, exactly as an owner
+`clearProvider` would: outstanding requests resolve at once with
+`provider was cleared while the request was outstanding`, the ring + slab +
+response slot pool are freed on the owning thread, and the context can be
+provided again by any thread. A thread that never runs `teardownBrokerThread`
+(the main thread, or a foreign thread that skips it) keeps its providers
+registered until process exit.
 
 ### 7. ORC and refc compatibility
 
@@ -240,16 +262,6 @@ when threads exit and new ones are created. Each bucket stores a `threadGen`
 (monotonically increasing counter from `currentMtThreadGen()`) alongside the
 `threadId` to disambiguate thread incarnations. All identity checks match on
 both `threadId` and `threadGen`.
-
-**`clearProvider` on a dead provider thread:** If the provider thread exits
-without calling `clearProvider`, a cross-thread `clearProvider` call sets
-the bucket's `ring.closed` flag and fires the provider's signal. The
-provider thread is gone, so nothing drains the ring — the ring + slab +
-response slot pool sit unreclaimed. This is a small bounded memory leak
-(per Invariant I0: the only safe deallocator is the bucket-owning
-thread; if that thread is gone, freeing from another thread would
-violate macOS+ORC's TLV-allocator hazard documented in
-`design/LESSONS_LEARNED.md` §1.2. No OS resources held; no hang.
 
 ### 8. Cross-thread request timeout
 
@@ -601,6 +613,7 @@ sequenceDiagram
     PT ->> GL: withLock(globalLock)
     activate GL
     PT ->> B: find bucket by brokerCtx
+    Note right of B: owner (threadId, threadGen) ≠ caller →<br/>unlock, log error, return (§6)
     B -->> PT: requestChan pointer saved
     PT ->> B: remove bucket (shift array)
     PT ->> B: bucketCount -= 1

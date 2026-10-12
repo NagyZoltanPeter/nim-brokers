@@ -56,6 +56,12 @@ H2/H3 are **pre-existing** bugs for `getCurrentProvider` / `withMockProvider`
 too (owner-thread introspection returns a closure that is no longer
 installed). Out of scope here. Track separately.
 
+> **Resolved** by `doc/design/MT_OWNER_ONLY_CLEAR_PLAN.md`: MT clears / drops
+> are owner-only, so a foreign `clearProvider` / `dropSignalHandler` is now a
+> logged no-op and can no longer leave a stale threadvar entry. The H2/H3 rows
+> in the §7 matrix are tested as "a foreign clear cannot take the scope's
+> registration" (`test/test_multi_thread_broker_scope.nim`).
+
 ## 4. Design
 
 ### 4.1 `brokers/broker_scope.nim` (new)
@@ -219,7 +225,7 @@ Platforms: no platform-specific code. The MT thread identity reuses
 | `withMockProvider` active at close → mock survives; documented post-close restore | ✓ | ✓ |
 | Another owner `replaceProvider` → survives close | ✓ | ✓ |
 | **S5/H6** dual-slot: scope owns NoArgs only, other owner owns Args → after close, Args requests still succeed and NoArgs requests get "no provider" | ✓ | ✓ |
-| **H2/H3** thread B `clearProvider`/`dropSignalHandler` on the scope's ctx, then B provides/handles the same ctx → A's close leaves B's intact; A's stale tv purged | — | ✓ |
+| **H2/H3** thread B `clearProvider`/`dropSignalHandler` on the scope's ctx → refused (owner-only), B cannot re-provide/re-handle; A's close releases its own registration | — | ✓ |
 | MT per-slot release with the other slot set → bucket kept, in-flight requests on the other slot unaffected | — | ✓ |
 | Last-slot release → in-flight requests resolve `ProviderGone` immediately | — | ✓ |
 | `reprovideIt(scope)` twice → close clears; the older undo is an `alreadyGone` no-op | ✓ | ✓ |

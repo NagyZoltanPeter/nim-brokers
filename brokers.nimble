@@ -348,7 +348,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_mt_large_payload", "test_mt_drop_async_eager", "test_alloc_race_variants",
     "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
     "test_mt_request_cancel", "test_mt_thread_dispatcher_ownership",
-    "test_multi_thread_broker_scope",
+    "test_multi_thread_broker_scope", "test_mt_owner_only_clear",
   ]
   for f in mtTests:
     for opt in [
@@ -1204,6 +1204,14 @@ task testMtBrokerScopeAsanOrc,
 task testMtBrokerScopeAsanRefc,
   "Run multi-thread BrokerScope tests under AddressSanitizer (clang, refc, debug)":
   testAsan("refc", "test_multi_thread_broker_scope")
+
+task testMtOwnerOnlyClearAsanOrc,
+  "Run MT owner-only clear/drop tests under AddressSanitizer (clang, orc, debug)":
+  testAsan("orc", "test_mt_owner_only_clear")
+
+task testMtOwnerOnlyClearAsanRefc,
+  "Run MT owner-only clear/drop tests under AddressSanitizer (clang, refc, debug)":
+  testAsan("refc", "test_mt_owner_only_clear")
 
 # ---------------------------------------------------------------------------
 # ThreadSanitizer variants of the multi-thread broker tests. TSan is the

@@ -913,6 +913,16 @@ proc generateMtRequestBroker*(
 
   )
 
+  # ── owned-bucket cleanup at thread exit (forward decl) ───────────────
+  # Defined after clearProvider; registered with the thread's teardown by
+  # setupBucket so a provider thread that exits without clearing still
+  # retires its providers (owner-only clear, MT_OWNER_ONLY_CLEAR_PLAN).
+  let autoClearIdent = ident("clearOwnedProviders" & typeDisplayName)
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].}
+  )
+
   # ── setProvider impl helper (reused by 4 public overloads) ───────────
   # Allocates ring + slab + pool on the calling thread, registers the
   # bucket, and starts the poller.  Returns Result[void, string].
@@ -965,6 +975,7 @@ proc generateMtRequestBroker*(
           )
           `globalBucketCountIdent` += 1
         registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, brokerCtx))
+        registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
         ok()
 
@@ -1921,37 +1932,38 @@ proc generateMtRequestBroker*(
             break
     )
 
-  # `requireOwner` (BrokerScope release): tear the bucket down only when this
-  # thread owns it, decided in the same critical section as the removal so no
-  # other thread can clear + re-provide in between. The default path is the
-  # historical `clearProvider` body unchanged.
+  # Owner-only clear: the bucket is torn down only when this thread owns it,
+  # decided in the same critical section as the removal so no other thread can
+  # clear + re-provide in between. A non-owner gets `broOwnerChanged` and the
+  # provider stays installed. `requireOwner` only says the caller expects that
+  # outcome (BrokerScope release); the public `clearProvider` passes false, so
+  # a foreign call is logged as the misuse it is.
   let requireOwnerParam = ident("requireOwner")
   let clearBody = quote:
     `initProcIdent`()
     var ring: ptr VyukovMpscRing[uint32]
     var pool: ptr ResponseSlotPool
     var providerSignal: ptr BrokerSignalShared
-    var isProviderThread = false
     var found = false
+    var foreignOwned = false
+    let myThreadId = currentMtThreadId()
     let myThreadGen = currentMtThreadGen()
     withLock(`globalLockIdent`):
       var foundIdx = -1
       for i in 0 ..< `globalBucketCountIdent`:
         if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
+          found = true
+          # The provider closure lives in its owner's threadvars, so only the
+          # owner can retire it consistently.
+          if `globalBucketsIdent`[i].threadId != myThreadId or
+              `globalBucketsIdent`[i].threadGen != myThreadGen:
+            foreignOwned = true
+            break
           ring = `globalBucketsIdent`[i].ring
           pool = `globalBucketsIdent`[i].responseSlotPool
           providerSignal = `globalBucketsIdent`[i].providerSignal
-          isProviderThread = (
-            `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-            `globalBucketsIdent`[i].threadGen == myThreadGen
-          )
           foundIdx = i
-          found = true
           break
-      if foundIdx >= 0 and `requireOwnerParam` and not isProviderThread:
-        foundIdx = -1
-        ring = nil
-        pool = nil
       if foundIdx >= 0:
         for i in foundIdx ..< `globalBucketCountIdent` - 1:
           `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
@@ -1962,6 +1974,13 @@ proc generateMtRequestBroker*(
       # provider thread frees the pool shortly after this returns.
       if foundIdx >= 0 and not pool.isNil:
         discard pool[].markProviderGone()
+    if foreignOwned:
+      if not `requireOwnerParam`:
+        error "clearProvider ignored: called from a thread that does not own the provider",
+          requestType = `typeNameLit`, brokerCtx = uint32(`brokerCtxParam`)
+      return broOwnerChanged
+    if not found:
+      return broAlreadyGone
     if not pool.isNil:
       # Wake every requester so it resolves now rather than at its next
       # unrelated dispatch tick. Firing a stale or closed signal is a no-op.
@@ -1969,15 +1988,10 @@ proc generateMtRequestBroker*(
         let waker = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
         if not waker.isNil:
           fireBrokerSignal(waker)
-    if isProviderThread:
-      `tvCleanup`
+    `tvCleanup`
     if not ring.isNil:
       ring.close()
       fireBrokerSignal(providerSignal)
-    if not found:
-      return broAlreadyGone
-    if `requireOwnerParam` and not isProviderThread:
-      return broOwnerChanged
     broReleased
 
   let clearImplIdent = ident("clear" & typeDisplayName & "ProviderImpl")
@@ -2010,6 +2024,24 @@ proc generateMtRequestBroker*(
     quote do:
       proc clearProvider*(_: typedesc[`typeIdent`]) =
         clearProvider(`typeIdent`, DefaultBrokerContext)
+
+  )
+
+  result.add(
+    quote do:
+      proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].} =
+        let myThreadId = currentMtThreadId()
+        let myThreadGen = currentMtThreadGen()
+        var owned: seq[BrokerContext]
+        {.cast(gcsafe).}:
+          withLock(`globalLockIdent`):
+            for i in 0 ..< `globalBucketCountIdent`:
+              if `globalBucketsIdent`[i].threadId == myThreadId and
+                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+                owned.add(`globalBucketsIdent`[i].brokerCtx)
+          for ownedCtx in owned:
+            clearProvider(`typeIdent`, ownedCtx)
+        owned.len
 
   )
 
@@ -2104,7 +2136,10 @@ proc generateMtRequestBroker*(
           ## Owning-thread only. Install `mock` for the duration of `body`, then
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProviderNoArgs(t, brokerCtx)
-          discard replaceProvider(t, brokerCtx, mock)
+          let mockInstalled = replaceProvider(t, brokerCtx, mock)
+          doAssert mockInstalled.isOk(),
+            "withMockProvider: " & mockInstalled.error &
+              " (only the provider's owning thread may mock it)"
           try:
             body
           finally:
@@ -2155,7 +2190,10 @@ proc generateMtRequestBroker*(
           ## Owning-thread only. Install `mock` for the duration of `body`, then
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProvider(t, brokerCtx)
-          discard replaceProvider(t, brokerCtx, mock)
+          let mockInstalled = replaceProvider(t, brokerCtx, mock)
+          doAssert mockInstalled.isOk(),
+            "withMockProvider: " & mockInstalled.error &
+              " (only the provider's owning thread may mock it)"
           try:
             body
           finally:
@@ -2175,9 +2213,9 @@ proc generateMtRequestBroker*(
   #     provider registered for input signature" (poll fn lookup).
   #   - last slot → the owner-checked clear (`requireOwner`), which fails
   #     in-flight requests with ProviderGone exactly like `clearProvider`.
-  # A foreign-thread `clearProvider` skips the owner's threadvar cleanup, so our
-  # entry can be stale; the shared bucket then decides (gone / owned elsewhere)
-  # and only the stale local entry is purged.
+  # Clears are owner-only, so another thread cannot retire our bucket; the
+  # shared bucket still decides (gone / owned elsewhere) and only our local
+  # entry is purged in those cases.
   block:
     let releaseIdent = ident("release" & typeDisplayName & "Provider")
     var slots: seq[
