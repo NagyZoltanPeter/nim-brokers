@@ -57,12 +57,14 @@ type
 
   ApiList* = object ## Lightweight payload returned by `<lib>_listApis`.
     libName*: string
+    schemaHash*: string ## Wire-schema fingerprint (32 hex), as in `<lib>_verifySchema`.
     requests*: seq[string]
     events*: seq[string]
     signals*: seq[string]
 
   LibraryDescriptor* = object ## Full payload returned by `<lib>_getSchema`.
     libName*: string
+    schemaHash*: string ## Wire-schema fingerprint (32 hex), as in `<lib>_verifySchema`.
     cddl*: string ## Verbatim contents of the generated `<lib>.cddl`.
     requests*: seq[ApiRequestInfo]
     events*: seq[ApiEventInfo]
@@ -114,6 +116,7 @@ proc toJson*(s: ApiSignalInfo): JsonNode =
 proc toJson*(a: ApiList): JsonNode =
   %*{
     "libName": a.libName,
+    "schemaHash": a.schemaHash,
     "requests": a.requests,
     "events": a.events,
     "signals": a.signals,
@@ -122,6 +125,7 @@ proc toJson*(a: ApiList): JsonNode =
 proc toJson*(d: LibraryDescriptor): JsonNode =
   result = %*{
     "libName": d.libName,
+    "schemaHash": d.schemaHash,
     "cddl": d.cddl,
     "requests": newJArray(),
     "events": newJArray(),

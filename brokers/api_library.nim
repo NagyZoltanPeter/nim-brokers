@@ -34,6 +34,7 @@ import ./internal/api_codegen_cbor_py
 import ./internal/api_codegen_cbor_rust
 import ./internal/api_codegen_cbor_go
 import ./internal/api_codegen_cbor_cddl
+import ./internal/api_schema_hash
 import ./internal/api_codegen_cmake
 import ./internal/api_cbor_descriptor
 import ./internal/api_cbor_subs_registry
@@ -2387,6 +2388,48 @@ proc registerBrokerLibraryCborImpl(
   # ------------------------------------------------------------------
   let outDir =
     detectOutputDir(when defined(BrokerFfiApiOutDir): BrokerFfiApiOutDir else: "")
+
+  # ------------------------------------------------------------------
+  # Schema fingerprint + `<lib>_verifySchema`. One compile-time value is burned
+  # into the library and into every generated wrapper; wrappers pass theirs in
+  # and the library compares. Detection, not enforcement: no other entry point
+  # consults the result. Allocation-free (fixed-size buffers, rodata hash,
+  # libc/kernel32 env lookup), so it is safe before `<lib>_initialize` and on
+  # any foreign thread under both refc and ORC.
+  # ------------------------------------------------------------------
+  let schemaHash =
+    computeSchemaHash(libName, entries, eventEntries, signalEntries, gApiTypeRegistry)
+  doAssert schemaHash.len == SchemaHashLen
+  let verifyFuncName = libName & "_verifySchema"
+  let verifyFuncIdent = ident(verifyFuncName)
+  let verifyFuncNameLit = newLit(verifyFuncName)
+  let skipEnvLit =
+    newLit(libName.toUpperAscii().replace("-", "_") & "_SKIP_SCHEMA_CHECK")
+  var hashBracket = nnkBracket.newTree()
+  for c in schemaHash:
+    hashBracket.add(newLit(c))
+  hashBracket.add(newLit('\0'))
+  result.add(
+    quote do:
+      {.push stackTrace: off, lineTrace: off, checks: off.}
+      proc `verifyFuncIdent`*(
+          wrapperHash: ptr array[32, char], libHashOut: ptr array[33, char]
+      ): int32 {.exportc: `verifyFuncNameLit`, cdecl, dynlib, raises: [], gcsafe.} =
+        const libHash: array[33, char] = `hashBracket`
+        if not libHashOut.isNil:
+          libHashOut[] = libHash
+        if wrapperHash.isNil:
+          return -1
+        for i in 0 ..< 32:
+          if wrapperHash[][i] != libHash[i]:
+            if brokerSkipSchemaCheck(`skipEnvLit`):
+              return ApiStatusSchemaSkipped
+            return ApiStatusSchemaMismatch
+        ApiStatusOk
+
+      {.pop.}
+  )
+
   var requestNames: seq[string] = @[]
   var requestDocs: seq[string] = @[]
   for e in entries:
@@ -2403,27 +2446,37 @@ proc registerBrokerLibraryCborImpl(
     signalNames.add(s.apiName)
     signalDocs.add(s.doc)
   generateCborCHeaderFile(
-    outDir, libName, config.version, requestNames, eventNames, config.asyncTimeoutMs,
-    config.asyncQueueDepth, signalNames, requestDocs, eventDocs, signalDocs,
+    outDir,
+    libName,
+    config.version,
+    requestNames,
+    eventNames,
+    config.asyncTimeoutMs,
+    config.asyncQueueDepth,
+    signalNames,
+    requestDocs,
+    eventDocs,
+    signalDocs,
+    schemaHash = schemaHash,
   )
   generateCborCppHeaderFile(
     outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-    config.asyncQueueDepth, signalEntries,
+    config.asyncQueueDepth, signalEntries, schemaHash,
   )
   when defined(BrokerFfiApiGenPy):
     generateCborPyFile(
       outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-      config.asyncQueueDepth, signalEntries,
+      config.asyncQueueDepth, signalEntries, schemaHash,
     )
   when defined(BrokerFfiApiGenRust):
     generateCborRustFile(
       outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-      config.asyncQueueDepth, signalEntries,
+      config.asyncQueueDepth, signalEntries, schemaHash,
     )
   when defined(BrokerFfiApiGenGo):
     generateCborGoFile(
       outDir, libName, entries, eventEntries, config.mainClass, config.asyncTimeoutMs,
-      config.asyncQueueDepth, signalEntries,
+      config.asyncQueueDepth, signalEntries, schemaHash,
     )
 
   generateCMakePackageFiles(
@@ -2432,7 +2485,7 @@ proc registerBrokerLibraryCborImpl(
 
   # Emit the CDDL schema and capture its text for the runtime descriptor.
   let cddlText = generateCborCddlFile(
-    outDir, libName, entries, eventEntries, gApiTypeRegistry, signalEntries
+    outDir, libName, entries, eventEntries, gApiTypeRegistry, signalEntries, schemaHash
   )
 
   # ------------------------------------------------------------------
@@ -2448,6 +2501,7 @@ proc registerBrokerLibraryCborImpl(
   # than having to splice deeply nested AST through `quote do:`.
   var buildSrc = "proc " & libName & "CborBuildDescriptor(): LibraryDescriptor =\n"
   buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.schemaHash = " & escape(schemaHash) & "\n")
   buildSrc.add("  result.cddl = " & escape(cddlText) & "\n")
   buildSrc.add("  result.requests = @[\n")
   for r in entries:
@@ -2516,6 +2570,7 @@ proc registerBrokerLibraryCborImpl(
   # Build the lightweight ApiList in the same fashion.
   buildSrc.add("\nproc " & libName & "CborBuildApiList(): ApiList =\n")
   buildSrc.add("  result.libName = " & escape(libName) & "\n")
+  buildSrc.add("  result.schemaHash = " & escape(schemaHash) & "\n")
   buildSrc.add("  result.requests = @[\n")
   for r in entries:
     buildSrc.add("    " & escape(r.apiName) & ",\n")

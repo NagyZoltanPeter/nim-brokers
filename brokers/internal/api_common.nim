@@ -84,6 +84,24 @@ const
     ## `<lib>_callAsync` was invoked on a one-way signal name — signals carry no
     ## response, so a completion callback would deliver nothing not already known
     ## synchronously. Use the (slot-free) `<lib>_call` for signals.
+  ApiStatusSchemaMismatch* = -14'i32
+    ## `<lib>_verifySchema`: the wrapper's schema fingerprint differs from the
+    ## library's — the wrapper was generated against a different wire schema.
+  ApiStatusSchemaSkipped* = 1'i32
+    ## `<lib>_verifySchema`: fingerprints differ but an opt-out env var
+    ## (`BROKERS_FFI_SKIP_SCHEMA_CHECK` / `<LIB>_SKIP_SCHEMA_CHECK`) is set.
+    ## Wrappers treat it as success.
+
+# ---------------------------------------------------------------------------
+# Wire-convention version
+# ---------------------------------------------------------------------------
+#
+# Folded into every library's schema fingerprint (`api_schema_hash.nim`). Bump
+# it whenever a CBOR codec convention changes in a way that makes old wrappers
+# and new libraries disagree on the wire even with an identical declared schema:
+# enum-as-ordinal, Option omission, text map keys, response envelope shape,
+# status codes, call framing. Nothing else in nim-brokers affects the hash.
+const BrokerFfiWireVersion* = 1
 
 # ---------------------------------------------------------------------------
 # Library name accumulator
@@ -335,6 +353,44 @@ proc allocSharedCString*(s: string): cstring =
 proc freeSharedCString*(s: cstring) =
   ## Free a C string allocated by `allocSharedCString`.
   freeCString(s)
+
+# ---------------------------------------------------------------------------
+# Schema-check opt-out env lookup — allocation-free
+# ---------------------------------------------------------------------------
+#
+# Used by the generated `<lib>_verifySchema`, which may run before
+# `<lib>_initialize` and on an unregistered foreign thread, so it must not touch
+# the Nim heap: no `std/os.getEnv` (returns a heap `string`). Windows reads the
+# OS env block, not the CRT's startup copy, so values set later via
+# `SetEnvironmentVariableW` (Go, Rust, Python's `_wputenv`) are seen.
+
+when defined(windows):
+  proc brokerGetEnvVarA*(
+    name: cstring, buf: ptr char, size: uint32
+  ): uint32 {.importc: "GetEnvironmentVariableA", stdcall, header: "<windows.h>".}
+
+else:
+  proc brokerCGetEnv*(
+    name: cstring
+  ): cstring {.importc: "getenv", header: "<stdlib.h>".}
+
+template brokerEnvFlagSet(name: cstring): bool =
+  ## True when env var `name` is set to a non-empty value other than "0".
+  ## A template, so the caller's code calls only the importc function — no Nim
+  ## proc call, hence no goto-exception error-flag (threadvar) check after it.
+  when defined(windows):
+    var buf: array[2, char]
+    let n = brokerGetEnvVarA(name, addr buf[0], 2)
+    # 0 = unset; 1 = one-char value in buf; >= 2 = longer value (required size).
+    n >= 2'u32 or (n == 1'u32 and buf[0] != '0')
+  else:
+    let p = brokerCGetEnv(name)
+    not p.isNil and p[0] != '\0' and not (p[0] == '0' and p[1] == '\0')
+
+template brokerSkipSchemaCheck*(libEnvName: cstring): bool =
+  ## Opt-out for `<lib>_verifySchema`: the generic
+  ## `BROKERS_FFI_SKIP_SCHEMA_CHECK` or the per-library `<LIB>_SKIP_SCHEMA_CHECK`.
+  brokerEnvFlagSet("BROKERS_FFI_SKIP_SCHEMA_CHECK") or brokerEnvFlagSet(libEnvName)
 
 # ---------------------------------------------------------------------------
 # Foreign thread GC helper — emitted once per compilation unit

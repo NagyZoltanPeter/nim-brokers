@@ -1323,5 +1323,50 @@ class TestAliasAndByteGaps(unittest.TestCase):
         self.assertEqual(ri.value, 42)
 
 
+
+class TestSchemaHash(unittest.TestCase):
+    """<lib>_verifySchema: wrapper fingerprint vs the loaded library."""
+
+    ENV = "TYPEMAPPINGTESTLIB_SKIP_SCHEMA_CHECK"
+
+    def tearDown(self) -> None:
+        os.environ.pop(self.ENV, None)
+
+    def test_schema_hash_verify(self) -> None:
+        import ctypes
+
+        import typemappingtestlib as tm
+
+        ours = Typemappingtestlib.schema_hash()
+        self.assertEqual(len(ours), 32)
+        lib_hash = ctypes.create_string_buffer(33)
+        self.assertEqual(tm._LIB.typemappingtestlib_verifySchema(ours.encode(), lib_hash), 0)
+        self.assertEqual(lib_hash.value.decode(), ours)
+
+        bad = ("1" if ours[0] == "0" else "0") + ours[1:]
+        self.assertEqual(tm._LIB.typemappingtestlib_verifySchema(bad.encode(), None), -14)
+        os.environ[self.ENV] = "1"
+        self.assertEqual(tm._LIB.typemappingtestlib_verifySchema(bad.encode(), None), 1)
+        del os.environ[self.ENV]
+        self.assertEqual(tm._LIB.typemappingtestlib_verifySchema(bad.encode(), None), -14)
+
+    def test_create_context_reports_mismatch(self) -> None:
+        import typemappingtestlib as tm
+
+        saved = tm._SCHEMA_HASH
+        try:
+            tm._SCHEMA_HASH = b"0" * 32
+            lib = Typemappingtestlib()
+            r = lib.create_context()
+            self.assertFalse(r.is_ok())
+            self.assertIn("schema mismatch", r.error)
+            os.environ[self.ENV] = "1"
+            r = lib.create_context()
+            self.assertTrue(r.is_ok(), r.error)
+            lib.shutdown()
+        finally:
+            tm._SCHEMA_HASH = saved
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

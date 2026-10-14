@@ -232,6 +232,7 @@ proc generateCborRustFile*(
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
     signalEntries: seq[CborSignalEntry] = @[],
+    schemaHash: string,
 ) {.compileTime, raises: [].} =
   ## Writes the Rust wrapper crate (Cargo.toml + src/lib.rs) for a
   ## CBOR-mode library under `<outDir>/<libName>_rs/`.
@@ -312,6 +313,7 @@ proc generateCborRustFile*(
   rs.add("//\n")
   rs.add("// Public API surface (auto-generated from broker declarations):\n")
   rs.add("//   pub fn version() -> String  (associated)\n")
+  rs.add("//   pub fn schema_hash() -> &'static str  (associated)\n")
   rs.add("//   pub fn new() -> Self\n")
   rs.add("//   pub fn create_context(&mut self) -> Result<()>\n")
   rs.add("//   pub fn valid_context(&self) -> bool\n")
@@ -352,6 +354,10 @@ proc generateCborRustFile*(
   rs.add("// -------- C ABI bindings --------\n\n")
   rs.add("extern \"C\" {\n")
   rs.add("    fn " & p & "version() -> *const c_char;\n")
+  rs.add(
+    "    fn " & p &
+      "verifySchema(wrapper_hash: *const [c_char; 32], lib_hash_out: *mut [c_char; 33]) -> i32;\n"
+  )
   rs.add("    fn " & p & "initialize();\n")
   rs.add("    fn " & p & "createContext(err: *mut *const c_char) -> u32;\n")
   rs.add("    fn " & p & "shutdown(ctx: u32) -> i32;\n")
@@ -860,6 +866,10 @@ proc generateCborRustFile*(
   rs.add("    ctx: u32,\n")
   rs.add("}\n\n")
 
+  # Burned in here, NOT read from the library: checked against the loaded
+  # library by create_context().
+  rs.add("/// Wire-schema fingerprint this wrapper was generated against.\n")
+  rs.add("pub const SCHEMA_HASH: &str = \"" & schemaHash & "\";\n\n")
   rs.add("impl " & className & " {\n")
   rs.add("    /// Static semver string baked into the shared library.\n")
   rs.add("    pub fn version() -> String {\n")
@@ -871,6 +881,9 @@ proc generateCborRustFile*(
   rs.add("        }\n")
   rs.add("    }\n\n")
 
+  rs.add("    /// Wire-schema fingerprint this wrapper was generated against.\n")
+  rs.add("    pub fn schema_hash() -> &'static str { SCHEMA_HASH }\n\n")
+
   rs.add("    pub fn new() -> Self {\n")
   rs.add("        unsafe { " & p & "initialize(); }\n")
   rs.add("        Self { ctx: 0 }\n")
@@ -881,6 +894,20 @@ proc generateCborRustFile*(
     "        if self.ctx != 0 { return Result::err(\"Context already created\"); }\n"
   )
   rs.add("        unsafe {\n")
+  rs.add("            let mut lib_hash: [c_char; 33] = [0; 33];\n")
+  rs.add(
+    "            if " & p &
+      "verifySchema(SCHEMA_HASH.as_ptr() as *const [c_char; 32], &mut lib_hash) == " &
+      $ApiStatusSchemaMismatch & " {\n"
+  )
+  rs.add(
+    "                let lh = CStr::from_ptr(lib_hash.as_ptr()).to_string_lossy().into_owned();\n"
+  )
+  rs.add(
+    "                return Result::err(format!(\"schema mismatch: " & libName &
+      " {} has {}, wrapper has {}\", Self::version(), lh, SCHEMA_HASH));\n"
+  )
+  rs.add("            }\n")
   rs.add("            let mut err: *const c_char = std::ptr::null();\n")
   rs.add("            let ctx = " & p & "createContext(&mut err as *mut _);\n")
   rs.add("            if ctx == 0 {\n")

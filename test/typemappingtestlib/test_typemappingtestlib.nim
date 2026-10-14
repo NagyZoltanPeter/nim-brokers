@@ -886,3 +886,18 @@ suite "typemappingtestlib_cbor parity":
     check dU.value.joined == "héllo,wörld"
 
     discard typemappingtestlib_shutdown(ctx)
+
+  test "schema fingerprint drift guard":
+    # Golden value for this library's wire schema. It changes only when the
+    # schema itself (typemappingtestlib.nim's API surface), the canonical form
+    # (`api_schema_hash.nim`), or `BrokerFfiWireVersion` changes. An unexpected
+    # change here means canonicalisation drifted (e.g. a Nim upgrade changed a
+    # type spelling) — every deployed wrapper/library pair built across that
+    # change would then report a false mismatch. Update deliberately.
+    const golden = "7369f66069391b6722ea74280965afd1"
+    var libHash: array[33, char]
+    check typemappingtestlib_verifySchema(nil, addr libHash) == -1'i32
+    var got = newString(32)
+    for i in 0 ..< 32:
+      got[i] = libHash[i]
+    check got == golden

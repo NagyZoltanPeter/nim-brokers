@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -2789,6 +2790,41 @@ static void test_library_version_from_const() {
     CHECK_EQ(std::string(Typemappingtestlib::version()), std::string("0.1.0"));
 }
 
+// <lib>_verifySchema: the wrapper's burned-in fingerprint matches the loaded
+// library; a corrupted one is reported (-14) and the per-lib opt-out env turns
+// it into 1. Detection only — the check never gates other calls.
+static void setTestEnv(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value ? value : "");
+#else
+    if (value)
+        setenv(name, value, 1);
+    else
+        unsetenv(name);
+#endif
+}
+
+static void test_schema_hash_verify() {
+    char libHash[33] = {0};
+    CHECK_EQ(typemappingtestlib_verifySchema(Typemappingtestlib::schemaHash().data(), libHash), 0);
+    CHECK_EQ(std::string(libHash), std::string(Typemappingtestlib::schemaHash()));
+    CHECK_EQ(Typemappingtestlib::schemaHash().size(), size_t(32));
+
+    char bad[32];
+    std::memcpy(bad, libHash, sizeof bad);
+    bad[0] = bad[0] == '0' ? '1' : '0';
+    CHECK_EQ(typemappingtestlib_verifySchema(bad, nullptr), -14);
+    setTestEnv("TYPEMAPPINGTESTLIB_SKIP_SCHEMA_CHECK", "1");
+    CHECK_EQ(typemappingtestlib_verifySchema(bad, nullptr), 1);
+    setTestEnv("TYPEMAPPINGTESTLIB_SKIP_SCHEMA_CHECK", nullptr);
+    CHECK_EQ(typemappingtestlib_verifySchema(bad, nullptr), -14);
+
+    // createContext() ran the same check and succeeded.
+    Typemappingtestlib lib;
+    CHECK(lib.createContext().isOk());
+    lib.shutdown();
+}
+
 // Proc-sugar broker returning a BARE PRIMITIVE — the method must surface the
 // simple type (Result<bool> / Result<int32_t>), not a synthetic Result<IsReady>.
 static void test_proc_sugar_bare_primitive() {
@@ -3060,6 +3096,7 @@ int main() {
     RUN(test_proc_sugar_object_payload);
     RUN(test_proc_sugar_bare_primitive);
     RUN(test_library_version_from_const);
+    RUN(test_schema_hash_verify);
 
     printf("\n----------------------------------------------------------------------\n");
     printf("Ran %d tests: %d ok, %d failed\n", gTotal, gTotal - gFailed, gFailed);
