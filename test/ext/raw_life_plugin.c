@@ -9,6 +9,8 @@
  *                        {"n": 7777} that must be dropped
  *   life_owned  ()       bridge, for autoWire = false brokers: replies at once
  *   life_tick            event {"n": uint} via life_emit_tick()
+ *   life_sig    signal   bridge: records the invoking thread
+ *   life_tid    ()       bridge: records the invoking thread, replies
  * Other replies are {"n": 5}. life_bridge records the parked call id so a
  * test can answer it later, from this port or from a second one.
  */
@@ -18,8 +20,11 @@
 #ifdef _WIN32
 #include <windows.h>
 static void sleep_ms(int ms) { Sleep(ms); }
+static uintptr_t self_thread(void) { return (uintptr_t)GetCurrentThreadId(); }
 #else
 #include <time.h>
+#include <pthread.h>
+static uintptr_t self_thread(void) { return (uintptr_t)pthread_self(); }
 static void sleep_ms(int ms) {
   struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
   nanosleep(&ts, NULL);
@@ -39,6 +44,8 @@ static _Atomic(life_hook_fn) hook = NULL;
 static _Atomic broker_ext_port P2 = 0;
 static _Atomic broker_ext_call_id parkedId = 0;
 static _Atomic broker_ext_call_id doneId = 0;
+static atomic_uintptr_t sigThread = 0;
+static atomic_uintptr_t tidThread = 0;
 
 static size_t put_head(uint8_t* o, uint8_t major, uint64_t v) {
   if (v < 24) { o[0] = (uint8_t)(major << 5 | v); return 1; }
@@ -83,6 +90,11 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
     k = enc_n(out, 7777); /* duplicate: the host must drop it */
     H->reply(H->host, atomic_load(&P), id, BROKER_EXT_REPLY_OK, out, k);
     atomic_store(&doneId, id);
+  } else if (strcmp(name, "life_sig") == 0) {
+    atomic_store(&sigThread, self_thread());
+  } else if (strcmp(name, "life_tid") == 0) {
+    atomic_store(&tidThread, self_thread());
+    reply_ok(id);
   } else if (strcmp(name, "life_bridge") == 0) {
     atomic_store(&parkedId, id); /* parked: answered by life_reply_parked */
   } else if (strcmp(name, "life_hook_bridge") == 0 ||
@@ -133,6 +145,10 @@ int32_t life_reply_late(uint32_t v) {
   size_t k = enc_n(out, v);
   return H->reply(H->host, atomic_load(&P), atomic_load(&doneId), BROKER_EXT_REPLY_OK, out, k);
 }
+
+uintptr_t life_sig_thread(void) { return atomic_load(&sigThread); }
+uintptr_t life_tid_thread(void) { return atomic_load(&tidThread); }
+uintptr_t life_self_thread(void) { return self_thread(); }
 
 int32_t life_emit_tick(uint32_t n) {
   uint8_t out[8];

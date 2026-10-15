@@ -580,17 +580,20 @@ proc generateExtRequestBroker*(
       src.add(
         "proc extProvider" & sfx & "*(_: typedesc[" & typeName &
           "], ctx: BrokerContext): " & providerType & " =\n" & "  result = proc(" & decl &
-          "): Future[" & resTy & "] {.async.} =\n" & idxRead("ctx", "    ") &
-          "    let enc = " & encExpr & "\n" & "    if enc.isErr:\n" &
-          "      return err(\"EXTAPI: request encode failed: \" & enc.error)\n" &
-          "    var r: Result[seq[byte], string]\n" &
-          "    if extNameDispatch(pIdx, nIdx) == edInplace:\n" & (
+          "): Future[" & resTy & "] {.async.} =\n" & idxRead("ctx", "    ") & (
+          # A native import served inplace is a direct C call: before any CBOR
+          # encoding, which raw-pointer arguments cannot go through.
           if isImport:
-            "      if extNativeProvided(pIdx, nIdx, ctx):\n" & "        return " &
+            "    if extNameDispatch(pIdx, nIdx) == edInplace and\n" &
+              "        extNativeProvided(pIdx, nIdx, ctx):\n" & "      return " &
               adapterName & "(" & callArgs & ")\n"
           else:
             ""
-        ) & "      r = extCallInplace(pIdx, nIdx, ctx, enc.value)\n" &
+        ) & "    let enc = " & encExpr & "\n" & "    if enc.isErr:\n" &
+          "      return err(\"EXTAPI: request encode failed: \" & enc.error)\n" &
+          "    var r: Result[seq[byte], string]\n" &
+          "    if extNameDispatch(pIdx, nIdx) == edInplace:\n" &
+          "      r = extCallInplace(pIdx, nIdx, ctx, enc.value)\n" &
           "    elif extOnBridge():\n" & "      var tmo: Duration\n" &
           "      {.cast(gcsafe).}:\n" & "        tmo = g" & typeName & "MtTimeout\n" &
           "      r = await extCall(pIdx, nIdx, ctx, enc.value, tmo)\n" & "    else:\n" &

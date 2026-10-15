@@ -394,6 +394,9 @@ type
     ctlRing: ExtRing[ptr ExtCtlMsg]
     replyRing: ExtRing[ExtReplyMsg]
     eventRing: ExtRing[ExtEventMsg]
+    sigRing: ExtRing[ExtCallMsg]
+      ## `bridge`-dispatch signals sent from other threads: the bridge invokes
+      ## them, so a `bridge` plugin is only ever invoked on one thread.
 
   PendingCall = object
     fut: Future[ExtRawReply]
@@ -973,6 +976,22 @@ proc replyPoll(): int {.gcsafe, raises: [].} =
         c_free(r.buf)
     did
 
+proc sigPoll(): int {.gcsafe, raises: [].} =
+  ## Bridge: invoke `bridge`-dispatch signals queued by other threads.
+  {.cast(gcsafe).}:
+    var did = 0
+    var m: ExtCallMsg
+    while gExtHost.sigRing.tryPop(m):
+      did = 1
+      if not m.impl.closed.load(moAcquire):
+        m.impl.impl.invoke(
+          m.impl.impl.user, 0, m.nameIdx, m.name, m.buf, csize_t(m.len)
+        )
+      if not m.buf.isNil:
+        c_free(m.buf)
+      implRelease(m.impl)
+    did
+
 proc eventPoll(): int {.gcsafe, raises: [].} =
   when defined(extTestHooks):
     if extTestPauseEvents.load(moAcquire):
@@ -1226,8 +1245,9 @@ proc extSignal*(
     pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte]
 ): Result[void, string] =
   ## One-way delivery of a signal to its foreign handler (`id = 0`, no reply).
-  ## Any thread: `bridge` / `inplace` invoke on the calling thread (the
-  ## handler thread), `workers` enqueue.
+  ## Any thread. `inplace` invokes on the calling thread (by contract),
+  ## `workers` enqueue for the pool, `bridge` invokes on the bridge thread —
+  ## directly when already there, else through the signal ring (review M3).
   if pluginIdx < 0 or nameIdx < 0:
     return err("EXTAPI: plugin not registered")
   let (impl, rt, _, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
@@ -1257,6 +1277,23 @@ proc extSignal*(
         c_free(m.buf)
       implRelease(impl)
       return err("EXTAPI: worker queue full")
+    return ok()
+  if nd.dispatch == edBridge and not onBridgeThread():
+    let m = ExtCallMsg(
+      impl: impl, # the bridge releases it
+      id: 0,
+      nameIdx: uint32(nameIdx),
+      name: nd.name,
+      buf: copyToC(payload),
+      len: payload.len,
+      st: nil,
+    )
+    if not gExtHost.sigRing.tryPush(m):
+      if not m.buf.isNil:
+        c_free(m.buf)
+      implRelease(impl)
+      return err("EXTAPI: signal queue full")
+    fireBrokerSignal(gExtHost.signal)
     return ok()
   impl.impl.invoke(
     impl.impl.user, 0, uint32(nameIdx), nd.name, bufPtr, csize_t(payload.len)
@@ -2081,6 +2118,7 @@ proc bridgeThreadProc(h: ptr ExtHostRt) {.thread.} =
   registerBrokerPoller(ctlPoll)
   registerBrokerPoller(replyPoll)
   registerBrokerPoller(eventPoll)
+  registerBrokerPoller(sigPoll)
   ensureBrokerDispatchStarted()
   h.ready.store(1, moRelease)
 
@@ -2174,6 +2212,7 @@ proc startHost(): Result[void, string] =
     gExtHost.ctlRing.init(ExtRingCap)
     gExtHost.replyRing.init(ExtRingCap)
     gExtHost.eventRing.init(ExtRingCap)
+    gExtHost.sigRing.init(ExtRingCap)
     initLock(gExtHost.ctlLock)
   gExtHost.ready.store(0, moRelease)
   gExtHost.stopFlag.store(0, moRelease)
@@ -2288,6 +2327,11 @@ proc extHostStop*(): Result[void, string] =
   while gExtHost.eventRing.tryPop(em):
     if not em.buf.isNil:
       c_free(em.buf)
+  var sm: ExtCallMsg
+  while gExtHost.sigRing.tryPop(sm):
+    if not sm.buf.isNil:
+      c_free(sm.buf)
+    implRelease(sm.impl)
   # A control call pushed before `running` flipped and not yet answered by the
   # bridge: answer it so its caller never hangs.
   var m: ptr ExtCtlMsg

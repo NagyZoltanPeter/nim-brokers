@@ -2036,6 +2036,20 @@ Switching is gapless: `replaceProvider` takes effect between messages, so a
 load generator sees no `"no provider"` error across switches (gated by
 `test/test_ext_switching.nim` and scenario 2 of the examples).
 
+**Who owns the slot.** With `autoWire = true` (the default) the bridge thread
+installs the forwarder when a source provides the name, so the **bridge thread
+owns the broker's slot** on that context. The owner-only verbs then refuse
+other threads: `replaceProvider` / `setProvider` return `err`, `clearProvider`
+is a logged no-op, `withMockProvider` trips its owner `doAssert` — and for a
+dual-slot request the other slot is owned by the bridge too. Declare the
+broker with **`autoWire = false`** for anything the Nim side will reprovide,
+fall back from or mock: the thread that calls `setProvider` owns it, and
+`extProvider` / `extFallback` / `withMockProvider` all work (also for K1
+imports, raw-pointer short form included). The reverse case — a Nim provider
+installed before a plugin provides the name — keeps the Nim provider; the
+plugin stays reachable through `extProvider` / `extFallback`, and the runtime
+logs `EXTAPI: provided name not auto-wired` at `warn`.
+
 ```nim
 # Owner thread: prefer the plugin, fall back to Nim, switch at runtime.
 discard FetchBlob.setProvider(ctx, FetchBlob.extFallback(ctx, localFetch))

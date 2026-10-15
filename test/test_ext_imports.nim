@@ -57,6 +57,22 @@ RequestBroker(
 
   proc signature*(x: int32): Future[Result[Missing, string]] {.async.}
 
+RequestBroker(
+  EXTAPI[codec],
+  importc = "codec_crc",
+  dynlib = codecLib,
+  dispatch = inplace,
+  autoWire = false,
+):
+  ## The same C function, owned by the Nim side (review M12): reprovide,
+  ## fallback and mocking need `autoWire = false`.
+  type OwnedCrc = object
+    value*: uint32
+
+  proc signature*(
+    seed: uint32, buf: ptr uint8, len: uint32
+  ): Future[Result[OwnedCrc, string]] {.async.}
+
 registerExtPlugin(codec)
 
 # --- K2: a nim-brokers peer library (test/ext/peerlib.nim) --------------------
@@ -279,4 +295,47 @@ suite "EXTAPI native C imports (K1)":
       check (waitFor PeerEcho.request(ctx, "x")).isOk
       waitFor sleepAsync(chronos.milliseconds(200))
       check ticks.load() == 1
+      check ExtHost.stop().isOk
+
+  test "autoWire ownership: reprovide / fallback / mock need autoWire = false (M12)":
+    when defined(windows):
+      skip()
+    else:
+      check ExtHost.start().isOk
+      let ctx = NewBrokerContext()
+      check ExtPlugin.load("codec", ctx).isOk
+      var data = [byte 1, 2, 3, 4]
+      let c = nimCrc(9, data)
+
+      # autoWire = true: the bridge thread owns the slot once the import loads.
+      proc nimCodec(
+          seed: uint32, buf: ptr uint8, len: uint32
+      ): Future[Result[CodecCrc, string]] {.async.} =
+        return ok(CodecCrc(value: 1))
+
+      check CodecCrc.replaceProvider(ctx, nimCodec).isErr
+      check CodecCrc.setProvider(ctx, nimCodec).isErr
+
+      # autoWire = false: this thread owns it.
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).isErr # unwired
+      proc nimOwned(
+          seed: uint32, buf: ptr uint8, len: uint32
+      ): Future[Result[OwnedCrc, string]] {.async.} =
+        return ok(OwnedCrc(value: 1))
+
+      check OwnedCrc.setProvider(ctx, OwnedCrc.extFallback(ctx, nimOwned)).isOk
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+      check OwnedCrc.replaceProvider(ctx, nimOwned).isOk
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 1
+      check OwnedCrc.replaceProvider(ctx, OwnedCrc.extProvider(ctx)).isOk
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+      proc mock(
+          seed: uint32, buf: ptr uint8, len: uint32
+      ): Future[Result[OwnedCrc, string]] {.async.} =
+        return ok(OwnedCrc(value: 7))
+
+      OwnedCrc.withMockProvider(ctx, mock):
+        check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 7
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+      OwnedCrc.clearProvider(ctx)
       check ExtHost.stop().isOk

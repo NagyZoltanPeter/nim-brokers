@@ -8,7 +8,7 @@ import testutils/unittests
 import chronos
 import std/[atomics, os]
 
-import brokers/[request_broker, event_broker, ext_plugin, broker_context]
+import brokers/[request_broker, event_broker, signal_broker, ext_plugin, broker_context]
 import brokers/internal/ext_runtime
 
 {.passC: "-I" & currentSourcePath.parentDir.parentDir & "/brokers".}
@@ -29,6 +29,9 @@ proc life_open2(ctx: uint32): int32 {.importc, cdecl.}
 proc life_reply_parked(fromSecond: int32, v: uint32): int32 {.importc, cdecl.}
 proc life_reply_late(v: uint32): int32 {.importc, cdecl.}
 proc life_emit_tick(n: uint32): int32 {.importc, cdecl.}
+proc life_sig_thread(): uint {.importc, cdecl.}
+proc life_tid_thread(): uint {.importc, cdecl.}
+proc life_self_thread(): uint {.importc, cdecl.}
 
 RequestBroker(EXTAPI[life], dispatch = workers(1)):
   type LifeWork = object
@@ -72,6 +75,16 @@ RequestBroker(EXTAPI[life], autoWire = false):
     n*: int32
 
   proc signature*(): Future[Result[LifeOwned, string]] {.async.}
+
+SignalBroker(EXTAPI[life], autoWire = false):
+  type LifeSig = object
+    v*: int32
+
+RequestBroker(EXTAPI[life]):
+  type LifeTid = object
+    n*: int32
+
+  proc signature*(): Future[Result[LifeTid, string]] {.async.}
 
 EventBroker(EXTAPI[life]):
   type LifeTick = object
@@ -366,4 +379,21 @@ suite "EXTAPI lifecycle":
     let r = LifeEcho.blockingRequestCancellable(Ctx, 7'i32, addr id)
     check r.isOk and r.value.n == 7
     check uint64(id) == 0
+    check ExtHost.stop().isOk
+
+  test "a bridge signal sent from another thread runs on the bridge (M3)":
+    check startAndOpen()
+    check life_provide("life_sig") == ExtOk
+    check life_provide("life_tid") == ExtOk
+    check (waitFor LifeTid.request(Ctx)).isOk # records the bridge thread
+    # This thread owns the handler: the signal reaches extSignal here.
+    check LifeSig.onSignal(Ctx, LifeSig.extHandler(Ctx)).isOk
+    check LifeSig.signal(Ctx, LifeSig(v: 1)).isOk
+    check pump(
+      proc(): bool =
+        life_sig_thread() != 0
+    )
+    check life_sig_thread() == life_tid_thread()
+    check life_sig_thread() != life_self_thread()
+    waitFor LifeSig.dropSignalHandler(Ctx)
     check ExtHost.stop().isOk

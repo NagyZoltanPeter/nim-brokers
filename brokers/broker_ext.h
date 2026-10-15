@@ -45,7 +45,12 @@ enum {
   BROKER_EXT_CAP_REPLY_INLINE = 1u << 1  /* invoke always replies before returning */
 };
 
-/* Foreign side, called by the host. `buf` valid only during the call. */
+/* Foreign side, called by the host. `buf` valid only during the call.
+ * `invoke` runs on: the host's single bridge thread for `bridge` names
+ * (requests and signals alike), one of the plugin's host-owned worker threads
+ * for `workers(n)` names, and the Nim caller's own thread for `inplace` names.
+ * A port serving names of several modes is invoked concurrently from those
+ * threads. `cancel` runs on the bridge thread. */
 typedef void (*broker_ext_invoke_fn)(void* user, broker_ext_call_id id,
                                      uint32_t nameIdx, const char* name,
                                      const uint8_t* buf, size_t len);

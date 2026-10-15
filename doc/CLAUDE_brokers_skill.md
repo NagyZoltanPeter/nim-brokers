@@ -644,7 +644,11 @@ Wiring a source:
 - **Imports:** `ExtPlugin.load(name, ctx)`; missing symbols stay unprovided,
   details in `ExtPlugin.loadError(name)`.
 
-Switching / mocking (owner thread; the usual owner-only MT verbs apply):
+Switching / mocking (owner thread; the usual owner-only MT verbs apply). With
+`autoWire = true` the **bridge thread owns the slot** once a source provides
+it, so user-thread `replaceProvider` / `setProvider` return `err` and
+`withMockProvider` asserts — use **`autoWire = false`** for anything you
+reprovide, fall back from or mock (K1 imports included):
 
 ```nim
 discard FetchBlob.setProvider(ctx, FetchBlob.extFallback(ctx, nimImpl)) # plugin if present, else Nim
