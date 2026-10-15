@@ -10,6 +10,7 @@
 
 import std/[macros, algorithm, strutils, os]
 import ./internal/ext_brokers
+import ./internal/ext_runtime
 import ./internal/ext_shapes
 import ./broker_context
 import chronos
@@ -20,7 +21,7 @@ import ./internal/ext_codegen_py
 import
   ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
 
-export ext_brokers
+export ext_brokers, ext_runtime
 
 type ExtHost* = object ## Namespace for the process-wide EXTAPI host (exe mode).
 
@@ -89,9 +90,9 @@ proc listen*(
     ctx: BrokerContext,
     plugin, name: string,
     cb: ExtTunnelEventCb,
-): Result[void, string] =
+): Result[uint64, string] =
   ## Every event of (plugin, name) on `ctx` is re-encoded and handed to `cb`
-  ## on the listening thread.
+  ## on the listening thread. Returns a token for `unlisten` (same thread).
   let (p, n) = extFindName(plugin, name)
   if p < 0 or n < 0:
     return err("unknown ext api " & plugin & "." & name)
@@ -99,6 +100,18 @@ proc listen*(
   if fn.isNil:
     return err("ext api " & plugin & "." & name & " is not an event")
   fn(ctx, cb)
+
+proc unlisten*(
+    _: typedesc[ExtTunnel], ctx: BrokerContext, plugin, name: string, token: uint64
+): Future[void] {.async: (raises: []).} =
+  ## Remove a listener added by `listen` on this thread; unknown tokens are a
+  ## no-op.
+  let (p, n) = extFindName(plugin, name)
+  if p < 0 or n < 0:
+    return
+  let fn = extNameDesc(p, n).tunnelUnlisten
+  if not fn.isNil:
+    await fn(ctx, token)
 
 proc loadPlugin*(_: typedesc[ExtHost], path: string): Result[void, string] =
   ## Exe mode: `dlopen` / `LoadLibrary` a plugin shared library and call its
@@ -512,7 +525,9 @@ proc emitExtPlugin(args: NimNode, shapes: seq[string]): NimNode {.compileTime.} 
           if e.tunnelName.len == 0: ""
           elif e.kind == enkRequest: ", tunnelCall: " & e.tunnelName
           elif e.kind == enkSignal: ", tunnelSignal: " & e.tunnelName
-          else: ", tunnelListen: " & e.tunnelName
+          else:
+            ", tunnelListen: " & e.tunnelName & ", tunnelUnlisten: extTunnelUnlisten_" &
+              e.typeName
         ) & (
           if e.dynlibSrc.len > 0 and e.peerLib.len == 0:
             ", importLib: cstring(" & e.dynlibSrc & "), importResolve: " &
@@ -603,6 +618,11 @@ macro exportExtHost*(libName: static string): untyped =
   let src =
     "proc " & fname & "*(): ptr ExtHostTable {.exportc: \"" & fname &
     "\", cdecl, dynlib.} =\n" & "  when compileOption(\"app\", \"lib\"):\n" &
-    "    when declared(setupForeignThreadGc):\n" & "      setupForeignThreadGc()\n" &
+    "    when declared(setupForeignThreadGc):\n" &
+    # Once per foreign thread. Under refc the registration is never torn down
+    # (Nim has no hook for a foreign thread's exit); call `<lib>_extHost()`
+    # from long-lived threads.
+    "      var registered {.threadvar.}: bool\n" & "      if not registered:\n" &
+    "        registered = true\n" & "        setupForeignThreadGc()\n" &
     "  if ExtHost.start().isErr:\n" & "    return nil\n" & "  ExtHost.table()\n"
   result = parseStmt(src)

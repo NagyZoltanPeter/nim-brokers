@@ -2006,7 +2006,7 @@ blocking plugin can never stall the bridge.
 | Situation | Nim side | Foreign side |
 |---|---|---|
 | **Exe mode** — Nim program loads a plugin library | `ExtHost.start()`, then `ExtHost.loadPlugin(path)` (`dlopen` / `LoadLibrary`; the library stays loaded for the process lifetime) | exports `int32_t broker_ext_plugin_entry(const broker_ext_host*)`, opens a port, provides names |
-| **Lib mode** — foreign app hosts a Nim library and implements the plugin in-process | `exportExtHost("<lib>")` in the library | calls `<lib>_extHost()` once the library is initialized (the examples call it after `createContext()`; the first call starts the bridge) and opens ports on `lib.ctx()` |
+| **Lib mode** — foreign app hosts a Nim library and implements the plugin in-process | `exportExtHost("<lib>")` in the library | calls `<lib>_extHost()` once the library is initialized (the examples call it after `createContext()`; the first call starts the bridge) and opens ports on `lib.ctx()`. Under refc each calling foreign thread is registered with the GC once and never unregistered — call it from long-lived threads |
 | **K1 native import** — a plain C library | `ExtPlugin.load(name, ctx)`; `ExtPlugin.loadError(name)` reports missing libraries / symbols, which stay unprovided | nothing: plain `extern "C"` exports |
 | **K2 peer import** — another nim-brokers library | `ExtPlugin.load(name, ctx)`: one peer context per host context, schema compared per name | nothing: the peer's own `(API)` surface (`_callAsync` / `_subscribe` / `_call`) |
 
@@ -2064,7 +2064,9 @@ FetchBlob.withMockProvider(ctx, mock):
 ### Raw CBOR tunnel
 
 For generic forwarders, `ExtTunnel.call(ctx, plugin, name, cborArgs)`,
-`ExtTunnel.signal(…)` and `ExtTunnel.listen(…)` address EXTAPI brokers by
+`ExtTunnel.signal(…)` and `ExtTunnel.listen(…)` (returns a token;
+`ExtTunnel.unlisten(ctx, plugin, name, token)` on the same thread removes the
+listener) address EXTAPI brokers by
 `(plugin, wire name)` with raw CBOR. They go through the typed broker, so they
 reach whatever provider is installed (plugin, fallback, Nim impl, mock) with
 the same timeout and "no provider" semantics. On the foreign side a port opened
@@ -2089,7 +2091,7 @@ exported symbols, so loading works identically on macOS, Linux and Windows.
 | Entry (`broker_ext_impl`, filled by the plugin) | Called by the host | Contract |
 |---|---|---|
 | `invoke(user, id, nameIdx, name, buf, len)` | bridge / worker / caller thread per dispatch mode | `id == 0` is a one-way signal (no reply); otherwise reply exactly once — later replies are dropped |
-| `cancel(user, id)` (may be NULL) | bridge thread | a hint: the Nim side has already given up (cancel or deadline); stop the work, a reply is not required |
+| `cancel(user, id)` (may be NULL) | bridge thread | a hint: the Nim side has already given up (cancel or deadline); stop the work, a reply is not required. It can arrive before the plugin registered the call (e.g. while it is still queued for a worker) — then it is lost and the only cost is wasted work |
 | `release(user)` (may be NULL) | whichever thread drops the last reference | after `close` and after the last in-flight `invoke` returned; free `user` here |
 
 Port handles are generation-checked (`(pluginIdx<<48)|(slot<<32)|gen`), so a

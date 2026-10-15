@@ -235,19 +235,29 @@ suite "EXTAPI phase 1b: Nim impl, switching, mocking, inplace, tunnel":
         raw_kv_note_count() == 2
     )
     var ticks: seq[int32]
-    check ExtTunnel.listen(
+    let tl = ExtTunnel.listen(
       ctx,
       "kv",
       "kv_tick",
       proc(b: seq[byte]) {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
           ticks.add(cborDecode(b, KvTick).get(KvTick()).n),
-    ).isOk
+    )
+    check tl.isOk
     check raw_kv_emit_tick(4) == ExtOk
     check pump(
       proc(): bool =
         ticks == @[4'i32]
     )
+    # The token removes exactly that listener (review: listen had no handle).
+    waitFor ExtTunnel.unlisten(ctx, "kv", "kv_tick", tl.get(0'u64))
+    check raw_kv_emit_tick(5) == ExtOk
+    discard pump(
+      proc(): bool =
+        false,
+      150,
+    )
+    check ticks == @[4'i32]
 
     check raw_kv_close() == ExtOk
     # Plugin gone: fallback serves, forwarder reports the missing source.

@@ -468,6 +468,17 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
       echo outp
       quit("WARN TEST FAILED: " & f & " must compile with the warning", 1)
     echo "  warn OK: " & f
+  # Must compile (and run) WITHOUT -d:BrokerFfiApi: plain MT builds stay free
+  # of the EXTAPI runtime; EXTAPI brokers degrade to `(mt)`.
+  for f in ["check_ext_not_imported", "check_ext_degrade"]:
+    let (outp, code) = gorgeEx(
+      "nim c -r --hints:off --threads:on --path:. --outdir:build/reject test/warn/" & f &
+        ".nim"
+    )
+    if code != 0:
+      echo outp
+      quit("COMPILE CHECK FAILED: " & f, 1)
+    echo "  compile OK: " & f
   echo "all sugar-reject tests passed"
 
 task runFfiBenchEventStress,

@@ -18,11 +18,17 @@ import
   ./mt_event_broker,
   ./mt_signal_broker,
   ./mt_config,
-  ./api_cbor_codec,
-  ./ext_runtime,
+  ./ext_types,
   ./broker_debug
 
-export mt_request_broker, mt_config, api_cbor_codec, ext_runtime
+# The EXTAPI runtime (process globals, std/dynlib, std/json, the CBOR codec)
+# is only needed when EXTAPI brokers are bound to foreign code; without the
+# FFI flag they are plain `(mt)` brokers and plain MT builds stay lean.
+when defined(BrokerFfiApi):
+  import ./api_cbor_codec, ./ext_runtime
+  export api_cbor_codec, ext_runtime
+
+export mt_request_broker, mt_config, ext_types
 
 type ExtEntryCT* = object
   plugin*: string
@@ -635,12 +641,13 @@ proc generateExtRequestBroker*(
       src.add(
         "proc " & typeName & "ExtInplaceTry" & hookSfx & "(brokerCtx: BrokerContext" &
           hookParams & ", res: var " & resTy & "): bool {.gcsafe, raises: [].} =\n" &
-          idxRead("brokerCtx") & "  if extNameDispatch(pIdx, nIdx) != edInplace or\n" &
-          "      not extInplaceActive(pIdx, nIdx, brokerCtx):\n" & "    return false\n" &
-        (
+          idxRead("brokerCtx") & "  if extNameDispatch(pIdx, nIdx) != edInplace:\n" &
+          "    return false\n" &
+          "  let route = extInplaceRoute(pIdx, nIdx, brokerCtx) # one table lookup\n" &
+          "  if route == 0:\n" & "    return false\n" & (
           if isImport:
-            "  if extNativeActive(pIdx, nIdx, brokerCtx):\n" & "    {.cast(gcsafe).}:\n" &
-              "      res = " & adapterName & "(" & callArgs & ")\n" & "    return true\n"
+            "  if route == 2:\n" & "    {.cast(gcsafe).}:\n" & "      res = " &
+              adapterName & "(" & callArgs & ")\n" & "    return true\n"
           else:
             ""
         ) & "  {.cast(gcsafe).}:\n" & "    let enc = " & encExpr & "\n" &
@@ -812,12 +819,23 @@ proc generateExtEventBroker*(
         "proc(e: " & typeName & "): Future[void] {.async: (raises: []).} =\n" &
           "      let enc = cborEncode(e)\n" & "      if enc.isOk:\n" &
           "        cb(enc.value)\n"
+    # Tunnel listeners: the handle stays on the listening thread (a threadvar)
+    # and the caller gets its id as a token for `ExtTunnel.unlisten`.
+    let tvName = "gExtTunnelListeners_" & typeName
+    let unlistenName = "extTunnelUnlisten_" & typeName
     let tunnelSrc =
-      "proc " & tunnelName &
-      "(ctx: BrokerContext, cb: ExtTunnelEventCb): Result[void, string] {.nimcall, gcsafe, raises: [].} =\n" &
+      "var " & tvName & " {.threadvar.}: seq[" & typeName & "Listener]\n" & "proc " &
+      tunnelName &
+      "(ctx: BrokerContext, cb: ExtTunnelEventCb): Result[uint64, string] {.nimcall, gcsafe, raises: [].} =\n" &
       "  {.cast(gcsafe).}:\n" & "    let r = " & typeName & ".listen(ctx, " & listenerSrc &
-      "    )\n" & "    if r.isErr:\n" & "      return err(r.error)\n" &
-      "    return ok()\n"
+      "    )\n" & "    if r.isErr:\n" & "      return err(r.error)\n" & "    " & tvName &
+      ".add(r.value)\n" & "    return ok(r.value.id)\n" & "proc " & unlistenName &
+      "(ctx: BrokerContext, token: uint64): Future[void] {.nimcall, async: (raises: []), gcsafe.} =\n" &
+      "  var found = false\n" & "  var h: " & typeName & "Listener\n" &
+      "  {.cast(gcsafe).}:\n" & "    for i in 0 ..< " & tvName & ".len:\n" & "      if " &
+      tvName & "[i].id == token:\n" & "        h = " & tvName & "[i]\n" & "        " &
+      tvName & ".del(i)\n" & "        found = true\n" & "        break\n" &
+      "  if found:\n" & "    await " & typeName & ".dropListener(ctx, h)\n"
     let src =
       "var gExtNameIdx_" & typeName & "_event* {.global.}: int = -1\n" &
       "var gExtPluginIdx_" & typeName & "* {.global.}: int = -1\n" & "proc " & emitName &

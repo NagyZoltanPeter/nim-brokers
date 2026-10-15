@@ -37,7 +37,9 @@ when not defined(windows):
   from std/posix import pthread_self
 import system/ansi_c
 import chronos, chronicles, results
-import ../broker_context, ./mt_broker_common, ./ext_shapes
+import ../broker_context, ./mt_broker_common, ./ext_shapes, ./ext_types
+
+export ext_types
 
 export results, dynlib
 
@@ -157,16 +159,6 @@ type
       cdecl, gcsafe, raises: []
     .}
 
-  ExtDispatch* = enum
-    edBridge
-    edWorkers
-    edInplace
-
-  ExtNameKind* = enum
-    enkRequest
-    enkSignal
-    enkEvent
-
   ExtInstallFn* = proc(ctx: BrokerContext, wirePublic: bool): Result[void, string] {.
     nimcall, gcsafe, raises: []
   .}
@@ -195,7 +187,11 @@ type
   ExtTunnelEventCb* = proc(payload: seq[byte]) {.gcsafe, raises: [].}
   ExtTunnelListenFn* = proc(
     ctx: BrokerContext, cb: ExtTunnelEventCb
-  ): Result[void, string] {.nimcall, gcsafe, raises: [].}
+  ): Result[uint64, string] {.nimcall, gcsafe, raises: [].}
+    ## Returns a token for `ExtTunnelUnlistenFn` (valid on the listening thread).
+  ExtTunnelUnlistenFn* = proc(ctx: BrokerContext, token: uint64): Future[void] {.
+    nimcall, async: (raises: []), gcsafe
+  .}
 
   ExtImportResolveFn* = proc(lib: LibHandle): string {.nimcall, gcsafe, raises: [].}
     ## K1: resolve the broker's C symbols from `lib`; "" or the missing names.
@@ -212,6 +208,7 @@ type
     tunnelCall*: ExtTunnelCallFn
     tunnelSignal*: ExtTunnelSignalFn
     tunnelListen*: ExtTunnelListenFn
+    tunnelUnlisten*: ExtTunnelUnlistenFn
     importLib*: cstring ## K1: `dynlib` pattern (std/dynlib loadLibPattern)
     importResolve*: ExtImportResolveFn ## K1: resolve this broker's symbols
     peerSig*: cstring ## K2: "args|payload" signature compared with the peer schema
@@ -1094,6 +1091,19 @@ proc extInplaceActive*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
   let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
   f.found and f.wired
 
+proc extInplaceRoute*(pluginIdx, nameIdx: int, ctx: BrokerContext): int =
+  ## One source-table lookup for the inplace hook: 0 = not auto-wired here
+  ## (take the normal broker path), 1 = foreign inplace port, 2 = K1 native.
+  if pluginIdx < 0 or nameIdx < 0:
+    return 0
+  let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
+  if not (f.found and f.wired):
+    0
+  elif f.native:
+    2
+  else:
+    1
+
 proc extNativeActive*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
   ## A K1 import serves `(plugin, name)` on `ctx` and the bridge auto-wired
   ## the public slot: the generated code may call the C function directly.
@@ -1190,6 +1200,10 @@ proc extCall*(
         gExtPending.del(id)
       return err("EXTAPI: worker pool not running")
     st = newCallState()
+    if st.isNil:
+      {.cast(gcsafe).}:
+        gExtPending.del(id)
+      return err("EXTAPI: out of memory")
     {.cast(gcsafe).}:
       gExtPending.withValue(id, pc):
         pc.st = st
@@ -1203,14 +1217,15 @@ proc extCall*(
       len: payload.len,
       st: st,
     )
-    if not poolPush(rt.pool, m):
+    let oom = payload.len > 0 and m.buf.isNil
+    if oom or not poolPush(rt.pool, m):
       if not m.buf.isNil:
         c_free(m.buf)
       stRelease(st) # the worker's ref, never handed over
       implRelease(impl)
       {.cast(gcsafe).}:
         gExtPending.del(id)
-      return err("EXTAPI: worker queue full")
+      return err(if oom: "EXTAPI: out of memory" else: "EXTAPI: worker queue full")
   of edBridge:
     # Invoke synchronously on this thread; the args buffer is borrowed for
     # the duration of the call only.
@@ -1272,11 +1287,12 @@ proc extSignal*(
       len: payload.len,
       st: nil,
     )
-    if not poolPush(rt.pool, m):
+    let oom = payload.len > 0 and m.buf.isNil
+    if oom or not poolPush(rt.pool, m):
       if not m.buf.isNil:
         c_free(m.buf)
       implRelease(impl)
-      return err("EXTAPI: worker queue full")
+      return err(if oom: "EXTAPI: out of memory" else: "EXTAPI: worker queue full")
     return ok()
   if nd.dispatch == edBridge and not onBridgeThread():
     let m = ExtCallMsg(
@@ -1288,11 +1304,12 @@ proc extSignal*(
       len: payload.len,
       st: nil,
     )
-    if not gExtHost.sigRing.tryPush(m):
+    let oom = payload.len > 0 and m.buf.isNil
+    if oom or not gExtHost.sigRing.tryPush(m):
       if not m.buf.isNil:
         c_free(m.buf)
       implRelease(impl)
-      return err("EXTAPI: signal queue full")
+      return err(if oom: "EXTAPI: out of memory" else: "EXTAPI: signal queue full")
     fireBrokerSignal(gExtHost.signal)
     return ok()
   impl.impl.invoke(
@@ -1382,6 +1399,8 @@ proc extOpen(
           g = 1
         ps.gen.store(g, moRelease)
         let r = cast[ptr ExtImplRef](c_calloc(1, csize_t(sizeof(ExtImplRef))))
+        if r.isNil:
+          return ExtAgain # out of memory: the slot stays closed
         r.refs.store(1, moRelease)
         r.impl = impl[]
         r.impl.plugin = nil # not retained
@@ -1543,6 +1562,8 @@ proc copyOut(src: cstring, n: int, outBuf: ptr ptr uint8, outLen: ptr csize_t): 
   if outBuf.isNil or outLen.isNil:
     return ExtBadArg
   let b = cast[ptr uint8](c_malloc(csize_t(max(n, 1))))
+  if b.isNil:
+    return ExtAgain
   if n > 0:
     copyMem(b, src, n)
   outBuf[] = b
@@ -1628,8 +1649,9 @@ proc setLoadError(rt: ptr ExtPluginRt, msg: string) =
       rt.loadError = nil
     if msg.len > 0:
       rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
-      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
-      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
+      if not rt.loadError.isNil:
+        copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
+        cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
 
 proc importLoadedOn(rt: ptr ExtPluginRt, ctx: BrokerContext): bool =
   ## An import (K1) or peer (K2) port of this plugin is already open on `ctx`.
