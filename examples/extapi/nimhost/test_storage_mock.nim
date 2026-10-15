@@ -66,4 +66,4 @@ suite "EXTAPI example — mocking":
         waitFor sleepAsync(chronos.milliseconds(5))
         waited += 5
       check seen == 1
-      ExtHost.stop()
+      doAssert ExtHost.stop().isOk

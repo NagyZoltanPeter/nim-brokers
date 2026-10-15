@@ -29,6 +29,12 @@ RequestBroker(API):
 
   proc signature*(): Future[Result[PeerFail, string]] {.async.}
 
+RequestBroker(API):
+  type PeerSlow = object
+    n*: int32
+
+  proc signature*(ms: int32): Future[Result[PeerSlow, string]] {.async.}
+
 EventBroker(API):
   type PeerTick = object
     n*: int32
@@ -58,6 +64,12 @@ proc setupProviders(ctx: BrokerContext): Result[void, string] =
     return err("nope")
 
   ?PeerFail.setProvider(ctx, failProv)
+
+  proc slowProv(ms: int32): Future[Result[PeerSlow, string]] {.async.} =
+    await sleepAsync(chronos.milliseconds(int(ms)))
+    return ok(PeerSlow(n: ms))
+
+  ?PeerSlow.setProvider(ctx, slowProv)
 
   ?PeerPoke.onSignal(
     ctx,

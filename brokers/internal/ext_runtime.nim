@@ -8,7 +8,7 @@
 ## - Every `broker_ext_host` entry (`extOpen`, `extProvide`, `extReply`, …)
 ##   may run on a foreign, non-Nim thread. Those procs touch only atomics,
 ##   `Lock` / `Cond`, libc `c_malloc` / `c_free` and `fireBrokerSignal` —
-##   never the Nim heap and never a threadvar — so they are safe under
+##   never the Nim heap — so they are safe under
 ##   `--mm:refc` (thread-local heaps) and `--mm:orc` alike.
 ## - All Nim-heap state (pending calls, futures) lives in threadvars of the
 ##   bridge thread and is only touched there. The source table (which port
@@ -202,6 +202,9 @@ type
 
   ExtImplRef = object
     refs: Atomic[int]
+    closed: Atomic[bool]
+      ## Set when its port closes: queued worker messages and late one-way
+      ## deliveries for it are dropped instead of invoked.
     impl: ExtImplDesc
 
   ExtPortSlot = object
@@ -293,7 +296,10 @@ type
       proc(outBuf: ptr pointer, outLen: ptr int32): int32 {.cdecl, gcsafe, raises: [].}
 
   ExtPeerUser = object
-    ## `user` of a K2 synthetic port; libc-allocated, lives until host stop.
+    ## `user` of a K2 synthetic port; libc-allocated. Two refs: the port
+    ## (dropped by its `release`) and `rt.peers` (dropped by `shutdownPeers`
+    ## after the peer context is shut down); the last one frees it.
+    refs: Atomic[int]
     port: uint64
     peerCtx: uint32
     fns: ptr PeerFns
@@ -335,6 +341,10 @@ type
 
   ExtHostRt = object
     running: Atomic[bool]
+    ctlLock: Lock
+      ## Serialises "is the host running" + "push a control message" against
+      ## `extHostStop` flipping `running`: nothing is pushed after stop's
+      ## final control drain, so no `postCtl` caller can wait forever.
     ready: Atomic[int]
     stopFlag: Atomic[int]
     signal: ptr BrokerSignalShared
@@ -348,6 +358,10 @@ type
     pluginIdx: int
     portSlot: int
     nameIdx: int
+    impl: ptr ExtImplRef
+      ## Borrowed: `extCall` holds a ref until its future completes, which is
+      ## after the pending entry is gone.
+    st: ptr ExtCallState ## borrowed likewise; nil unless `workers` dispatch
 
   ExtRawReply* = object
     status*: int32
@@ -407,6 +421,23 @@ var gExtHost: ptr ExtHostRt
 var gExtHostTable: ExtHostTable
 var gExtCallSeq: Atomic[uint64]
 var gExtBridgeThread: Thread[ptr ExtHostRt]
+
+const
+  hsStopped = 0
+  hsStarting = 1
+  hsRunning = 2
+  hsStopping = 3
+
+var gExtHostState: Atomic[int]
+  ## Host lifecycle: start / stop CAS into it, so concurrent `start` calls run
+  ## one bridge and a stop never overlaps a start.
+var gExtIsWorker {.threadvar.}: bool
+
+when defined(extTestHooks):
+  var extTestBridgeStarts*: Atomic[int] ## bridge threads started
+  var extTestBridgeExits*: Atomic[int] ## bridge threads finished
+  var extTestFailWorkerAt*: Atomic[int]
+    ## > 0: the n-th worker thread of the next start fails to start.
 const ExtMaxInplace = 256
 var gExtInplace: array[ExtMaxInplace, ExtInplaceSlot]
 
@@ -545,11 +576,14 @@ proc poolPush(pool: ptr ExtWorkerPool, m: ExtCallMsg): bool =
 proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
   ## Plain worker: no chronos loop, never touches broker state. Runs the
   ## foreign `invoke` (which may block this thread only).
+  gExtIsWorker = true
   while true:
     var m: ExtCallMsg
     var got = false
+    var stopping = false
     withLock(pool.lock):
       while true:
+        stopping = pool.stop
         if pool.q.tryPop(m):
           got = true
           break
@@ -558,8 +592,11 @@ proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
         wait(pool.cond, pool.lock)
     if not got:
       break
+    # Never invoke once the host is stopping or the port is closed: the caller
+    # already got an error (at-most-once), and the plugin may be gone.
     var expected = 0
-    if m.st.isNil or m.st.state.compareExchange(expected, 1):
+    if not stopping and not m.impl.closed.load(moAcquire) and
+        (m.st.isNil or m.st.state.compareExchange(expected, 1)):
       m.impl.impl.invoke(
         m.impl.impl.user, m.id, m.nameIdx, m.name, m.buf, csize_t(m.len)
       )
@@ -672,7 +709,14 @@ proc onBridgeThread(): bool =
 # Bridge-side operations (run on the bridge thread only)
 # ---------------------------------------------------------------------------
 
-proc failPending(pred: proc(c: PendingCall): bool {.gcsafe, raises: [].}, msg: string) =
+proc failPending(
+    pred: proc(c: PendingCall): bool {.gcsafe, raises: [].}, msg: string, hint: bool
+) =
+  ## Fail matching pending calls with `msg`. A call still queued for a worker
+  ## is marked cancelled first, so its `invoke` never runs (at-most-once: the
+  ## caller is about to see an error). `hint`: also send the plugin's cancel
+  ## hint for calls already running — used for host-initiated failures only,
+  ## never while the plugin itself is withdrawing / closing (re-entrancy).
   var ids: seq[uint64]
   for id, c in gExtPending:
     if pred(c):
@@ -680,6 +724,12 @@ proc failPending(pred: proc(c: PendingCall): bool {.gcsafe, raises: [].}, msg: s
   for id in ids:
     var c: PendingCall
     if gExtPending.pop(id, c):
+      var running = true
+      if not c.st.isNil:
+        var expected = 0
+        running = not c.st.state.compareExchange(expected, 2)
+      if running and hint and not c.impl.isNil and not c.impl.impl.cancel.isNil:
+        c.impl.impl.cancel(c.impl.impl.user, id)
       if not c.fut.finished():
         c.fut.complete(ExtRawReply(status: ExtReplyErr, data: toBytes(msg)))
 
@@ -701,6 +751,7 @@ proc bridgeWithdraw(pluginIdx, slot, nameIdx: int, ctx: uint32): int32 =
     proc(c: PendingCall): bool =
       c.pluginIdx == pluginIdx and c.portSlot == slot and c.nameIdx == nameIdx,
     "EXTAPI: provider withdrawn",
+    hint = false,
   )
   ExtOk
 
@@ -739,6 +790,7 @@ proc bridgeClose(pluginIdx, slot: int, gen: uint32): int32 =
     proc(c: PendingCall): bool =
       c.pluginIdx == pluginIdx and c.portSlot == slot,
     "EXTAPI: port closed",
+    hint = false,
   )
   var impl: ptr ExtImplRef
   withLock(rt.lock):
@@ -746,6 +798,8 @@ proc bridgeClose(pluginIdx, slot: int, gen: uint32): int32 =
       ps.open.store(false, moRelease)
       impl = ps.impl
       ps.impl = nil
+      if not impl.isNil:
+        impl.closed.store(true, moRelease)
   if not impl.isNil:
     implRelease(impl)
   ExtOk
@@ -937,8 +991,9 @@ proc extCall*(
   let id = gExtCallSeq.fetchAdd(1, moAcquireRelease) + 1
   let fut = newFuture[ExtRawReply]("extCall")
   {.cast(gcsafe).}:
-    gExtPending[id] =
-      PendingCall(fut: fut, pluginIdx: pluginIdx, portSlot: srcSlot, nameIdx: nameIdx)
+    gExtPending[id] = PendingCall(
+      fut: fut, pluginIdx: pluginIdx, portSlot: srcSlot, nameIdx: nameIdx, impl: impl
+    )
   let bufPtr =
     if payload.len > 0:
       cast[ptr uint8](unsafeAddr payload[0])
@@ -958,6 +1013,9 @@ proc extCall*(
         gExtPending.del(id)
       return err("EXTAPI: worker pool not running")
     st = newCallState()
+    {.cast(gcsafe).}:
+      gExtPending.withValue(id, pc):
+        pc.st = st
     implAcquire(impl) # the worker's ref
     let m = ExtCallMsg(
       impl: impl,
@@ -1077,8 +1135,17 @@ proc postCtl(op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int): int
   defer:
     deinitCond(m.cond)
     deinitLock(m.lock)
-  if not gExtHost.ctlRing.tryPush(addr m):
-    return ExtAgain
+  # Check-and-push under `ctlLock`: `extHostStop` clears `running` under the
+  # same lock before its final control drain, so a message is either pushed
+  # in time to be answered (by the bridge or by that drain) or not at all.
+  var rc = ExtOk
+  withLock(gExtHost.ctlLock):
+    if not gExtHost.running.load(moAcquire):
+      rc = ExtShutdown
+    elif not gExtHost.ctlRing.tryPush(addr m):
+      rc = ExtAgain
+  if rc != ExtOk:
+    return rc
   fireBrokerSignal(gExtHost.signal)
   withLock(m.lock):
     while not m.done:
@@ -1139,10 +1206,16 @@ proc nameOp(port: uint64, name: cstring, op: ExtCtlOp): int32 =
     return ExtBadArg
   if op == ecoProvide:
     var caps = 0'u32
+    var closed = false
     withLock(lp.rt.lock):
-      let impl = lp.rt.ports[lp.slot].impl
-      if not impl.isNil:
+      let ps = addr lp.rt.ports[lp.slot]
+      let impl = ps.impl
+      if impl.isNil or not ps.open.load(moAcquire) or ps.gen.load(moAcquire) != lp.gen:
+        closed = true # closed since `lookupPort`: STALE, not a caps mismatch
+      else:
         caps = impl.impl.caps
+    if closed:
+      return ExtStale
     let ok =
       case lp.rt.desc.names[n].dispatch
       of edInplace:
@@ -1467,6 +1540,13 @@ proc peerEventCb(
   let u = cast[ptr ExtPeerUser](user)
   discard extEmit(nil, u.port, eventName, cast[ptr uint8](buf), csize_t(len))
 
+proc peerUserRelease(u: ptr ExtPeerUser) =
+  if u.refs.fetchSub(1, moAcquireRelease) == 1:
+    c_free(u)
+
+proc peerRelease(user: pointer) {.cdecl, gcsafe, raises: [].} =
+  peerUserRelease(cast[ptr ExtPeerUser](user))
+
 proc peerInvoke(
     user: pointer,
     id: uint64,
@@ -1622,6 +1702,7 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
       fns.freeBuffer(errOut)
     return err("EXTAPI: peer createContext failed: " & e)
   let user = cast[ptr ExtPeerUser](c_calloc(1, csize_t(sizeof(ExtPeerUser))))
+  user.refs.store(2, moRelease) # the port + `rt.peers`
   user.peerCtx = peerCtx
   user.fns = fns
   var impl = ExtImplDesc(
@@ -1631,7 +1712,7 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
     caps: ExtCapNonBlocking,
     invoke: peerInvoke,
     cancel: nil, # no `_cancelAsync` yet: a cancelled call's late reply is dropped by id
-    release: nil, # freed with the peer context at host stop
+    release: peerRelease, # drops the port's ref; `shutdownPeers` drops the other
     user: user,
   )
   var port: uint64
@@ -1654,7 +1735,9 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
   ok()
 
 proc shutdownPeers() =
-  ## Host stop: unsubscribe, shut every peer context down, free the users.
+  ## Host stop, after the bridge and the worker pools are gone: unsubscribe,
+  ## shut every peer context down and drop `rt.peers`' ref on each user (an
+  ## off-bridge call still holding the port's impl keeps it alive).
   for p in 0 ..< gExtPluginCount.load(moAcquire):
     let rt = gExtPlugins[p]
     if rt.peerFns.isNil:
@@ -1668,7 +1751,7 @@ proc shutdownPeers() =
         if u.subs[n] != 0:
           discard rt.peerFns.unsubscribe(u.peerCtx, rt.desc.names[n].name, u.subs[n])
       discard rt.peerFns.shutdown(u.peerCtx)
-      c_free(u)
+      peerUserRelease(u)
 
 proc extJoinMissing*(missing: seq[string]): string =
   missing.join(", ")
@@ -1685,6 +1768,8 @@ proc extHostTable*(): ptr ExtHostTable =
 # ---------------------------------------------------------------------------
 
 proc bridgeThreadProc(h: ptr ExtHostRt) {.thread.} =
+  when defined(extTestHooks):
+    discard extTestBridgeStarts.fetchAdd(1)
   h.signal = getOrInitBrokerSignal()
   h.bridgeTid.store(osThreadId(), moRelease)
   registerBrokerPoller(ctlPoll)
@@ -1714,11 +1799,14 @@ proc bridgeThreadProc(h: ptr ExtHostRt) {.thread.} =
       proc(c: PendingCall): bool =
         true,
       "EXTAPI: host shut down",
+      hint = true,
     )
   # Drain any ctl message that raced the stop so its caller does not hang.
   discard ctlPoll()
   teardownBrokerThread()
   closeThreadDispatcherSelector()
+  when defined(extTestHooks):
+    discard extTestBridgeExits.fetchAdd(1)
 
 proc extLoadPlugin*(path: string): Result[void, string] =
   ## Exe mode: load a plugin shared library and call its
@@ -1738,15 +1826,49 @@ proc extLoadPlugin*(path: string): Result[void, string] =
     return err("EXTAPI: plugin entry of '" & path & "' failed with " & $rc)
   ok()
 
-proc extHostStart*(): Result[void, string] =
-  ## Start the shared EXTAPI bridge thread (exe mode). Idempotent.
-  if hostRunning():
-    return ok()
+proc stopPool(pool: ptr ExtWorkerPool, started: int) =
+  ## Stop and join the first `started` worker threads of `pool`, free queued
+  ## messages without invoking them, release the pool.
+  withLock(pool.lock):
+    pool.stop = true
+    broadcast(pool.cond)
+  let threads = cast[ptr UncheckedArray[Thread[ptr ExtWorkerPool]]](pool.threads)
+  for i in 0 ..< started:
+    joinAndReleaseThread(threads[i])
+  var m: ExtCallMsg
+  while pool.q.tryPop(m):
+    if not m.buf.isNil:
+      c_free(m.buf)
+    stRelease(m.st)
+    implRelease(m.impl)
+  deallocShared(pool.threads)
+  deinitCond(pool.cond)
+  deinitLock(pool.lock)
+  deallocShared(pool)
+
+proc stopAllPools() =
+  for p in 0 ..< gExtPluginCount.load(moAcquire):
+    let rt = gExtPlugins[p]
+    if not rt.pool.isNil:
+      let pool = rt.pool
+      rt.pool = nil
+      stopPool(pool, pool.n)
+
+proc stopBridgeThread() =
+  gExtHost.stopFlag.store(1, moRelease)
+  fireBrokerSignal(gExtHost.signal)
+  joinAndReleaseThread(gExtBridgeThread)
+  gExtHost.bridgeTid.store(0, moRelease)
+
+proc startHost(): Result[void, string] =
+  ## Owner of the `hsStarting` state: bring up the bridge, then the worker
+  ## pools. On any failure everything already started is torn down again.
   if gExtHost.isNil:
     gExtHost = cast[ptr ExtHostRt](createShared(ExtHostRt, 1))
     gExtHost.ctlRing.init(ExtRingCap)
     gExtHost.replyRing.init(ExtRingCap)
     gExtHost.eventRing.init(ExtRingCap)
+    initLock(gExtHost.ctlLock)
   gExtHost.ready.store(0, moRelease)
   gExtHost.stopFlag.store(0, moRelease)
   gExtHostTable = ExtHostTable(
@@ -1767,7 +1889,11 @@ proc extHostStart*(): Result[void, string] =
     createThread(gExtBridgeThread, bridgeThreadProc, gExtHost)
   except ResourceExhaustedError as e:
     return err("EXTAPI: cannot start bridge thread: " & e.msg)
+  # Ready before the pools: a rollback can then always signal and join it.
+  while gExtHost.ready.load(moAcquire) != 1:
+    os.sleep(1)
   # Worker pools: one per plugin that has `workers` names.
+  var attempts = 0
   for p in 0 ..< gExtPluginCount.load(moAcquire):
     let rt = gExtPlugins[p]
     let n = rt.desc.workers
@@ -1783,14 +1909,41 @@ proc extHostStart*(): Result[void, string] =
     ))
     pool.threads = threads
     for i in 0 ..< n:
-      try:
-        createThread(threads[i], workerProc, pool)
-      except ResourceExhaustedError as e:
-        return err("EXTAPI: cannot start worker thread: " & e.msg)
+      inc attempts
+      var failure = ""
+      when defined(extTestHooks):
+        if extTestFailWorkerAt.load(moAcquire) == attempts:
+          failure = "injected failure"
+      if failure.len == 0:
+        try:
+          createThread(threads[i], workerProc, pool)
+        except ResourceExhaustedError as e:
+          failure = e.msg
+      if failure.len > 0:
+        stopPool(pool, i)
+        stopAllPools()
+        stopBridgeThread()
+        return err("EXTAPI: cannot start worker thread: " & failure)
     rt.pool = pool
-  while gExtHost.ready.load(moAcquire) != 1:
-    os.sleep(1)
+  ok()
+
+proc extHostStart*(): Result[void, string] =
+  ## Start the shared EXTAPI bridge thread and the worker pools. Idempotent and
+  ## safe from any thread (`<lib>_extHost()` may race on foreign threads):
+  ## exactly one caller starts, the others wait for it.
+  while true:
+    var expected = hsStopped
+    if gExtHostState.compareExchange(expected, hsStarting):
+      break
+    if expected == hsRunning:
+      return ok()
+    os.sleep(1) # another start or a stop is in progress
+  let r = startHost()
+  if r.isErr:
+    gExtHostState.store(hsStopped, moRelease)
+    return r
   gExtHost.running.store(true, moRelease)
+  gExtHostState.store(hsRunning, moRelease)
   for p in 0 ..< gExtPluginCount.load(moAcquire):
     let d = gExtPlugins[p].desc
     if d.loadEager and (not d.importInvoke.isNil or not d.peerLib.isNil):
@@ -1799,43 +1952,27 @@ proc extHostStart*(): Result[void, string] =
         warn "EXTAPI: eager import load failed", plugin = $d.name, reason = r.error
   ok()
 
-proc extHostStop*() =
-  ## Stop the bridge thread: closes every port, fails pending calls, clears
-  ## every auto-wired provider. Foreign calls afterwards return SHUTDOWN.
-  if not hostRunning():
-    return
-  gExtHost.running.store(false, moRelease)
-  gExtHost.stopFlag.store(1, moRelease)
-  fireBrokerSignal(gExtHost.signal)
-  joinAndReleaseThread(gExtBridgeThread)
-  gExtHost.bridgeTid.store(0, moRelease)
-  # Peer contexts: ports are already closed; stop the peers' threads.
+proc extHostStop*(): Result[void, string] =
+  ## Stop the host: closes every port, fails pending calls (queued worker calls
+  ## never run), clears every auto-wired provider, stops the worker pools and
+  ## K2 peer contexts. Foreign calls afterwards return SHUTDOWN. Refused on the
+  ## bridge or a worker thread (it would join itself). Idempotent.
+  if onBridgeThread() or gExtIsWorker:
+    return err("EXTAPI: ExtHost.stop() cannot run on the bridge or a worker thread")
+  while true:
+    var expected = hsRunning
+    if gExtHostState.compareExchange(expected, hsStopping):
+      break
+    if expected == hsStopped:
+      return ok()
+    os.sleep(1) # a start or another stop is in progress
+  withLock(gExtHost.ctlLock):
+    gExtHost.running.store(false, moRelease)
+  stopBridgeThread()
+  # Pools before peers: queued peer calls are dropped, never invoked against
+  # a shut-down peer context.
+  stopAllPools()
   shutdownPeers()
-  # Stop worker pools after the bridge: no new work can be queued now.
-  # A worker blocked inside a foreign `invoke` delays this join (documented
-  # in EXTAPI_PLAN §11; a join timeout + leak is a follow-up).
-  for p in 0 ..< gExtPluginCount.load(moAcquire):
-    let rt = gExtPlugins[p]
-    let pool = rt.pool
-    if pool.isNil:
-      continue
-    withLock(pool.lock):
-      pool.stop = true
-      broadcast(pool.cond)
-    let threads = cast[ptr UncheckedArray[Thread[ptr ExtWorkerPool]]](pool.threads)
-    for i in 0 ..< pool.n:
-      joinAndReleaseThread(threads[i])
-    var m: ExtCallMsg
-    while pool.q.tryPop(m):
-      if not m.buf.isNil:
-        c_free(m.buf)
-      stRelease(m.st)
-      implRelease(m.impl)
-    deallocShared(pool.threads)
-    deinitCond(pool.cond)
-    deinitLock(pool.lock)
-    rt.pool = nil
-    deallocShared(pool)
   # Payloads that raced the stop: free them.
   var rm: ExtReplyMsg
   while gExtHost.replyRing.tryPop(rm):
@@ -1845,12 +1982,15 @@ proc extHostStop*() =
   while gExtHost.eventRing.tryPop(em):
     if not em.buf.isNil:
       c_free(em.buf)
-  # A control call that raced the stop: answer it so its caller never hangs.
+  # A control call pushed before `running` flipped and not yet answered by the
+  # bridge: answer it so its caller never hangs.
   var m: ptr ExtCtlMsg
   while gExtHost.ctlRing.tryPop(m):
     withLock(m.lock):
       m.rc = ExtShutdown
       m.done = true
       signal(m.cond)
+  gExtHostState.store(hsStopped, moRelease)
+  ok()
 
 {.pop.}

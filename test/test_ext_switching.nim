@@ -253,4 +253,4 @@ suite "EXTAPI phase 1b: Nim impl, switching, mocking, inplace, tunnel":
     # Plugin gone: fallback serves, forwarder reports the missing source.
     check (waitFor KvGet.request(ctx, "a")).get(KvGet()).value == "nim:a"
     check (waitFor KvSlow.request(ctx)).isErr
-    ExtHost.stop()
+    check ExtHost.stop().isOk

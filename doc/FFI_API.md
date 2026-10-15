@@ -2010,8 +2010,13 @@ blocking plugin can never stall the bridge.
 | **K1 native import** — a plain C library | `ExtPlugin.load(name, ctx)`; `ExtPlugin.loadError(name)` reports missing libraries / symbols, which stay unprovided | nothing: plain `extern "C"` exports |
 | **K2 peer import** — another nim-brokers library | `ExtPlugin.load(name, ctx)`: one peer context per host context, schema compared per name | nothing: the peer's own `(API)` surface (`_callAsync` / `_subscribe` / `_call`) |
 
-`ExtHost.stop()` closes every port, fails pending calls, clears auto-wired
-providers, shuts K2 peer contexts down and stops the bridge.
+`ExtHost.stop()` closes every port, fails pending calls (a call still queued
+for a worker is dropped, never invoked — at most once), clears auto-wired
+providers, stops the worker pools, shuts K2 peer contexts down and stops the
+bridge. It returns `Result[void, string]`: `err` when called on the bridge or a
+worker thread (it would join itself, e.g. from inside a plugin `invoke`).
+`start` / `stop` are safe to race from any thread — exactly one caller starts
+the bridge.
 
 ### Switching, fallback and mocking (Nim side)
 
@@ -2061,8 +2066,8 @@ exported symbols, so loading works identically on macOS, Linux and Windows.
 | Entry (`broker_ext_host`) | Called by | Blocks? | Purpose |
 |---|---|---|---|
 | `open(host, ctx, impl, &port)` | plugin, any thread | no | register an implementation on one broker context; checks ABI version and schema hash |
-| `provide(host, port, name)` / `withdraw(…)` | plugin, any thread | bounded wait for the bridge | become / stop being the source of a request or signal name |
-| `close(host, port)` | plugin, any thread | bounded wait | withdraw everything, fail that port's pending calls, invalidate the handle |
+| `provide(host, port, name)` / `withdraw(…)` | plugin, any thread | waits until the bridge applied it (`SHUTDOWN` across a host stop) | become / stop being the source of a request or signal name |
+| `close(host, port)` | plugin, any thread | waits likewise | withdraw everything, fail that port's pending calls (queued worker calls never run), invalidate the handle |
 | `reply(host, port, id, status, buf, len)` | plugin, any thread | never | answer call `id`: `REPLY_OK` + bare CBOR value, or `REPLY_ERR` + UTF-8 message |
 | `emit(host, port, name, buf, len)` | plugin, any thread | never | fire an event (CBOR payload) |
 | `listApis` / `getSchema` / `freeBuffer` / `schemaHash` | anyone | no | discovery (CBOR descriptors, same shape as the `(API)` lane) |

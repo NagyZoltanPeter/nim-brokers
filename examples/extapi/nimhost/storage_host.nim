@@ -189,7 +189,7 @@ proc main() =
   let m = waitFor Mixed.request(ctx, 1)
   expect m.isOk and m.value.value == 1001, "missing symbol → Nim fallback"
 
-  ExtHost.stop()
+  doAssert ExtHost.stop().isOk
   if failures > 0:
     quit("storage_host: " & $failures & " check(s) failed", 1)
   echo "storage_host: all scenarios passed"

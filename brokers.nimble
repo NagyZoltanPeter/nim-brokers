@@ -641,6 +641,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_ext_plugin", "extplugin"),
     ("test_ext_switching", "extswitch"),
     ("test_ext_imports", "extimports"),
+    ("test_ext_lifecycle", "extlife"),
   ]
   for (f, prefix) in apiTests:
     for opt in [
@@ -1418,6 +1419,16 @@ task testExtImportsAsanOrc,
 task testExtImportsAsanRefc,
   "Run the EXTAPI native/peer import test under ASan+UBSan (clang, refc, debug)":
   testSan("asan", "refc", "test_ext_imports", extImportsTestExtra)
+
+const extLifeTestExtra = "-d:BrokerFfiApi -d:extTestHooks --nimMainPrefix:extlife"
+
+task testExtLifeAsanOrc,
+  "Run the EXTAPI lifecycle / at-most-once test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_lifecycle", extLifeTestExtra)
+
+task testExtLifeAsanRefc,
+  "Run the EXTAPI lifecycle / at-most-once test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_lifecycle", extLifeTestExtra)
 
 task testExtSwitchAsanOrc,
   "Run the EXTAPI switching test under ASan+UBSan (clang, orc, debug)":

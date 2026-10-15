@@ -3,9 +3,11 @@
  * Fixed, hand-written, versioned. Never regenerated per plugin.
  * See doc/design/EXTAPI_PLAN.md §6.
  *
- * Every `broker_ext_host` entry may be called from ANY thread. open / provide /
- * withdraw / close wait (bounded) for the host's bridge thread; reply / emit
- * never wait. Buffers passed to the host are copied before the call returns.
+ * Every `broker_ext_host` entry may be called from ANY thread. provide /
+ * withdraw / close wait until the host's bridge thread has applied them (never
+ * across a host stop: they return BROKER_EXT_SHUTDOWN instead); a bridge
+ * stalled by a blocking `invoke` stalls them too. open / reply / emit never
+ * wait. Buffers passed to the host are copied before the call returns.
  * The `buf` passed to `invoke` is valid only for the duration of that call.
  */
 #ifndef BROKER_EXT_H

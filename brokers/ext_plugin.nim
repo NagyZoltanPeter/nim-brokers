@@ -28,9 +28,11 @@ proc start*(_: typedesc[ExtHost]): Result[void, string] =
   ## port. Idempotent.
   extHostStart()
 
-proc stop*(_: typedesc[ExtHost]) =
-  ## Close every port, fail pending calls, clear auto-wired providers and stop
-  ## the bridge thread.
+proc stop*(_: typedesc[ExtHost]): Result[void, string] =
+  ## Close every port, fail pending calls (calls queued for a worker never
+  ## run), clear auto-wired providers, stop the worker pools, K2 peer contexts
+  ## and the bridge thread. `err` on the bridge or a worker thread — it would
+  ## have to join itself. Idempotent; safe against concurrent `start`.
   extHostStop()
 
 proc table*(_: typedesc[ExtHost]): ptr ExtHostTable =

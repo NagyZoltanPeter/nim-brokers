@@ -77,6 +77,14 @@ RequestBroker(EXTAPI[peer], importLib = "peerlib", dynlib = peerLib):
 
   proc signature*(): Future[Result[PeerFail, string]] {.async.}
 
+RequestBroker(
+  EXTAPI[peer], importLib = "peerlib", dynlib = peerLib, dispatch = workers(1)
+):
+  type PeerSlow = object
+    n*: int32
+
+  proc signature*(ms: int32): Future[Result[PeerSlow, string]] {.async.}
+
 EventBroker(EXTAPI[peer], importLib = "peerlib", dynlib = peerLib):
   type PeerTick = object
     n*: int32
@@ -158,8 +166,7 @@ suite "EXTAPI native C imports (K1)":
       # Unknown library: nothing loads.
       check ExtPlugin.load("nope", ctx).isErr
 
-      ExtHost.stop()
-
+      check ExtHost.stop().isOk
   test "peer nim-brokers library (K2)":
     when defined(windows):
       skip()
@@ -214,4 +221,22 @@ suite "EXTAPI native C imports (K1)":
           gLastTick.load() == 105
       )
 
-      ExtHost.stop()
+      check ExtHost.stop().isOk
+
+  test "stop with peer calls queued for a worker (R2.3)":
+    # Run after the K2 test, which built the peer library. Under ASAN this
+    # catches a peer `user` freed while workers still invoke through it.
+    when defined(windows):
+      skip()
+    else:
+      check ExtHost.start().isOk
+      let ctx = NewBrokerContext()
+      check ExtPlugin.load("peer", ctx).isOk
+      var futs: seq[Future[Result[PeerSlow, string]]]
+      for i in 0 ..< 300:
+        futs.add(PeerSlow.request(ctx, 20))
+      waitFor sleepAsync(chronos.milliseconds(5))
+      check ExtHost.stop().isOk
+      for f in futs:
+        discard waitFor withTimeout(f, chronos.seconds(5))
+      check (waitFor PeerSlow.request(ctx, 1)).isErr # nothing left serving it

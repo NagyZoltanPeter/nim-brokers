@@ -286,7 +286,7 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
 
     check raw_storage_emit_evicted("k9") == ExtStale
     check CompactHint.signal(ctx, CompactHint(urgency: 1)).isErr
-    ExtHost.stop()
+    check ExtHost.stop().isOk
     check raw_storage_open(ExtHost.table(), uint32(ctx), nil) == ExtShutdown
 
   test "dispatch policies: inplace, workers(n), caps check":
@@ -352,8 +352,7 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
     sleep(450) # let the worker finish and post its (dropped) reply
 
     check raw_calc_close() == ExtOk
-    ExtHost.stop()
-
+    check ExtHost.stop().isOk
   test "loader, schema hash, discovery, generated header":
     when defined(windows):
       skip()
@@ -418,4 +417,4 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
         check r.value.text == "hello"
       check ExtHost.loadPlugin(repoRoot / "build" / "nope.so").isErr
 
-      ExtHost.stop()
+      check ExtHost.stop().isOk
