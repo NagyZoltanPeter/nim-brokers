@@ -444,7 +444,7 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
   # manifest under -d:BrokerFfiApi --threads:on.
   let apiRejects = [
     "reject_iface_apicollision", "reject_shutdownreq_noargless",
-    "reject_shutdownreq_dualslot",
+    "reject_shutdownreq_dualslot", "reject_ext_rawptr_workers",
   ]
   for f in apiRejects:
     let (outp, code) = gorgeEx(
@@ -640,6 +640,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
     ("test_ext_plugin", "extplugin"),
     ("test_ext_switching", "extswitch"),
+    ("test_ext_imports", "extimports"),
   ]
   for (f, prefix) in apiTests:
     for opt in [
@@ -1284,6 +1285,16 @@ task testExtAsanRefc,
   testSan("asan", "refc", "test_ext_plugin", extPluginTestExtra)
 
 const extSwitchTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extswitch"
+
+const extImportsTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extimports"
+
+task testExtImportsAsanOrc,
+  "Run the EXTAPI native/peer import test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_imports", extImportsTestExtra)
+
+task testExtImportsAsanRefc,
+  "Run the EXTAPI native/peer import test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_imports", extImportsTestExtra)
 
 task testExtSwitchAsanOrc,
   "Run the EXTAPI switching test under ASan+UBSan (clang, orc, debug)":

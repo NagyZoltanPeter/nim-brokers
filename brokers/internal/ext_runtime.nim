@@ -19,14 +19,14 @@
 
 {.push raises: [].}
 
-import std/[atomics, locks, tables, os, dynlib]
+import std/[atomics, locks, tables, os, dynlib, strutils, algorithm, json]
 when not defined(windows):
   from std/posix import pthread_self
 import system/ansi_c
 import chronos, chronicles, results
 import ../broker_context, ./mt_broker_common
 
-export results
+export results, dynlib
 
 when defined(windows):
   proc extGetCurrentThreadId(): uint32 {.
@@ -56,6 +56,9 @@ const
 
   ExtCapNonBlocking* = 1'u32
   ExtCapReplyInline* = 2'u32
+  ExtCapNative* = 1'u32 shl 31
+    ## Internal: the port is a native import (K1) loaded by `extImportLoad`;
+    ## an auto-wired `inplace` name may then skip CBOR entirely.
 
 type ExtRing[T] = object
   ## Fixed-capacity, mutex-protected MPSC ring of POD elements. Storage is
@@ -162,6 +165,9 @@ type
     ctx: BrokerContext, cb: ExtTunnelEventCb
   ): Result[void, string] {.nimcall, gcsafe, raises: [].}
 
+  ExtImportResolveFn* = proc(lib: LibHandle): string {.nimcall, gcsafe, raises: [].}
+    ## K1: resolve the broker's C symbols from `lib`; "" or the missing names.
+
   ExtNameDesc* = object
     name*: cstring
     kind*: ExtNameKind
@@ -174,6 +180,9 @@ type
     tunnelCall*: ExtTunnelCallFn
     tunnelSignal*: ExtTunnelSignalFn
     tunnelListen*: ExtTunnelListenFn
+    importLib*: cstring ## K1: `dynlib` pattern (std/dynlib loadLibPattern)
+    importResolve*: ExtImportResolveFn ## K1: resolve this broker's symbols
+    peerSig*: cstring ## K2: "args|payload" signature compared with the peer schema
 
   ExtPluginDesc* = object
     name*: cstring
@@ -186,6 +195,10 @@ type
     listApisLen*: int
     schemaBuf*: cstring ## CBOR, static storage
     schemaLen*: int
+    importInvoke*: ExtInvokeFn ## K1: the generated trampoline dispatcher
+    loadEager*: bool ## K1: load on `ExtHost.start()` for DefaultBrokerContext
+    peerLib*: cstring ## K2: the peer nim-brokers library's name (symbol prefix)
+    peerDynlib*: cstring ## K2: `dynlib` pattern of the peer library
 
   ExtImplRef = object
     refs: Atomic[int]
@@ -234,6 +247,60 @@ type
     lock: Lock
     ports: array[ExtMaxPorts, ExtPortSlot]
     pool: ptr ExtWorkerPool
+    loadError: cstring ## K1: c_malloc'd, last `extImportLoad` diagnostics
+    resolved: uint64 ## K1: names whose symbols resolved (bit per nameIdx)
+    peerFns: ptr PeerFns ## K2: resolved peer C ABI (once per process)
+    peers: array[ExtMaxPorts, ptr ExtPeerUser] ## K2: one per loaded host ctx
+
+  PeerRespCb = proc(
+    user: pointer, reqId: uint64, status: int32, buf: pointer, len: int32
+  ) {.cdecl, gcsafe, raises: [].}
+  PeerEventCb = proc(
+    ctx: uint32, eventName: cstring, buf: pointer, len: int32, user: pointer
+  ) {.cdecl, gcsafe, raises: [].}
+
+  PeerFns = object
+    ## The fixed 13-function C ABI of a nim-brokers library (the parts used).
+    initialize: proc() {.cdecl, gcsafe, raises: [].}
+    createContext: proc(errOut: ptr cstring): uint32 {.cdecl, gcsafe, raises: [].}
+    shutdown: proc(ctx: uint32): int32 {.cdecl, gcsafe, raises: [].}
+    allocBuffer: proc(size: int32): pointer {.cdecl, gcsafe, raises: [].}
+    freeBuffer: proc(buf: pointer) {.cdecl, gcsafe, raises: [].}
+    call: proc(
+      ctx: uint32,
+      api: cstring,
+      req: pointer,
+      reqLen: int32,
+      respOut: ptr pointer,
+      respLenOut: ptr int32,
+    ): int32 {.cdecl, gcsafe, raises: [].}
+    callAsync: proc(
+      ctx: uint32,
+      api: cstring,
+      req: pointer,
+      reqLen: int32,
+      reqId: uint64,
+      timeoutMs: uint32,
+      cb: PeerRespCb,
+      user: pointer,
+    ): int32 {.cdecl, gcsafe, raises: [].}
+    subscribe: proc(ctx: uint32, ev: cstring, cb: PeerEventCb, user: pointer): uint64 {.
+      cdecl, gcsafe, raises: []
+    .}
+    unsubscribe:
+      proc(ctx: uint32, ev: cstring, h: uint64): int32 {.cdecl, gcsafe, raises: [].}
+    getSchema:
+      proc(outBuf: ptr pointer, outLen: ptr int32): int32 {.cdecl, gcsafe, raises: [].}
+
+  ExtPeerUser = object
+    ## `user` of a K2 synthetic port; libc-allocated, lives until host stop.
+    port: uint64
+    peerCtx: uint32
+    fns: ptr PeerFns
+    subs: array[ExtMaxNames, uint64] ## event subscriptions by nameIdx
+
+  ExtImportUser = object ## `user` of a K1 synthetic port: lets the trampolines reply.
+    port: uint64
 
   ExtCtlOp = enum
     ecoProvide
@@ -298,6 +365,7 @@ type
     portSlot: int
     gen: uint32
     wired: bool
+    native: bool ## served by a K1 import port
 
 # ---------------------------------------------------------------------------
 # Ring
@@ -520,15 +588,15 @@ proc inplaceFill(id: uint64, status: int32, buf: ptr uint8, len: int): bool =
 
 proc sharedFind(
     p, n: int, ctx: uint32
-): tuple[found: bool, slot: int, gen: uint32, wired: bool] =
+): tuple[found: bool, slot: int, gen: uint32, wired: bool, native: bool] =
   withLock(gExtSharedLock):
     for i in 0 ..< ExtMaxShared:
       let e = gExtShared[i]
       if e.used and e.pluginIdx == p and e.nameIdx == n and e.ctx == ctx:
-        return (true, e.portSlot, e.gen, e.wired)
-  (false, 0, 0'u32, false)
+        return (true, e.portSlot, e.gen, e.wired, e.native)
+  (false, 0, 0'u32, false, false)
 
-proc sharedAdd(p, n: int, ctx: uint32, slot: int, gen: uint32): int32 =
+proc sharedAdd(p, n: int, ctx: uint32, slot: int, gen: uint32, native = false): int32 =
   withLock(gExtSharedLock):
     var free = -1
     for i in 0 ..< ExtMaxShared:
@@ -541,7 +609,13 @@ proc sharedAdd(p, n: int, ctx: uint32, slot: int, gen: uint32): int32 =
     if free < 0:
       return ExtAgain
     gExtShared[free] = ExtShared(
-      used: true, pluginIdx: p, nameIdx: n, ctx: ctx, portSlot: slot, gen: gen
+      used: true,
+      pluginIdx: p,
+      nameIdx: n,
+      ctx: ctx,
+      portSlot: slot,
+      gen: gen,
+      native: native,
     )
   ExtOk
 
@@ -623,7 +697,13 @@ proc bridgeWithdraw(pluginIdx, slot, nameIdx: int, ctx: uint32): int32 =
   ExtOk
 
 proc bridgeProvide(pluginIdx, slot, nameIdx: int, ctx: uint32, gen: uint32): int32 =
-  let rc = sharedAdd(pluginIdx, nameIdx, ctx, slot, gen)
+  var native = false
+  let prt = gExtPlugins[pluginIdx]
+  withLock(prt.lock):
+    let impl = prt.ports[slot].impl
+    if not impl.isNil:
+      native = (impl.impl.caps and ExtCapNative) != 0
+  let rc = sharedAdd(pluginIdx, nameIdx, ctx, slot, gen, native)
   if rc != ExtOk:
     return rc
   let rt = gExtPlugins[pluginIdx]
@@ -787,6 +867,21 @@ proc extInplaceActive*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
     return false
   let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
   f.found and f.wired
+
+proc extNativeActive*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
+  ## A K1 import serves `(plugin, name)` on `ctx` and the bridge auto-wired
+  ## the public slot: the generated code may call the C function directly.
+  if pluginIdx < 0 or nameIdx < 0:
+    return false
+  let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
+  f.found and f.native and f.wired
+
+proc extNativeProvided*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
+  ## A K1 import serves `(plugin, name)` on `ctx` (wired or not).
+  if pluginIdx < 0 or nameIdx < 0:
+    return false
+  let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
+  f.found and f.native
 
 proc extCallInplace*(
     pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte]
@@ -1159,6 +1254,415 @@ proc extSchemaHash(
   cast[ptr UncheckedArray[char]](hashOut)[min(n, 32)] = '\0'
   ExtOk
 
+proc extImportReplyOk*(user: pointer, id: uint64, data: seq[byte]) =
+  ## K1 trampolines: answer an invoke through the ordinary reply path.
+  let u = cast[ptr ExtImportUser](user)
+  let p =
+    if data.len > 0:
+      cast[ptr uint8](unsafeAddr data[0])
+    else:
+      nil
+  discard extReply(nil, u.port, id, ExtReplyOk, p, csize_t(data.len))
+
+proc extImportReplyErr*(user: pointer, id: uint64, msg: string) =
+  let u = cast[ptr ExtImportUser](user)
+  let p =
+    if msg.len > 0:
+      cast[ptr uint8](unsafeAddr msg[0])
+    else:
+      nil
+  discard extReply(nil, u.port, id, ExtReplyErr, p, csize_t(msg.len))
+
+proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string]
+
+proc extImportLoad*(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
+  ## K1: resolve every import of the plugin and serve the resolved names on
+  ## `ctx` through a synthetic port. Names whose library or symbol is missing
+  ## stay unprovided (`extFallback` / "no provider") and are listed in
+  ## `extImportLoadError`. `err` only when nothing could be loaded. Libraries
+  ## are never unloaded: running calls could outlive any unload point.
+  if not hostRunning():
+    return err("EXTAPI: host not started (call ExtHost.start() first)")
+  if pluginIdx < 0 or pluginIdx >= gExtPluginCount.load(moAcquire):
+    return err("EXTAPI: unknown plugin")
+  let rt = gExtPlugins[pluginIdx]
+  let d = rt.desc
+  if not d.peerLib.isNil:
+    return extPeerLoad(pluginIdx, ctx)
+  if d.importInvoke.isNil:
+    return err("EXTAPI: plugin " & $d.name & " has no native or peer imports")
+  var problems: seq[string]
+  var resolved: seq[int]
+  for n in 0 ..< d.nameCount:
+    let nd = d.names[n]
+    if nd.importResolve.isNil:
+      continue
+    var lib: LibHandle = nil
+    try:
+      lib = loadLibPattern($nd.importLib)
+    except Exception:
+      lib = nil
+    if lib.isNil:
+      problems.add($nd.name & ": cannot load library '" & $nd.importLib & "'")
+      continue
+    let missing = nd.importResolve(lib)
+    if missing.len > 0:
+      problems.add($nd.name & ": missing symbol " & missing)
+      continue
+    resolved.add(n)
+  let msg = problems.join("; ")
+  withLock(rt.lock):
+    if not rt.loadError.isNil:
+      c_free(rt.loadError)
+      rt.loadError = nil
+    if msg.len > 0:
+      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
+      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
+      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
+  if resolved.len == 0:
+    return err("EXTAPI: nothing could be loaded for " & $d.name & ": " & msg)
+  let user = cast[ptr ExtImportUser](c_calloc(1, csize_t(sizeof(ExtImportUser))))
+  var impl = ExtImplDesc(
+    abiVersion: ExtAbiVersion,
+    plugin: d.name,
+    schemaHash: nil,
+    caps: ExtCapNonBlocking or ExtCapReplyInline or ExtCapNative,
+    invoke: d.importInvoke,
+    cancel: nil,
+    release: proc(u: pointer) {.cdecl, gcsafe, raises: [].} =
+      c_free(u),
+    user: user,
+  )
+  var port: uint64
+  let rc = extOpen(nil, uint32(ctx), addr impl, addr port)
+  if rc != ExtOk:
+    c_free(user)
+    return err("EXTAPI: cannot open import port (" & $rc & ")")
+  user.port = port
+  for n in resolved:
+    let prc = extProvide(nil, port, d.names[n].name)
+    if prc != ExtOk:
+      problems.add($d.names[n].name & ": provide failed (" & $prc & ")")
+  ok()
+
+proc extImportLoadError*(pluginIdx: int): string =
+  if pluginIdx < 0 or pluginIdx >= gExtPluginCount.load(moAcquire):
+    return "unknown plugin"
+  let rt = gExtPlugins[pluginIdx]
+  withLock(rt.lock):
+    if not rt.loadError.isNil:
+      return $rt.loadError
+  ""
+
+# ---------------------------------------------------------------------------
+# K2 — nim-brokers peer library
+# ---------------------------------------------------------------------------
+
+const
+  peerBadEnvelope: cstring = "EXTAPI: malformed peer response envelope"
+  peerTimedOut: cstring = "EXTAPI: peer timed out"
+  peerShutDown: cstring = "EXTAPI: peer shut down"
+  peerDispatchFailed: cstring = "EXTAPI: peer dispatch failed"
+  peerBusy: cstring = "ext: peer busy"
+  peerCallFailed: cstring = "EXTAPI: peer callAsync failed"
+  peerAllocFailed: cstring = "EXTAPI: peer allocBuffer failed"
+
+proc replyText(port: uint64, id: uint64, msg: cstring) =
+  discard
+    extReply(nil, port, id, ExtReplyErr, cast[ptr uint8](msg), csize_t(c_strlen(msg)))
+
+proc cborHeadAt(
+    b: ptr UncheckedArray[uint8], n, at: int
+): tuple[major, hdr: int, v: uint64] =
+  ## Minimal CBOR head decoder (definite lengths up to 64 bit); hdr 0 = error.
+  if at >= n:
+    return (0, 0, 0'u64)
+  let ib = int(b[at])
+  let major = ib shr 5
+  let ai = ib and 31
+  if ai < 24:
+    return (major, 1, uint64(ai))
+  let extra =
+    case ai
+    of 24: 1
+    of 25: 2
+    of 26: 4
+    of 27: 8
+    else: -1
+  if extra < 0 or at + extra >= n:
+    return (major, 0, 0'u64)
+  var v = 0'u64
+  for i in 1 .. extra:
+    v = (v shl 8) or uint64(b[at + i])
+  (major, 1 + extra, v)
+
+proc peerRespCb(
+    user: pointer, reqId: uint64, status: int32, buf: pointer, len: int32
+) {.cdecl, gcsafe, raises: [].} =
+  ## Runs on the PEER's delivery thread — foreign to this runtime: pointer
+  ## arithmetic, libc and `extReply` (which copies) only. Unwraps the peer's
+  ## `{ok: v}` / `{err: "…"}` envelope into a bare value / error text.
+  let u = cast[ptr ExtPeerUser](user)
+  if status != 0:
+    case status
+    of -12:
+      replyText(u.port, reqId, peerTimedOut)
+    of -11:
+      replyText(u.port, reqId, peerShutDown)
+    of -4:
+      if len > 0 and not buf.isNil:
+        discard
+          extReply(nil, u.port, reqId, ExtReplyErr, cast[ptr uint8](buf), csize_t(len))
+      else:
+        replyText(u.port, reqId, peerDispatchFailed)
+    else:
+      replyText(u.port, reqId, peerDispatchFailed)
+    return
+  let b = cast[ptr UncheckedArray[uint8]](buf)
+  let n = int(len)
+  let m = cborHeadAt(b, n, 0)
+  if buf.isNil or m.hdr == 0 or m.major != 5 or m.v != 1:
+    replyText(u.port, reqId, peerBadEnvelope)
+    return
+  let k = cborHeadAt(b, n, m.hdr)
+  if k.hdr == 0 or k.major != 3:
+    replyText(u.port, reqId, peerBadEnvelope)
+    return
+  let keyAt = m.hdr + k.hdr
+  let valAt = keyAt + int(k.v)
+  if valAt > n:
+    replyText(u.port, reqId, peerBadEnvelope)
+    return
+  if k.v == 2 and b[keyAt] == uint8('o') and b[keyAt + 1] == uint8('k'):
+    let p = (if valAt < n: addr b[valAt] else: nil)
+    discard extReply(nil, u.port, reqId, ExtReplyOk, p, csize_t(n - valAt))
+  elif k.v == 3 and b[keyAt] == uint8('e') and b[keyAt + 1] == uint8('r') and
+      b[keyAt + 2] == uint8('r'):
+    let t = cborHeadAt(b, n, valAt)
+    if t.hdr == 0 or t.major != 3 or valAt + t.hdr + int(t.v) > n:
+      replyText(u.port, reqId, peerBadEnvelope)
+      return
+    let p = (if t.v > 0: addr b[valAt + t.hdr] else: nil)
+    discard extReply(nil, u.port, reqId, ExtReplyErr, p, csize_t(t.v))
+  else:
+    replyText(u.port, reqId, peerBadEnvelope)
+
+proc peerEventCb(
+    ctx: uint32, eventName: cstring, buf: pointer, len: int32, user: pointer
+) {.cdecl, gcsafe, raises: [].} =
+  ## Peer delivery thread: the event payload is the same CBOR object our
+  ## EventBroker decodes — forward it as a foreign `emit`.
+  let u = cast[ptr ExtPeerUser](user)
+  discard extEmit(nil, u.port, eventName, cast[ptr uint8](buf), csize_t(len))
+
+proc peerInvoke(
+    user: pointer,
+    id: uint64,
+    nameIdx: uint32,
+    name: cstring,
+    buf: ptr uint8,
+    len: csize_t,
+) {.cdecl, gcsafe, raises: [].} =
+  ## The synthetic port's invoke: requests → `<peer>_callAsync` (never
+  ## blocks; the reply arrives on the peer's delivery thread), signals →
+  ## the peer's slot-free one-way `<peer>_call`. The request buffer is the
+  ## peer's to free (allocated with `<peer>_allocBuffer`).
+  let u = cast[ptr ExtPeerUser](user)
+  var req: pointer = nil
+  if len > 0:
+    req = u.fns.allocBuffer(int32(len))
+    if req.isNil:
+      if id != 0:
+        replyText(u.port, id, peerAllocFailed)
+      return
+    copyMem(req, buf, int(len))
+  if id == 0:
+    var resp: pointer = nil
+    var respLen: int32 = 0
+    discard u.fns.call(u.peerCtx, name, req, int32(len), addr resp, addr respLen)
+    if not resp.isNil:
+      u.fns.freeBuffer(resp)
+    return
+  let rc = u.fns.callAsync(u.peerCtx, name, req, int32(len), id, 0, peerRespCb, user)
+  if rc < 0:
+    replyText(u.port, id, (if rc == -6: peerBusy else: peerCallFailed))
+
+proc resolvePeer(lib: LibHandle, prefix: string): Result[ptr PeerFns, string] =
+  let f = cast[ptr PeerFns](c_calloc(1, csize_t(sizeof(PeerFns))))
+  var missing: seq[string]
+  template res(field, suffix: untyped) =
+    let a = symAddr(lib, prefix & suffix)
+    if a.isNil:
+      missing.add(prefix & suffix)
+    else:
+      f.field = cast[typeof(f.field)](a)
+
+  res(initialize, "_initialize")
+  res(createContext, "_createContext")
+  res(shutdown, "_shutdown")
+  res(allocBuffer, "_allocBuffer")
+  res(freeBuffer, "_freeBuffer")
+  res(call, "_call")
+  res(callAsync, "_callAsync")
+  res(subscribe, "_subscribe")
+  res(unsubscribe, "_unsubscribe")
+  res(getSchema, "_getSchema")
+  if missing.len > 0:
+    c_free(f)
+    return err("missing peer symbols: " & missing.join(", "))
+  ok(f)
+
+proc peerSchemaSigs(f: ptr PeerFns): Result[seq[(string, string)], string] =
+  ## (wire name, "args|payload") for every request / event / signal the peer
+  ## publishes, in the same canonical form `registerExtPlugin` burns in.
+  var outBuf: pointer = nil
+  var outLen: int32 = 0
+  if f.getSchema(addr outBuf, addr outLen) != 0 or outBuf.isNil:
+    return err("peer _getSchema failed")
+  # `<lib>_getSchema` returns the JSON form of `LibraryDescriptor`.
+  var text = newString(int(outLen))
+  if outLen > 0:
+    copyMem(addr text[0], outBuf, int(outLen))
+  f.freeBuffer(outBuf)
+  var sigs: seq[(string, string)]
+  try:
+    let j = parseJson(text)
+    for r in j["requests"]:
+      var args: seq[string]
+      for a in r["argFields"]:
+        args.add(a["name"].getStr() & ":" & a["nimType"].getStr().replace(" ", ""))
+      args.sort()
+      sigs.add(
+        (
+          r["apiName"].getStr(),
+          args.join(",") & "|" & r["responseType"].getStr().replace(" ", ""),
+        )
+      )
+    for e in j["events"]:
+      sigs.add(
+        (e["apiName"].getStr(), "|" & e["payloadType"].getStr().replace(" ", ""))
+      )
+    for e in j["signals"]:
+      sigs.add(
+        (e["apiName"].getStr(), "|" & e["payloadType"].getStr().replace(" ", ""))
+      )
+  except CatchableError as e:
+    return err("peer schema parse failed: " & e.msg)
+  ok(sigs)
+
+proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
+  ## K2: one peer context per host context (EXTAPI_PLAN §D4-4). Resolves the
+  ## peer library once, checks every imported name against the peer schema,
+  ## creates `peerCtx`, opens a synthetic port, provides the requests /
+  ## signals and subscribes the events.
+  let rt = gExtPlugins[pluginIdx]
+  let d = rt.desc
+  var problems: seq[string]
+  if rt.peerFns.isNil:
+    var lib: LibHandle = nil
+    try:
+      lib = loadLibPattern($d.peerDynlib)
+    except Exception:
+      lib = nil
+    if lib.isNil:
+      return err("EXTAPI: cannot load peer library '" & $d.peerDynlib & "'")
+    let f = resolvePeer(lib, $d.peerLib)
+    if f.isErr:
+      return err("EXTAPI: " & f.error)
+    f.value.initialize()
+    rt.peerFns = f.value
+  let fns = rt.peerFns
+  let sigs = peerSchemaSigs(fns)
+  if sigs.isErr:
+    return err("EXTAPI: " & sigs.error)
+  var accepted: seq[int]
+  for n in 0 ..< d.nameCount:
+    let want = $d.names[n].peerSig
+    var found = false
+    var match = false
+    for (nm, sg) in sigs.value:
+      if nm == $d.names[n].name:
+        found = true
+        match = sg == want
+    if not found:
+      problems.add($d.names[n].name & ": not published by the peer")
+    elif not match:
+      problems.add($d.names[n].name & ": schema differs from the peer's")
+    else:
+      accepted.add(n)
+  let msg = problems.join("; ")
+  withLock(rt.lock):
+    if not rt.loadError.isNil:
+      c_free(rt.loadError)
+      rt.loadError = nil
+    if msg.len > 0:
+      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
+      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
+      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
+  if accepted.len == 0:
+    return err("EXTAPI: nothing could be imported from " & $d.peerLib & ": " & msg)
+  var errOut: cstring = nil
+  let peerCtx = fns.createContext(addr errOut)
+  if peerCtx == 0:
+    let e = (if errOut.isNil: "unknown" else: $errOut)
+    if not errOut.isNil:
+      fns.freeBuffer(errOut)
+    return err("EXTAPI: peer createContext failed: " & e)
+  let user = cast[ptr ExtPeerUser](c_calloc(1, csize_t(sizeof(ExtPeerUser))))
+  user.peerCtx = peerCtx
+  user.fns = fns
+  var impl = ExtImplDesc(
+    abiVersion: ExtAbiVersion,
+    plugin: d.name,
+    schemaHash: nil,
+    caps: ExtCapNonBlocking,
+    invoke: peerInvoke,
+    cancel: nil, # no `_cancelAsync` yet: a cancelled call's late reply is dropped by id
+    release: nil, # freed with the peer context at host stop
+    user: user,
+  )
+  var port: uint64
+  let rc = extOpen(nil, uint32(ctx), addr impl, addr port)
+  if rc != ExtOk:
+    discard fns.shutdown(peerCtx)
+    c_free(user)
+    return err("EXTAPI: cannot open peer port (" & $rc & ")")
+  user.port = port
+  withLock(rt.lock):
+    rt.peers[splitPort(port).slot] = user
+  for n in accepted:
+    let nd = d.names[n]
+    if nd.kind == enkEvent:
+      user.subs[n] = fns.subscribe(peerCtx, nd.name, peerEventCb, user)
+    else:
+      let prc = extProvide(nil, port, nd.name)
+      if prc != ExtOk:
+        problems.add($nd.name & ": provide failed (" & $prc & ")")
+  ok()
+
+proc shutdownPeers() =
+  ## Host stop: unsubscribe, shut every peer context down, free the users.
+  for p in 0 ..< gExtPluginCount.load(moAcquire):
+    let rt = gExtPlugins[p]
+    if rt.peerFns.isNil:
+      continue
+    for s in 0 ..< ExtMaxPorts:
+      let u = rt.peers[s]
+      if u.isNil:
+        continue
+      rt.peers[s] = nil
+      for n in 0 ..< rt.desc.nameCount:
+        if u.subs[n] != 0:
+          discard rt.peerFns.unsubscribe(u.peerCtx, rt.desc.names[n].name, u.subs[n])
+      discard rt.peerFns.shutdown(u.peerCtx)
+      c_free(u)
+
+proc extJoinMissing*(missing: seq[string]): string =
+  missing.join(", ")
+
+proc extPluginIndex*(name: string): int =
+  findPlugin(cstring(name))
+
 proc extHostTable*(): ptr ExtHostTable =
   ## The function table handed to foreign plugins (`broker_ext_host`).
   addr gExtHostTable
@@ -1274,6 +1778,12 @@ proc extHostStart*(): Result[void, string] =
   while gExtHost.ready.load(moAcquire) != 1:
     os.sleep(1)
   gExtHost.running.store(true, moRelease)
+  for p in 0 ..< gExtPluginCount.load(moAcquire):
+    let d = gExtPlugins[p].desc
+    if d.loadEager and (not d.importInvoke.isNil or not d.peerLib.isNil):
+      let r = extImportLoad(p, DefaultBrokerContext)
+      if r.isErr:
+        warn "EXTAPI: eager import load failed", plugin = $d.name, reason = r.error
   ok()
 
 proc extHostStop*() =
@@ -1286,6 +1796,8 @@ proc extHostStop*() =
   fireBrokerSignal(gExtHost.signal)
   joinAndReleaseThread(gExtBridgeThread)
   gExtHost.bridgeTid.store(0, moRelease)
+  # Peer contexts: ports are already closed; stop the peers' threads.
+  shutdownPeers()
   # Stop worker pools after the bridge: no new work can be queued now.
   # A worker blocked inside a foreign `invoke` delays this join (documented
   # in EXTAPI_PLAN §11; a join timeout + leak is a follow-up).

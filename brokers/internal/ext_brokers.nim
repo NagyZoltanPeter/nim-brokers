@@ -33,6 +33,11 @@ type ExtEntryCT* = object
   uninstallName*: string
   emitName*: string
   tunnelName*: string ## ExtTunnel adapter proc for this name
+  dynlibSrc*: string ## K1: Nim expression of the `dynlib` pattern ("" = not an import)
+  importResolveName*: string ## K1: resolver proc
+  importTrampName*: string ## K1: CBOR trampoline proc
+  rawPtrArgs*: bool ## K1 short form with ptr / pointer / openArray / cstring args
+  peerLib*: string ## K2: peer nim-brokers library name ("" = not a peer import)
   nameIdxVar*: string
   pluginIdxVar*: string
   dispatch*: string ## "" = the plugin default
@@ -80,7 +85,14 @@ proc parseBoolLit*(v: NimNode, what: string): string {.compileTime.} =
 
 proc extDispatchArg(
     ext: seq[NimNode]
-): tuple[name: string, workers: int, autoWire: string] {.compileTime.} =
+): tuple[
+  name: string,
+  workers: int,
+  autoWire: string,
+  importc: string,
+  dynlibSrc: string,
+  importLib: string,
+] {.compileTime.} =
   for kw in ext:
     if kw[0].eqIdent("dispatch"):
       let d = parseDispatch(kw[1])
@@ -88,9 +100,46 @@ proc extDispatchArg(
       result.workers = d.workers
     elif kw[0].eqIdent("autoWire"):
       result.autoWire = parseBoolLit(kw[1], "autoWire")
-    elif kw[0].eqIdent("importc") or kw[0].eqIdent("dynlib") or
-        kw[0].eqIdent("importLib"):
-      error("EXTAPI kwarg `" & $kw[0] & "` is not implemented yet", kw)
+    elif kw[0].eqIdent("importc"):
+      if kw[1].kind notin {nnkStrLit, nnkTripleStrLit, nnkRStrLit}:
+        error("EXTAPI `importc` expects the C symbol as a string literal", kw[1])
+      result.importc = kw[1].strVal
+    elif kw[0].eqIdent("dynlib"):
+      # A string literal or any Nim expression (e.g. a const) evaluated at load.
+      result.dynlibSrc = kw[1].repr
+    elif kw[0].eqIdent("importLib"):
+      if kw[1].kind notin {nnkStrLit, nnkTripleStrLit, nnkRStrLit}:
+        error(
+          "EXTAPI `importLib` expects the peer library name as a string literal", kw[1]
+        )
+      result.importLib = kw[1].strVal
+  if result.importLib.len > 0 and result.dynlibSrc.len == 0:
+    macros.error("EXTAPI `importLib` needs `dynlib = <peer library pattern>`")
+  if result.importLib.len > 0 and result.importc.len > 0:
+    macros.error(
+      "EXTAPI: `importLib` (peer library) and `importc` (C function) exclude each other"
+    )
+
+proc isImportcProc(n: NimNode): bool {.compileTime.} =
+  if n.kind != nnkProcDef or n[4].kind != nnkPragma:
+    return false
+  for pr in n[4]:
+    if (pr.kind == nnkIdent and pr.eqIdent("importc")) or
+        (pr.kind in {nnkExprColonExpr, nnkCall} and pr[0].eqIdent("importc")):
+      return true
+  false
+
+proc importcSymbol(n: NimNode): string {.compileTime.} =
+  let nm = (if n[0].kind == nnkPostfix: $n[0][1] else: $n[0])
+  for pr in n[4]:
+    if pr.kind in {nnkExprColonExpr, nnkCall} and pr[0].eqIdent("importc") and pr.len > 1 and
+        pr[1].kind in {nnkStrLit, nnkTripleStrLit, nnkRStrLit}:
+      return pr[1].strVal
+  nm
+
+proc isRawPtrType(t: string): bool {.compileTime.} =
+  let l = t.strip().toLowerAscii()
+  l.startsWith("ptr ") or l == "pointer" or l.startsWith("openarray") or l == "cstring"
 
 proc pluginNameOf*(modeNode: NimNode): string {.compileTime.} =
   ## `EXTAPI[storage]` → "storage".
@@ -165,9 +214,30 @@ proc generateExtRequestBroker*(
   # Parsed afresh rather than copied: a `let` copy of an object in the
   # compile-time VM can alias the original, and the lane must not get the hook.
   let laneCfg = parseMtReqKwargs(mtKw)
+  # K1 imports: `{.importc.}` prototypes and signature bodies (adapters) are
+  # ours, not the MT broker's — strip them before handing the body on.
+  var protos: seq[NimNode]
+  var zeroBody, argBody: NimNode = nil
+  var stripped = body
+  if body.kind == nnkStmtList:
+    stripped = newStmtList()
+    for stmt in body:
+      if isImportcProc(stmt):
+        protos.add(stmt)
+        continue
+      if stmt.kind == nnkProcDef and stmt[6].kind != nnkEmpty:
+        let c = copyNimTree(stmt)
+        c[6] = newEmptyNode()
+        if stmt.params.len - 1 == 0:
+          zeroBody = stmt[6]
+        else:
+          argBody = stmt[6]
+        stripped.add(c)
+        continue
+      stripped.add(copyNimTree(stmt))
   when defined(BrokerFfiApi):
     cfg.extInplaceHook = true
-  result.add(generateMtRequestBroker(copyNimTree(body), cfg))
+  result.add(generateMtRequestBroker(copyNimTree(stripped), cfg))
   when not defined(BrokerFfiApi):
     # Without the FFI flag EXTAPI degrades to `(mt)`: callable, mockable,
     # just not bindable from foreign code (§4).
@@ -175,6 +245,15 @@ proc generateExtRequestBroker*(
     return
   else:
     let dispatch = extDispatchArg(extKw)
+    let body = stripped
+    let isPeer = dispatch.importLib.len > 0
+    let isImport =
+      (dispatch.dynlibSrc.len > 0 and not isPeer) or dispatch.importc.len > 0 or
+      protos.len > 0 or not zeroBody.isNil or not argBody.isNil
+    if isPeer and (protos.len > 0 or not zeroBody.isNil or not argBody.isNil):
+      error("EXTAPI peer import (`importLib`) takes signatures only", modeNode)
+    if isImport and dispatch.dynlibSrc.len == 0:
+      error("EXTAPI native import needs `dynlib = \"<library pattern>\"`", modeNode)
 
     # 2. Classify the body exactly like the (API) lane does.
     var hasSignatureProc = false
@@ -292,6 +371,44 @@ proc generateExtRequestBroker*(
         "(payload: r.value))\n"
     )
 
+    # K1: C function pointers + resolver (broker level).
+    var resolveLines = ""
+    proc fnVar(suffix: string, params: seq[NimNode], ret: string, sym: string): string =
+      let v = "gExtImpFn_" & typeName & "_" & suffix
+      let pt =
+        "proc(" & paramDeclSrc(params) & ")" & (if ret.len > 0: ": " & ret
+        else: "") & " {.cdecl, gcsafe, raises: [].}"
+      src.add("var " & v & "* {.global.}: " & pt & "\n")
+      resolveLines.add(
+        "    block:\n" & "      let a = symAddr(lib, \"" & sym & "\")\n" &
+          "      if a.isNil:\n" & "        missing.add(\"" & sym & "\")\n" &
+          "      else:\n" & "        " & v & " = cast[" & pt & "](a)\n"
+      )
+      v
+
+    var protoWrappers = ""
+    if isImport:
+      if isSugar:
+        error("EXTAPI native imports need the `proc signature*` form", modeNode)
+      for pr in protos:
+        let pname = (if pr[0].kind == nnkPostfix: $pr[0][1]
+        else: $pr[0])
+        var pparams: seq[NimNode]
+        for i in 1 ..< pr.params.len:
+          pparams.add(pr.params[i])
+        let ret = (if pr.params[0].kind == nnkEmpty: ""
+        else: pr.params[0].repr.strip())
+        let v = fnVar(pname, pparams, ret, importcSymbol(pr))
+        protoWrappers.add(
+          "      proc " & pname & "(" & paramDeclSrc(pparams) & ")" &
+            (if ret.len > 0: ": " & ret else: "") & " =\n" & "        " & v & "(" &
+            paramNames(pparams).join(", ") & ")\n"
+        )
+      if dispatch.importc.len > 0 and zeroPresent and argPresent:
+        error("EXTAPI `importc` short form needs a single signature", modeNode)
+
+    var bodySplices: seq[(string, NimNode)]
+
     proc emitSlot(tag: string, slotLit: int, wireName: string, params: seq[NimNode]) =
       let nameIdxVar = (if tag == "zero": zeroIdxVar else: argIdxVar)
       let providerType =
@@ -302,8 +419,20 @@ proc generateExtRequestBroker*(
       let names = paramNames(params)
       let callArgs = names.join(", ")
       var encExpr: string
+      # Raw C pointers (K1 short form, `inplace` only) cannot be marshalled:
+      # every CBOR path of such a slot is an explicit error; only the native
+      # in-place call serves it.
+      var slotRawPtr = false
+      if isImport:
+        for p in params:
+          if isRawPtrType(p[p.len - 2].repr):
+            slotRawPtr = true
+      const rawPtrErr =
+        "\"EXTAPI: raw-pointer arguments cannot be marshalled (inplace native call only)\""
       if params.len == 0:
         encExpr = "Result[seq[byte], string].ok(newSeq[byte]())"
+      elif slotRawPtr:
+        encExpr = "Result[seq[byte], string].err(" & rawPtrErr & ")"
       else:
         let argsType = typeName & "ExtArgs" & tag
         src.add("type " & argsType & "* = object\n")
@@ -323,6 +452,92 @@ proc generateExtRequestBroker*(
         "  var pIdx, nIdx: int\n" & "  {.cast(gcsafe).}:\n" & "    pIdx = " &
           pluginIdxVar & "\n" & "    nIdx = " & nameIdxVar & "\n"
 
+      # K1: typed sync adapter (the native call) + CBOR trampoline.
+      let adapterName = "extImport_" & typeName & "_" & tag
+      let trampName = "extImportTramp_" & typeName & "_" & tag
+      var rawPtr = false
+      if isImport:
+        let ubody = (if tag == "zero": zeroBody else: argBody)
+        if ubody.isNil:
+          if dispatch.importc.len == 0:
+            error(
+              "EXTAPI native import: give `importc = \"<symbol>\"` or a signature body",
+              modeNode,
+            )
+          var ret = ""
+          if not isVoid:
+            if payloadFieldPairs.len != 1:
+              error(
+                "EXTAPI `importc` short form needs a response object with exactly one field (the C return value)",
+                modeNode,
+              )
+            ret = payloadFieldPairs[0][1]
+          for p in params:
+            if isRawPtrType(p[p.len - 2].repr):
+              rawPtr = true
+          let v = fnVar(tag, params, ret, dispatch.importc)
+          src.add(
+            "proc " & adapterName & "*(" & decl & "): " & resTy &
+              " {.gcsafe, raises: [].} =\n" & "  {.cast(gcsafe).}:\n" & "    if " & v &
+              ".isNil:\n" & "      return err(\"EXTAPI: import not loaded\")\n"
+          )
+          if isVoid:
+            src.add("    " & v & "(" & callArgs & ")\n" & "    return ok()\n")
+          else:
+            src.add(
+              "    return ok(" & payloadSrc & "(" & payloadFieldPairs[0][0] & ": " & v &
+                "(" & callArgs & ")))\n"
+            )
+        else:
+          src.add(
+            "proc " & adapterName & "*(" & decl & "): " & resTy &
+              " {.gcsafe, raises: [].} =\n" & "  {.cast(gcsafe).}:\n" & protoWrappers &
+              "      try:\n" & "        discard \"EXT_BODY_" & tag & "\"\n" &
+              "      except CatchableError as e:\n" &
+              "        return err(\"EXTAPI: import adapter raised: \" & e.msg)\n"
+          )
+          bodySplices.add(("EXT_BODY_" & tag, ubody))
+        # Trampoline: runs where the dispatch policy says (bridge / worker /
+        # inplace caller), CBOR in and out.
+        src.add(
+          "proc " & trampName &
+            "*(user: pointer, id: uint64, buf: ptr uint8, len: int) {.gcsafe, raises: [].} =\n" &
+            "  {.cast(gcsafe).}:\n"
+        )
+        if slotRawPtr:
+          src.add(
+            "    discard buf\n    discard len\n    extImportReplyErr(user, id, " &
+              rawPtrErr & ")\n    return\n"
+          )
+        elif params.len > 0:
+          src.add(
+            "    let d = cborDecode(toOpenArray(cast[ptr UncheckedArray[byte]](buf), 0, len - 1), " &
+              typeName & "ExtArgs" & tag & ")\n" & "    if d.isErr:\n" &
+              "      extImportReplyErr(user, id, \"EXTAPI: import args decode failed: \" & d.error)\n" &
+              "      return\n"
+          )
+          var dargs: seq[string]
+          for n in names:
+            dargs.add("d.value." & n)
+          src.add("    let r = " & adapterName & "(" & dargs.join(", ") & ")\n")
+        else:
+          src.add("    let r = " & adapterName & "()\n")
+        if not slotRawPtr:
+          src.add(
+            "    if r.isErr:\n" & "      extImportReplyErr(user, id, r.error)\n" &
+              "      return\n"
+          )
+        if slotRawPtr:
+          discard
+        elif isVoid:
+          src.add("    extImportReplyOk(user, id, newSeq[byte]())\n")
+        else:
+          src.add(
+            "    let e = cborEncode(r.value)\n" & "    if e.isErr:\n" &
+              "      extImportReplyErr(user, id, \"EXTAPI: import reply encode failed: \" & e.error)\n" &
+              "      return\n" & "    extImportReplyOk(user, id, e.value)\n"
+          )
+
       # Forwarder: serves one call from the external source, from any thread.
       src.add(
         "proc extProvider" & sfx & "*(_: typedesc[" & typeName &
@@ -331,8 +546,13 @@ proc generateExtRequestBroker*(
           "    let enc = " & encExpr & "\n" & "    if enc.isErr:\n" &
           "      return err(\"EXTAPI: request encode failed: \" & enc.error)\n" &
           "    var r: Result[seq[byte], string]\n" &
-          "    if extNameDispatch(pIdx, nIdx) == edInplace:\n" &
-          "      r = extCallInplace(pIdx, nIdx, ctx, enc.value)\n" &
+          "    if extNameDispatch(pIdx, nIdx) == edInplace:\n" & (
+          if isImport:
+            "      if extNativeProvided(pIdx, nIdx, ctx):\n" & "        return " &
+              adapterName & "(" & callArgs & ")\n"
+          else:
+            ""
+        ) & "      r = extCallInplace(pIdx, nIdx, ctx, enc.value)\n" &
           "    elif extOnBridge():\n" & "      var tmo: Duration\n" &
           "      {.cast(gcsafe).}:\n" & "        tmo = g" & typeName & "MtTimeout\n" &
           "      r = await extCall(pIdx, nIdx, ctx, enc.value, tmo)\n" & "    else:\n" &
@@ -378,7 +598,13 @@ proc generateExtRequestBroker*(
           hookParams & ", res: var " & resTy & "): bool {.gcsafe, raises: [].} =\n" &
           idxRead("brokerCtx") & "  if extNameDispatch(pIdx, nIdx) != edInplace or\n" &
           "      not extInplaceActive(pIdx, nIdx, brokerCtx):\n" & "    return false\n" &
-          "  {.cast(gcsafe).}:\n" & "    let enc = " & encExpr & "\n" &
+        (
+          if isImport:
+            "  if extNativeActive(pIdx, nIdx, brokerCtx):\n" & "    {.cast(gcsafe).}:\n" &
+              "      res = " & adapterName & "(" & callArgs & ")\n" & "    return true\n"
+          else:
+            ""
+        ) & "  {.cast(gcsafe).}:\n" & "    let enc = " & encExpr & "\n" &
           "    if enc.isErr:\n" &
           "      res.err(\"EXTAPI: request encode failed: \" & enc.error)\n" &
           "      return true\n" &
@@ -390,7 +616,9 @@ proc generateExtRequestBroker*(
       let tunnelName = "extTunnel_" & typeName & "_" & tag
       var reqCall = "await " & typeName & ".request(ctx"
       var tunnelDecode = ""
-      if params.len > 0:
+      if slotRawPtr:
+        tunnelDecode = "  discard payload\n  return err(" & rawPtrErr & ")\n"
+      elif params.len > 0:
         tunnelDecode =
           "  let d = cborDecode(payload, " & typeName & "ExtArgs" & tag & ")\n" &
           "  if d.isErr:\n" &
@@ -401,10 +629,15 @@ proc generateExtRequestBroker*(
       src.add(
         "proc " & tunnelName &
           "(ctx: BrokerContext, payload: seq[byte]): Future[Result[seq[byte], string]] {.async: (raises: []), gcsafe.} =\n" &
-          tunnelDecode & "  let r = " & reqCall & "\n" & "  if r.isErr:\n" &
-          "    return err(r.error)\n"
+          tunnelDecode
       )
-      if isVoid:
+      if not slotRawPtr:
+        src.add(
+          "  let r = " & reqCall & "\n" & "  if r.isErr:\n" & "    return err(r.error)\n"
+        )
+      if slotRawPtr:
+        discard
+      elif isVoid:
         src.add("  return ok(newSeq[byte]())\n")
       else:
         src.add(
@@ -456,6 +689,11 @@ proc generateExtRequestBroker*(
             a,
           payloadType: payloadSrc,
           payloadFields: payloadFieldPairs,
+          dynlibSrc: (if isImport or isPeer: dispatch.dynlibSrc else: ""),
+          importResolveName: (if isImport: "extResolve_" & typeName else: ""),
+          importTrampName: (if isImport: trampName else: ""),
+          rawPtrArgs: rawPtr,
+          peerLib: dispatch.importLib,
         )
       )
 
@@ -463,9 +701,29 @@ proc generateExtRequestBroker*(
       emitSlot("zero", 0, wireBase & zeroSuffix, @[])
     if argPresent:
       emitSlot("arg", 1, wireBase & argSuffix, argParams)
+    if isImport:
+      src.add(
+        "proc extResolve_" & typeName &
+          "*(lib: LibHandle): string {.nimcall, gcsafe, raises: [].} =\n" &
+          "  var missing: seq[string]\n" & "  {.cast(gcsafe).}:\n" & resolveLines &
+          "  extJoinMissing(missing)\n"
+      )
 
     let gen = parseStmt(src)
+    # Splice the user's adapter bodies over their placeholders.
+    proc splice(n: NimNode) =
+      for i in 0 ..< n.len:
+        let c = n[i]
+        if c.kind == nnkDiscardStmt and c.len == 1 and c[0].kind == nnkStrLit:
+          for (marker, b) in bodySplices:
+            if c[0].strVal == marker:
+              n[i] = copyNimTree(b)
+        else:
+          splice(c)
+
+    # Stamp first so the user's adapter body keeps its own line info.
     stampLineInfo(gen, modeNode)
+    splice(gen)
     result.add(gen)
     when defined(brokerDebug):
       writeBrokerDebug(
@@ -480,11 +738,13 @@ proc generateExtEventBroker*(
   ## `emit` and re-emits it with the ordinary `T.emit(ctx, value)`.
   let plugin = pluginNameOf(modeNode)
   let (mtKw, extKw) = splitExtKwargs(kwargs)
-  if extKw.len > 0:
-    error("EventBroker(EXTAPI[...]) takes no EXTAPI kwargs", extKw[0])
+  for kw in extKw:
+    if not (kw[0].eqIdent("importLib") or kw[0].eqIdent("dynlib")):
+      error("EventBroker(EXTAPI[...]) only takes `importLib` / `dynlib`", kw)
   result = newStmtList()
   result.add(generateMtEventBroker(copyNimTree(body), parseMtEvtKwargs(mtKw)))
   when defined(BrokerFfiApi):
+    let evKw = extDispatchArg(extKw)
     let parsed = parseSingleTypeDef(body, "EventBroker", collectFieldInfo = true)
     let typeName = sanitizeIdentName(parsed.typeIdent)
     let emitName = "extEmit_" & typeName
@@ -529,6 +789,8 @@ proc generateExtEventBroker*(
         pluginIdxVar: "gExtPluginIdx_" & typeName,
         payloadType: (if parsed.isVoid: "void" else: typeName),
         payloadFields: fieldPairs(parsed),
+        peerLib: evKw.importLib,
+        dynlibSrc: evKw.dynlibSrc,
       )
     )
 
@@ -634,6 +896,8 @@ proc generateExtSignalBroker*(
         autoWire: dispatch.autoWire,
         payloadType: (if parsed.isVoid: "void" else: typeName),
         payloadFields: fieldPairs(parsed),
+        peerLib: dispatch.importLib,
+        dynlibSrc: dispatch.dynlibSrc,
       )
     )
 

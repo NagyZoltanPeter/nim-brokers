@@ -1935,3 +1935,37 @@ Findings:
 | Plugin withdraws while `extFallback` already routed a call to it | that call fails (`provider was cleared …`); later calls fall back to the Nim impl | no implicit retry: the plugin may already have acted on the call (at-most-once over at-least-once) |
 | `requestCancellable` on an auto-wired `inplace` broker | id `0`, synchronous result | the call never leaves the caller thread |
 | Compile-time VM | `let b = a` of an object inside a macro can alias `a`; the lane cfg is parsed afresh | otherwise the lane broker inherited `extInplaceHook` |
+
+### Phase 2 — library imports (implemented on `feat-extapi-design`)
+
+Both import kinds load as a **synthetic port**: a Nim-side `invoke` serves
+the names through the same port / provide / source-table machinery as a
+foreign plugin, so routing, `workers(n)`, the hidden lane, `extFallback`,
+`extAvailable`, withdraw and shutdown are shared, not re-implemented.
+
+| Piece | Where |
+|---|---|
+| K1 short form `RequestBroker(EXTAPI[p], importc = "sym", dynlib = <pattern or const>)`, body form with `{.importc.}` prototypes + an adapter body; lazy `std/dynlib` resolution into function pointers | `ext_brokers.nim` |
+| K1 trampolines (CBOR) + per-plugin dispatcher; zero-CBOR fast path when an `inplace` import is auto-wired (caller's thread) or called through `extProvider` | `ext_brokers.nim`, `registerExtPlugin` |
+| K2 `importLib = "<lib>"` on Request / Event / Signal brokers; generic peer adapter: `<lib>_callAsync` + envelope unwrap on the peer's delivery thread, `<lib>_subscribe` → foreign emit, signals via the peer's one-way `<lib>_call`; per-name schema check against the peer's `_getSchema`; one peer context per host ctx | `ext_runtime.nim` |
+| `ExtPlugin.load(name, ctx)` / `ExtPlugin.loadError(name)`; `registerExtPlugin(p, load = eager \| manual)` | `ext_plugin.nim` |
+| Compile-time rule: K1 short form with raw pointers (`ptr` / `pointer` / `openArray` / `cstring`) only under `inplace` | `registerExtPlugin`, `test/reject/reject_ext_rawptr_workers.nim` |
+| Tests | `test/test_ext_imports.nim` (`test/ext/libcodec.c`, peer `test/ext/peerlib.nim` built at test time); in `testApi`, `testExtImportsAsan{Orc,Refc}`, reject in `testSugarRejects` |
+
+Verified: ORC / refc × debug / release, ORC + ASAN, refc + ASAN; 10
+consecutive runs per MM without a failure.
+
+Deviations from §5.9:
+
+| Topic | Plan | Implemented | Reason |
+|---|---|---|---|
+| K1 wire | native C call, no CBOR | no CBOR for `inplace` (direct call); `bridge` / `workers` carry CBOR between forwarder and trampoline | one synthetic-port path instead of a second marshalling lane; the MT lane would marshal anyway |
+| K1 `workers(n)` | per-worker Nim threads with a chronos loop + internal contexts | the plugin's plain worker pool runs the adapter | the adapter body is **synchronous** (`await` not allowed — it wraps a C call), so no loop is needed |
+| K1 adapter exceptions | — | `CatchableError` → `err(...)` | providers must not raise |
+| Unload | `unload()` after the last running call | no unload; libraries stay mapped | foreign threads / callbacks may outlive any unload point (same rule as the plugin loader) |
+| `load = lazy` | eager / lazy / manual | eager / manual | lazy loading on first call deferred |
+| K1 signals / events | Request, Signal | requests only | no use case yet |
+| K2 schema | compare descriptors | per-name canonical `args\|payload` text; the peer's `_getSchema` is JSON (the `(API)` lane's format) | — |
+| K2 `inplace` | via the peer's sync `_call` | not supported (port caps `NONBLOCKING`) | deferred |
+| K2 cancel | drop by id | drop by id (no `_cancelAsync` yet) | as planned |
+| K2 per-ctx unload | `unload(ctx)` | peer contexts shut down at `ExtHost.stop()` | deferred with `unload` |

@@ -33,6 +33,20 @@ proc table*(_: typedesc[ExtHost]): ptr ExtHostTable =
   ## The `broker_ext_host` function table to hand to a plugin entry point.
   extHostTable()
 
+type ExtPlugin* = object ## Namespace for native-import plugins (K1).
+
+proc load*(
+    _: typedesc[ExtPlugin], name: string, ctx: BrokerContext = DefaultBrokerContext
+): Result[void, string] =
+  ## Resolve the plugin's C symbols (`std/dynlib`, lazily, never aborting the
+  ## program) and serve every resolved name on `ctx`. Missing libraries or
+  ## symbols leave their names unprovided — see `loadError`.
+  extImportLoad(extPluginIndex(name), ctx)
+
+proc loadError*(_: typedesc[ExtPlugin], name: string): string =
+  ## Diagnostics of the last `load` ("" when everything resolved).
+  extImportLoadError(extPluginIndex(name))
+
 type ExtTunnel* = object
   ## Nim-side raw CBOR access to EXTAPI brokers by (plugin, wire name), for
   ## generic forwarders. Every call goes through the typed broker, so it
@@ -142,6 +156,7 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
   var version = "0.1.0"
   var defDispatch = ("bridge", 0)
   var defAutoWire = "true"
+  var loadEager = false
   for i in 1 ..< args.len:
     let kw = args[i]
     if kw.kind != nnkExprEqExpr:
@@ -152,6 +167,10 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
       defDispatch = parseDispatch(kw[1])
     elif kw[0].eqIdent("autoWire"):
       defAutoWire = parseBoolLit(kw[1], "autoWire")
+    elif kw[0].eqIdent("load"):
+      if kw[1].kind != nnkIdent or $kw[1] notin ["eager", "manual"]:
+        error("registerExtPlugin: `load` must be `eager` or `manual`", kw[1])
+      loadEager = $kw[1] == "eager"
     else:
       error("registerExtPlugin: unknown kwarg `" & $kw[0] & "`", kw)
   result = newStmtList()
@@ -329,10 +348,53 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
 
     let namesVar = "gExtNames_" & plugin
     let descVar = "gExtDesc_" & plugin
+    # K2 peer imports: every name comes from the same peer library.
+    var peers = 0
+    for e in entries:
+      if e.peerLib.len > 0:
+        inc peers
+    let isPeerPlugin = peers > 0
+    if isPeerPlugin:
+      if peers != entries.len:
+        error(
+          "registerExtPlugin(" & plugin &
+            "): a peer-import plugin imports every name with `importLib`",
+          args[0],
+        )
+      for e in entries:
+        if e.peerLib != entries[0].peerLib or e.dynlibSrc != entries[0].dynlibSrc:
+          error(
+            "registerExtPlugin(" & plugin &
+              "): all names must import the same peer library",
+            args[0],
+          )
+    # K1 native imports: the plugin is either all imports or all foreign.
+    var imports = 0
+    for e in entries:
+      if e.dynlibSrc.len > 0 and e.peerLib.len == 0:
+        inc imports
+    let isImportPlugin = imports > 0
+    if isImportPlugin and imports != entries.len:
+      error(
+        "registerExtPlugin(" & plugin &
+          "): a plugin is either all native imports (`dynlib`) or all foreign brokers",
+        args[0],
+      )
+    if not isImportPlugin and not isPeerPlugin and loadEager:
+      error("registerExtPlugin: `load` applies to native-import plugins only", args[0])
     var src =
       "var " & namesVar & " {.global.}: array[" & $n & ", ExtNameDesc]\n" & "var " &
-      descVar & " {.global.}: ExtPluginDesc\n" & "proc extInitPlugin_" & plugin &
-      "() =\n"
+      descVar & " {.global.}: ExtPluginDesc\n"
+    if isImportPlugin:
+      src.add(
+        "proc extImportInvoke_" & plugin &
+          "(user: pointer, id: uint64, nameIdx: uint32, name: cstring, buf: ptr uint8, len: csize_t) {.cdecl, gcsafe, raises: [].} =\n" &
+          "  case int(nameIdx)\n"
+      )
+      for i, e in entries:
+        src.add("  of " & $i & ": " & e.importTrampName & "(user, id, buf, int(len))\n")
+      src.add("  else: discard\n")
+    src.add("proc extInitPlugin_" & plugin & "() =\n")
     var poolSize = 0
     for e in entries:
       if e.dispatch == "workers":
@@ -346,6 +408,13 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
             o.typeName == e.typeName:
           sibling = j
       let eff = (if e.dispatch.len > 0: e.dispatch else: defDispatch[0])
+      if e.rawPtrArgs and eff != "inplace":
+        error(
+          "registerExtPlugin(" & plugin & "): '" & e.wireName &
+            "' passes raw pointers (ptr / pointer / openArray / cstring) to C; that is " &
+            "only safe with `dispatch = inplace` — use the body form for `" & eff & "`",
+          args[0],
+        )
       let disp =
         case eff
         of "workers": "edWorkers"
@@ -368,6 +437,22 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
           elif e.kind == enkRequest: ", tunnelCall: " & e.tunnelName
           elif e.kind == enkSignal: ", tunnelSignal: " & e.tunnelName
           else: ", tunnelListen: " & e.tunnelName
+        ) & (
+          if e.dynlibSrc.len > 0 and e.peerLib.len == 0:
+            ", importLib: cstring(" & e.dynlibSrc & "), importResolve: " &
+              e.importResolveName
+          else:
+            ""
+        ) & (
+          if e.peerLib.len > 0:
+            block:
+              var a: seq[string]
+              for (an, at) in e.args:
+                a.add(an & ":" & at.replace(" ", ""))
+              a.sort()
+              ", peerSig: \"" & a.join(",") & "|" & e.payloadType.replace(" ", "") & "\""
+          else:
+            ""
         ) & ")\n"
       )
     src.add(
@@ -376,8 +461,15 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
         nimStrLit(listBlob) & "), listApisLen: " & $listBlob.len &
         ", schemaBuf: cstring(" & nimStrLit(schemaBlob) & "), schemaLen: " &
         $schemaBlob.len & ", names: cast[ptr UncheckedArray[ExtNameDesc]](addr " &
-        namesVar & "[0]), nameCount: " & $n & ", workers: " & $poolSize & ")\n" &
-        "  let pIdx = extRegisterPlugin(addr " & descVar & ")\n"
+        namesVar & "[0]), nameCount: " & $n & ", workers: " & $poolSize & (
+        if isImportPlugin:
+          ", importInvoke: extImportInvoke_" & plugin & ", loadEager: " & $loadEager
+        elif isPeerPlugin:
+          ", peerLib: \"" & entries[0].peerLib & "\", peerDynlib: cstring(" &
+            entries[0].dynlibSrc & "), loadEager: " & $loadEager
+        else:
+          ""
+      ) & ")\n" & "  let pIdx = extRegisterPlugin(addr " & descVar & ")\n"
     )
     var seenPluginVars: seq[string]
     for i, e in entries:
