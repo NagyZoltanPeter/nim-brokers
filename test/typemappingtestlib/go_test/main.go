@@ -2652,6 +2652,10 @@ func main() {
 	fmt.Println("library version:", typemappingtestlib.Version())
 	fmt.Println()
 
+	fmt.Println("--- TestSchemaHash ---")
+	runTest("test_schema_hash_verify", test_schema_hash_verify)
+	fmt.Println()
+
 	fmt.Println("--- TestLifecycle ---")
 	runTest("test_lifecycle_create_and_shutdown", test_lifecycle_create_and_shutdown)
 	runTest("test_lifecycle_raii_shutdown", test_lifecycle_raii_shutdown)

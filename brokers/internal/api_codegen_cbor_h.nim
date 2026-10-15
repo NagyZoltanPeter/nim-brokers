@@ -31,6 +31,7 @@ proc generateCborCHeaderFile*(
     requestApiDocs: seq[string] = @[],
     eventApiDocs: seq[string] = @[],
     signalApiDocs: seq[string] = @[],
+    schemaHash: string,
 ) {.compileTime, raises: [].} =
   ## Writes the fixed-shape C header for a CBOR-mode library. The optional
   ## `*Docs` seqs are parallel to the corresponding `*Names` and carry the
@@ -72,6 +73,28 @@ proc generateCborCHeaderFile*(
       ".\n" & " * The returned pointer is owned by the library — do NOT free. */\n"
   )
   h.add("const char* " & p & "version(void);\n\n")
+  h.add(
+    "/* Wire-schema fingerprint of this header: 32 lowercase hex chars (128-bit\n" &
+      " * FNV-1a over the canonical ABI schema). Changes only when the wire schema\n" &
+      " * changes — not on doc edits, internal fixes, or version bumps. */\n"
+  )
+  h.add("#define " & upperLib & "_SCHEMA_HASH \"" & schemaHash & "\"\n")
+  h.add("#define " & upperLib & "_SCHEMA_HASH_LEN 32\n\n")
+  h.add(
+    "/* Detect a header/library schema mismatch. Allocation-free and stateless:\n" &
+      " * callable before " & p & "initialize, from any thread, with no context.\n" &
+      " *   wrapperHash: the caller's fingerprint (pass " & upperLib &
+      "_SCHEMA_HASH), or NULL.\n" &
+      " *   libHashOut:  if non-NULL, receives the library's fingerprint + NUL.\n" &
+      " * Returns 0 on match, 1 on mismatch with an opt-out env var set\n" &
+      " * (BROKERS_FFI_SKIP_SCHEMA_CHECK or " & upperLib &
+      "_SKIP_SCHEMA_CHECK, any value\n" &
+      " * other than \"0\"), -14 on mismatch, -1 if wrapperHash is NULL. It only\n" &
+      " * reports: no other entry point consults the result. */\n"
+  )
+  h.add(
+    "int32_t " & p & "verifySchema(const char wrapperHash[32], char libHashOut[33]);\n\n"
+  )
 
   h.add("/* ----------------------------------------------------------------\n")
   h.add(" * Lifecycle\n")

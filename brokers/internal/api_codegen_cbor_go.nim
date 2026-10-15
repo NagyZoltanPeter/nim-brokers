@@ -257,6 +257,7 @@ proc generateCborGoFile*(
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
     signalEntries: seq[CborSignalEntry] = @[],
+    schemaHash: string,
 ) {.compileTime, raises: [].} =
   ## Emits `<outDir>/<libName>_go/{<libName>.go, <libName>_callbacks.c}`.
   ## Same filenames as the native generator — only one wrapper exists per
@@ -323,6 +324,7 @@ proc generateCborGoFile*(
   g.add("//\n")
   g.add("// Public surface mirrors the native build:\n")
   g.add("//   " & libName & ".Version()\n")
+  g.add("//   " & libName & ".SchemaHash\n")
   g.add("//   " & libName & ".New() + lib.CreateContext()\n")
   g.add("//   <Request>(args) -> (T, error)\n")
   g.add("//   On<Event>(callback) -> uint64 / Off<Event>(handle uint64)\n")
@@ -355,6 +357,13 @@ proc generateCborGoFile*(
   g.add("#include <string.h>\n")
   g.add("#include <stdint.h>\n")
   g.add("#include \"" & libName & ".h\"\n")
+  # Burned into the wrapper's own cgo preamble (NOT the .h macro), so a swapped
+  # .so + .h with a stale .go is still detected. A static literal: no
+  # C.CString allocation per call.
+  g.add(
+    "static const char* " & p & "wrapperSchemaHash(void) { return \"" & schemaHash &
+      "\"; }\n"
+  )
   g.add(
     "uint64_t go_cbor_subscribe(uint32_t ctx, const char* name, void* user_data);\n"
   )
@@ -561,6 +570,9 @@ proc generateCborGoFile*(
   g.add("func Version() string {\n")
   g.add("\treturn C.GoString(C." & p & "version())\n")
   g.add("}\n\n")
+  g.add("// SchemaHash is the wire-schema fingerprint this wrapper was generated\n")
+  g.add("// against; CreateContext checks it against the loaded library.\n")
+  g.add("const SchemaHash = \"" & schemaHash & "\"\n\n")
 
   g.add("func New() *" & className & " {\n")
   g.add("\tC." & p & "initialize()\n")
@@ -572,6 +584,16 @@ proc generateCborGoFile*(
   g.add("func (l *" & className & ") CreateContext() error {\n")
   g.add("\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n")
   g.add("\tif l.ctx != 0 { return errors.New(\"context already created\") }\n")
+  g.add("\tvar libHash [33]C.char\n")
+  g.add(
+    "\tif C." & p & "verifySchema(C." & p & "wrapperSchemaHash(), &libHash[0]) == " &
+      $ApiStatusSchemaMismatch & " {\n"
+  )
+  g.add(
+    "\t\treturn errors.New(\"schema mismatch: " & libName &
+      " \" + Version() + \" has \" + C.GoString(&libHash[0]) + \", wrapper has \" + SchemaHash)\n"
+  )
+  g.add("\t}\n")
   g.add("\tvar errPtr *C.char\n")
   g.add("\tctx := C." & p & "createContext(&errPtr)\n")
   g.add("\tif ctx == 0 {\n")

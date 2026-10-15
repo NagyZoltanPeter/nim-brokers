@@ -283,12 +283,18 @@ proc generateCborCddlFile*(
     eventEntries: seq[CborEventEntry],
     typeRegistry: seq[ApiTypeEntry],
     signalEntries: seq[CborSignalEntry] = @[],
+    schemaHash: string = "",
 ): string {.compileTime, raises: [].} =
   ## Writes `<libName>.cddl` and returns the file's contents so the caller
   ## can embed the same string in the generated runtime discovery payload.
+  ## `schemaHash` is stamped as an informational banner comment; it is not an
+  ## input to the fingerprint (that is computed from the registries).
   ensureGeneratedOutputDir(outDir)
-  let body =
+  var body =
     generateCborCddl(libName, requestEntries, eventEntries, typeRegistry, signalEntries)
+  if schemaHash.len > 0:
+    let nl = body.find('\n')
+    body.insert("; schema-hash: " & schemaHash & "\n", nl + 1)
   let path = cddlPath(outDir, libName)
   try:
     writeFile(path, body)

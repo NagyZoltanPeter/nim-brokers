@@ -390,6 +390,7 @@ proc generateCborPyFile*(
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
     signalEntries: seq[CborSignalEntry] = @[],
+    schemaHash: string,
 ) {.compileTime, raises: [].} =
   ## Writes the Python wrapper module (.py) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
@@ -447,6 +448,7 @@ proc generateCborPyFile*(
   )
   py.add("# class " & className & ":\n")
   py.add("#   version() -> str    (@staticmethod)\n")
+  py.add("#   schema_hash() -> str    (@staticmethod)\n")
   py.add("#   __enter__() -> " & className & "\n")
   py.add("#   __exit__(*_) -> None\n")
   py.add("#   create_context() -> Result[None]\n")
@@ -503,6 +505,15 @@ proc generateCborPyFile*(
   )
   py.add("_LIB." & p & "version.argtypes = []\n")
   py.add("_LIB." & p & "version.restype = ctypes.c_char_p\n\n")
+  py.add(
+    "_LIB." & p &
+      "verifySchema.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char)]\n"
+  )
+  py.add("_LIB." & p & "verifySchema.restype = ctypes.c_int32\n\n")
+  # Burned in here, NOT read from the library: checked against the loaded
+  # library by create_context().
+  py.add("# Wire-schema fingerprint this wrapper was generated against.\n")
+  py.add("_SCHEMA_HASH = b\"" & schemaHash & "\"\n\n")
   py.add("_LIB." & p & "initialize.argtypes = []\n")
   py.add("_LIB." & p & "initialize.restype = None\n\n")
   py.add("_LIB." & p & "createContext.argtypes = [ctypes.POINTER(ctypes.c_char_p)]\n")
@@ -861,6 +872,12 @@ proc generateCborPyFile*(
   )
   py.add("        raw = _LIB." & p & "version()\n")
   py.add("        return raw.decode(\"utf-8\") if raw else \"\"\n\n")
+  py.add("    @staticmethod\n")
+  py.add("    def schema_hash() -> str:\n")
+  py.add(
+    "        \"\"\"Wire-schema fingerprint this wrapper was generated against.\"\"\"\n"
+  )
+  py.add("        return _SCHEMA_HASH.decode(\"ascii\")\n\n")
 
   # reduced-A: ownership predicates — an entry belongs to the main class when no
   # mainClass is designated (legacy single-class), or it is flat (no owning
@@ -903,6 +920,19 @@ proc generateCborPyFile*(
   py.add("        on success, Result.err(msg) on failure.\"\"\"\n")
   py.add("        if self._ctx != 0:\n")
   py.add("            return Result.err(\"Context already created\")\n")
+  py.add("        lib_hash = ctypes.create_string_buffer(33)\n")
+  py.add(
+    "        if _LIB." & p & "verifySchema(_SCHEMA_HASH, lib_hash) == " &
+      $ApiStatusSchemaMismatch & ":\n"
+  )
+  py.add(
+    "            return Result.err(f\"schema mismatch: " & libName & " {" & className &
+      ".version()} has \"\n"
+  )
+  py.add(
+    "                              f\"{lib_hash.value.decode('ascii')}, wrapper has \"\n"
+  )
+  py.add("                              f\"{_SCHEMA_HASH.decode('ascii')}\")\n")
   py.add("        err = ctypes.c_char_p()\n")
   py.add("        ctx = _LIB." & p & "createContext(ctypes.byref(err))\n")
   py.add("        if ctx == 0:\n")

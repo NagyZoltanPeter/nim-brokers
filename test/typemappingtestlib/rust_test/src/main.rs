@@ -3186,9 +3186,51 @@ fn test_proc_sugar_bare_primitive() {
     lib.shutdown();
 }
 
+// Raw-ABI check of <lib>_verifySchema (the wrapper keeps its extern private).
+extern "C" {
+    fn typemappingtestlib_verifySchema(
+        wrapper_hash: *const [std::os::raw::c_char; 32],
+        lib_hash_out: *mut [std::os::raw::c_char; 33],
+    ) -> i32;
+}
+
+// The wrapper's burned-in fingerprint matches the loaded library; a corrupted
+// one is reported (-14) and the per-lib opt-out env turns it into 1.
+fn test_schema_hash_verify() {
+    const ENV: &str = "TYPEMAPPINGTESTLIB_SKIP_SCHEMA_CHECK";
+    let ours = Typemappingtestlib::schema_hash();
+    check_eq!(ours.len(), 32usize);
+    let mut lib_hash: [std::os::raw::c_char; 33] = [0; 33];
+    let rc = unsafe {
+        typemappingtestlib_verifySchema(ours.as_ptr() as *const [std::os::raw::c_char; 32], &mut lib_hash)
+    };
+    check_eq!(rc, 0i32);
+    let lh = unsafe { std::ffi::CStr::from_ptr(lib_hash.as_ptr()) }.to_string_lossy().into_owned();
+    check_eq!(lh.as_str(), ours);
+
+    let mut bad: Vec<u8> = ours.as_bytes().to_vec();
+    bad[0] = if bad[0] == b'0' { b'1' } else { b'0' };
+    let verify_bad = || unsafe {
+        typemappingtestlib_verifySchema(bad.as_ptr() as *const [std::os::raw::c_char; 32], std::ptr::null_mut())
+    };
+    check_eq!(verify_bad(), -14i32);
+    std::env::set_var(ENV, "1");
+    check_eq!(verify_bad(), 1i32);
+    std::env::remove_var(ENV);
+    check_eq!(verify_bad(), -14i32);
+
+    // create_context() ran the same check and succeeded.
+    let mut lib = Typemappingtestlib::new();
+    check!(lib.create_context().is_ok());
+    lib.shutdown();
+}
+
 fn main() {
     println!("test_typemappingtestlib — Rust type mapping coverage\n");
     println!("library version: {}", Typemappingtestlib::version());
+
+    println!("--- TestSchemaHash ---");
+    run_test("test_schema_hash_verify", test_schema_hash_verify);
 
     println!("--- TestLifecycle ---");
     run_test("test_lifecycle_create_and_shutdown", test_lifecycle_create_and_shutdown);

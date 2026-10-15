@@ -501,6 +501,7 @@ proc generateCborCppHeaderFile*(
     asyncTimeoutMs: int = 30000,
     asyncQueueDepth: int = 64,
     signalEntries: seq[CborSignalEntry] = @[],
+    schemaHash: string,
 ) {.compileTime, raises: [].} =
   ## Writes the C++ wrapper header (.hpp) for a CBOR-mode library.
   ensureGeneratedOutputDir(outDir)
@@ -930,7 +931,17 @@ proc generateCborCppHeaderFile*(
   h.add("  " & className & "& operator=(const " & className & "&) = delete;\n")
   h.add("  " & className & "(" & className & "&&) = delete;\n")
   h.add("  " & className & "& operator=(" & className & "&&) = delete;\n\n")
-  h.add("  static std::string_view version() noexcept;\n\n")
+  h.add("  static std::string_view version() noexcept;\n")
+  # Burned in here, NOT taken from the .h macro: a swapped .so + .h with a stale
+  # .hpp must still be detected.
+  h.add(
+    "  // Wire-schema fingerprint this wrapper was generated against. Checked\n" &
+      "  // against the loaded library by createContext() (" & p & "verifySchema).\n"
+  )
+  h.add(
+    "  static constexpr std::string_view schemaHash() noexcept { return \"" & schemaHash &
+      "\"; }\n\n"
+  )
   h.add(
     "  // Max concurrent in-flight <method>Async requests (full => returns the\n" &
       "  // EAGAIN code below). Size a bounded send window to this value.\n"
@@ -1940,6 +1951,21 @@ proc generateCborCppHeaderFile*(
   h.add("inline Result<void> " & className & "::createContext() {\n")
   h.add("  if (ctx_)\n")
   h.add("    return Result<void>::err(\"Context already created\");\n")
+  h.add("  {\n")
+  h.add("    char libHash[33] = {0};\n")
+  h.add(
+    "    if (" & p & "verifySchema(schemaHash().data(), libHash) == " &
+      $ApiStatusSchemaMismatch & ")\n"
+  )
+  h.add(
+    "      return Result<void>::err(std::string(\"schema mismatch: " & libName &
+      " \") + std::string(version()) +\n"
+  )
+  h.add(
+    "                               \" has \" + libHash + \", wrapper has \" +\n" &
+      "                               std::string(schemaHash()));\n"
+  )
+  h.add("  }\n")
   h.add("  char* err = nullptr;\n")
   h.add("  ctx_ = " & p & "createContext(&err);\n")
   h.add("  if (ctx_ == 0) {\n")

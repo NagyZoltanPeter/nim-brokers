@@ -610,8 +610,10 @@ task perftest, "Run performance and stress tests":
 
 task testApi, "Run codec unit tests + library init integration tests":
   # Codec round-trip tests + event-courier drop evidence (no FFI flags needed).
-  let codecTests =
-    ["test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload"]
+  let codecTests = [
+    "test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload",
+    "test_api_schema_hash",
+  ]
   for f in codecTests:
     for opt in [
       "-d:nimUnittestOutputLevel:VERBOSE --mm:orc",
@@ -626,6 +628,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   # NimMain symbols distinct.
   let apiTests = [
     ("test_api_library_init", "apitest"),
+    ("test_api_verify_schema", "vstest"),
     ("test_api_callAsync", "acbtest"),
     ("test_api_signal_broker", "sigtest"),
     ("test_api_event_teardown_isolation", "cbevt"),

@@ -4,6 +4,8 @@
  * Demonstrates consuming the mylib Nim dynamic library from plain C.
  *
  * Exercises:
+ *   - Schema verification (mylib_verifySchema) — detect a header/library
+ *     wire-schema mismatch before creating a context
  *   - Library lifecycle (createContext / shutdown)
  *   - Adding devices in a single AddDevice batch request
  *   - Querying a single device (GetDevice request)
@@ -121,6 +123,25 @@ int main(void) {
     printf("=== Device Monitor — C Example ===\n\n");
 
     ExampleEventState event_state = {0, 0};
+
+    /* ── 0. Verify the header matches the loaded library ──────────────── */
+    /* Detection only: the library never refuses other calls. Allocation-free,
+     * callable before any other entry point. A mismatch can be silenced with
+     * MYLIB_SKIP_SCHEMA_CHECK=1 (or BROKERS_FFI_SKIP_SCHEMA_CHECK=1), in which
+     * case the call returns 1. */
+    printf("0. Verify schema\n");
+    {
+        char lib_hash[MYLIB_SCHEMA_HASH_LEN + 1];
+        int32_t rc = mylib_verifySchema(MYLIB_SCHEMA_HASH, lib_hash);
+        if (rc < 0) {
+            fprintf(stderr,
+                    "   FATAL: schema mismatch: mylib %s has %s, header has %s\n",
+                    mylib_version(), lib_hash, MYLIB_SCHEMA_HASH);
+            return 1;
+        }
+        printf("   schema %s%s\n\n", lib_hash,
+               rc == 1 ? " (mismatch ignored: opt-out env set)" : "");
+    }
 
     /* ── 1. Create library context ────────────────────────────────────── */
     printf("1. Create library context\n");

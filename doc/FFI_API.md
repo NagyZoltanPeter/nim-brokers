@@ -54,6 +54,7 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
     - [Doc comments in generated surfaces](#doc-comments-in-generated-surfaces)
   - [Generated Foreign Surfaces](#generated-foreign-surfaces)
     - [C API](#c-api)
+      - [Schema verification (`<lib>_verifySchema`)](#schema-verification-lib_verifyschema)
       - [Async requests (`<lib>_callAsync`)](#async-requests-lib_callasync)
     - [C++ wrapper](#c-wrapper)
     - [Python wrapper](#python-wrapper)
@@ -92,14 +93,15 @@ Typical consumers are:
 
 The FFI API solution provides:
 
-- a fixed CBOR C ABI — 11 core functions plus the async `<lib>_callAsync`
-  gate (see `## C API` below) — that every
+- a fixed 13-function CBOR C ABI — 11 core functions, the async
+  `<lib>_callAsync` gate, and the `<lib>_verifySchema` wrapper/library
+  schema check (see `## C API` below) — that every
   library exports identically — same shape regardless of how many
   request / event brokers are declared
 - a generated library lifecycle API (`<lib>_initialize`,
   `<lib>_createContext`, `<lib>_shutdown`, `<lib>_version`)
 - a generated C header (`<lib>.h`) declaring the CBOR ABI + the
-  per-library event-callback typedef
+  per-library event and async-response callback typedefs
 - a generated C++ wrapper header (`<lib>.hpp`) with typed methods that
   CBOR-encode / decode internally (always emitted)
 - an optional generated Python wrapper module (`<lib>.py`)
@@ -140,7 +142,7 @@ flowchart TB
 
     subgraph CABI["C ABI Surface"]
         direction LR
-        Cbor["<b>CBOR ABI</b><br/>fixed 11-function ABI<br/>+ one event-callback typedef<br/>CBOR-encoded payloads<br/><i>&lt;lib&gt;.h</i>"]
+        Cbor["<b>CBOR ABI</b><br/>fixed 13-function ABI<br/>+ two callback typedefs<br/>CBOR-encoded payloads<br/><i>&lt;lib&gt;.h</i>"]
     end
 
     subgraph Nim["Nim Library (single source)"]
@@ -179,7 +181,7 @@ flowchart TB
 | Layer | Per-library count | What it does |
 |-------|-------------------|--------------|
 | Nim source | 1 | declares brokers + providers; mode-agnostic |
-| C ABI / `<lib>.h` | 1 | fixed 11-function CBOR ABI + event-callback typedef |
+| C ABI / `<lib>.h` | 1 | fixed 13-function CBOR ABI + event and async-response callback typedefs |
 | Language wrapper | 1 per language | typed methods; CBOR encode / decode internally |
 | Consumer code | 1 | uses the typed wrapper; sees no CBOR |
 
@@ -239,7 +241,7 @@ brokers/
                                    delivery thread)
 
     # CBOR language codegen (one module per output surface)
-    api_codegen_cbor_h.nim         Fixed 11-function CBOR C header
+    api_codegen_cbor_h.nim         Fixed 13-function CBOR C header
     api_codegen_cbor_hpp.nim       jsoncons-backed C++ wrapper
     api_codegen_cbor_py.nim        cbor2-backed Python wrapper
     api_codegen_cbor_rust.nim      ciborium + serde-backed Rust crate
@@ -314,7 +316,7 @@ Each language codegen module owns:
 
 | Module | Output file(s) | Notes |
 |--------|----------------|-------|
-| `api_codegen_cbor_h.nim` | `<lib>.h` | Fixed 11-function C ABI + one event-callback typedef. Always emitted. |
+| `api_codegen_cbor_h.nim` | `<lib>.h` | Fixed 13-function C ABI + event and async-response callback typedefs. Always emitted. |
 | `api_codegen_cbor_hpp.nim` | `<lib>.hpp` | C++ wrapper backed by jsoncons. Always emitted. |
 | `api_codegen_cbor_py.nim` | `<lib>.py` | Python wrapper backed by `cbor2`. Opt-in via `-d:BrokerFfiApiGenPy`. |
 | `api_codegen_cbor_rust.nim` | `<lib>_rs/Cargo.toml`, `src/lib.rs` | Rust crate using `ciborium` + `serde` (per-method `__Env<T>` envelope). Opt-in via `-d:BrokerFfiApiGenRust`. |
@@ -541,7 +543,7 @@ CBOR is the only supported FFI mode; activate the codegen with
 
 | Flag | Selects | Generated C ABI shape | Wire format |
 |------|---------|-----------------------|-------------|
-| `-d:BrokerFfiApi` | CBOR ABI | Fixed 11-function ABI + one event-callback typedef. | CBOR-encoded payloads. |
+| `-d:BrokerFfiApi` | CBOR ABI | Fixed 13-function ABI + event and async-response callback typedefs. | CBOR-encoded payloads. |
 
 The historical `-d:BrokerFfiApiNative` (native typed-C export ABI) and
 the transitional `-d:BrokerFfiApiCBOR` alias have been removed.
@@ -1341,10 +1343,14 @@ look like.
 ### C API
 
 Every library exposes the **same fixed CBOR ABI**, plus per-library
-callback typedefs. The core is **11 synchronous functions**; a **12th**,
+callback typedefs: **13 functions** in total. The core is **11 synchronous
+functions**; a **12th**,
 `<lib>_callAsync`, adds a fire-and-forget request gate whose response is
 delivered later via a foreign callback (see
-[Async requests](#async-requests-lib_callasync) below). The C ABI is
+[Async requests](#async-requests-lib_callasync) below), and a **13th**,
+`<lib>_verifySchema`, lets a wrapper detect that it was generated against a
+different wire schema (see
+[Schema verification](#schema-verification-lib_verifyschema)). The C ABI is
 intentionally narrow — typed methods live in the language wrappers
 above. Pure-C consumers see only the raw CBOR ABI; the typed-C surface
 is on the deferred work list (see `doc/CBOR_Refactoring.md` §10).
@@ -1384,6 +1390,12 @@ int32_t       <lib>_callAsync(
                   <lib>_response_cb_t cb,
                   void* userData);                                   // opaque; passed back verbatim
 
+// 13th function — wrapper/library schema check (allocation-free, stateless):
+int32_t       <lib>_verifySchema(const char wrapperHash[32],         // may be NULL
+                                 char       libHashOut[33]);         // may be NULL
+#define <LIB>_SCHEMA_HASH     "<32 lowercase hex>"
+#define <LIB>_SCHEMA_HASH_LEN 32
+
 // Per-library typedefs (one declaration per library, generated):
 typedef void (*<lib>EventCallback)(
     uint32_t ctx,
@@ -1405,6 +1417,75 @@ Wire format: every payload buffer is CBOR. `apiName` and `eventName`
 are NUL-terminated ASCII strings selected from the discovery API. The
 typed wrapper layer (`<lib>.hpp` / `.py` / Rust / Go) is what most
 consumers actually use.
+
+### Schema verification (`<lib>_verifySchema`)
+
+A **detection** tool, not an enforcement gate: it reports when a generated
+wrapper and the loaded library disagree on the wire schema (e.g. a stale
+`.hpp` / `.py` / crate / Go module against a rebuilt `.so`). No other entry
+point consults the result.
+
+**Fingerprint.** `registerBrokerLibrary` reduces the library's ABI to a
+canonical text and hashes it with FNV-1a-128 into 32 lowercase hex chars
+(`brokers/internal/api_schema_hash.nim`). The same compile-time value is
+burned into the library, `<lib>.h` (`<LIB>_SCHEMA_HASH`), every generated
+wrapper, the CDDL banner (`; schema-hash: …`), and the `schemaHash` field of
+`_listApis` / `_getSchema`.
+
+| Changes the fingerprint | Does not change it |
+|---|---|
+| request / event / signal added, removed, renamed | doc comments |
+| arg, field, response type (incl. `T` ↔ `Option[T]`, container shape, array size) | provider / listener bodies, internal fixes |
+| object field added, removed, renamed | object field order (CBOR maps are keyed by name) |
+| enum value added, removed, renumbered, renamed | the `version:` string |
+| type renamed (nominal) | capacity / timeout knobs, `mainClass`, adapter identifiers |
+| interface membership, `returnsInterface` | alias / distinct spelling (wire-transparent) |
+| `BrokerFfiWireVersion` bump (codec-convention change in nim-brokers) | Nim / nim-brokers upgrades without a codec change |
+
+**Call contract.**
+
+| Situation | Return | `libHashOut` (if non-NULL) |
+|---|---|---|
+| first 32 bytes equal | `0` (`ApiStatusOk`) | library hash + NUL |
+| mismatch, opt-out env set | `1` (`ApiStatusSchemaSkipped`) | library hash + NUL |
+| mismatch | `-14` (`ApiStatusSchemaMismatch`) | library hash + NUL |
+| `wrapperHash == NULL` | `-1` | library hash + NUL |
+
+The library builds no message; the caller formats one from its own hash,
+`libHashOut`, and `<lib>_version()`. The call reads exactly 32 bytes and
+writes exactly 33, touches no Nim heap, GC state, or threadvar, so it is safe
+before `<lib>_initialize`, without a context, and from any thread, identically
+under `--mm:refc` and `--mm:orc`.
+
+**Opt-out.** Set `BROKERS_FFI_SKIP_SCHEMA_CHECK` (all libraries) or
+`<LIB>_SKIP_SCHEMA_CHECK` (one library; upper-cased, `-` → `_`) to any value
+other than `0`. A mismatch then returns `1`, which wrappers treat as success.
+The variable is read on every call (POSIX `getenv`, Windows
+`GetEnvironmentVariableA` — the OS block, so values set later from Go, Rust,
+or Python are seen). Set it before loading the wrapper: POSIX `getenv`
+racing `setenv` is undefined behaviour.
+
+**Wrappers check automatically.** C++ `createContext()`, Python
+`create_context()`, Rust `create_context()`, and Go `CreateContext()` call
+`<lib>_verifySchema` with their own burned-in literal (never the `.h` macro,
+so a swapped `.so` + `.h` with a stale wrapper is still caught) and return a
+`schema mismatch: <lib> <version> has <libHash>, wrapper has <wrapperHash>`
+error on `-14`. Each wrapper exposes its value: `<Lib>::schemaHash()`,
+`<Lib>.schema_hash()`, `<Lib>::schema_hash()` / `SCHEMA_HASH`,
+`<pkg>.SchemaHash`.
+
+**Pure C** opts in explicitly:
+
+```c
+char libHash[MYLIB_SCHEMA_HASH_LEN + 1];
+if (mylib_verifySchema(MYLIB_SCHEMA_HASH, libHash) < 0)
+    fprintf(stderr, "schema mismatch: header %s, library %s\n", MYLIB_SCHEMA_HASH, libHash);
+```
+
+`test/typemappingtestlib/test_typemappingtestlib.nim` pins a golden
+fingerprint so accidental canonicalisation drift is caught; bump
+`BrokerFfiWireVersion` (`brokers/internal/api_common.nim`) whenever a codec
+convention changes.
 
 ### Async requests (`<lib>_callAsync`)
 
@@ -1808,7 +1889,7 @@ Request providers run on the processing thread and may be async. That means:
 
 ### Typed C surface
 
-Pure-C consumers currently see only the raw 11-function CBOR ABI;
+Pure-C consumers currently see only the raw 13-function CBOR ABI;
 typed accessors for C are tracked in `doc/CBOR_Refactoring.md` §10 and
 will use the same compile-time schema registry the C++ wrapper
 already consumes. The other four wrapper languages (C++, Python,
