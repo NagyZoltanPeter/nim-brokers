@@ -609,7 +609,63 @@ task perftest, "Run performance and stress tests":
     ]:
       test opt, f
 
+proc checkExtForeignPathC() =
+  ## EXTAPI review M2: host-table procs run on foreign threads, so their C must
+  ## not push Nim frames (`nimfr_`) or contain checked raises. Compiles the raw
+  ## plugin test under refc (stack traces on by default in debug) and scans the
+  ## generated `ext_runtime` C for every function marked as a foreign path.
+  let cache = "build/extforeign/cache"
+  exec "nim c --hints:off -d:BrokerFfiApi --threads:on --mm:refc --path:. " &
+    "--outdir:build/extforeign --nimcache:" & cache & " test/test_ext_plugin.nim"
+  var cfile = ""
+  for f in listFiles(cache):
+    if f.endsWith("ext_runtime.nim.c"):
+      cfile = f
+  if cfile.len == 0:
+    quit("checkExtForeignPathC: ext_runtime C file not found", 1)
+  let src = readFile(cfile)
+  let names = [
+    "extOpen", "extClose", "extProvide", "extWithdraw", "extReply", "extEmit",
+    "extListApis", "extGetSchema", "extFreeBuffer", "extSchemaHash", "nameOp",
+    "postCtl", "inplaceFill", "lookupPort", "peerRespCb", "peerEventCb", "peerInvoke",
+    "cborHeadAt",
+  ]
+  var bad: seq[string]
+  for name in names:
+    var at = 0
+    while true:
+      let i = src.find(name & "__", at)
+      if i < 0:
+        break
+      at = i + 1
+      # A definition: the prototype line ends with "{" before the next ";".
+      let semi = src.find(';', i)
+      let brace = src.find('{', i)
+      if brace < 0 or (semi >= 0 and semi < brace):
+        continue
+      var depth = 1
+      var j = brace + 1
+      while depth > 0 and j < src.len:
+        if src[j] == '{':
+          inc depth
+        elif src[j] == '}':
+          dec depth
+        inc j
+      let body = src[brace .. j - 1]
+      for marker in ["nimfr_", "raiseOverflow", "raiseRangeError", "raiseIndexError"]:
+        if marker in body:
+          bad.add(name & ": " & marker)
+      break
+  if bad.len > 0:
+    quit("EXTAPI foreign-thread procs touch Nim runtime state: " & $bad, 1)
+  echo "  EXTAPI foreign-thread path C: clean (", names.len, " procs)"
+
+task testExtForeignPath,
+  "EXTAPI: foreign-thread host procs compile without Nim frames / checked raises":
+  checkExtForeignPathC()
+
 task testApi, "Run codec unit tests + library init integration tests":
+  checkExtForeignPathC()
   # Codec round-trip tests + event-courier drop evidence (no FFI flags needed).
   let codecTests = [
     "test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload",

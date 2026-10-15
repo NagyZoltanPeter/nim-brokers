@@ -344,6 +344,9 @@ proc generateExtRequestBroker*(
     var src =
       "var " & pluginIdxVar & "* {.global.}: int = -1\n" & "var " & zeroIdxVar &
       "* {.global.}: int = -1\n" & "var " & argIdxVar & "* {.global.}: int = -1\n"
+    # The lane never times out on its own: the bridge's `extCall` enforces the
+    # public broker's deadline. Set once here (module init), never per call.
+    src.add("g" & laneType & "MtTimeout = InfiniteDuration\n")
     # Reply decoding, shared by every path.
     src.add(
       "proc extDecode_" & typeName & "(b: seq[byte]): " & resTy &
@@ -360,12 +363,13 @@ proc generateExtRequestBroker*(
     # The lane provider (installed on the bridge).
     src.add(
       "proc extLaneProvider*(_: typedesc[" & typeName & "], ctx: BrokerContext): " &
-        laneType & "ProviderWithArgs =\n" & "  var pIdx, nZero, nArg: int\n" &
-        "  {.cast(gcsafe).}:\n" & "    pIdx = " & pluginIdxVar & "\n" & "    nZero = " &
-        zeroIdxVar & "\n" & "    nArg = " & argIdxVar & "\n" &
+        laneType & "ProviderWithArgs =\n" &
         "  result = proc(slot: int32, req: seq[byte]): Future[Result[" & laneType &
-        ", string]] {.async.} =\n" & "    var tmo: Duration\n" &
-        "    {.cast(gcsafe).}:\n" & "      tmo = g" & typeName & "MtTimeout\n" &
+        ", string]] {.async.} =\n" & "    var pIdx, nZero, nArg: int\n" &
+        "    {.cast(gcsafe).}:\n" & "      pIdx = " & pluginIdxVar & "\n" &
+        "      nZero = " & zeroIdxVar & "\n" & "      nArg = " & argIdxVar & "\n" &
+        "    var tmo: Duration\n" & "    {.cast(gcsafe).}:\n" & "      tmo = g" &
+        typeName & "MtTimeout\n" &
         "    let r = await extCall(pIdx, (if slot == 0: nZero else: nArg), ctx, req, tmo)\n" &
         "    if r.isErr:\n" & "      return err(r.error)\n" & "    return ok(" & laneType &
         "(payload: r.value))\n"
@@ -448,9 +452,12 @@ proc generateExtRequestBroker*(
           ctor.add(n & ": " & n)
         ctor.add(")")
         encExpr = "cborEncode(" & ctor & ")"
-      proc idxRead(ctxName: string): string =
-        "  var pIdx, nIdx: int\n" & "  {.cast(gcsafe).}:\n" & "    pIdx = " &
-          pluginIdxVar & "\n" & "    nIdx = " & nameIdxVar & "\n"
+      proc idxRead(ctxName: string, ind = "  "): string =
+        ## Read the plugin / name index globals. Closures call it inside their
+        ## body, so a closure built before `registerExtPlugin`'s initialiser
+        ## ran still finds the plugin (EXTAPI review M9).
+        ind & "var pIdx, nIdx: int\n" & ind & "{.cast(gcsafe).}:\n" & ind & "  pIdx = " &
+          pluginIdxVar & "\n" & ind & "  nIdx = " & nameIdxVar & "\n"
 
       # K1: typed sync adapter (the native call) + CBOR trampoline.
       let adapterName = "extImport_" & typeName & "_" & tag
@@ -565,8 +572,8 @@ proc generateExtRequestBroker*(
       # Forwarder: serves one call from the external source, from any thread.
       src.add(
         "proc extProvider" & sfx & "*(_: typedesc[" & typeName &
-          "], ctx: BrokerContext): " & providerType & " =\n" & idxRead("ctx") &
-          "  result = proc(" & decl & "): Future[" & resTy & "] {.async.} =\n" &
+          "], ctx: BrokerContext): " & providerType & " =\n" & "  result = proc(" & decl &
+          "): Future[" & resTy & "] {.async.} =\n" & idxRead("ctx", "    ") &
           "    let enc = " & encExpr & "\n" & "    if enc.isErr:\n" &
           "      return err(\"EXTAPI: request encode failed: \" & enc.error)\n" &
           "    var r: Result[seq[byte], string]\n" &
@@ -580,8 +587,6 @@ proc generateExtRequestBroker*(
           "    elif extOnBridge():\n" & "      var tmo: Duration\n" &
           "      {.cast(gcsafe).}:\n" & "        tmo = g" & typeName & "MtTimeout\n" &
           "      r = await extCall(pIdx, nIdx, ctx, enc.value, tmo)\n" & "    else:\n" &
-          "      {.cast(gcsafe).}:\n" & "        g" & laneType & "MtTimeout = g" &
-          typeName & "MtTimeout + chronos.seconds(1)\n" &
           "      let (laneId, laneFut) = " & laneType & ".requestCancellable(ctx, " &
           $slotLit & "'i32, enc.value)\n" & "      try:\n" &
           "        let lr = await laneFut\n" & "        if lr.isOk:\n" &
@@ -598,8 +603,8 @@ proc generateExtRequestBroker*(
         "proc extFallback" & sfx & "*(_: typedesc[" & typeName &
           "], ctx: BrokerContext, nimImpl: " & providerType & "): " & providerType &
           " =\n" & "  let fwd = " & typeName & ".extProvider" & sfx & "(ctx)\n" &
-          idxRead("ctx") & "  result = proc(" & decl & "): Future[" & resTy &
-          "] {.async.} =\n" & "    if extAvailable(pIdx, nIdx, ctx):\n" &
+          "  result = proc(" & decl & "): Future[" & resTy & "] {.async.} =\n" &
+          idxRead("ctx", "    ") & "    if extAvailable(pIdx, nIdx, ctx):\n" &
           "      return await fwd(" & callArgs & ")\n" & "    return await nimImpl(" &
           callArgs & ")\n"
       )
@@ -852,25 +857,28 @@ proc generateExtSignalBroker*(
     let installName = "extInstall_" & typeName & "_signal"
     let uninstallName = "extUninstall_" & typeName & "_signal"
     let callArgs = (if parsed.isVoid: "" else: "signalValue")
-    let idxRead =
-      "  var pIdx, nIdx: int\n" & "  {.cast(gcsafe).}:\n" & "    pIdx = " & pluginIdxVar &
-      "\n" & "    nIdx = " & nameIdxVar & "\n"
+    proc sigIdxRead(ind: string): string =
+      ind & "var pIdx, nIdx: int\n" & ind & "{.cast(gcsafe).}:\n" & ind & "  pIdx = " &
+        pluginIdxVar & "\n" & ind & "  nIdx = " & nameIdxVar & "\n"
+
+    let idxRead = sigIdxRead("  ")
     var src =
       "var " & pluginIdxVar & "* {.global.}: int = -1\n" & "var " & nameIdxVar &
       "* {.global.}: int = -1\n"
     # Handler: delivers to the external source, from any thread.
     src.add(
       "proc extHandler*(_: typedesc[" & typeName & "], ctx: BrokerContext): " &
-        handlerType & " =\n" & idxRead & "  result = proc(" & params &
-        "): Future[void] {.async: (raises: []), gcsafe.} =\n" & encSrc &
-        "    let r = extSignal(pIdx, nIdx, ctx, payload)\n" & "    if r.isErr:\n" &
-        "      extWarnSignalDropped(\"" & wireName & "\", r.error)\n"
+        handlerType & " =\n" & "  result = proc(" & params &
+        "): Future[void] {.async: (raises: []), gcsafe.} =\n" & sigIdxRead("    ") &
+        encSrc & "    let r = extSignal(pIdx, nIdx, ctx, payload)\n" &
+        "    if r.isErr:\n" & "      extWarnSignalDropped(\"" & wireName &
+        "\", r.error)\n"
     )
     src.add(
       "proc extFallback*(_: typedesc[" & typeName & "], ctx: BrokerContext, nimHandler: " &
         handlerType & "): " & handlerType & " =\n" & "  let fwd = " & typeName &
-        ".extHandler(ctx)\n" & idxRead & "  result = proc(" & params &
-        "): Future[void] {.async: (raises: []), gcsafe.} =\n" &
+        ".extHandler(ctx)\n" & "  result = proc(" & params &
+        "): Future[void] {.async: (raises: []), gcsafe.} =\n" & sigIdxRead("    ") &
         "    if extAvailable(pIdx, nIdx, ctx):\n" & "      await fwd(" & callArgs & ")\n" &
         "    else:\n" & "      await nimHandler(" & callArgs & ")\n"
     )

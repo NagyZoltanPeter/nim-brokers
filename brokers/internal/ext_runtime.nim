@@ -8,7 +8,13 @@
 ## - Every `broker_ext_host` entry (`extOpen`, `extProvide`, `extReply`, …)
 ##   may run on a foreign, non-Nim thread. Those procs touch only atomics,
 ##   `Lock` / `Cond`, libc `c_malloc` / `c_free` and `fireBrokerSignal` —
-##   never the Nim heap — so they are safe under
+##   never the Nim heap. They are compiled with checks, stack traces and line
+##   traces off (marked `foreign-thread path (M2)`), so they never push a Nim
+##   frame and never raise (raising would allocate on an unregistered thread).
+##   The only Nim runtime state they touch is the goto-exceptions error flag
+##   (ORC), a native-TLS read of a zero-initialised per-thread variable, which
+##   is valid on any OS thread; `--tlsEmulation:on` is therefore rejected. All
+##   of that holds under
 ##   `--mm:refc` (thread-local heaps) and `--mm:orc` alike.
 ## - All Nim-heap state (pending calls, futures) lives in threadvars of the
 ##   bridge thread and is only touched there. The source table (which port
@@ -18,6 +24,13 @@
 ##   the producer and `c_free`d by the consumer.
 
 {.push raises: [].}
+
+when compileOption("tlsEmulation"):
+  {.
+    error:
+      "EXTAPI needs native thread-local storage: foreign plugin threads call " &
+      "into ext_runtime, which emulated TLS cannot serve (drop --tlsEmulation:on)"
+  .}
 
 import std/[atomics, locks, tables, os, dynlib, strutils, algorithm, json]
 when not defined(windows):
@@ -239,8 +252,12 @@ type
 
   ExtInplaceSlot = object
     ## A synchronous `inplace` call waiting for its reply inside `invoke`.
-    id: Atomic[uint64]
-    filled: Atomic[bool]
+    ## `ctl` packs `(gen shl 32) or state` so every transition is one
+    ## generation-checked CAS (as the MT response slots): a late or duplicate
+    ## reply carries an old generation or finds the slot already filled, and
+    ## is dropped — it can never land in a later call that reuses the slot.
+    ctl: Atomic[uint64]
+    port: uint64 ## the source port; a reply from any other port is dropped
     status: int32
     buf: ptr uint8
     len: int
@@ -330,12 +347,14 @@ type
     cond: Cond
 
   ExtReplyMsg = object
+    port: uint64 ## the replying port; must be the call's source
     callId: uint64
     status: int32
     buf: ptr uint8 ## c_malloc, consumer frees
     len: int
 
   ExtEventMsg = object
+    port: uint64 ## delivered only while this port is still open
     pluginIdx: int
     nameIdx: int
     ctx: uint32
@@ -360,6 +379,7 @@ type
     fut: Future[ExtRawReply]
     pluginIdx: int
     portSlot: int
+    portGen: uint32 ## with pluginIdx / portSlot: the only port whose reply counts
     nameIdx: int
     impl: ptr ExtImplRef
       ## Borrowed: `extCall` holds a ref until its future completes, which is
@@ -395,6 +415,7 @@ proc init[T](r: var ExtRing[T], cap: int) =
   r.count = 0
   initLock(r.lock)
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc tryPush[T](r: var ExtRing[T], v: T): bool =
   withLock(r.lock):
     if r.count >= r.cap:
@@ -403,6 +424,9 @@ proc tryPush[T](r: var ExtRing[T], v: T): bool =
     inc r.count
   true
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc tryPop[T](r: var ExtRing[T], dst: var T): bool =
   withLock(r.lock):
     if r.count == 0:
@@ -415,6 +439,7 @@ proc tryPop[T](r: var ExtRing[T], dst: var T): bool =
 # ---------------------------------------------------------------------------
 # Process-global state (shared heap / plain globals, no GC'd fields)
 # ---------------------------------------------------------------------------
+{.pop.}
 
 var gExtPlugins: array[ExtMaxPlugins, ptr ExtPluginRt]
 var gExtPluginCount: Atomic[int]
@@ -441,6 +466,8 @@ when defined(extTestHooks):
   var extTestBridgeExits*: Atomic[int] ## bridge threads finished
   var extTestFailWorkerAt*: Atomic[int]
     ## > 0: the n-th worker thread of the next start fails to start.
+  var extTestPauseEvents*: Atomic[bool]
+    ## true: the bridge leaves queued events in the ring (delivery-order tests).
 const ExtMaxInplace = 256
 var gExtInplace: array[ExtMaxInplace, ExtInplaceSlot]
 
@@ -461,11 +488,14 @@ proc fromBytes(b: seq[byte]): string =
   if b.len > 0:
     copyMem(addr result[0], unsafeAddr b[0], b.len)
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc osThreadId(): uint64 =
   when defined(windows):
     uint64(extGetCurrentThreadId())
   else:
     cast[uint64](pthread_self())
+
+{.pop.}
 
 proc ensureRegLock() =
   var expected = 0
@@ -505,6 +535,7 @@ proc extRegisterPlugin*(desc: ptr ExtPluginDesc): int =
     gExtPluginCount.store(idx + 1, moRelease)
     return idx
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc findPlugin(name: cstring): int =
   if name.isNil:
     return -1
@@ -515,6 +546,9 @@ proc findPlugin(name: cstring): int =
       return i
   -1
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc findName(desc: ptr ExtPluginDesc, name: cstring): int =
   if name.isNil:
     return -1
@@ -523,9 +557,15 @@ proc findName(desc: ptr ExtPluginDesc, name: cstring): int =
       return i
   -1
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc makePort(pluginIdx, slot: int, gen: uint32): uint64 =
   (uint64(pluginIdx) shl 48) or (uint64(slot) shl 32) or uint64(gen)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc splitPort(port: uint64): tuple[pluginIdx, slot: int, gen: uint32] =
   (
     int(port shr 48),
@@ -533,6 +573,9 @@ proc splitPort(port: uint64): tuple[pluginIdx, slot: int, gen: uint32] =
     uint32(port and 0xFFFF_FFFF'u64),
   )
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc lookupPort(
     port: uint64
 ): tuple[rt: ptr ExtPluginRt, slot: int, gen: uint32, ok: bool] =
@@ -547,18 +590,29 @@ proc lookupPort(
     return (rt, s, g, false)
   (rt, s, g, true)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc implAcquire(r: ptr ExtImplRef) =
   discard r.refs.fetchAdd(1, moAcquireRelease)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc implRelease(r: ptr ExtImplRef) =
   if r.refs.fetchSub(1, moAcquireRelease) == 1:
     if not r.impl.release.isNil:
       r.impl.release(r.impl.user)
     c_free(r)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc stRelease(st: ptr ExtCallState) =
   if not st.isNil and st.refs.fetchSub(1, moAcquireRelease) == 1:
     c_free(st)
+
+{.pop.}
 
 proc newCallState(): ptr ExtCallState =
   result = cast[ptr ExtCallState](c_calloc(1, csize_t(sizeof(ExtCallState))))
@@ -609,31 +663,67 @@ proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
     stRelease(m.st)
     implRelease(m.impl)
 
-proc inplaceClaim(id: uint64): int =
-  for i in 0 ..< ExtMaxInplace:
-    var expected = 0'u64
-    if gExtInplace[i].id.compareExchange(expected, id):
-      gExtInplace[i].filled.store(false, moRelease)
-      gExtInplace[i].buf = nil
-      gExtInplace[i].len = 0
-      return i
-  -1
+const
+  ExtInplaceIdBit = 1'u64 shl 63 ## inplace call ids: bit 63 | slot << 32 | gen
+  isFree = 0'u64
+  isClaimed = 1'u64
+  isFilling = 2'u64
+  isFilled = 3'u64
 
-proc inplaceFill(id: uint64, status: int32, buf: ptr uint8, len: int): bool =
-  ## Called from `extReply`: if `id` is a synchronous inplace call, store the
-  ## reply in its slot instead of the bridge ring.
+template slotState(c: uint64): uint64 =
+  c and 0xFFFF_FFFF'u64
+
+template slotGen(c: uint64): uint64 =
+  c shr 32
+
+proc inplaceClaim(port: uint64): tuple[slot: int, id: uint64] =
+  ## Claim a free slot; the returned call id names the slot and its new
+  ## generation, so `inplaceFill` needs no search. (-1, 0) when all are busy.
   for i in 0 ..< ExtMaxInplace:
-    if gExtInplace[i].id.load(moAcquire) == id:
-      if gExtInplace[i].filled.load(moAcquire):
-        return true # first reply wins; later ones are dropped
-      gExtInplace[i].status = status
+    let c = gExtInplace[i].ctl.load(moAcquire)
+    if slotState(c) == isFree:
+      var g = (slotGen(c) + 1) and 0xFFFF_FFFF'u64
+      if g == 0:
+        g = 1
+      var expected = c
+      if gExtInplace[i].ctl.compareExchange(expected, (g shl 32) or isClaimed):
+        gExtInplace[i].port = port
+        gExtInplace[i].buf = nil
+        gExtInplace[i].len = 0
+        return (i, ExtInplaceIdBit or (uint64(i) shl 32) or g)
+  (-1, 0'u64)
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
+proc inplaceFill(port, id: uint64, status: int32, buf: ptr uint8, len: int): bool =
+  ## Called from `extReply` (any thread): `true` when `id` is an inplace call
+  ## id — the reply is then stored in its slot or, if late / duplicate / from
+  ## another port, dropped. `false`: not an inplace id (use the reply ring).
+  if (id and ExtInplaceIdBit) == 0:
+    return false
+  let i = int((id shr 32) and 0x7FFF_FFFF'u64)
+  if i >= ExtMaxInplace:
+    return true
+  let g = id and 0xFFFF_FFFF'u64
+  var expected = (g shl 32) or isClaimed
+  if not gExtInplace[i].ctl.compareExchange(expected, (g shl 32) or isFilling):
+    return true # first reply wins; late / duplicate replies are dropped
+  if gExtInplace[i].port != port:
+    gExtInplace[i].ctl.store((g shl 32) or isClaimed, moRelease)
+    return true # not the call's source port
+  gExtInplace[i].status = status
+  gExtInplace[i].len = 0
+  if len > 0:
+    let copy = cast[ptr uint8](c_malloc(csize_t(len)))
+    if copy.isNil:
+      gExtInplace[i].status = ExtReplyErr # out of memory: answer, empty error
+    else:
+      copyMem(copy, buf, len)
+      gExtInplace[i].buf = copy
       gExtInplace[i].len = len
-      if len > 0:
-        gExtInplace[i].buf = cast[ptr uint8](c_malloc(csize_t(len)))
-        copyMem(gExtInplace[i].buf, buf, len)
-      gExtInplace[i].filled.store(true, moRelease)
-      return true
-  false
+  gExtInplace[i].ctl.store((g shl 32) or isFilled, moRelease)
+  true
+
+{.pop.}
 
 proc sharedFind(
     p, n: int, ctx: uint32
@@ -688,11 +778,11 @@ proc sharedDel(p, n: int, ctx: uint32, slot: int): tuple[found, wired: bool] =
 
 proc acquireSource(
     p, n: int, ctx: uint32
-): tuple[impl: ptr ExtImplRef, rt: ptr ExtPluginRt, slot: int] =
+): tuple[impl: ptr ExtImplRef, rt: ptr ExtPluginRt, slot: int, gen: uint32] =
   ## The serving port's impl with one extra ref, or nil. Any thread.
   let f = sharedFind(p, n, ctx)
   if not f.found:
-    return (nil, nil, 0)
+    return (nil, nil, 0, 0'u32)
   let rt = gExtPlugins[p]
   var impl: ptr ExtImplRef
   withLock(rt.lock):
@@ -701,17 +791,22 @@ proc acquireSource(
       impl = ps.impl
       if not impl.isNil:
         implAcquire(impl)
-  (impl, rt, f.slot)
+  (impl, rt, f.slot, f.gen)
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc hostRunning(): bool =
   not gExtHost.isNil and gExtHost.running.load(moAcquire)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc onBridgeThread(): bool =
   not gExtHost.isNil and gExtHost.bridgeTid.load(moAcquire) == osThreadId()
 
 # ---------------------------------------------------------------------------
 # Bridge-side operations (run on the bridge thread only)
 # ---------------------------------------------------------------------------
+{.pop.}
 
 proc failPending(
     pred: proc(c: PendingCall): bool {.gcsafe, raises: [].}, msg: string, hint: bool
@@ -842,7 +937,11 @@ proc replyPoll(): int {.gcsafe, raises: [].} =
     while gExtHost.replyRing.tryPop(r):
       did = 1
       var c: PendingCall
-      if gExtPending.pop(r.callId, c):
+      var fromSource = false
+      gExtPending.withValue(r.callId, pc):
+        let (rp, rs, rg) = splitPort(r.port)
+        fromSource = rp == pc.pluginIdx and rs == pc.portSlot and rg == pc.portGen
+      if fromSource and gExtPending.pop(r.callId, c):
         var data = newSeq[byte](r.len)
         if r.len > 0:
           copyMem(addr data[0], r.buf, r.len)
@@ -855,13 +954,18 @@ proc replyPoll(): int {.gcsafe, raises: [].} =
     did
 
 proc eventPoll(): int {.gcsafe, raises: [].} =
+  when defined(extTestHooks):
+    if extTestPauseEvents.load(moAcquire):
+      return 0
   {.cast(gcsafe).}:
     var did = 0
     var e: ExtEventMsg
     while gExtHost.eventRing.tryPop(e):
       did = 1
       let nd = gExtPlugins[e.pluginIdx].desc.names[e.nameIdx]
-      if not nd.emitFn.isNil:
+      if not lookupPort(e.port).ok:
+        debug "EXTAPI: event of a closed port dropped", name = $nd.name
+      elif not nd.emitFn.isNil:
         let r = nd.emitFn(BrokerContext(e.ctx), e.buf, e.len)
         if r.isErr:
           warn "EXTAPI: event payload dropped", name = $nd.name, reason = r.error
@@ -875,26 +979,43 @@ proc eventPoll(): int {.gcsafe, raises: [].} =
 
 proc invokeInplace(
     impl: ptr ExtImplRef,
+    port: uint64,
     nameIdx: int,
     name: cstring,
-    id: uint64,
     buf: ptr uint8,
     len: int,
 ): Result[seq[byte], string] =
   ## Synchronous contract: the reply must arrive before `invoke` returns.
-  let slot = inplaceClaim(id)
+  let (slot, id) = inplaceClaim(port)
   if slot < 0:
     return err("EXTAPI: too many concurrent inplace calls")
   impl.impl.invoke(impl.impl.user, id, uint32(nameIdx), name, buf, csize_t(len))
-  let filled = gExtInplace[slot].filled.load(moAcquire)
-  let status = gExtInplace[slot].status
-  var data = newSeq[byte](gExtInplace[slot].len)
-  if data.len > 0:
-    copyMem(addr data[0], gExtInplace[slot].buf, data.len)
-  if not gExtInplace[slot].buf.isNil:
-    c_free(gExtInplace[slot].buf)
-    gExtInplace[slot].buf = nil
-  gExtInplace[slot].id.store(0, moRelease)
+  # Retire: a reply racing the return (state Filling) is waited for and
+  # counts; the slot keeps its generation when freed, so any later reply for
+  # this id fails its CAS.
+  var filled = false
+  var status = ExtReplyErr
+  var data: seq[byte]
+  while true:
+    let c = gExtInplace[slot].ctl.load(moAcquire)
+    case slotState(c)
+    of isFilling:
+      cpuRelax()
+    of isFilled:
+      filled = true
+      status = gExtInplace[slot].status
+      data = newSeq[byte](gExtInplace[slot].len)
+      if data.len > 0:
+        copyMem(addr data[0], gExtInplace[slot].buf, data.len)
+      if not gExtInplace[slot].buf.isNil:
+        c_free(gExtInplace[slot].buf)
+        gExtInplace[slot].buf = nil
+      gExtInplace[slot].ctl.store((slotGen(c) shl 32) or isFree, moRelease)
+      break
+    else:
+      var expected = c
+      if gExtInplace[slot].ctl.compareExchange(expected, (slotGen(c) shl 32) or isFree):
+        break
   if not filled:
     return err("EXTAPI: inplace impl returned without reply")
   if status == ExtReplyOk:
@@ -955,18 +1076,24 @@ proc extCallInplace*(
   ## Run an `inplace` source synchronously on the calling thread (any thread).
   if pluginIdx < 0 or nameIdx < 0:
     return err("EXTAPI: plugin not registered")
-  let (impl, rt, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
+  let (impl, rt, srcSlot, srcGen) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
     return err("EXTAPI: no provider registered (not provided by any plugin port)")
   defer:
     implRelease(impl)
-  let id = gExtCallSeq.fetchAdd(1, moAcquireRelease) + 1
   let bufPtr =
     if payload.len > 0:
       cast[ptr uint8](unsafeAddr payload[0])
     else:
       nil
-  invokeInplace(impl, nameIdx, rt.desc.names[nameIdx].name, id, bufPtr, payload.len)
+  invokeInplace(
+    impl,
+    makePort(pluginIdx, srcSlot, srcGen),
+    nameIdx,
+    rt.desc.names[nameIdx].name,
+    bufPtr,
+    payload.len,
+  )
 
 proc extCall*(
     pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte], timeout: Duration
@@ -982,7 +1109,7 @@ proc extCall*(
   if not onBridgeThread():
     # Off-bridge forwarders go through the hidden `<T>ExtLane` instead.
     return err("EXTAPI: extCall must run on the bridge thread")
-  let (impl, rt, srcSlot) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
+  let (impl, rt, srcSlot, srcGen) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
     return err(
       "EXTAPI: no provider registered (" & $gExtPlugins[pluginIdx].desc.name & "." &
@@ -996,7 +1123,12 @@ proc extCall*(
   let fut = newFuture[ExtRawReply]("extCall")
   {.cast(gcsafe).}:
     gExtPending[id] = PendingCall(
-      fut: fut, pluginIdx: pluginIdx, portSlot: srcSlot, nameIdx: nameIdx, impl: impl
+      fut: fut,
+      pluginIdx: pluginIdx,
+      portSlot: srcSlot,
+      portGen: srcGen,
+      nameIdx: nameIdx,
+      impl: impl,
     )
   let bufPtr =
     if payload.len > 0:
@@ -1010,7 +1142,9 @@ proc extCall*(
   of edInplace:
     {.cast(gcsafe).}:
       gExtPending.del(id)
-    return invokeInplace(impl, nameIdx, nd.name, id, bufPtr, payload.len)
+    return invokeInplace(
+      impl, makePort(pluginIdx, srcSlot, srcGen), nameIdx, nd.name, bufPtr, payload.len
+    )
   of edWorkers:
     if rt.pool.isNil:
       {.cast(gcsafe).}:
@@ -1076,7 +1210,7 @@ proc extSignal*(
   ## handler thread), `workers` enqueue.
   if pluginIdx < 0 or nameIdx < 0:
     return err("EXTAPI: plugin not registered")
-  let (impl, rt, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
+  let (impl, rt, _, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
     return err("EXTAPI: plugin port closed")
   let bufPtr =
@@ -1119,6 +1253,7 @@ proc extWarnSignalDropped*(name: string, reason: string) =
 # Host function table (foreign threads)
 # ---------------------------------------------------------------------------
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc postCtl(op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int): int32 =
   if not hostRunning():
     return ExtShutdown
@@ -1156,6 +1291,9 @@ proc postCtl(op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int): int
       wait(m.cond, m.lock)
   m.rc
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extOpen(
     host: pointer, ctx: uint32, impl: ptr ExtImplDesc, outPort: ptr uint64
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1193,12 +1331,18 @@ proc extOpen(
         return ExtOk
   ExtAgain
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extClose(host: pointer, port: uint64): int32 {.cdecl, gcsafe, raises: [].} =
   let lp = lookupPort(port)
   if not lp.ok:
     return ExtStale
   postCtl(ecoClose, splitPort(port).pluginIdx, lp.slot, lp.gen, -1)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc nameOp(port: uint64, name: cstring, op: ExtCtlOp): int32 =
   let lp = lookupPort(port)
   if not lp.ok:
@@ -1232,16 +1376,25 @@ proc nameOp(port: uint64, name: cstring, op: ExtCtlOp): int32 =
       return ExtDispatchMismatch
   postCtl(op, splitPort(port).pluginIdx, lp.slot, lp.gen, n)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extProvide(
     host: pointer, port: uint64, name: cstring
 ): int32 {.cdecl, gcsafe, raises: [].} =
   nameOp(port, name, ecoProvide)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extWithdraw(
     host: pointer, port: uint64, name: cstring
 ): int32 {.cdecl, gcsafe, raises: [].} =
   nameOp(port, name, ecoWithdraw)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extReply(
     host: pointer, port: uint64, id: uint64, status: int32, buf: ptr uint8, len: csize_t
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1252,11 +1405,15 @@ proc extReply(
   let lp = lookupPort(port)
   if not lp.ok or id == 0:
     return ExtStale
-  if inplaceFill(id, status, buf, int(len)):
+  if len > csize_t(high(int32)):
+    return ExtBadArg
+  if inplaceFill(port, id, status, buf, int(len)):
     return ExtOk
-  var m = ExtReplyMsg(callId: id, status: status, len: int(len))
+  var m = ExtReplyMsg(port: port, callId: id, status: status, len: int(len))
   if len > 0:
     m.buf = cast[ptr uint8](c_malloc(len))
+    if m.buf.isNil:
+      return ExtAgain
     copyMem(m.buf, buf, int(len))
   if not gExtHost.replyRing.tryPush(m):
     if not m.buf.isNil:
@@ -1265,6 +1422,9 @@ proc extReply(
   fireBrokerSignal(gExtHost.signal)
   ExtOk
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extEmit(
     host: pointer, port: uint64, name: cstring, buf: ptr uint8, len: csize_t
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1280,14 +1440,31 @@ proc extEmit(
     return ExtUnknownName
   if lp.rt.desc.names[n].kind != enkEvent:
     return ExtBadArg
+  if len > csize_t(high(int32)):
+    return ExtBadArg
+  # Read the port's ctx together with its open / generation state: a close +
+  # reopen in between must not deliver this event on the new port's ctx.
+  var ctx = 0'u32
+  var live = false
+  acquire(lp.rt.lock)
+  let ps = addr lp.rt.ports[lp.slot]
+  if ps.open.load(moAcquire) and ps.gen.load(moAcquire) == lp.gen:
+    ctx = ps.ctx
+    live = true
+  release(lp.rt.lock)
+  if not live:
+    return ExtStale
   var m = ExtEventMsg(
+    port: port,
     pluginIdx: splitPort(port).pluginIdx,
     nameIdx: n,
-    ctx: lp.rt.ports[lp.slot].ctx,
+    ctx: ctx,
     len: int(len),
   )
   if len > 0:
     m.buf = cast[ptr uint8](c_malloc(len))
+    if m.buf.isNil:
+      return ExtAgain
     copyMem(m.buf, buf, int(len))
   if not gExtHost.eventRing.tryPush(m):
     if not m.buf.isNil:
@@ -1296,6 +1473,9 @@ proc extEmit(
   fireBrokerSignal(gExtHost.signal)
   ExtOk
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc copyOut(src: cstring, n: int, outBuf: ptr ptr uint8, outLen: ptr csize_t): int32 =
   if outBuf.isNil or outLen.isNil:
     return ExtBadArg
@@ -1306,6 +1486,9 @@ proc copyOut(src: cstring, n: int, outBuf: ptr ptr uint8, outLen: ptr csize_t): 
   outLen[] = csize_t(n)
   ExtOk
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extListApis(
     host: pointer, plugin: cstring, outBuf: ptr ptr uint8, outLen: ptr csize_t
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1315,6 +1498,9 @@ proc extListApis(
   let d = gExtPlugins[p].desc
   copyOut(d.listApisBuf, d.listApisLen, outBuf, outLen)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extGetSchema(
     host: pointer, plugin: cstring, outBuf: ptr ptr uint8, outLen: ptr csize_t
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1324,10 +1510,16 @@ proc extGetSchema(
   let d = gExtPlugins[p].desc
   copyOut(d.schemaBuf, d.schemaLen, outBuf, outLen)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extFreeBuffer(host: pointer, buf: ptr uint8) {.cdecl, gcsafe, raises: [].} =
   if not buf.isNil:
     c_free(buf)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc extSchemaHash(
     host: pointer, plugin: cstring, hashOut: ptr char
 ): int32 {.cdecl, gcsafe, raises: [].} =
@@ -1342,6 +1534,8 @@ proc extSchemaHash(
     copyMem(hashOut, h, min(n, 32))
   cast[ptr UncheckedArray[char]](hashOut)[min(n, 32)] = '\0'
   ExtOk
+
+{.pop.}
 
 proc extImportReplyOk*(user: pointer, id: uint64, data: seq[byte]) =
   ## K1 trampolines: answer an invoke through the ordinary reply path.
@@ -1482,10 +1676,14 @@ const
   peerCallFailed: cstring = "EXTAPI: peer callAsync failed"
   peerAllocFailed: cstring = "EXTAPI: peer allocBuffer failed"
 
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc replyText(port: uint64, id: uint64, msg: cstring) =
   discard
     extReply(nil, port, id, ExtReplyErr, cast[ptr uint8](msg), csize_t(c_strlen(msg)))
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc cborHeadAt(
     b: ptr UncheckedArray[uint8], n, at: int
 ): tuple[major, hdr: int, v: uint64] =
@@ -1511,6 +1709,9 @@ proc cborHeadAt(
     v = (v shl 8) or uint64(b[at + i])
   (major, 1 + extra, v)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc peerRespCb(
     user: pointer, reqId: uint64, status: int32, buf: pointer, len: int32
 ) {.cdecl, gcsafe, raises: [].} =
@@ -1533,10 +1734,13 @@ proc peerRespCb(
     else:
       replyText(u.port, reqId, peerDispatchFailed)
     return
+  if buf.isNil or len <= 0:
+    replyText(u.port, reqId, peerBadEnvelope)
+    return
   let b = cast[ptr UncheckedArray[uint8]](buf)
   let n = int(len)
   let m = cborHeadAt(b, n, 0)
-  if buf.isNil or m.hdr == 0 or m.major != 5 or m.v != 1:
+  if m.hdr == 0 or m.major != 5 or m.v != 1:
     replyText(u.port, reqId, peerBadEnvelope)
     return
   let k = cborHeadAt(b, n, m.hdr)
@@ -1544,17 +1748,20 @@ proc peerRespCb(
     replyText(u.port, reqId, peerBadEnvelope)
     return
   let keyAt = m.hdr + k.hdr
-  let valAt = keyAt + int(k.v)
-  if valAt > n:
+  # Peer-controlled lengths: compare in uint64 before any int arithmetic.
+  if keyAt > n or k.v > uint64(n - keyAt):
     replyText(u.port, reqId, peerBadEnvelope)
     return
+  let valAt = keyAt + int(k.v)
   if k.v == 2 and b[keyAt] == uint8('o') and b[keyAt + 1] == uint8('k'):
     let p = (if valAt < n: addr b[valAt] else: nil)
     discard extReply(nil, u.port, reqId, ExtReplyOk, p, csize_t(n - valAt))
   elif k.v == 3 and b[keyAt] == uint8('e') and b[keyAt + 1] == uint8('r') and
       b[keyAt + 2] == uint8('r'):
     let t = cborHeadAt(b, n, valAt)
-    if t.hdr == 0 or t.major != 3 or valAt + t.hdr + int(t.v) > n:
+    if t.hdr == 0 or t.major != 3 or valAt + t.hdr > n or t.v > uint64(
+      n - valAt - t.hdr
+    ):
       replyText(u.port, reqId, peerBadEnvelope)
       return
     let p = (if t.v > 0: addr b[valAt + t.hdr] else: nil)
@@ -1562,21 +1769,35 @@ proc peerRespCb(
   else:
     replyText(u.port, reqId, peerBadEnvelope)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc peerEventCb(
     ctx: uint32, eventName: cstring, buf: pointer, len: int32, user: pointer
 ) {.cdecl, gcsafe, raises: [].} =
   ## Peer delivery thread: the event payload is the same CBOR object our
   ## EventBroker decodes — forward it as a foreign `emit`.
   let u = cast[ptr ExtPeerUser](user)
+  if len < 0:
+    return
   discard extEmit(nil, u.port, eventName, cast[ptr uint8](buf), csize_t(len))
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc peerUserRelease(u: ptr ExtPeerUser) =
   if u.refs.fetchSub(1, moAcquireRelease) == 1:
     c_free(u)
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc peerRelease(user: pointer) {.cdecl, gcsafe, raises: [].} =
   peerUserRelease(cast[ptr ExtPeerUser](user))
 
+{.pop.}
+
+{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc peerInvoke(
     user: pointer,
     id: uint64,
@@ -1590,6 +1811,10 @@ proc peerInvoke(
   ## the peer's slot-free one-way `<peer>_call`. The request buffer is the
   ## peer's to free (allocated with `<peer>_allocBuffer`).
   let u = cast[ptr ExtPeerUser](user)
+  if len > csize_t(high(int32)):
+    if id != 0:
+      replyText(u.port, id, peerCallFailed)
+    return
   var req: pointer = nil
   if len > 0:
     req = u.fns.allocBuffer(int32(len))
@@ -1608,6 +1833,8 @@ proc peerInvoke(
   let rc = u.fns.callAsync(u.peerCtx, name, req, int32(len), id, 0, peerRespCb, user)
   if rc < 0:
     replyText(u.port, id, (if rc == -6: peerBusy else: peerCallFailed))
+
+{.pop.}
 
 proc resolvePeer(lib: LibHandle, prefix: string): Result[ptr PeerFns, string] =
   let f = cast[ptr PeerFns](c_calloc(1, csize_t(sizeof(PeerFns))))

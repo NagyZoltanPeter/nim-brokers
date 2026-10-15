@@ -8,7 +8,7 @@ import testutils/unittests
 import chronos
 import std/[atomics, os]
 
-import brokers/[request_broker, ext_plugin, broker_context]
+import brokers/[request_broker, event_broker, ext_plugin, broker_context]
 import brokers/internal/ext_runtime
 
 {.passC: "-I" & currentSourcePath.parentDir.parentDir & "/brokers".}
@@ -25,6 +25,10 @@ proc life_cancels(): int32 {.importc, cdecl.}
 proc life_set_gate(open: int32) {.importc, cdecl.}
 proc life_set_hook(f: LifeHookFn) {.importc, cdecl.}
 proc life_reset() {.importc, cdecl.}
+proc life_open2(ctx: uint32): int32 {.importc, cdecl.}
+proc life_reply_parked(fromSecond: int32, v: uint32): int32 {.importc, cdecl.}
+proc life_reply_late(v: uint32): int32 {.importc, cdecl.}
+proc life_emit_tick(n: uint32): int32 {.importc, cdecl.}
 
 RequestBroker(EXTAPI[life], dispatch = workers(1)):
   type LifeWork = object
@@ -56,6 +60,30 @@ RequestBroker(EXTAPI[life]):
 
   proc signature*(): Future[Result[LifeDual, string]] {.async.}
   proc signature*(x: int32): Future[Result[LifeDual, string]] {.async.}
+
+RequestBroker(EXTAPI[life], dispatch = inplace):
+  type LifeEcho = object
+    n*: int32
+
+  proc signature*(x: int32): Future[Result[LifeEcho, string]] {.async.}
+
+RequestBroker(EXTAPI[life], autoWire = false):
+  type LifeOwned = object
+    n*: int32
+
+  proc signature*(): Future[Result[LifeOwned, string]] {.async.}
+
+EventBroker(EXTAPI[life]):
+  type LifeTick = object
+    n*: int32
+
+proc nimOwned(): Future[Result[LifeOwned, string]] {.async.} =
+  return ok(LifeOwned(n: -1))
+
+# Built before `registerExtPlugin(life)` ran its initialiser (module order):
+# the fallback must still see the plugin at call time (review M9) — with the
+# indices captured early it would always pick the Nim impl.
+let earlyOwned = LifeOwned.extFallback(DefaultBrokerContext, nimOwned)
 
 registerExtPlugin(life)
 
@@ -253,4 +281,89 @@ suite "EXTAPI lifecycle":
     check r.isOk
     if r.isErr:
       echo "re-provided slot: ", r.error
+    check ExtHost.stop().isOk
+
+  test "inplace: duplicate and late replies never reach another call (M1)":
+    check startAndOpen()
+    check life_provide("life_echo") == ExtOk
+    var stop: Atomic[bool]
+    proc lateReplies(st: ptr Atomic[bool]) {.thread.} =
+      while not st[].load():
+        discard life_reply_late(9999)
+
+    var t: Thread[ptr Atomic[bool]]
+    createThread(t, lateReplies, addr stop)
+    var wrong = 0
+    for i in 0 ..< 5000:
+      let r = waitFor LifeEcho.request(Ctx, int32(i mod 60000))
+      if r.isErr or r.value.n != int32(i mod 60000):
+        inc wrong
+    stop.store(true)
+    joinThread(t)
+    check wrong == 0
+    check ExtHost.stop().isOk
+
+  test "a reply from another port does not complete the call (M4)":
+    check startAndOpen()
+    check life_open2(uint32(NewBrokerContext())) == ExtOk
+    check life_provide("life_bridge") == ExtOk
+    LifeBridge.setRequestTimeout(chronos.seconds(5))
+    let fut = LifeBridge.request(Ctx)
+    settle(100) # parked inside the plugin
+    check life_reply_parked(1, 42) == ExtOk # from port 2: must be dropped
+    settle(100)
+    check not fut.finished()
+    check life_reply_parked(0, 43) == ExtOk # from the source port
+    check pump(
+      proc(): bool =
+        fut.finished()
+    )
+    let r = fut.read()
+    check r.isOk and r.value.n == 43
+    check ExtHost.stop().isOk
+
+  test "an event queued before its port closed is dropped (M5)":
+    check startAndOpen()
+    var got: Atomic[int]
+    let gp = addr got
+    check LifeTick.listen(
+      Ctx,
+      proc(e: LifeTick): Future[void] {.async: (raises: []).} =
+        discard gp[].fetchAdd(1),
+    ).isOk
+    check life_emit_tick(1) == ExtOk
+    check pump(
+      proc(): bool =
+        got.load() == 1
+    )
+    extTestPauseEvents.store(true)
+    check life_emit_tick(2) == ExtOk # queued
+    check life_close() == ExtOk
+    extTestPauseEvents.store(false)
+    check life_emit_tick(3) == ExtStale # after close: STALE
+    settle(200)
+    check got.load() == 1
+    waitFor LifeTick.dropAllListeners(Ctx)
+    check ExtHost.stop().isOk
+
+  test "off-bridge forwarder with an infinite timeout (M6) built early (M9)":
+    check startAndOpen()
+    check life_provide("life_owned") == ExtOk
+    LifeOwned.setRequestTimeout(InfiniteDuration)
+    check LifeOwned.setProvider(Ctx, earlyOwned).isOk # this thread owns it
+    let r = waitFor LifeOwned.request(Ctx) # forwarder runs here, not on the bridge
+    check r.isOk and r.value.n == 5 # served by the plugin, not nimOwned
+    if r.isErr:
+      echo "owned: ", r.error
+    LifeOwned.clearProvider(Ctx)
+    LifeOwned.setRequestTimeout(chronos.seconds(20))
+    check ExtHost.stop().isOk
+
+  test "inplace blockingRequestCancellable publishes id 0 (M7)":
+    check startAndOpen()
+    check life_provide("life_echo") == ExtOk
+    var id = LifeEchoRequestId(12345'u64)
+    let r = LifeEcho.blockingRequestCancellable(Ctx, 7'i32, addr id)
+    check r.isOk and r.value.n == 7
+    check uint64(id) == 0
     check ExtHost.stop().isOk

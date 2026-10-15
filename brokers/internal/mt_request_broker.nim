@@ -189,7 +189,33 @@ proc addExtInplaceHooks(
           var fwd = newCall(ident("blockingRequest"), copyNimTree(typeIdent), ctxNode)
           for a in args:
             fwd.add(a)
-          hook.add(ifReturn(newCall(activeName, copyNimTree(ctxNode)), fwd))
+          # The inplace path is not cancellable: still honour the `idOut`
+          # contract (published before the call blocks) with id 0, which a
+          # canceller treats as "not cancellable".
+          let idOutNode = copyNimTree(formal[formal.len - 1][0])
+          let publish = newTree(
+            nnkIfStmt,
+            newTree(
+              nnkElifBranch,
+              newCall(ident("not"), newCall(ident("isNil"), idOutNode)),
+              newStmtList(
+                newAssignment(
+                  newTree(nnkBracketExpr, copyNimTree(idOutNode)),
+                  newCall(copyNimTree(requestIdName), newLit(0'u64)),
+                )
+              ),
+            ),
+          )
+          hook.add(
+            newTree(
+              nnkIfStmt,
+              newTree(
+                nnkElifBranch,
+                newCall(activeName, copyNimTree(ctxNode)),
+                newStmtList(publish, newTree(nnkReturnStmt, fwd)),
+              ),
+            )
+          )
         c[6].insert(0, hook)
         if not declsPlaced:
           declsPlaced = true
