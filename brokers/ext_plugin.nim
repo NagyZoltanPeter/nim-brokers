@@ -1,0 +1,334 @@
+## EXTAPI — consuming external (plugin) APIs through brokers.
+##
+## Declare brokers with `RequestBroker(EXTAPI[<plugin>], …)`, then call
+## `registerExtPlugin(<plugin>)` once in the compilation root. Foreign plugins
+## wire themselves through the `broker_ext_host` function table
+## (`brokers/broker_ext.h`); Nim code keeps using the ordinary broker verbs.
+## See doc/design/EXTAPI_PLAN.md.
+
+{.push raises: [].}
+
+import std/[macros, algorithm, strutils, os]
+import ./internal/ext_brokers
+import
+  ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
+
+export ext_brokers
+
+type ExtHost* = object ## Namespace for the process-wide EXTAPI host (exe mode).
+
+proc start*(_: typedesc[ExtHost]): Result[void, string] =
+  ## Start the shared bridge thread. Required before any plugin can open a
+  ## port. Idempotent.
+  extHostStart()
+
+proc stop*(_: typedesc[ExtHost]) =
+  ## Close every port, fail pending calls, clear auto-wired providers and stop
+  ## the bridge thread.
+  extHostStop()
+
+proc table*(_: typedesc[ExtHost]): ptr ExtHostTable =
+  ## The `broker_ext_host` function table to hand to a plugin entry point.
+  extHostTable()
+
+proc loadPlugin*(_: typedesc[ExtHost], path: string): Result[void, string] =
+  ## Exe mode: `dlopen` / `LoadLibrary` a plugin shared library and call its
+  ## `broker_ext_plugin_entry(host)`. The library stays loaded for the life of
+  ## the process (unloading under running foreign code is never safe).
+  extLoadPlugin(path)
+
+{.pop.}
+
+proc cborHead(major, v: int): string {.compileTime.} =
+  let m = major shl 5
+  if v < 24:
+    result.add(char(m or v))
+  elif v < 256:
+    result.add(char(m or 24))
+    result.add(char(v))
+  elif v < 65536:
+    result.add(char(m or 25))
+    result.add(char(v shr 8))
+    result.add(char(v and 0xFF))
+  else:
+    result.add(char(m or 26))
+    for sh in [24, 16, 8, 0]:
+      result.add(char((v shr sh) and 0xFF))
+
+proc cborText(s: string): string {.compileTime.} =
+  cborHead(3, s.len) & s
+
+proc cborArr(items: seq[string]): string {.compileTime.} =
+  result = cborHead(4, items.len)
+  for i in items:
+    result.add(i)
+
+proc cborMap(pairs: seq[(string, string)]): string {.compileTime.} =
+  result = cborHead(5, pairs.len)
+  for (k, v) in pairs:
+    result.add(cborText(k))
+    result.add(v)
+
+proc nimStrLit(s: string): string {.compileTime.} =
+  result = "\""
+  for c in s:
+    result.add("\\x" & toHex(ord(c), 2))
+  result.add("\"")
+
+proc fieldsCbor(fields: seq[(string, string)]): string {.compileTime.} =
+  var items: seq[string]
+  for (n, t) in fields:
+    items.add(cborMap(@[("name", cborText(n)), ("type", cborText(t))]))
+  cborArr(items)
+
+proc stampLineInfoExt(n, src: NimNode) {.compileTime.} =
+  n.copyLineInfo(src)
+  for c in n:
+    stampLineInfoExt(c, src)
+
+macro registerExtPlugin*(args: varargs[untyped]): untyped =
+  ## `registerExtPlugin(storage, version = "1.0.0")`
+  if args.len == 0 or args[0].kind != nnkIdent:
+    error("registerExtPlugin expects the plugin identifier first", args)
+  let plugin = $args[0]
+  var version = "0.1.0"
+  var defDispatch = ("bridge", 0)
+  for i in 1 ..< args.len:
+    let kw = args[i]
+    if kw.kind != nnkExprEqExpr:
+      error("registerExtPlugin expects `name = value` kwargs", kw)
+    if kw[0].eqIdent("version"):
+      version = kw[1].strVal
+    elif kw[0].eqIdent("dispatch"):
+      defDispatch = parseDispatch(kw[1])
+    else:
+      error("registerExtPlugin: unknown kwarg `" & $kw[0] & "`", kw)
+  result = newStmtList()
+  when not defined(BrokerFfiApi):
+    return
+  else:
+    var entries: seq[ExtEntryCT]
+    for e in gExtEntries:
+      if e.plugin == plugin:
+        entries.add(e)
+    if entries.len == 0:
+      error(
+        "registerExtPlugin(" & plugin & "): no EXTAPI[" & plugin & "] broker declared",
+        args[0],
+      )
+    entries.sort(
+      proc(a, b: ExtEntryCT): int =
+        cmp(a.wireName, b.wireName)
+    )
+    for i in 1 ..< entries.len:
+      if entries[i].wireName == entries[i - 1].wireName:
+        error(
+          "registerExtPlugin(" & plugin & "): duplicate wire name '" &
+            entries[i].wireName & "'",
+          args[0],
+        )
+    let n = entries.len
+
+    # Schema fingerprint: names, kinds, argument / payload wire types and the
+    # payload's inline fields (sorted). Not covered: nested external types are
+    # identified by name only.
+    var canon: seq[string]
+    for e in entries:
+      var args: seq[string]
+      for (an, at) in e.args:
+        args.add(an & ":" & at)
+      args.sort()
+      var flds: seq[string]
+      for (fname, ft) in e.payloadFields:
+        flds.add(fname & ":" & ft)
+      flds.sort()
+      canon.add(
+        $e.kind & ":" & e.wireName & "(" & args.join(",") & ")->" & e.payloadType & "{" &
+          flds.join(",") & "}"
+      )
+    canon.sort()
+    let schemaHash =
+      fnv1a128Hex("brokers-ext:1\nplugin:" & plugin & "\n" & canon.join("\n"))
+
+    # Discovery blobs (CBOR, built at compile time, static storage).
+    var reqNames, evtNames, sigNames, reqRecs, evtRecs, sigRecs: seq[string]
+    for e in entries:
+      case e.kind
+      of enkRequest:
+        reqNames.add(cborText(e.wireName))
+        reqRecs.add(
+          cborMap(
+            @[
+              ("name", cborText(e.wireName)),
+              ("args", fieldsCbor(e.args)),
+              ("response", cborText(e.payloadType)),
+              ("fields", fieldsCbor(e.payloadFields)),
+            ]
+          )
+        )
+      of enkEvent:
+        evtNames.add(cborText(e.wireName))
+        evtRecs.add(
+          cborMap(
+            @[
+              ("name", cborText(e.wireName)),
+              ("type", cborText(e.payloadType)),
+              ("fields", fieldsCbor(e.payloadFields)),
+            ]
+          )
+        )
+      of enkSignal:
+        sigNames.add(cborText(e.wireName))
+        sigRecs.add(
+          cborMap(
+            @[
+              ("name", cborText(e.wireName)),
+              ("type", cborText(e.payloadType)),
+              ("fields", fieldsCbor(e.payloadFields)),
+            ]
+          )
+        )
+    let head = @[
+      ("plugin", cborText(plugin)),
+      ("version", cborText(version)),
+      ("schemaHash", cborText(schemaHash)),
+    ]
+    let listBlob = cborMap(
+      head &
+        @[
+          ("requests", cborArr(reqNames)),
+          ("events", cborArr(evtNames)),
+          ("signals", cborArr(sigNames)),
+        ]
+    )
+    let schemaBlob = cborMap(
+      head &
+        @[
+          ("requests", cborArr(reqRecs)),
+          ("events", cborArr(evtRecs)),
+          ("signals", cborArr(sigRecs)),
+        ]
+    )
+
+    # <plugin>_ext.h (names + hash, no codec), broker_ext.h copy, <plugin>_ext.cddl.
+    let outDir = detectOutputDir()
+    if outDir.len > 0:
+      ensureGeneratedOutputDir(outDir)
+      let up = plugin.toUpperAscii()
+      var h =
+        "/* " & plugin &
+        "_ext.h — generated by nim-brokers registerExtPlugin. Do not edit. */\n" &
+        "#ifndef " & up & "_EXT_H\n#define " & up &
+        "_EXT_H\n\n#include \"broker_ext.h\"\n\n" & "#define " & up & "_EXT_PLUGIN \"" &
+        plugin & "\"\n" & "#define " & up & "_EXT_VERSION \"" & version & "\"\n" &
+        "#define " & up & "_EXT_SCHEMA_HASH \"" & schemaHash & "\"\n\n"
+      for e in entries:
+        h.add(
+          "#define " & up & "_EXT_" & e.wireName.toUpperAscii() & " \"" & e.wireName &
+            "\"\n"
+        )
+      h.add("\nenum " & plugin & "_ext_name_idx {\n")
+      for i, e in entries:
+        h.add("  " & up & "_EXT_IDX_" & e.wireName.toUpperAscii() & " = " & $i & ",\n")
+      h.add("  " & up & "_EXT_NAME_COUNT = " & $n & "\n};\n\n#endif\n")
+      var cddl =
+        "; " & plugin & " EXTAPI plugin — generated by nim-brokers. Do not edit.\n" &
+        "; schemaHash " & schemaHash &
+        "\n; reply: bare value on REPLY_OK, UTF-8 text on REPLY_ERR\n\n"
+      var typeRules: seq[string]
+      proc cddlType(t: string): string =
+        let lt = t.replace(" ", "").toLowerAscii()
+        if lt in ["seq[byte]", "seq[uint8]"]:
+          "bstr"
+        else:
+          nimTypeToCddl(t)
+
+      proc mapRule(fs: seq[(string, string)]): string =
+        var parts: seq[string]
+        for (fname, ft) in fs:
+          parts.add(fname & ": " & cddlType(ft))
+        "{ " & parts.join(", ") & " }"
+
+      for e in entries:
+        case e.kind
+        of enkRequest:
+          if e.args.len == 0:
+            cddl.add("; " & e.wireName & ": no arguments, empty payload\n")
+          else:
+            cddl.add(e.wireName & "-args = " & mapRule(e.args) & "\n")
+          cddl.add(e.wireName & "-reply = " & e.payloadType & "\n")
+        of enkEvent:
+          cddl.add(e.wireName & "-event = " & e.payloadType & "\n")
+        of enkSignal:
+          cddl.add(e.wireName & "-signal = " & e.payloadType & "\n")
+        if e.payloadFields.len > 0:
+          let rule = e.payloadType & " = " & mapRule(e.payloadFields) & "\n"
+          if rule notin typeRules:
+            typeRules.add(rule)
+      cddl.add("\n" & typeRules.join(""))
+      try:
+        writeFile(outDir / (plugin & "_ext.h"), h)
+        writeFile(outDir / (plugin & "_ext.cddl"), cddl)
+        writeFile(
+          outDir / "broker_ext.h",
+          staticRead(currentSourcePath().parentDir / "broker_ext.h"),
+        )
+      except IOError as e:
+        error("registerExtPlugin: cannot write generated files: " & e.msg, args[0])
+
+    let namesVar = "gExtNames_" & plugin
+    let descVar = "gExtDesc_" & plugin
+    var src =
+      "var " & namesVar & " {.global.}: array[" & $n & ", ExtNameDesc]\n" & "var " &
+      descVar & " {.global.}: ExtPluginDesc\n" & "proc extInitPlugin_" & plugin &
+      "() =\n"
+    var poolSize = 0
+    for e in entries:
+      if e.dispatch == "workers":
+        poolSize = max(poolSize, e.workers)
+      elif e.dispatch == "" and defDispatch[0] == "workers" and e.kind != enkEvent:
+        poolSize = max(poolSize, defDispatch[1])
+    for i, e in entries:
+      var sibling = -1
+      for j, o in entries:
+        if j != i and o.kind == enkRequest and e.kind == enkRequest and
+            o.typeName == e.typeName:
+          sibling = j
+      let eff = (if e.dispatch.len > 0: e.dispatch else: defDispatch[0])
+      let disp =
+        case eff
+        of "workers": "edWorkers"
+        of "inplace": "edInplace"
+        else: "edBridge"
+      let kind = (
+        case e.kind
+        of enkRequest: "enkRequest"
+        of enkSignal: "enkSignal"
+        of enkEvent: "enkEvent"
+      )
+      src.add(
+        "  " & namesVar & "[" & $i & "] = ExtNameDesc(name: \"" & e.wireName &
+          "\", kind: " & kind & ", dispatch: " & disp & ", install: " &
+          (if e.installName.len > 0: e.installName else: "nil") & ", uninstall: " &
+          (if e.uninstallName.len > 0: e.uninstallName else: "nil") & ", emitFn: " &
+          (if e.emitName.len > 0: e.emitName else: "nil") & ", sibling: " & $sibling &
+          ")\n"
+      )
+    src.add(
+      "  " & descVar & " = ExtPluginDesc(name: \"" & plugin & "\", version: \"" & version &
+        "\", schemaHash: \"" & schemaHash & "\", listApisBuf: cstring(" &
+        nimStrLit(listBlob) & "), listApisLen: " & $listBlob.len &
+        ", schemaBuf: cstring(" & nimStrLit(schemaBlob) & "), schemaLen: " &
+        $schemaBlob.len & ", names: cast[ptr UncheckedArray[ExtNameDesc]](addr " &
+        namesVar & "[0]), nameCount: " & $n & ", workers: " & $poolSize & ")\n" &
+        "  let pIdx = extRegisterPlugin(addr " & descVar & ")\n"
+    )
+    var seenPluginVars: seq[string]
+    for i, e in entries:
+      if e.pluginIdxVar notin seenPluginVars:
+        seenPluginVars.add(e.pluginIdxVar)
+        src.add("  " & e.pluginIdxVar & " = pIdx\n")
+      src.add("  " & e.nameIdxVar & " = " & $i & "\n")
+    src.add("extInitPlugin_" & plugin & "()\n")
+    result.add(parseStmt(src))
+    stampLineInfoExt(result, args[0])

@@ -638,6 +638,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_broker_interface_api", "brokerifaceapi"),
     ("test_broker_interface_mt", "brokerifacemt"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
+    ("test_ext_plugin", "extplugin"),
   ]
   for (f, prefix) in apiTests:
     for opt in [
@@ -1270,6 +1271,16 @@ task testApiTeardownAsanRefc,
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
+
+const extPluginTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extplugin"
+
+task testExtAsanOrc,
+  "Run the EXTAPI raw-plugin test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_plugin", extPluginTestExtra)
+
+task testExtAsanRefc,
+  "Run the EXTAPI raw-plugin test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_plugin", extPluginTestExtra)
 
 task testApiSignalAsanOrc,
   "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":

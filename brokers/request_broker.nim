@@ -166,6 +166,8 @@ import ./internal/broker_debug
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_request_broker
   export mt_config, mt_request_broker
+  import ./internal/ext_brokers
+  export ext_brokers
 
 when compileOption("threads") and defined(BrokerFfiApi):
   # CBOR is the only FFI codegen strategy. The historical
@@ -1290,6 +1292,16 @@ macro RequestBroker*(args: varargs[untyped]): untyped =
   var kwargs: seq[NimNode]
   for i in 1 ..< args.len - 1:
     kwargs.add(args[i])
+  if mode.kind == nnkBracketExpr:
+    when not compileOption("threads"):
+      error("RequestBroker(EXTAPI[...]) requires --threads:on", mode)
+    else:
+      if not isExtMode(mode):
+        error(
+          "RequestBroker mode must be `sync`, `async`, `mt`, `API` or `EXTAPI[<plugin>]`",
+          mode,
+        )
+      return generateExtRequestBroker(mode, kwargs, body)
   let m = parseMode(mode)
   let split = (kwargs: kwargs, body: body)
   case m

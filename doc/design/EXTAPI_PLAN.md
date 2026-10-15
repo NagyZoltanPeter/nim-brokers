@@ -1879,3 +1879,33 @@ switching under load, the lifetime-heaviest path.
 (the generated surfaces, the ownership table, the failure table), and
 `README.md` / `USAGEGUIDE.md` link to it — no separate new doc files beyond
 this plan.
+
+---
+
+## 15. Implementation status
+
+### Phase 1a — foreign lane core (implemented on `feat-extapi-design`)
+
+| Piece | Where |
+|---|---|
+| `RequestBroker` / `EventBroker` / `SignalBroker(EXTAPI[p], …)` parsing + lowering | `brokers/{request,event,signal}_broker.nim` (bracket-mode hook), `brokers/internal/ext_brokers.nim` |
+| `registerExtPlugin(p, version, dispatch)`, `ExtHost.start/stop/table/loadPlugin` | `brokers/ext_plugin.nim` |
+| Runtime: plugin registry, ports, host table, bridge thread, control / reply / event rings, worker pools, inplace slots, caps check | `brokers/internal/ext_runtime.nim` |
+| Fixed C ABI | `brokers/broker_ext.h` (copied next to the generated `<plugin>_ext.h` / `.cddl`) |
+| Tests | `test/test_ext_plugin.nim` + raw C plugins `test/ext/raw_{storage,calc,echo}_plugin.c` (no generated wrapper) |
+
+Verified: ORC / refc × debug / release, refc + ASAN/UBSan and ORC + ASAN/UBSan
+on macOS; 25 consecutive runs per MM without a failure.
+
+Deviations from the sections above, found while implementing:
+
+| Topic | Plan said | Implemented | Reason |
+|---|---|---|---|
+| Timeout of a running call | MT timeout cancels the provider | `extCall` enforces the broker's own `requestTimeoutMs` and sends the cancel hint itself | an MT timeout only abandons the response slot; it never cancels a running provider (existing MT semantics, unchanged) |
+| Second / late `reply` | `STALE` | `OK`, dropped on the bridge by call id | the foreign thread cannot see the bridge's pending table synchronously; `STALE` is still returned for a closed port |
+| `inplace` | runs on the caller's thread | runs on the thread that owns the public slot (the bridge when auto-wired); synchronous-reply contract enforced | the caller-thread bypass (`directInplace`) is phase 1b |
+| `extProvider` / `extHandler` off the bridge | forwards over the hidden `<T>Ext` lane | returns `err` | the hidden lane is phase 1b |
+| Worker pool shutdown | join timeout, leak a stuck worker | plain join | a worker stuck in a foreign `invoke` delays `ExtHost.stop()`; follow-up |
+| Schema hash scope | full type registry | names, kinds, argument / payload types, inline payload fields | nested external types are identified by name only |
+| Limits | — | 32 plugins, 64 ports and 64 names per plugin, 256 concurrent inplace calls, 4096-entry rings | fixed arrays keep foreign-thread paths allocation-free |
+| Windows | — | loader test skipped | Windows CI cell is phase 4 |
