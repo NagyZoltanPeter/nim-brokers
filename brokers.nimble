@@ -711,6 +711,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_ext_switching", "extswitch"),
     ("test_ext_imports", "extimports"),
     ("test_ext_lifecycle", "extlife"),
+    ("test_ext_schema", "extschema"),
   ]
   for (f, prefix) in apiTests:
     for opt in [

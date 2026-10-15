@@ -37,9 +37,28 @@ when not defined(windows):
   from std/posix import pthread_self
 import system/ansi_c
 import chronos, chronicles, results
-import ../broker_context, ./mt_broker_common
+import ../broker_context, ./mt_broker_common, ./ext_shapes
 
 export results, dynlib
+
+when defined(windows):
+  proc extGetEnvVarA(
+    name: cstring, buf: ptr char, size: uint32
+  ): uint32 {.importc: "GetEnvironmentVariableA", stdcall, header: "<windows.h>".}
+
+else:
+  proc extCGetEnv(name: cstring): cstring {.importc: "getenv", header: "<stdlib.h>".}
+
+template extEnvFlagSet(name: cstring): bool =
+  ## Env var `name` set to a non-empty value other than "0" — libc only, safe
+  ## on a foreign thread (same rule as `<lib>_verifySchema`).
+  when defined(windows):
+    var buf: array[2, char]
+    let n = extGetEnvVarA(name, addr buf[0], 2)
+    n >= 2'u32 or (n == 1'u32 and buf[0] != '0')
+  else:
+    let p = extCGetEnv(name)
+    not p.isNil and p[0] != '\0' and not (p[0] == '0' and p[1] == '\0')
 
 when defined(windows):
   proc extGetCurrentThreadId(): uint32 {.
@@ -212,6 +231,7 @@ type
     loadEager*: bool ## K1: load on `ExtHost.start()` for DefaultBrokerContext
     peerLib*: cstring ## K2: the peer nim-brokers library's name (symbol prefix)
     peerDynlib*: cstring ## K2: `dynlib` pattern of the peer library
+    skipSchemaEnv*: cstring ## "<PLUGIN>_SKIP_SCHEMA_CHECK" (static storage)
 
   ExtImplRef = object
     refs: Atomic[int]
@@ -1309,7 +1329,13 @@ proc extOpen(
   let rt = gExtPlugins[p]
   if not impl.schemaHash.isNil and not rt.desc.schemaHash.isNil and
       c_strcmp(impl.schemaHash, rt.desc.schemaHash) != 0:
-    return ExtSchemaMismatch
+    # Same escape hatch as `<lib>_verifySchema`: an operator who knows the
+    # mismatch is benign can open anyway.
+    let skip =
+      extEnvFlagSet("BROKERS_FFI_SKIP_SCHEMA_CHECK") or
+      (not rt.desc.skipSchemaEnv.isNil and extEnvFlagSet(rt.desc.skipSchemaEnv))
+    if not skip:
+      return ExtSchemaMismatch
   withLock(rt.lock):
     for s in 0 ..< ExtMaxPorts:
       let ps = addr rt.ports[s]
@@ -1877,24 +1903,53 @@ proc peerSchemaSigs(f: ptr PeerFns): Result[seq[(string, string)], string] =
   var sigs: seq[(string, string)]
   try:
     let j = parseJson(text)
+    # The peer's own type records, so its types expand to wire shapes exactly
+    # like ours (`extTypeShapes`): nested objects and enums are compared, not
+    # just type names (EXTAPI review M13).
+    var types = initTable[string, PeerType]()
+    if j.hasKey("types"):
+      for t in j["types"]:
+        var rec: PeerType
+        case t["kind"].getStr()
+        of "object":
+          rec.kind = ptkObject
+          for f in t["fields"]:
+            rec.fields.add((f["name"].getStr(), f["nimType"].getStr()))
+        of "enum":
+          rec.kind = ptkEnum
+          for v in t["enumValues"]:
+            rec.enumValues.add((v["ordinal"].getInt(), v["name"].getStr()))
+        else:
+          rec.kind = ptkAlias
+          rec.underlying = t["underlyingType"].getStr()
+        types[t["name"].getStr()] = rec
     for r in j["requests"]:
-      var args: seq[string]
+      var args: seq[(string, string)]
       for a in r["argFields"]:
-        args.add(a["name"].getStr() & ":" & a["nimType"].getStr().replace(" ", ""))
-      args.sort()
+        args.add((a["name"].getStr(), peerShape(a["nimType"].getStr(), types)))
+      args.sort(
+        proc(x, y: (string, string)): int =
+          cmp(x[0], y[0])
+      )
+      var parts: seq[string]
+      for (n, sh) in args:
+        parts.add(n & ":" & sh)
+      let resp = r["responseType"].getStr()
       sigs.add(
         (
           r["apiName"].getStr(),
-          args.join(",") & "|" & r["responseType"].getStr().replace(" ", ""),
+          parts.join(",") & "|" & (
+            if resp.len == 0: "void" else: peerShape(resp, types)
+          ),
         )
       )
     for e in j["events"]:
       sigs.add(
-        (e["apiName"].getStr(), "|" & e["payloadType"].getStr().replace(" ", ""))
+        (e["apiName"].getStr(), "|" & peerShape(e["payloadType"].getStr(), types))
       )
     for e in j["signals"]:
       sigs.add(
-        (e["apiName"].getStr(), "|" & e["payloadType"].getStr().replace(" ", ""))
+        (e["apiName"].getStr(), "|" & peerShape(e["payloadType"].getStr(), types))
       )
   except CatchableError as e:
     return err("peer schema parse failed: " & e.msg)

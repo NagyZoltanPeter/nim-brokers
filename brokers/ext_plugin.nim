@@ -10,6 +10,7 @@
 
 import std/[macros, algorithm, strutils, os]
 import ./internal/ext_brokers
+import ./internal/ext_shapes
 import ./broker_context
 import chronos
 import ./internal/ext_codegen_hpp
@@ -156,8 +157,19 @@ proc stampLineInfoExt(n, src: NimNode) {.compileTime.} =
 
 var gExtPluginNamesCT {.compileTime.}: seq[string]
 
-macro registerExtPlugin*(args: varargs[untyped]): untyped =
-  ## `registerExtPlugin(storage, version = "1.0.0")`
+proc sortedExtEntries(plugin: string): seq[ExtEntryCT] {.compileTime.} =
+  for e in gExtEntries:
+    if e.plugin == plugin:
+      result.add(e)
+  result.sort(
+    proc(a, b: ExtEntryCT): int =
+      cmp(a.wireName, b.wireName)
+  )
+
+proc emitExtPlugin(args: NimNode, shapes: seq[string]): NimNode {.compileTime.} =
+  ## The body of `registerExtPlugin`, run once the wire shapes of every
+  ## argument / payload type are known (`shapes`, in `sortedExtEntries` order:
+  ## per entry its argument types, then its payload type unless void).
   if args.len == 0 or args[0].kind != nnkIdent:
     error("registerExtPlugin expects the plugin identifier first", args)
   let plugin = $args[0]
@@ -185,19 +197,12 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
   when not defined(BrokerFfiApi):
     return
   else:
-    var entries: seq[ExtEntryCT]
-    for e in gExtEntries:
-      if e.plugin == plugin:
-        entries.add(e)
+    var entries = sortedExtEntries(plugin)
     if entries.len == 0:
       error(
         "registerExtPlugin(" & plugin & "): no EXTAPI[" & plugin & "] broker declared",
         args[0],
       )
-    entries.sort(
-      proc(a, b: ExtEntryCT): int =
-        cmp(a.wireName, b.wireName)
-    )
     for i in 1 ..< entries.len:
       if entries[i].wireName == entries[i - 1].wireName:
         error(
@@ -223,26 +228,39 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
           args[0],
         )
 
-    # Schema fingerprint: names, kinds, argument / payload wire types and the
-    # payload's inline fields (sorted). Not covered: nested external types are
-    # identified by name only.
-    var canon: seq[string]
+    # Wire shapes (ext_shapes): structural, nested types included (review M13).
+    var argShapes: seq[seq[(string, string)]] # per entry: (arg name, shape)
+    var payloadShapes: seq[string]
+    var si = 0
     for e in entries:
+      var a: seq[(string, string)]
+      for (an, _) in e.args:
+        a.add((an, (if si < shapes.len: shapes[si] else: "?")))
+        inc si
+      a.sort(
+        proc(x, y: (string, string)): int =
+          cmp(x[0], y[0])
+      )
+      argShapes.add(a)
+      if e.payloadType == "void":
+        payloadShapes.add("void")
+      else:
+        payloadShapes.add((if si < shapes.len: shapes[si] else: "?"))
+        inc si
+
+    # Schema fingerprint: names, kinds and the wire shape of every argument and
+    # payload (nested objects, enum ordinals, containers — not type names).
+    var canon: seq[string]
+    for i, e in entries:
       var args: seq[string]
-      for (an, at) in e.args:
-        args.add(an & ":" & at)
-      args.sort()
-      var flds: seq[string]
-      for (fname, ft) in e.payloadFields:
-        flds.add(fname & ":" & ft)
-      flds.sort()
+      for (an, sh) in argShapes[i]:
+        args.add(an & ":" & sh)
       canon.add(
-        $e.kind & ":" & e.wireName & "(" & args.join(",") & ")->" & e.payloadType & "{" &
-          flds.join(",") & "}"
+        $e.kind & ":" & e.wireName & "(" & args.join(",") & ")->" & payloadShapes[i]
       )
     canon.sort()
     let schemaHash =
-      fnv1a128Hex("brokers-ext:1\nplugin:" & plugin & "\n" & canon.join("\n"))
+      fnv1a128Hex("brokers-ext:2\nplugin:" & plugin & "\n" & canon.join("\n"))
 
     # Discovery blobs (CBOR, built at compile time, static storage).
     var reqNames, evtNames, sigNames, reqRecs, evtRecs, sigRecs: seq[string]
@@ -505,21 +523,22 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
           if e.peerLib.len > 0:
             block:
               var a: seq[string]
-              for (an, at) in e.args:
-                a.add(an & ":" & at.replace(" ", ""))
-              a.sort()
-              ", peerSig: \"" & a.join(",") & "|" & e.payloadType.replace(" ", "") & "\""
+              for (an, sh) in argShapes[i]:
+                a.add(an & ":" & sh)
+              ", peerSig: " & nimStrLit(a.join(",") & "|" & payloadShapes[i])
           else:
             ""
         ) & ")\n"
       )
     src.add(
       "  " & descVar & " = ExtPluginDesc(name: \"" & plugin & "\", version: \"" & version &
-        "\", schemaHash: \"" & schemaHash & "\", listApisBuf: cstring(" &
-        nimStrLit(listBlob) & "), listApisLen: " & $listBlob.len &
-        ", schemaBuf: cstring(" & nimStrLit(schemaBlob) & "), schemaLen: " &
-        $schemaBlob.len & ", names: cast[ptr UncheckedArray[ExtNameDesc]](addr " &
-        namesVar & "[0]), nameCount: " & $n & ", workers: " & $poolSize & (
+        "\", schemaHash: \"" & schemaHash & "\", skipSchemaEnv: \"" &
+        plugin.toUpperAscii().replace("-", "_") & "_SKIP_SCHEMA_CHECK" &
+        "\", listApisBuf: cstring(" & nimStrLit(listBlob) & "), listApisLen: " &
+        $listBlob.len & ", schemaBuf: cstring(" & nimStrLit(schemaBlob) &
+        "), schemaLen: " & $schemaBlob.len &
+        ", names: cast[ptr UncheckedArray[ExtNameDesc]](addr " & namesVar &
+        "[0]), nameCount: " & $n & ", workers: " & $poolSize & (
         if isImportPlugin:
           ", importInvoke: extImportInvoke_" & plugin & ", loadEager: " & $loadEager
         elif isPeerPlugin:
@@ -538,6 +557,42 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
     src.add("extInitPlugin_" & plugin & "()\n")
     result.add(parseStmt(src))
     stampLineInfoExt(result, args[0])
+
+var gExtPendingArgs {.compileTime.}: seq[(string, NimNode)]
+
+macro extRegisterPluginShaped*(plugin: static string, shapes: static string): untyped =
+  ## Second stage of `registerExtPlugin`: `shapes` was computed by the typed
+  ## `extTypeShapes` from the plugin's argument / payload types.
+  var args: NimNode = nil
+  for (p, a) in gExtPendingArgs:
+    if p == plugin:
+      args = a
+  if args.isNil:
+    error("registerExtPlugin(" & plugin & "): internal: arguments not recorded")
+  emitExtPlugin(args, (if shapes.len == 0: @[]
+    else: shapes.split(ShapeSep)))
+
+macro registerExtPlugin*(args: varargs[untyped]): untyped =
+  ## `registerExtPlugin(storage, version = "1.0.0")`
+  ##
+  ## Two stages: this untyped stage hands every argument / payload type of the
+  ## plugin's brokers to the typed `extTypeShapes`, whose wire shapes (nested
+  ## objects, enum ordinals) the second stage puts into the schema hash and
+  ## the K2 peer signatures.
+  if args.len == 0 or args[0].kind != nnkIdent:
+    error("registerExtPlugin expects the plugin identifier first", args)
+  when not defined(BrokerFfiApi):
+    return emitExtPlugin(args, @[]) # validates the kwargs, emits nothing
+  else:
+    let plugin = $args[0]
+    var shapesCall = newCall(bindSym("extTypeShapes"))
+    for e in sortedExtEntries(plugin):
+      for (_, at) in e.args:
+        shapesCall.add(parseExpr(at))
+      if e.payloadType != "void":
+        shapesCall.add(parseExpr(e.payloadType))
+    gExtPendingArgs.add((plugin, copyNimTree(args)))
+    result = newCall(bindSym("extRegisterPluginShaped"), newLit(plugin), shapesCall)
 
 macro exportExtHost*(libName: static string): untyped =
   ## Lib mode: export `<libName>_extHost()` from a Nim shared library. The C /
