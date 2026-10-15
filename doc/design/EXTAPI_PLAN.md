@@ -2009,3 +2009,24 @@ is clean.
 | R2 | compiled and type-checked, not exercised at runtime by the examples (no `inplace` / `workers` foreign broker in `storage`) | follow-up: a raw-kv-style test plugin in Rust |
 | Table keys | non-`String` keys need the `(API)` lane's `cbor_strkey_map` adapter | rejected at compile time for EXTAPI v1 |
 | Windows | Rust and C++ examples not yet run on Windows | CI steps gated to Linux / macOS; Windows cell still open |
+
+### Phase 5 — Go and Python wrappers and examples (implemented on `feat-extapi-design`)
+
+| Piece | Where |
+|---|---|
+| `<plugin>_ext_go/` module (`-d:BrokerFfiApiGenGo`): `<Plugin>` interface (requests take `context.Context`, cancelled by a Nim cancel / deadline; one goroutine per request, port caps `NONBLOCKING`), `Funcs` + `OpenFuncs` (provides exactly the non-nil funcs), `Port`, `Emitter`; `cgo.Handle` as `user`, `//export` trampolines in their own file, C helpers in the main preamble; panics become error replies | `brokers/internal/ext_codegen_go.nim` |
+| `<plugin>_ext.py` (`-d:BrokerFfiApiGenPy`): ctypes mirror of `broker_ext.h`, dataclasses, `<Plugin>` base class (`async def` → `run_coroutine_threadsafe` on the given loop, Nim cancel → `future.cancel()`; plain `def` replies inline), `Builder`, `Port` (kept alive until the host's `release`), `Emitter`; exceptions become error replies | `brokers/internal/ext_codegen_py.nim` |
+| Go examples: `go_plugin/` (c-shared, scenarios 1–3), `go_cimport/` (c-shared C-ABI lib, scenario 4), `go_host_lib/` (lib mode, `OpenFuncs` + the generated `storagelib_go`) | `examples/extapi/` |
+| Python example: `python_host_lib/main.py` (lib mode: `Builder` with a sync function, then a subclass with an `async def` on a loop thread) | `examples/extapi/` |
+| `nimble runExtExampleGo`, `nimble runExtExamplePy` (orc + refc); CI steps on Linux / macOS | `brokers.nimble`, `.github/workflows/ci.yml` |
+
+Verified on macOS: Go scenarios 1, 1b, 2, 3, 4 and Python 1b pass under ORC
+and refc; the ASAN (refc) host run with the Go plugin is clean.
+
+| Topic | Finding | Handling |
+|---|---|---|
+| Python scope | a Python plugin cannot be a `dlopen`-able library, so exe mode (scenarios 1–4) needs an embedding host | Python covers lib mode (1b) only |
+| Two Go runtimes | `go_plugin` and `go_cimport` are separate c-shared libraries loaded into one process; Go does not promise this works | works on macOS (examples green); revisit if Linux CI disagrees — fallback is one c-shared library exporting both |
+| Python cancel | `future.cancel()` path compiled and wired, not exercised (`notes` has no slow request) | follow-up together with the Rust R2 runtime test |
+| gofmt | generated Go is `go vet`-clean; `gofmt` would only re-align struct fields / consts | left as is |
+| Windows | Go / Python examples not yet run on Windows | CI steps gated to Linux / macOS, like C++ / Rust |

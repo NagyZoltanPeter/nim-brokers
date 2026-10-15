@@ -747,22 +747,24 @@ proc extExeName(name: string): string =
   else:
     name
 
-proc buildExtExampleNim(mm, codecLib: string, rust = false) =
-  ## Lib-mode library (storagelib) + the exe-mode host and mock test; the
-  ## host build also writes storage_ext.hpp / storage_ext_rs the plugins use.
-  ## `rust` adds the generated Rust crates (storage_ext_rs, notes_ext_rs,
-  ## storagelib_rs).
-  let genRust = (if rust: " -d:BrokerFfiApiGenRust" else: "")
+proc buildExtStoragelib(mm: string, gen = "") =
+  ## Lib-mode library (storagelib); `gen` adds wrapper defines
+  ## (-d:BrokerFfiApiGenRust / GenGo / GenPy) for notes_ext_* + storagelib_*.
   var lib =
     "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " &
-    "--outdir:examples/extapi/nimlib/build --mm:" & mm & genRust
+    "--outdir:examples/extapi/nimlib/build --mm:" & mm & gen
   lib.add(nimMainPrefixFlag("storagelib"))
   lib.add(nimWindowsCcFlag())
   lib.add(nimWindowsImplibFlag("examples/extapi/nimlib/build", "storagelib"))
   exec lib & " examples/extapi/nimlib/storagelib.nim"
+
+proc buildExtExampleNim(mm, codecLib: string, gen = "") =
+  ## storagelib + the exe-mode host and mock test; the host build also writes
+  ## storage_ext.hpp (and storage_ext_rs / _go under `gen`) the plugins use.
+  buildExtStoragelib(mm, gen)
   let host =
     "nim c -d:BrokerFfiApi --threads:on --path:. --outdir:examples/extapi/nimhost/build" &
-    nimWindowsCcFlag() & " --mm:" & mm & genRust & " -d:codecLib=" & quoteArg(codecLib)
+    nimWindowsCcFlag() & " --mm:" & mm & gen & " -d:codecLib=" & quoteArg(codecLib)
   exec host & " examples/extapi/nimhost/storage_host.nim"
   exec host & " examples/extapi/nimhost/test_storage_mock.nim"
 
@@ -794,7 +796,7 @@ task runExtExampleRust,
   for mm in memoryManagerMatrix():
     echo "\n=== runExtExampleRust: --mm:" & mm & " ==="
     setMM(mm)
-    buildExtExampleNim(mm, codecLib, rust = true)
+    buildExtExampleNim(mm, codecLib, " -d:BrokerFfiApiGenRust")
     exec cargo & " build --manifest-path examples/extapi/rust_cimport/Cargo.toml"
     exec cargo & " build --manifest-path examples/extapi/rust_plugin/Cargo.toml"
     exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
@@ -802,6 +804,36 @@ task runExtExampleRust,
     putEnv("EXT_PLUGIN", pluginLib)
     exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
     exec cargo & " run --manifest-path examples/extapi/rust_host_lib/Cargo.toml"
+
+task runExtExampleGo,
+  "Build and run the EXTAPI Go examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
+  let ex = thisDir() / "examples/extapi"
+  let codecLib = ex / "go_cimport/build" / extSharedLibName("codec_go")
+  let pluginLib = ex / "go_plugin/build" / extSharedLibName("storage_go_plugin")
+  let go = quoteArg(findGoExe())
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtExampleNim(mm, codecLib, " -d:BrokerFfiApiGenGo")
+    withDir "examples/extapi/go_cimport":
+      exec go & " build -buildmode=c-shared -o " & quoteArg(codecLib) & " ."
+    withDir "examples/extapi/go_plugin":
+      exec go & " build -buildmode=c-shared -o " & quoteArg(pluginLib) & " ."
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
+      quoteArg(pluginLib)
+    putEnv("EXT_PLUGIN", pluginLib)
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
+    withDir "examples/extapi/go_host_lib":
+      exec go & " run ."
+
+task runExtExamplePy,
+  "Build and run the EXTAPI Python example: lib mode, sync + async plugin (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtStoragelib(mm, " -d:BrokerFfiApiGenPy")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/extapi/python_host_lib/main.py")
 
 task runFfiExamplePy,
   "Build the FFI example library + Python wrapper and run python_example/main.py (orc + refc)":

@@ -154,6 +154,10 @@ jobs:
       - name: Run Python parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibPy -y --verbose
 
+      - name: Run EXTAPI Python example
+        if: runner.os != 'Windows'
+        run: ci/nimble-strict.sh runExtExamplePy -y --verbose
+
       - name: Run C++ parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibCpp -y --verbose
 
@@ -186,6 +190,10 @@ jobs:
 
       - name: Run Go parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibGo -y --verbose
+
+      - name: Run EXTAPI Go examples
+        if: runner.os != 'Windows'
+        run: ci/nimble-strict.sh runExtExampleGo -y --verbose
 
       # OOP interface-model examples (hierlib + persistence)
       - name: Run hierlib C++ example

@@ -14,6 +14,8 @@ import ./broker_context
 import chronos
 import ./internal/ext_codegen_hpp
 import ./internal/ext_codegen_rust
+import ./internal/ext_codegen_go
+import ./internal/ext_codegen_py
 import
   ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
 
@@ -358,6 +360,22 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
             ensureGeneratedOutputDir(outDir / (plugin & "_ext_rs") / "src")
             writeFile(outDir / (plugin & "_ext_rs") / "Cargo.toml", crate.cargo)
             writeFile(outDir / (plugin & "_ext_rs") / "src" / "lib.rs", crate.lib)
+          when defined(BrokerFfiApiGenPy):
+            writeFile(
+              outDir / (plugin & "_ext.py"),
+              generateExtPyFile(plugin, version, schemaHash, entries),
+            )
+          when defined(BrokerFfiApiGenGo):
+            let gm = generateExtGoModule(plugin, version, schemaHash, entries)
+            let goDir = outDir / (plugin & "_ext_go")
+            ensureGeneratedOutputDir(goDir)
+            writeFile(goDir / "go.mod", gm.gomod)
+            writeFile(goDir / (plugin & "_ext.go"), gm.main)
+            writeFile(goDir / (plugin & "_ext_export.go"), gm.exports)
+            writeFile(
+              goDir / "broker_ext.h",
+              staticRead(currentSourcePath().parentDir / "broker_ext.h"),
+            )
         writeFile(
           outDir / "broker_ext.h",
           staticRead(currentSourcePath().parentDir / "broker_ext.h"),
