@@ -10,6 +10,8 @@
 
 import std/[macros, algorithm, strutils, os]
 import ./internal/ext_brokers
+import ./broker_context
+import chronos
 import
   ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
 
@@ -30,6 +32,52 @@ proc stop*(_: typedesc[ExtHost]) =
 proc table*(_: typedesc[ExtHost]): ptr ExtHostTable =
   ## The `broker_ext_host` function table to hand to a plugin entry point.
   extHostTable()
+
+type ExtTunnel* = object
+  ## Nim-side raw CBOR access to EXTAPI brokers by (plugin, wire name), for
+  ## generic forwarders. Every call goes through the typed broker, so it
+  ## reaches whatever provider is installed — plugin, fallback or Nim impl —
+  ## with the broker's timeout and "no provider" semantics (EXTAPI_PLAN §6.6.4).
+
+proc call*(
+    _: typedesc[ExtTunnel], ctx: BrokerContext, plugin, name: string, payload: seq[byte]
+): Future[Result[seq[byte], string]] {.async: (raises: []).} =
+  ## Request: `payload` is the CBOR argument map (empty for zero-arg); the
+  ## result is the bare CBOR reply value.
+  let (p, n) = extFindName(plugin, name)
+  if p < 0 or n < 0:
+    return err("unknown ext api " & plugin & "." & name)
+  let fn = extNameDesc(p, n).tunnelCall
+  if fn.isNil:
+    return err("ext api " & plugin & "." & name & " is not a request")
+  return await fn(ctx, payload)
+
+proc signal*(
+    _: typedesc[ExtTunnel], ctx: BrokerContext, plugin, name: string, payload: seq[byte]
+): Result[void, string] =
+  let (p, n) = extFindName(plugin, name)
+  if p < 0 or n < 0:
+    return err("unknown ext api " & plugin & "." & name)
+  let fn = extNameDesc(p, n).tunnelSignal
+  if fn.isNil:
+    return err("ext api " & plugin & "." & name & " is not a signal")
+  fn(ctx, payload)
+
+proc listen*(
+    _: typedesc[ExtTunnel],
+    ctx: BrokerContext,
+    plugin, name: string,
+    cb: ExtTunnelEventCb,
+): Result[void, string] =
+  ## Every event of (plugin, name) on `ctx` is re-encoded and handed to `cb`
+  ## on the listening thread.
+  let (p, n) = extFindName(plugin, name)
+  if p < 0 or n < 0:
+    return err("unknown ext api " & plugin & "." & name)
+  let fn = extNameDesc(p, n).tunnelListen
+  if fn.isNil:
+    return err("ext api " & plugin & "." & name & " is not an event")
+  fn(ctx, cb)
 
 proc loadPlugin*(_: typedesc[ExtHost], path: string): Result[void, string] =
   ## Exe mode: `dlopen` / `LoadLibrary` a plugin shared library and call its
@@ -93,6 +141,7 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
   let plugin = $args[0]
   var version = "0.1.0"
   var defDispatch = ("bridge", 0)
+  var defAutoWire = "true"
   for i in 1 ..< args.len:
     let kw = args[i]
     if kw.kind != nnkExprEqExpr:
@@ -101,6 +150,8 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
       version = kw[1].strVal
     elif kw[0].eqIdent("dispatch"):
       defDispatch = parseDispatch(kw[1])
+    elif kw[0].eqIdent("autoWire"):
+      defAutoWire = parseBoolLit(kw[1], "autoWire")
     else:
       error("registerExtPlugin: unknown kwarg `" & $kw[0] & "`", kw)
   result = newStmtList()
@@ -312,7 +363,12 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
           (if e.installName.len > 0: e.installName else: "nil") & ", uninstall: " &
           (if e.uninstallName.len > 0: e.uninstallName else: "nil") & ", emitFn: " &
           (if e.emitName.len > 0: e.emitName else: "nil") & ", sibling: " & $sibling &
-          ")\n"
+          ", autoWire: " & (if e.autoWire.len > 0: e.autoWire else: defAutoWire) & (
+          if e.tunnelName.len == 0: ""
+          elif e.kind == enkRequest: ", tunnelCall: " & e.tunnelName
+          elif e.kind == enkSignal: ", tunnelSignal: " & e.tunnelName
+          else: ", tunnelListen: " & e.tunnelName
+        ) & ")\n"
       )
     src.add(
       "  " & descVar & " = ExtPluginDesc(name: \"" & plugin & "\", version: \"" & version &

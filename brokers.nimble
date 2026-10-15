@@ -639,6 +639,7 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_broker_interface_mt", "brokerifacemt"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
     ("test_ext_plugin", "extplugin"),
+    ("test_ext_switching", "extswitch"),
   ]
   for (f, prefix) in apiTests:
     for opt in [
@@ -1281,6 +1282,16 @@ task testExtAsanOrc,
 task testExtAsanRefc,
   "Run the EXTAPI raw-plugin test under ASan+UBSan (clang, refc, debug)":
   testSan("asan", "refc", "test_ext_plugin", extPluginTestExtra)
+
+const extSwitchTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extswitch"
+
+task testExtSwitchAsanOrc,
+  "Run the EXTAPI switching test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_switching", extSwitchTestExtra)
+
+task testExtSwitchAsanRefc,
+  "Run the EXTAPI switching test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_switching", extSwitchTestExtra)
 
 task testApiSignalAsanOrc,
   "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":

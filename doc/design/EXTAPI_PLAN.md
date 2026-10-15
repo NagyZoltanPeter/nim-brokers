@@ -1903,9 +1903,35 @@ Deviations from the sections above, found while implementing:
 |---|---|---|---|
 | Timeout of a running call | MT timeout cancels the provider | `extCall` enforces the broker's own `requestTimeoutMs` and sends the cancel hint itself | an MT timeout only abandons the response slot; it never cancels a running provider (existing MT semantics, unchanged) |
 | Second / late `reply` | `STALE` | `OK`, dropped on the bridge by call id | the foreign thread cannot see the bridge's pending table synchronously; `STALE` is still returned for a closed port |
-| `inplace` | runs on the caller's thread | runs on the thread that owns the public slot (the bridge when auto-wired); synchronous-reply contract enforced | the caller-thread bypass (`directInplace`) is phase 1b |
-| `extProvider` / `extHandler` off the bridge | forwards over the hidden `<T>Ext` lane | returns `err` | the hidden lane is phase 1b |
+| `inplace` | runs on the caller's thread | phase 1a: on the slot owner's thread; **phase 1b: caller's thread** via the MT inplace hook | — |
+| `extProvider` / `extHandler` off the bridge | forwards over the hidden `<T>Ext` lane | phase 1a: `err`; **phase 1b: implemented** (`<T>ExtLane`) | — |
 | Worker pool shutdown | join timeout, leak a stuck worker | plain join | a worker stuck in a foreign `invoke` delays `ExtHost.stop()`; follow-up |
 | Schema hash scope | full type registry | names, kinds, argument / payload types, inline payload fields | nested external types are identified by name only |
 | Limits | — | 32 plugins, 64 ports and 64 names per plugin, 256 concurrent inplace calls, 4096-entry rings | fixed arrays keep foreign-thread paths allocation-free |
 | Windows | — | loader test skipped | Windows CI cell is phase 4 |
+
+### Phase 1b — lowering and switching (implemented on `feat-extapi-design`)
+
+| Piece | Where |
+|---|---|
+| Opt-in MT hook: `MtReqCfg.extInplaceHook` forward-declares per-slot `<T>ExtInplaceTry*` / `Active*` and prepends a check to the keyed `request` / `blockingRequest` / `requestCancellable` / `blockingRequestCancellable`; off for every non-EXTAPI broker (no codegen change) | `brokers/internal/mt_request_broker.nim` (`addExtInplaceHooks`) |
+| Hidden `<T>ExtLane` (raw-CBOR MT broker, bridge-provided while any slot of `T` is provided) | `ext_brokers.nim` |
+| `T.extProvider[NoArgs](ctx)`: inplace → direct on any thread; on the bridge → `extCall`; elsewhere → lane `requestCancellable` with cancel propagation | `ext_brokers.nim` |
+| `T.extFallback[NoArgs](ctx, nimImpl)`, `T.extAvailable[NoArgs](ctx)`; signals: `extHandler`, `extFallback`, `extAvailable` | `ext_brokers.nim` |
+| `autoWire` per broker / plugin default (`true`) | `ext_brokers.nim`, `registerExtPlugin` |
+| Shared, lock-protected source table → availability, inplace calls and signals work from any thread | `ext_runtime.nim` |
+| `ExtTunnel.call / signal / listen` by (plugin, wire name), through the typed broker | `ext_plugin.nim` + per-name adapters |
+| Test | `test/test_ext_switching.nim` + `test/ext/raw_kv_plugin.c`; in `testApi`, `testExtSwitchAsan{Orc,Refc}` |
+
+Verified: ORC / refc × debug / release, ORC + ASAN, refc + ASAN; 30
+consecutive runs per configuration without a failure; `nimble test` and
+`nimble testApi` green.
+
+Findings:
+
+| Topic | Behaviour | Reason |
+|---|---|---|
+| Owner `replaceProvider` switch under load | no lost call, no `"no provider"`, no `ProviderGone` (test asserts 0 errors over 6 switches) | as designed: the handler is looked up per message |
+| Plugin withdraws while `extFallback` already routed a call to it | that call fails (`provider was cleared …`); later calls fall back to the Nim impl | no implicit retry: the plugin may already have acted on the call (at-most-once over at-least-once) |
+| `requestCancellable` on an auto-wired `inplace` broker | id `0`, synchronous result | the call never leaves the caller thread |
+| Compile-time VM | `let b = a` of an object inside a macro can alias `a`; the lane cfg is parsed afresh | otherwise the lane broker inherited `extInplaceHook` |

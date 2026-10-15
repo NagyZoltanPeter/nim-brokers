@@ -10,8 +10,10 @@
 ##   `Lock` / `Cond`, libc `c_malloc` / `c_free` and `fireBrokerSignal` —
 ##   never the Nim heap and never a threadvar — so they are safe under
 ##   `--mm:refc` (thread-local heaps) and `--mm:orc` alike.
-## - All Nim-heap state (pending calls, source table, futures) lives in
-##   threadvars of the bridge thread and is only touched there.
+## - All Nim-heap state (pending calls, futures) lives in threadvars of the
+##   bridge thread and is only touched there. The source table (which port
+##   serves which name on which ctx) is a fixed, lock-protected array so any
+##   thread can check availability or run an `inplace` / one-way call.
 ## - Messages crossing threads are POD; payload buffers are `c_malloc`ed by
 ##   the producer and `c_free`d by the consumer.
 
@@ -130,18 +132,35 @@ type
     enkSignal
     enkEvent
 
-  ExtInstallFn* =
-    proc(ctx: BrokerContext): Result[void, string] {.nimcall, gcsafe, raises: [].}
-    ## Runs on the bridge thread when the first port provides this name on
-    ## `ctx`: wires the public broker slot (autoWire).
-  ExtUninstallFn* =
-    proc(ctx: BrokerContext, siblingWired: bool) {.nimcall, gcsafe, raises: [].}
+  ExtInstallFn* = proc(ctx: BrokerContext, wirePublic: bool): Result[void, string] {.
+    nimcall, gcsafe, raises: []
+  .}
+    ## Runs on the bridge thread when a port provides this name on `ctx`:
+    ## installs the hidden `<T>ExtLane` provider (requests) and, with
+    ## `wirePublic` (autoWire), the forwarder into the public slot. `err` only
+    ## when the public slot could not be wired (it is held by someone else).
+  ExtUninstallFn* = proc(
+    ctx: BrokerContext, siblingWired, publicWired, siblingProvided: bool
+  ) {.nimcall, gcsafe, raises: [].}
     ## Runs on the bridge thread when the providing port withdraws the name.
-    ## `siblingWired`: the other signature slot of the same request broker is
-    ## still auto-wired, so the broker must not be cleared as a whole.
+    ## `publicWired`: this slot was auto-wired; `siblingWired` / `siblingProvided`:
+    ## the other signature slot of the same request broker is still auto-wired /
+    ## provided, so the public broker / the hidden lane must stay.
   ExtEmitFn* = proc(ctx: BrokerContext, buf: ptr uint8, len: int): Result[void, string] {.
     nimcall, gcsafe, raises: []
   .} ## Runs on the bridge thread: decode an event payload and emit it.
+
+  ExtTunnelCallFn* = proc(
+    ctx: BrokerContext, payload: seq[byte]
+  ): Future[Result[seq[byte], string]] {.nimcall, async: (raises: []), gcsafe.}
+    ## ExtTunnel adapter for one request slot: decode → typed `request` → encode.
+  ExtTunnelSignalFn* = proc(
+    ctx: BrokerContext, payload: seq[byte]
+  ): Result[void, string] {.nimcall, gcsafe, raises: [].}
+  ExtTunnelEventCb* = proc(payload: seq[byte]) {.gcsafe, raises: [].}
+  ExtTunnelListenFn* = proc(
+    ctx: BrokerContext, cb: ExtTunnelEventCb
+  ): Result[void, string] {.nimcall, gcsafe, raises: [].}
 
   ExtNameDesc* = object
     name*: cstring
@@ -151,6 +170,10 @@ type
     uninstall*: ExtUninstallFn
     emitFn*: ExtEmitFn
     sibling*: int ## nameIdx of the other slot of a dual-slot request, or -1
+    autoWire*: bool ## wire the public slot when a port provides this name
+    tunnelCall*: ExtTunnelCallFn
+    tunnelSignal*: ExtTunnelSignalFn
+    tunnelListen*: ExtTunnelListenFn
 
   ExtPluginDesc* = object
     name*: cstring
@@ -264,9 +287,17 @@ type
     data*: seq[byte]
 
   SourceKey = tuple[pluginIdx: int, nameIdx: int, ctx: uint32]
-  Source = object
+
+  ExtShared = object
+    ## One provided (plugin, name, ctx): which port serves it, and whether the
+    ## bridge auto-wired the public slot for it.
+    used: bool
+    pluginIdx: int
+    nameIdx: int
+    ctx: uint32
     portSlot: int
     gen: uint32
+    wired: bool
 
 # ---------------------------------------------------------------------------
 # Ring
@@ -311,10 +342,12 @@ var gExtBridgeThread: Thread[ptr ExtHostRt]
 const ExtMaxInplace = 256
 var gExtInplace: array[ExtMaxInplace, ExtInplaceSlot]
 
+const ExtMaxShared = 1024
+var gExtShared: array[ExtMaxShared, ExtShared]
+var gExtSharedLock: Lock
+
 # Bridge-thread-local state.
 var gExtPending {.threadvar.}: Table[uint64, PendingCall]
-var gExtSources {.threadvar.}: Table[SourceKey, Source]
-var gExtWired {.threadvar.}: Table[SourceKey, bool]
 
 proc toBytes(s: string): seq[byte] =
   result = newSeq[byte](s.len)
@@ -336,6 +369,7 @@ proc ensureRegLock() =
   var expected = 0
   if gExtRegLockInit.compareExchange(expected, 1):
     initLock(gExtRegLock)
+    initLock(gExtSharedLock)
     gExtRegLockInit.store(2, moRelease)
   else:
     while gExtRegLockInit.load(moAcquire) != 2:
@@ -484,6 +518,68 @@ proc inplaceFill(id: uint64, status: int32, buf: ptr uint8, len: int): bool =
       return true
   false
 
+proc sharedFind(
+    p, n: int, ctx: uint32
+): tuple[found: bool, slot: int, gen: uint32, wired: bool] =
+  withLock(gExtSharedLock):
+    for i in 0 ..< ExtMaxShared:
+      let e = gExtShared[i]
+      if e.used and e.pluginIdx == p and e.nameIdx == n and e.ctx == ctx:
+        return (true, e.portSlot, e.gen, e.wired)
+  (false, 0, 0'u32, false)
+
+proc sharedAdd(p, n: int, ctx: uint32, slot: int, gen: uint32): int32 =
+  withLock(gExtSharedLock):
+    var free = -1
+    for i in 0 ..< ExtMaxShared:
+      let e = gExtShared[i]
+      if e.used:
+        if e.pluginIdx == p and e.nameIdx == n and e.ctx == ctx:
+          return ExtAlreadyProvided
+      elif free < 0:
+        free = i
+    if free < 0:
+      return ExtAgain
+    gExtShared[free] = ExtShared(
+      used: true, pluginIdx: p, nameIdx: n, ctx: ctx, portSlot: slot, gen: gen
+    )
+  ExtOk
+
+proc sharedSetWired(p, n: int, ctx: uint32, wired: bool) =
+  withLock(gExtSharedLock):
+    for i in 0 ..< ExtMaxShared:
+      if gExtShared[i].used and gExtShared[i].pluginIdx == p and
+          gExtShared[i].nameIdx == n and gExtShared[i].ctx == ctx:
+        gExtShared[i].wired = wired
+
+proc sharedDel(p, n: int, ctx: uint32, slot: int): tuple[found, wired: bool] =
+  withLock(gExtSharedLock):
+    for i in 0 ..< ExtMaxShared:
+      if gExtShared[i].used and gExtShared[i].pluginIdx == p and
+          gExtShared[i].nameIdx == n and gExtShared[i].ctx == ctx and
+          gExtShared[i].portSlot == slot:
+        let w = gExtShared[i].wired
+        gExtShared[i] = ExtShared()
+        return (true, w)
+  (false, false)
+
+proc acquireSource(
+    p, n: int, ctx: uint32
+): tuple[impl: ptr ExtImplRef, rt: ptr ExtPluginRt, slot: int] =
+  ## The serving port's impl with one extra ref, or nil. Any thread.
+  let f = sharedFind(p, n, ctx)
+  if not f.found:
+    return (nil, nil, 0)
+  let rt = gExtPlugins[p]
+  var impl: ptr ExtImplRef
+  withLock(rt.lock):
+    let ps = addr rt.ports[f.slot]
+    if ps.open.load(moAcquire) and ps.gen.load(moAcquire) == f.gen:
+      impl = ps.impl
+      if not impl.isNil:
+        implAcquire(impl)
+  (impl, rt, f.slot)
+
 proc hostRunning(): bool =
   not gExtHost.isNil and gExtHost.running.load(moAcquire)
 
@@ -506,19 +602,18 @@ proc failPending(pred: proc(c: PendingCall): bool {.gcsafe, raises: [].}, msg: s
         c.fut.complete(ExtRawReply(status: ExtReplyErr, data: toBytes(msg)))
 
 proc bridgeWithdraw(pluginIdx, slot, nameIdx: int, ctx: uint32): int32 =
-  let key: SourceKey = (pluginIdx, nameIdx, ctx)
-  var src: Source
-  if not gExtSources.pop(key, src) or src.portSlot != slot:
+  let d = sharedDel(pluginIdx, nameIdx, ctx, slot)
+  if not d.found:
     return ExtNotProvided
   let rt = gExtPlugins[pluginIdx]
   let nd = rt.desc.names[nameIdx]
-  if gExtWired.getOrDefault(key, false):
-    gExtWired.del(key)
-    var siblingWired = false
-    if nd.sibling >= 0:
-      siblingWired = gExtWired.getOrDefault((pluginIdx, nd.sibling, ctx), false)
-    if not nd.uninstall.isNil:
-      nd.uninstall(BrokerContext(ctx), siblingWired)
+  var siblingWired, siblingProvided = false
+  if nd.sibling >= 0:
+    let sib = sharedFind(pluginIdx, nd.sibling, ctx)
+    siblingProvided = sib.found
+    siblingWired = sib.found and sib.wired
+  if not nd.uninstall.isNil:
+    nd.uninstall(BrokerContext(ctx), siblingWired, d.wired, siblingProvided)
   discard rt.ports[slot].provided.fetchAnd(not (1'u64 shl nameIdx), moAcquireRelease)
   failPending(
     proc(c: PendingCall): bool =
@@ -528,20 +623,19 @@ proc bridgeWithdraw(pluginIdx, slot, nameIdx: int, ctx: uint32): int32 =
   ExtOk
 
 proc bridgeProvide(pluginIdx, slot, nameIdx: int, ctx: uint32, gen: uint32): int32 =
-  let key: SourceKey = (pluginIdx, nameIdx, ctx)
-  if gExtSources.hasKey(key):
-    return ExtAlreadyProvided
-  gExtSources[key] = Source(portSlot: slot, gen: gen)
+  let rc = sharedAdd(pluginIdx, nameIdx, ctx, slot, gen)
+  if rc != ExtOk:
+    return rc
   let rt = gExtPlugins[pluginIdx]
   discard rt.ports[slot].provided.fetchOr(1'u64 shl nameIdx, moAcquireRelease)
   let nd = rt.desc.names[nameIdx]
   if not nd.install.isNil:
-    let r = nd.install(BrokerContext(ctx))
+    let r = nd.install(BrokerContext(ctx), nd.autoWire)
     if r.isOk:
-      gExtWired[key] = true
+      sharedSetWired(pluginIdx, nameIdx, ctx, nd.autoWire)
     else:
       # The public slot is held by someone else (e.g. a Nim provider). The
-      # foreign source stays registered (standby); see EXTAPI_PLAN §5.8.
+      # foreign source stays registered; `extProvider` / `extFallback` reach it.
       info "EXTAPI: provided name not auto-wired",
         plugin = $rt.desc.name, name = $nd.name, reason = r.error
   ExtOk
@@ -630,8 +724,88 @@ proc eventPoll(): int {.gcsafe, raises: [].} =
     did
 
 # ---------------------------------------------------------------------------
-# The call path used by generated forwarders (bridge thread)
+# The call paths used by generated forwarders
 # ---------------------------------------------------------------------------
+
+proc invokeInplace(
+    impl: ptr ExtImplRef,
+    nameIdx: int,
+    name: cstring,
+    id: uint64,
+    buf: ptr uint8,
+    len: int,
+): Result[seq[byte], string] =
+  ## Synchronous contract: the reply must arrive before `invoke` returns.
+  let slot = inplaceClaim(id)
+  if slot < 0:
+    return err("EXTAPI: too many concurrent inplace calls")
+  impl.impl.invoke(impl.impl.user, id, uint32(nameIdx), name, buf, csize_t(len))
+  let filled = gExtInplace[slot].filled.load(moAcquire)
+  let status = gExtInplace[slot].status
+  var data = newSeq[byte](gExtInplace[slot].len)
+  if data.len > 0:
+    copyMem(addr data[0], gExtInplace[slot].buf, data.len)
+  if not gExtInplace[slot].buf.isNil:
+    c_free(gExtInplace[slot].buf)
+    gExtInplace[slot].buf = nil
+  gExtInplace[slot].id.store(0, moRelease)
+  if not filled:
+    return err("EXTAPI: inplace impl returned without reply")
+  if status == ExtReplyOk:
+    return ok(data)
+  err(fromBytes(data))
+
+proc extFindName*(plugin, name: string): tuple[pluginIdx, nameIdx: int] =
+  ## Resolve a (plugin, wire name) pair; (-1, -1) when unknown.
+  let p = findPlugin(cstring(plugin))
+  if p < 0:
+    return (-1, -1)
+  (p, findName(gExtPlugins[p].desc, cstring(name)))
+
+proc extNameDesc*(pluginIdx, nameIdx: int): ptr ExtNameDesc =
+  addr gExtPlugins[pluginIdx].desc.names[nameIdx]
+
+proc extOnBridge*(): bool =
+  ## True on the EXTAPI bridge thread.
+  onBridgeThread()
+
+proc extNameDispatch*(pluginIdx, nameIdx: int): ExtDispatch =
+  if pluginIdx < 0 or nameIdx < 0 or pluginIdx >= gExtPluginCount.load(moAcquire):
+    return edBridge
+  gExtPlugins[pluginIdx].desc.names[nameIdx].dispatch
+
+proc extAvailable*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
+  ## Some open port provides `(plugin, name)` on `ctx`. Any thread, no Nim heap.
+  if pluginIdx < 0 or nameIdx < 0:
+    return false
+  sharedFind(pluginIdx, nameIdx, uint32(ctx)).found
+
+proc extInplaceActive*(pluginIdx, nameIdx: int, ctx: BrokerContext): bool =
+  ## An `inplace` source is provided AND the bridge auto-wired the public slot
+  ## for it: the generated `request` may bypass the MT hop entirely.
+  if pluginIdx < 0 or nameIdx < 0:
+    return false
+  let f = sharedFind(pluginIdx, nameIdx, uint32(ctx))
+  f.found and f.wired
+
+proc extCallInplace*(
+    pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte]
+): Result[seq[byte], string] =
+  ## Run an `inplace` source synchronously on the calling thread (any thread).
+  if pluginIdx < 0 or nameIdx < 0:
+    return err("EXTAPI: plugin not registered")
+  let (impl, rt, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
+  if impl.isNil:
+    return err("EXTAPI: no provider registered (not provided by any plugin port)")
+  defer:
+    implRelease(impl)
+  let id = gExtCallSeq.fetchAdd(1, moAcquireRelease) + 1
+  let bufPtr =
+    if payload.len > 0:
+      cast[ptr uint8](unsafeAddr payload[0])
+    else:
+      nil
+  invokeInplace(impl, nameIdx, rt.desc.names[nameIdx].name, id, bufPtr, payload.len)
 
 proc extCall*(
     pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte], timeout: Duration
@@ -645,37 +819,19 @@ proc extCall*(
   if pluginIdx < 0 or nameIdx < 0:
     return err("EXTAPI: plugin not registered")
   if not onBridgeThread():
-    # Off-bridge forwarders reach the foreign source through the hidden
-    # `<T>Ext` MT lane (EXTAPI_PLAN §5.8, phase 1b); until then only the
-    # auto-wired, bridge-owned forwarder may call in.
-    return
-      err("EXTAPI: extProvider installed off the bridge thread is not supported yet")
-  var src: Source
-  var rt: ptr ExtPluginRt
-  var impl: ptr ExtImplRef
-  {.cast(gcsafe).}:
-    let key: SourceKey = (pluginIdx, nameIdx, uint32(ctx))
-    if not gExtSources.hasKey(key):
-      return err("EXTAPI: no provider registered (not provided by any plugin port)")
-    src = gExtSources.getOrDefault(key)
-    rt = gExtPlugins[pluginIdx]
-    withLock(rt.lock):
-      let ps = addr rt.ports[src.portSlot]
-      if ps.open.load(moAcquire) and ps.gen.load(moAcquire) == src.gen:
-        impl = ps.impl
-        if not impl.isNil:
-          implAcquire(impl)
+    # Off-bridge forwarders go through the hidden `<T>ExtLane` instead.
+    return err("EXTAPI: extCall must run on the bridge thread")
+  let (impl, rt, srcSlot) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
-    return err("EXTAPI: plugin port closed")
+    return err("EXTAPI: no provider registered (not provided by any plugin port)")
   defer:
     implRelease(impl)
   let nd = rt.desc.names[nameIdx]
   let id = gExtCallSeq.fetchAdd(1, moAcquireRelease) + 1
   let fut = newFuture[ExtRawReply]("extCall")
   {.cast(gcsafe).}:
-    gExtPending[id] = PendingCall(
-      fut: fut, pluginIdx: pluginIdx, portSlot: src.portSlot, nameIdx: nameIdx
-    )
+    gExtPending[id] =
+      PendingCall(fut: fut, pluginIdx: pluginIdx, portSlot: srcSlot, nameIdx: nameIdx)
   let bufPtr =
     if payload.len > 0:
       cast[ptr uint8](unsafeAddr payload[0])
@@ -686,29 +842,9 @@ proc extCall*(
     stRelease(st)
   case nd.dispatch
   of edInplace:
-    # Synchronous contract: the reply must arrive before `invoke` returns.
     {.cast(gcsafe).}:
       gExtPending.del(id)
-    let slot = inplaceClaim(id)
-    if slot < 0:
-      return err("EXTAPI: too many concurrent inplace calls")
-    impl.impl.invoke(
-      impl.impl.user, id, uint32(nameIdx), nd.name, bufPtr, csize_t(payload.len)
-    )
-    let filled = gExtInplace[slot].filled.load(moAcquire)
-    let status = gExtInplace[slot].status
-    var data = newSeq[byte](gExtInplace[slot].len)
-    if data.len > 0:
-      copyMem(addr data[0], gExtInplace[slot].buf, data.len)
-    if not gExtInplace[slot].buf.isNil:
-      c_free(gExtInplace[slot].buf)
-      gExtInplace[slot].buf = nil
-    gExtInplace[slot].id.store(0, moRelease)
-    if not filled:
-      return err("EXTAPI: inplace impl returned without reply")
-    if status == ExtReplyOk:
-      return ok(data)
-    return err(fromBytes(data))
+    return invokeInplace(impl, nameIdx, nd.name, id, bufPtr, payload.len)
   of edWorkers:
     if rt.pool.isNil:
       {.cast(gcsafe).}:
@@ -767,26 +903,11 @@ proc extSignal*(
     pluginIdx, nameIdx: int, ctx: BrokerContext, payload: seq[byte]
 ): Result[void, string] =
   ## One-way delivery of a signal to its foreign handler (`id = 0`, no reply).
-  ## Runs on the bridge thread, inside the auto-wired signal handler.
+  ## Any thread: `bridge` / `inplace` invoke on the calling thread (the
+  ## handler thread), `workers` enqueue.
   if pluginIdx < 0 or nameIdx < 0:
     return err("EXTAPI: plugin not registered")
-  if not onBridgeThread():
-    return
-      err("EXTAPI: extHandler installed off the bridge thread is not supported yet")
-  var impl: ptr ExtImplRef
-  var rt: ptr ExtPluginRt
-  {.cast(gcsafe).}:
-    let key: SourceKey = (pluginIdx, nameIdx, uint32(ctx))
-    if not gExtSources.hasKey(key):
-      return err("EXTAPI: signal not provided by any plugin port")
-    let src = gExtSources.getOrDefault(key)
-    rt = gExtPlugins[pluginIdx]
-    withLock(rt.lock):
-      let ps = addr rt.ports[src.portSlot]
-      if ps.open.load(moAcquire) and ps.gen.load(moAcquire) == src.gen:
-        impl = ps.impl
-        if not impl.isNil:
-          implAcquire(impl)
+  let (impl, rt, _) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
     return err("EXTAPI: plugin port closed")
   let bufPtr =

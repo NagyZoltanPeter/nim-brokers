@@ -58,6 +58,147 @@ proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
     return false
   inner[2].kind == nnkIdent and inner[2].eqIdent("string")
 
+proc addExtInplaceHooks(
+    generated, typeIdent: NimNode,
+    typeDisplayName: string,
+    payloadType: NimNode,
+    argParams: seq[NimNode],
+    hasZero, hasArg: bool,
+    requestIdName: NimNode,
+): NimNode =
+  ## EXTAPI `inplace` support (cfg.extInplaceHook). Forward-declares per-slot
+  ## hooks — implemented later by ext_brokers — and prepends a hook check to
+  ## the keyed `request` / `blockingRequest` / `requestCancellable` /
+  ## `blockingRequestCancellable` procs, so an auto-wired inplace source runs
+  ## on the calling thread with no MT hop. Never used for other brokers.
+  let resTy = quote:
+    Result[`payloadType`, string]
+  # Hook prototypes go right before the first patched proc: after the payload
+  # type section, before any use.
+  var decls = newStmtList()
+  var declsPlaced = false
+
+  proc hookDecl(name: string, params: seq[NimNode], withRes: bool): NimNode =
+    var formal = newTree(nnkFormalParams, ident("bool"))
+    formal.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
+    )
+    for p in params:
+      formal.add(copyNimTree(p))
+    if withRes:
+      formal.add(
+        newTree(
+          nnkIdentDefs,
+          ident("res"),
+          newTree(nnkVarTy, copyNimTree(resTy)),
+          newEmptyNode(),
+        )
+      )
+    newTree(
+      nnkProcDef,
+      ident(name),
+      newEmptyNode(),
+      newEmptyNode(),
+      formal,
+      newTree(
+        nnkPragma,
+        ident("gcsafe"),
+        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+    )
+
+  let base = typeDisplayName & "ExtInplace"
+  if hasZero:
+    decls.add(hookDecl(base & "TryNoArgs", @[], true))
+    decls.add(hookDecl(base & "ActiveNoArgs", @[], false))
+  if hasArg:
+    decls.add(hookDecl(base & "TryArgs", cloneParams(argParams), true))
+    decls.add(hookDecl(base & "ActiveArgs", @[], false))
+
+  proc paramNamesOf(formal: NimNode, first, last: int): seq[NimNode] =
+    for i in first .. last:
+      let d = formal[i]
+      for j in 0 ..< d.len - 2:
+        result.add(copyNimTree(d[j])) # the param node itself: may be a gensym
+
+  proc patch(n: NimNode) =
+    var idx = 0
+    while idx < n.len:
+      let c = n[idx]
+      inc idx
+      if c.kind == nnkStmtList:
+        patch(c)
+      elif c.kind == nnkProcDef:
+        let nm = (if c[0].kind == nnkPostfix: $c[0][1] else: $c[0])
+        if nm notin [
+          "request", "blockingRequest", "requestCancellable",
+          "blockingRequestCancellable",
+        ]:
+          continue
+        let formal = c[3]
+        if formal.len < 3 or formal[2].len < 1 or not formal[2][0].eqIdent("brokerCtx"):
+          continue # non-keyed forwarder
+        var last = formal.len - 1
+        let hasIdOut = formal[last][0].eqIdent("idOut")
+        if hasIdOut:
+          dec last
+        let args = paramNamesOf(formal, 3, last)
+        let ctxNode = copyNimTree(formal[2][0])
+        let isArg = args.len > 0
+        if (isArg and not hasArg) or (not isArg and not hasZero):
+          continue
+        let tryName = ident(base & (if isArg: "TryArgs" else: "TryNoArgs"))
+        let activeName = ident(base & (if isArg: "ActiveArgs" else: "ActiveNoArgs"))
+        # Built node by node: `quote` would gensym the local while the call
+        # refers to it by plain ident.
+        proc ifReturn(cond, value: NimNode): NimNode =
+          newTree(
+            nnkIfStmt,
+            newTree(nnkElifBranch, cond, newStmtList(newTree(nnkReturnStmt, value))),
+          )
+
+        var hook = newStmtList()
+        case nm
+        of "request", "blockingRequest":
+          let resVar = ident("extInplaceRes")
+          var call = newCall(tryName, ctxNode)
+          for a in args:
+            call.add(a)
+          call.add(resVar)
+          hook.add(
+            newTree(
+              nnkVarSection,
+              newTree(nnkIdentDefs, resVar, copyNimTree(resTy), newEmptyNode()),
+            )
+          )
+          hook.add(ifReturn(call, resVar))
+        of "requestCancellable":
+          var fwd = newCall(ident("request"), copyNimTree(typeIdent), ctxNode)
+          for a in args:
+            fwd.add(a)
+          let id0 = newCall(copyNimTree(requestIdName), newLit(0'u64))
+          hook.add(
+            ifReturn(
+              newCall(activeName, copyNimTree(ctxNode)),
+              newTree(nnkTupleConstr, id0, fwd),
+            )
+          )
+        else:
+          var fwd = newCall(ident("blockingRequest"), copyNimTree(typeIdent), ctxNode)
+          for a in args:
+            fwd.add(a)
+          hook.add(ifReturn(newCall(activeName, copyNimTree(ctxNode)), fwd))
+        c[6].insert(0, hook)
+        if not declsPlaced:
+          declsPlaced = true
+          n.insert(idx - 1, decls)
+          inc idx
+
+  patch(generated)
+  result = generated
+
 proc generateMtRequestBroker*(
     body: NimNode, cfgIn: MtReqCfg = defaultMtReqCfg()
 ): NimNode =
@@ -2726,6 +2867,18 @@ proc generateMtRequestBroker*(
         newEmptyNode(),
         newStmtList(newTree(nnkReturnStmt, bcNonKeyedCall)),
       )
+    )
+
+  if cfg.extInplaceHook:
+    result = addExtInplaceHooks(
+      result,
+      typeIdent,
+      typeDisplayName,
+      payloadType,
+      argParams,
+      not zeroArgSig.isNil(),
+      not argSig.isNil(),
+      requestIdName,
     )
 
   when defined(brokerDebug):
