@@ -6,7 +6,7 @@
 
 import testutils/unittests
 import chronos
-import std/[atomics, os]
+import std/[atomics, os, strutils]
 
 import brokers/[request_broker, event_broker, signal_broker, ext_plugin, broker_context]
 import brokers/internal/ext_runtime
@@ -30,6 +30,9 @@ proc life_reply_parked(fromSecond: int32, v: uint32): int32 {.importc, cdecl.}
 proc life_reply_late(v: uint32): int32 {.importc, cdecl.}
 proc life_emit_tick(n: uint32): int32 {.importc, cdecl.}
 proc life_sig_thread(): uint {.importc, cdecl.}
+proc life_port(): uint64 {.importc, cdecl.}
+proc life_provide_on(port: uint64, name: cstring): int32 {.importc, cdecl.}
+proc life_reply_parked_garbage(): int32 {.importc, cdecl.}
 proc life_tid_thread(): uint {.importc, cdecl.}
 proc life_self_thread(): uint {.importc, cdecl.}
 
@@ -396,4 +399,63 @@ suite "EXTAPI lifecycle":
     check life_sig_thread() == life_tid_thread()
     check life_sig_thread() != life_self_thread()
     waitFor LifeSig.dropSignalHandler(Ctx)
+    check ExtHost.stop().isOk
+
+  # --- EXTAPI_PLAN §11 failure rows as assertions (review F9) --------------
+
+  test "§11: event ring full -> AGAIN":
+    check startAndOpen()
+    extTestPauseEvents.store(true)
+    var ok = 0
+    var again = 0
+    for i in 0 ..< 4100:
+      case life_emit_tick(uint32(i mod 100))
+      of ExtOk:
+        inc ok
+      of ExtAgain:
+        inc again
+      else:
+        discard
+    extTestPauseEvents.store(false)
+    check ok == 4096 # ExtRingCap
+    check again == 4
+    check ExtHost.stop().isOk
+
+  test "§11: reply twice -> the first wins":
+    check startAndOpen()
+    check life_provide("life_bridge") == ExtOk
+    let fut = LifeBridge.request(Ctx)
+    settle(100)
+    check life_reply_parked(0, 1) == ExtOk
+    check life_reply_parked(0, 2) == ExtOk # accepted, dropped by call id
+    check pump(
+      proc(): bool =
+        fut.finished()
+    )
+    check fut.read().get(LifeBridge()).n == 1
+    check ExtHost.stop().isOk
+
+  test "§11: undecodable reply -> decode error":
+    check startAndOpen()
+    check life_provide("life_bridge") == ExtOk
+    let fut = LifeBridge.request(Ctx)
+    settle(100)
+    check life_reply_parked_garbage() == ExtOk
+    check pump(
+      proc(): bool =
+        fut.finished()
+    )
+    let r = fut.read()
+    check r.isErr and "decode" in r.error
+    check ExtHost.stop().isOk
+
+  test "§11: a stale port handle -> STALE, also after the slot is reused":
+    check startAndOpen()
+    let old = life_port()
+    check life_close() == ExtOk
+    check life_provide_on(old, "life_bridge") == ExtStale
+    check life_open(ExtHost.table, uint32(Ctx)) == ExtOk # may reuse the slot
+    check life_port() != old
+    check life_provide_on(old, "life_bridge") == ExtStale
+    check life_provide_on(life_port(), "life_bridge") == ExtOk
     check ExtHost.stop().isOk

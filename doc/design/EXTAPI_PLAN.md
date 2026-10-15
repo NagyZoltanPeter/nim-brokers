@@ -425,7 +425,7 @@ Consequences of the shared bridge (exe mode), and how they are contained:
 
 | Risk | Containment |
 |---|---|
-| an `bridge` impl of plugin X that does not return promptly stalls every plugin's replies/events | `bridge` is opt-in per plugin; generated C++/Rust wrappers only decode + hand off on the bridge (§7, §8); a stall watchdog logs `ext bridge blocked by <plugin>.<name>` |
+| an `bridge` impl of plugin X that does not return promptly stalls every plugin's replies/events | `bridge` is opt-in per plugin; generated C++/Rust wrappers only decode + hand off on the bridge (§7, §8); `provide` refuses a port without `CAP_NONBLOCKING` for `bridge` names. *As built:* no stall watchdog — a blocking `bridge` impl is a contract violation (review D1), not a supervised case |
 | blocking impls of plugin X starve plugin Y | `workers(n)` pools are **per plugin**, never shared |
 | one plugin floods `emit` | ingress ring is per plugin; full → `BROKER_EXT_AGAIN` to that plugin only |
 | decode cost of a large reply/event of X delays Y | accepted: same as any MT provider thread; measure before splitting |
@@ -588,7 +588,7 @@ Rules and consequences:
 
 | Concern | `inplace` behaviour | Why |
 |---|---|---|
-| reply after `invoke` returned, or from another thread | `STALE`; the call already failed with `err("inplace impl returned without reply")` | keeps `inplace` free of any pending table / mailbox (that is Approach B's cost) |
+| reply after `invoke` returned, or from another thread | *as built:* `OK` and dropped — the slot's generation CAS rejects it, so it can never reach a later call (review M1); the call already failed with `err("inplace impl returned without reply")` | keeps `inplace` free of any pending table / mailbox (that is Approach B's cost) |
 | concurrency | `invoke` may run concurrently on every Nim thread that calls | impl must be thread-safe; documented in the generated header |
 | timeout / `cancel(id)` | not applicable to a foreign or native `inplace` call; `requestCancellable` on an `inplace` broker returns id `0` (same as MT same-thread requests today) | the call is synchronous |
 | `withdraw` / `close` during a running `inplace` call | allowed; the running call completes; `release(user)` deferred to the last running call (source refcount) | same refcount rule as workers |
@@ -1133,7 +1133,8 @@ typedef struct {
 
 /* Nim side, handed to foreign code. Every entry is callable from ANY thread,
    allocation-free w.r.t. the Nim heap. open/provide/withdraw/close wait for
-   the bridge (bounded); reply/emit never wait. */
+   the bridge (unbounded but never across a stop: SHUTDOWN then, review D1);
+   reply/emit never wait. */
 typedef struct broker_ext_host {
   uint32_t abiVersion;
   void* host;                          /* opaque: identifies the Nim host */
@@ -1194,11 +1195,13 @@ documented in `doc/design/TEARDOWN_UAF_FINDINGS.md`.
 ### 6.4 Handshake
 
 `open` checks, in order: `abiVersion`, `plugin` name known, `schemaHash`
-(FNV-1a-128 over the plugin's canonical ABI via `api_schema_hash.nim`; same
+(FNV-1a-128 over the plugin's canonical wire shapes — names plus the
+structural shape of every argument / payload type, nested objects and enum
+ordinals included (`ext_shapes.nim`, review M13); same
 `BROKERS_FFI_SKIP_SCHEMA_CHECK` / `<PLUGIN>_SKIP_SCHEMA_CHECK` escape hatch),
 then stores `caps` for the per-broker check at `provide` (§5.4). One hash per plugin, so plugins
 version independently (R6). `schemaHash = NULL` opts out (raw tunnel, §6.6):
-accepted, logged once at `info`; wire mismatches then surface as CBOR decode
+accepted (*as built:* not logged — `open` runs on foreign threads); wire mismatches then surface as CBOR decode
 errors on the Nim side (`err("ext decode: …")`), never as UB.
 
 ### 6.5 Memory-model / platform matrix
@@ -1209,7 +1212,7 @@ errors on the Nim side (`err("ext decode: …")`), never as UB.
 | worker threads (Nim `createThread`, run foreign code) | ✓ | ✓ | ✓ | ✓ never touch GC'd memory beyond POD msg | ✓ |
 | exe `dlopen` plugin | ✓ (`dlopen`) | ✓ | ✓ `LoadLibrary`; table avoids exe imports | n/a | n/a |
 | bridge = lib processing thread | ✓ | ✓ | ✓ | ✓ teardown via `teardownBrokerThread` (already Windows+refc green) | ✓ |
-| foreign impl destroys host from inside `invoke` | must be rejected (`BROKER_EXT_BAD_ARG`) — same hazard nim-ffi documents | | | | |
+| foreign impl destroys host from inside `invoke` | must be rejected — *as built:* `ExtHost.stop()` returns `err` on the bridge / a worker thread (review R2.2) — same hazard nim-ffi documents | | | | |
 | stuck worker at shutdown | leaked after join timeout + logged (documented, like nim-ffi) | | | | |
 
 ### 6.6 Raw CBOR tunnel (§D-6)
@@ -1761,18 +1764,18 @@ matters.
 | `provide` of a broker whose dispatch policy the port's `caps` can't serve | — | `BROKER_EXT_DISPATCH_MISMATCH`, nothing installed |
 | `provide` / `emit` with an undeclared name | — | `BROKER_EXT_UNKNOWN_NAME` |
 | Timeout / `cancel(id)` while queued for a worker | `err` timeout / cancelled | `invoke` never runs |
-| Timeout / cancel while impl runs | resolves at once | `cancel(callId)` hint; later `reply` → `STALE` |
+| Timeout / cancel while impl runs | resolves at once | `cancel(callId)` hint; a later `reply` returns `OK` and is dropped by call id (only the source port can complete a call, review M4) |
 | `withdraw` / `close` with calls outstanding | `err` (ProviderGone) | — ; `release(user)` after last running `invoke` returns |
-| Reply twice | first wins | second → `STALE` |
+| Reply twice | first wins | second returns `OK` and is dropped (inplace: generation CAS; bridge: call id) |
 | Reply with undecodable CBOR | `err("ext decode: …")` | `OK` (accepted) |
 | `emit` ring full | — | `BROKER_EXT_AGAIN` |
-| `emit` after `close` / host shutdown | — | `BROKER_EXT_STALE` / `BROKER_EXT_SHUTDOWN` |
+| `emit` after `close` / host shutdown | — | `BROKER_EXT_STALE` / `BROKER_EXT_SHUTDOWN`; events queued before the close are dropped (review M5) |
 | C++ exception / Rust panic in impl | `err("panic: …")` / `err(what())` | process survives |
 | Worker blocked > stall threshold | other calls queue, then time out | chronicles warn `ext worker blocked` |
-| Host shutdown with stuck worker | outstanding → `err` (teardown) | worker leaked after join timeout; `release` never runs under it |
+| Host shutdown with stuck worker | outstanding → `err` (teardown); queued calls never run (review R1) | *as built:* `stop` waits for the stuck `invoke` (no join timeout — follow-up) |
 | `invoke` calls `withdraw` / `close` on its own port | in-flight call completes or fails normally | allowed (runs directly on the bridge, §5.7); `release` deferred until that `invoke` returns |
-| `invoke` triggers host shutdown | — | `BROKER_EXT_BAD_ARG` (rejected; do it from another thread) |
-| `inplace` foreign impl returns without replying | `err("inplace impl returned without reply")` | a later `reply` → `STALE` |
+| `invoke` triggers host shutdown | — | `ExtHost.stop()` returns `err` on the bridge / a worker thread (review R2.2); do it from another thread |
+| `inplace` foreign impl returns without replying | `err("inplace impl returned without reply")` | a later `reply` returns `OK` and is dropped (generation CAS) |
 | `inplace` + `requestCancellable` | id `0`, `cancel` is a no-op (synchronous call) | — |
 | K1 import: library or symbol missing | `extFallback` → Nim impl; otherwise `"no provider registered…"`; reason in `ExtPlugin(p).loadError` | — |
 | K1 import: blocking C call under `inplace` | blocks the caller's loop (author's choice) | — |
@@ -2032,3 +2035,25 @@ and refc; the ASAN (refc) host run with the Go plugin is clean.
 | Python cancel | `future.cancel()` path compiled and wired, not exercised (`notes` has no slow request) | follow-up together with the Rust R2 runtime test |
 | gofmt | generated Go is `go vet`-clean; `gofmt` would only re-align struct fields / consts | left as is |
 | Windows | Go / Python examples not yet run on Windows | CI steps gated to Linux / macOS, like C++ / Rust |
+
+### Review fixes (doc/design/EXTAPI_REVIEW_FIXES_PLAN.md)
+
+The peer review in `build/EXTAPI_REVIEW.md` (on `099a391`) was worked off in
+nine commits, F1–F9, each with regression tests that fail without the fix
+(stated per commit where that was verified):
+
+| Group | Findings | What changed |
+|---|---|---|
+| F1 | R1, R2 | queued worker calls never run after their caller got an error; control calls cannot hang across a stop; `ExtHost.stop()` returns `Result` and refuses on bridge / worker threads; start / stop CAS state machine with rollback; refcounted K2 peer users; stop order bridge → pools → peers |
+| F2 | H1–H4 | dual-slot re-provide; idempotent `ExtPlugin.load` per (plugin, ctx); K1 short-form C-ABI type check; C++ exceptions reach Nim as `err(what())` |
+| F3 | M1, M2, M4–M7, M9 | inplace (gen, state) slot protocol; foreign-thread procs without Nim frames / raises (checked by `testExtForeignPath`); replies bound to their port; events of closed ports dropped; lane timeout set once; inplace `idOut`; indices read per call |
+| F4 | M8, M10, M11, low | compile-time limits, body-form raw-pointer check, inplace + timeout warning, event / signal `dynlib` error |
+| F5 | M13, M14 | structural schema hash (`brokers-ext:2`) and K2 peer comparison via `ext_shapes`; skip-schema env vars |
+| F6 | M3, M12 | `bridge` signals invoked on the bridge; `autoWire` ownership documented and tested (and K1 raw-pointer `extProvider` fast path fixed) |
+| F7 | W1–W8 | C++ / Rust / Python wrapper fixes; `testExtRustWrapper`, `testExtPyWrapper` |
+| F8 | low | EXTAPI runtime imported only under `-d:BrokerFfiApi`; allocation checks; `ExtTunnel.unlisten`; one source lookup per inplace call; GC registration once per foreign thread |
+| F9 | drift, §11 | docs aligned with the code; §11 failure rows asserted in `test_ext_lifecycle`; EXTAPI ASAN tasks in `allAsan` |
+
+Not done here: the Windows CI cells for the EXTAPI example steps (gated to
+Linux / macOS until a push lets them run), a worker join timeout at stop,
+and the lib-mode double module initialisation (own follow-ups).

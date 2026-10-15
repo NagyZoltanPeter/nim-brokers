@@ -146,6 +146,17 @@ int32_t life_reply_late(uint32_t v) {
   return H->reply(H->host, atomic_load(&P), atomic_load(&doneId), BROKER_EXT_REPLY_OK, out, k);
 }
 
+broker_ext_port life_port(void) { return atomic_load(&P); }
+int32_t life_provide_on(broker_ext_port port, const char* name) {
+  return H->provide(H->host, port, name);
+}
+/* Answer the parked life_bridge call with bytes that are not CBOR. */
+int32_t life_reply_parked_garbage(void) {
+  const uint8_t junk[] = {0xff, 0xff, 0x00};
+  return H->reply(H->host, atomic_load(&P), atomic_load(&parkedId), BROKER_EXT_REPLY_OK,
+                  junk, sizeof junk);
+}
+
 uintptr_t life_sig_thread(void) { return atomic_load(&sigThread); }
 uintptr_t life_tid_thread(void) { return atomic_load(&tidThread); }
 uintptr_t life_self_thread(void) { return self_thread(); }

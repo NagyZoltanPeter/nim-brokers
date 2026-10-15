@@ -1811,6 +1811,14 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testApiTeardownAsanRefc"
   exec "nimble testApiSignalAsanOrc"
   exec "nimble testApiSignalAsanRefc"
+  exec "nimble testExtAsanOrc"
+  exec "nimble testExtAsanRefc"
+  exec "nimble testExtSwitchAsanOrc"
+  exec "nimble testExtSwitchAsanRefc"
+  exec "nimble testExtImportsAsanOrc"
+  exec "nimble testExtImportsAsanRefc"
+  exec "nimble testExtLifeAsanOrc"
+  exec "nimble testExtLifeAsanRefc"
 
 task allTsan,
   "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":

@@ -1,5 +1,13 @@
 # EXTAPI review fixes — plan
 
+**Status (2026-10-15): implemented** on `feat-extapi-design` — F1 `63e71dd`,
+F2 `f6a7ecb`, F3 `869e376`, F4 `0206d53`, F5 `3ed2729`, F6 `4106e3d`,
+F7 `dc6443d`, F8 `04a3b5d`, F9 (this commit). Deviations from the plan below:
+W4 is unreachable (non-object payloads are rejected for foreign plugins) and
+was not changed; the Windows CI cells for the EXTAPI example steps stay gated
+until a push lets them run; K2 schema comparison is structural (shapes)
+rather than via `api_schema_hash` directly.
+
 Source: `build/EXTAPI_REVIEW.md` (peer review of `feat-extapi-design`, HEAD
 `099a391`). This plan covers every finding: R1–R2, H1–H4, M1–M14, W1–W8, the
 Low items and the doc drift. Each finding is either fixed here or explicitly

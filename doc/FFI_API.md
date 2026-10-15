@@ -2181,7 +2181,7 @@ Status codes returned to the plugin (`broker_ext.h`):
 | -4 | `UNKNOWN_NAME` | `open`, `provide`, `withdraw`, `emit`, discovery | plugin or name not declared on the Nim side |
 | -6 | `AGAIN` | `open`, `reply`, `emit`, `provide` | no free port slot (64 per plugin) / reply or event ring full (4096) / source table full — retry or drop |
 | -11 | `SHUTDOWN` | `open`, `reply`, `emit` | host not started or stopping |
-| -14 | `SCHEMA_MISMATCH` | `open` | `impl.schemaHash` differs from the host's (pass NULL for a raw tunnel) |
+| -14 | `SCHEMA_MISMATCH` | `open` | `impl.schemaHash` differs from the host's — the hash covers names and the structural wire shape of every argument / payload (nested objects, enum ordinals). Pass NULL for a raw tunnel, or set `BROKERS_FFI_SKIP_SCHEMA_CHECK` / `<PLUGIN>_SKIP_SCHEMA_CHECK` (any value but `0`) to open anyway |
 | -15 | `STALE` | all port ops | port closed or handle generation mismatch; `reply` with `id == 0` |
 | -16 | `ALREADY_PROVIDED` | `provide` | another port already provides this name on this ctx |
 | -17 | `NOT_PROVIDED` | `withdraw` | this port does not provide that name |
@@ -2198,10 +2198,13 @@ What the Nim caller sees (`Result.error`):
 | `requestCancellable` → `cancel` | the MT lane's cancel error | `cancel(id)` is sent to the plugin |
 | plugin withdraws / closes while a call is pending | `EXTAPI: provider withdrawn` / `EXTAPI: port closed` | in-flight calls fail at once; with `autoWire` the broker's provider is cleared (or replaced by an erroring stub while a sibling slot stays wired) |
 | `workers(n)` queue full / pool down | `EXTAPI: worker queue full` / `EXTAPI: worker pool not running` | |
+| allocation failed | `EXTAPI: out of memory` | foreign-thread entries return `AGAIN` instead |
+| plugin replies with bytes that are not the expected CBOR | `EXTAPI: reply decode failed: …` | |
 | `inplace` port returned without replying | `EXTAPI: inplace impl returned without reply` | the port lied about `CAP_REPLY_INLINE` |
-| signal not deliverable | `signal()` returns `err` (no handler / queue full) like any SignalBroker; a forward failure is logged (`EXTAPI: signal not delivered`) | one-way: no reply path |
+| signal not deliverable | `signal()` returns `err` (no handler / queue full) like any SignalBroker; a forward failure (`EXTAPI: signal queue full`, …) is logged (`EXTAPI: signal not delivered`) | one-way: no reply path |
 | event payload fails to decode | logged (`EXTAPI: event payload dropped`), listeners not called | |
 | `ExtHost.loadPlugin` | `cannot load plugin library '…'`, `… does not export broker_ext_plugin_entry`, `plugin entry of '…' failed with N`, `host not started` | |
+| `ExtHost.stop()` on the bridge / a worker thread (e.g. from a plugin `invoke`) | `ExtHost.stop() cannot run on the bridge or a worker thread` | it would join itself; stop from another thread |
 | `ExtPlugin.load` | `nothing could be loaded for …`, `missing peer symbols: …`, `peer schema parse failed: …`, `peer createContext failed: …` | partial success is `ok`; details in `ExtPlugin.loadError(name)` |
 
 ### Platform support
