@@ -33,6 +33,7 @@ Single Pure Nim library interface to be used from other Nim apps/modules or from
       - [External dependencies for wrappers](#external-dependencies-for-wrappers)
       - [Convenience nimble tasks](#convenience-nimble-tasks)
   - [Lifecycle Model](#lifecycle-model)
+    - [Module initialisation](#module-initialisation)
     - [Per-context creation](#per-context-creation)
     - [Post-create configuration](#post-create-configuration)
       - [Dynamic provider registration via `InitializeRequest`](#dynamic-provider-registration-via-initializerequest)
@@ -616,11 +617,18 @@ nim c -d:brokerDebug -d:BrokerFfiApi \
 
 #### Why `--nimMainPrefix` matters (POSIX)
 
-The code emitted by `registerBrokerLibrary` imports `<libname>NimMain` and
-calls it from the once-per-process initialization path. That symbol is only
-produced when Nim is invoked with `--nimMainPrefix:<libname>`. If the prefix
-does not match the `name:` field of `registerBrokerLibrary`, the library
-fails to link.
+`--nimMainPrefix:<libname>` renames the library's `NimMain` (an exported,
+default-visibility symbol) to `<libname>NimMain`. Without it, two Nim shared
+libraries in one process both export `NimMain`; on Linux a library's own
+load-time call to it can then bind to the other library's copy (ELF symbol
+interposition, worse with `RTLD_GLOBAL`). macOS two-level namespaces bind
+each library to its own copy, but keep the prefix there too.
+
+With `--noMain` the generated `<lib>_initialize` imports and calls
+`<libname>NimMain` (see [Module initialisation](#module-initialisation)), so
+there a prefix that does not match the `name:` field of
+`registerBrokerLibrary` fails to link. A default build does not reference the
+symbol.
 
 On Windows the flag is omitted intentionally (see `nimMainPrefixFlag` in
 [brokers.nimble](../brokers.nimble) and [LIMITATION.md](LIMITATION.md) §3.1).
@@ -662,6 +670,47 @@ They are the easiest way to reproduce a working build.
 ## Lifecycle Model
 
 The FFI API exposes a single public creation entry point.
+
+### Module initialisation
+
+A library's module initialiser (`<libname>NimMain`: `system` init, every
+module's `DatInit` / `Init`, then all top-level code, including broker and
+plugin registration) runs **exactly once per process, when the library is
+loaded**. Nim's `--app:lib` codegen (`compiler/cgen.nim`, `PosixCDllMain` /
+`WinCDllMain`) emits the loader hook that runs it:
+
+| Platform | Build | Who runs `<libname>NimMain` | When |
+| --- | --- | --- | --- |
+| macOS, Linux | `--app:lib` | `NimMainInit`, an `__attribute__((constructor))` (`NIM_POSIX_INIT` in `nimbase.h`) | `dlopen` / process start, on the loading thread |
+| Windows | `--app:lib` | `DllMain(DLL_PROCESS_ATTACH)` | `LoadLibrary` / process start, under the loader lock |
+| macOS, Linux | `--app:lib --noMain` | `<lib>_initialize` (first call) | first `_initialize` |
+| Windows | `--app:lib --noMain` | nobody (unsupported) | — |
+
+`<lib>_initialize` therefore calls `<libname>NimMain` only under `--noMain`.
+Its remaining work is per-thread foreign-GC registration and the lazy
+context registry; it is idempotent and runs no module code.
+
+The same holds under `--mm:refc` and `--mm:orc`: the loader hook is emitted
+by the codegen independently of the memory manager.
+
+**History.** `_initialize` used to call `<libname>NimMain` on POSIX in every
+build, on the assumption that only Windows' `DllMain` runs it automatically.
+Every POSIX library therefore ran its module initialiser twice: at load and
+again at the first `_initialize`. The EXTAPI example registered its plugin
+twice. What the second run does differs by memory manager:
+
+| Effect of the second run | `--mm:orc` | `--mm:refc` |
+| --- | --- | --- |
+| Top-level `var x = @[…]` / `initTable()` | raw overwrite, no destructor: the first run's payload leaks | `asgnRef` overwrite: the first run's object becomes garbage and is collected |
+| Type info and GC roots | — | `DatInit` re-runs; `nimRegisterGlobalMarker` registers every global marker a second time |
+| `system` module init | re-runs | re-runs |
+| Top-level `initLock(...)` | `pthread_mutex_init` on a live mutex: undefined behaviour | same |
+| Counters and registries (`fetchAdd`, `seq.add`) | applied twice | applied twice |
+
+Gated by `test/test_api_module_init_once.nim` (in `nimble testApi`), which
+loads `test/initoncelib/initoncelib.nim` as a real shared library and checks
+its module-run counter after load, `_initialize` (twice), `_createContext`
+and `_shutdown`, under orc and refc, with and without `--noMain` (POSIX).
 
 ### Per-context creation
 

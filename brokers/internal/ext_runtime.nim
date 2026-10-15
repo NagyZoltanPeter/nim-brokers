@@ -532,9 +532,10 @@ proc extRegisterPlugin*(desc: ptr ExtPluginDesc): int =
   ## index used by the generated stubs.
   ensureRegLock()
   withLock(gExtRegLock):
-    # Idempotent: a library's module initialiser can run twice (e.g. once at
-    # load and once from `<lib>_initialize`); a second registration of the
-    # same descriptor must not create a second, unreachable plugin.
+    # Idempotent: a second registration of the same descriptor (or name) must
+    # not create a second, unreachable plugin. Module init itself runs once
+    # (doc/FFI_API.md § "Module initialisation"); `<lib>_initialize` used to
+    # re-run it on POSIX, which is what first hit this path.
     for i in 0 ..< gExtPluginCount.load(moAcquire):
       if gExtPlugins[i].desc == desc or
           c_strcmp(gExtPlugins[i].desc.name, desc.name) == 0:

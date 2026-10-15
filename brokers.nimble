@@ -735,6 +735,30 @@ task testApi, "Run codec unit tests + library init integration tests":
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
 
+  # Module init runs once in a real `--app:lib` library (loaded via dlopen /
+  # LoadLibrary). `--noMain` (no loader hook, `_initialize` runs NimMain) is a
+  # POSIX-only variant: on Windows the generated `_initialize` never calls it.
+  let libFile =
+    when defined(windows):
+      "initoncelib.dll"
+    elif defined(macosx):
+      "libinitoncelib.dylib"
+    else:
+      "libinitoncelib.so"
+  var noMainVariants = @[false]
+  when not defined(windows):
+    noMainVariants.add true
+  for mm in ["orc", "refc"]:
+    for noMain in noMainVariants:
+      let variant = mm & (if noMain: "_nomain" else: "")
+      let libDir = "build/initoncelib_" & variant
+      exec "nim c --hints:off -d:BrokerFfiApi --threads:on --app:lib --mm:" & mm &
+        (if noMain: " --noMain" else: "") & " --path:. --outdir:" & libDir &
+        nimMainPrefixFlag("initoncelib") & " test/initoncelib/initoncelib.nim"
+      test "-d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm &
+        (if noMain: " -d:initOnceNoMain" else: "") & " -d:initOnceLib=" &
+        quoteArg(thisDir() / libDir / libFile), "test_api_module_init_once"
+
 proc findCargoExe(): string =
   ## Returns the cargo invocation token. Resolving the symlink (rustup
   ## multi-call binary on most installs) loses the dispatch hint, so we
