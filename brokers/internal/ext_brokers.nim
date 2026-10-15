@@ -206,6 +206,16 @@ proc generateExtRequestBroker*(
   let (mtKw, extKw) = splitExtKwargs(kwargs)
   var cfg = parseMtReqKwargs(mtKw)
   result = newStmtList()
+  for kw in extKw:
+    if kw[0].eqIdent("dispatch") and kw[1].kind == nnkIdent and kw[1].eqIdent("inplace"):
+      for mk in mtKw:
+        if mk[0].eqIdent("requestTimeoutMs"):
+          warning(
+            "EXTAPI `dispatch = inplace` runs synchronously on the caller's thread: " &
+              "`requestTimeoutMs` / `setRequestTimeout` and `cancel` do not apply to it " &
+              "(`requestCancellable` returns id 0)",
+            mk,
+          )
   # 1. The public broker: a plain MT RequestBroker. Under the FFI flag it gets
   #    the inplace hook: the effective dispatch is only known once
   #    registerExtPlugin applies the plugin default, so the hook checks it at
@@ -462,7 +472,6 @@ proc generateExtRequestBroker*(
       # K1: typed sync adapter (the native call) + CBOR trampoline.
       let adapterName = "extImport_" & typeName & "_" & tag
       let trampName = "extImportTramp_" & typeName & "_" & tag
-      var rawPtr = false
       if isImport:
         let ubody = (if tag == "zero": zeroBody else: argBody)
         if ubody.isNil:
@@ -487,8 +496,6 @@ proc generateExtRequestBroker*(
           var abiTypes: seq[string]
           for p in params:
             let pt = p[p.len - 2].repr.strip()
-            if isRawPtrType(pt):
-              rawPtr = true
             let lpt = pt.toLowerAscii()
             if lpt.startsWith("openarray") or lpt.startsWith("varargs"):
               error(
@@ -724,7 +731,7 @@ proc generateExtRequestBroker*(
           dynlibSrc: (if isImport or isPeer: dispatch.dynlibSrc else: ""),
           importResolveName: (if isImport: "extResolve_" & typeName else: ""),
           importTrampName: (if isImport: trampName else: ""),
-          rawPtrArgs: rawPtr,
+          rawPtrArgs: slotRawPtr, # short and body form alike (review M11)
           peerLib: dispatch.importLib,
         )
       )
@@ -777,6 +784,13 @@ proc generateExtEventBroker*(
   result.add(generateMtEventBroker(copyNimTree(body), parseMtEvtKwargs(mtKw)))
   when defined(BrokerFfiApi):
     let evKw = extDispatchArg(extKw)
+    if evKw.dynlibSrc.len > 0 and evKw.importLib.len == 0:
+      error(
+        "EventBroker(EXTAPI[...]): `dynlib` alone is a native C import, which serves " &
+          "requests only — an event can only be imported from a nim-brokers peer " &
+          "(`importLib = \"<lib>\", dynlib = ...`)",
+        modeNode,
+      )
     let parsed = parseSingleTypeDef(body, "EventBroker", collectFieldInfo = true)
     let typeName = sanitizeIdentName(parsed.typeIdent)
     let emitName = "extEmit_" & typeName
@@ -838,6 +852,13 @@ proc generateExtSignalBroker*(
   result.add(generateMtSignalBroker(copyNimTree(body), parseMtSigKwargs(mtKw)))
   when defined(BrokerFfiApi):
     let dispatch = extDispatchArg(extKw)
+    if dispatch.dynlibSrc.len > 0 and dispatch.importLib.len == 0:
+      error(
+        "SignalBroker(EXTAPI[...]): `dynlib` alone is a native C import, which serves " &
+          "requests only — a signal can only be imported from a nim-brokers peer " &
+          "(`importLib = \"<lib>\", dynlib = ...`)",
+        modeNode,
+      )
     let parsed = parseSingleTypeDef(body, "SignalBroker", collectFieldInfo = true)
     let typeName = sanitizeIdentName(parsed.typeIdent)
     let wireName = toSnakeCase(typeName)

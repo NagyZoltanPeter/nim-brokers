@@ -446,6 +446,7 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
     "reject_iface_apicollision", "reject_shutdownreq_noargless",
     "reject_shutdownreq_dualslot", "reject_ext_rawptr_workers",
     "reject_ext_k1_managed_arg", "reject_ext_k1_managed_ret",
+    "reject_ext_too_many_names", "reject_ext_k1_body_rawptr", "reject_ext_event_dynlib",
   ]
   for f in apiRejects:
     let (outp, code) = gorgeEx(
@@ -456,6 +457,17 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
       echo outp
       quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
     echo "  reject OK (correctly rejected): " & f
+  # Compile-with-warning checks: must compile AND print the warning.
+  let warns = [("warn_ext_inplace_timeout", "`dispatch = inplace` runs synchronously")]
+  for (f, needle) in warns:
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off -d:BrokerFfiApi --threads:on --path:. --outdir:build/reject test/warn/" &
+        f & ".nim"
+    )
+    if code != 0 or needle notin outp:
+      echo outp
+      quit("WARN TEST FAILED: " & f & " must compile with the warning", 1)
+    echo "  warn OK: " & f
   echo "all sugar-reject tests passed"
 
 task runFfiBenchEventStress,

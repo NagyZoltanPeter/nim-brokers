@@ -154,6 +154,8 @@ proc stampLineInfoExt(n, src: NimNode) {.compileTime.} =
   for c in n:
     stampLineInfoExt(c, src)
 
+var gExtPluginNamesCT {.compileTime.}: seq[string]
+
 macro registerExtPlugin*(args: varargs[untyped]): untyped =
   ## `registerExtPlugin(storage, version = "1.0.0")`
   if args.len == 0 or args[0].kind != nnkIdent:
@@ -204,6 +206,22 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
           args[0],
         )
     let n = entries.len
+    # Limits of the runtime registry, known here at compile time (review M10):
+    # failing at runtime would only report "plugin not registered" per call.
+    if n > ExtMaxNames:
+      error(
+        "registerExtPlugin(" & plugin & "): " & $n & " names, at most " & $ExtMaxNames &
+          " per plugin (the provided-set bitmask width) — split it into two plugins",
+        args[0],
+      )
+    if plugin notin gExtPluginNamesCT:
+      gExtPluginNamesCT.add(plugin)
+      if gExtPluginNamesCT.len > ExtMaxPlugins:
+        error(
+          "registerExtPlugin(" & plugin & "): more than " & $ExtMaxPlugins &
+            " EXTAPI plugins in one program",
+          args[0],
+        )
 
     # Schema fingerprint: names, kinds, argument / payload wire types and the
     # payload's inline fields (sorted). Not covered: nested external types are
@@ -451,7 +469,8 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
         error(
           "registerExtPlugin(" & plugin & "): '" & e.wireName &
             "' passes raw pointers (ptr / pointer / openArray / cstring) to C; that is " &
-            "only safe with `dispatch = inplace` — use the body form for `" & eff & "`",
+            "only safe with `dispatch = inplace` — for `" & eff & "`, take values " &
+            "(e.g. `seq[byte]`) in the signature and pass pointers to C inside a body",
           args[0],
         )
       let disp =
