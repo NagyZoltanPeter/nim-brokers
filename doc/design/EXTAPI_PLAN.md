@@ -1969,3 +1969,24 @@ Deviations from §5.9:
 | K2 `inplace` | via the peer's sync `_call` | not supported (port caps `NONBLOCKING`) | deferred |
 | K2 cancel | drop by id | drop by id (no `_cancelAsync` yet) | as planned |
 | K2 per-ctx unload | `unload(ctx)` | peer contexts shut down at `ExtHost.stop()` | deferred with `unload` |
+
+### Phase 3 — C++ wrapper and C++ examples (implemented on `feat-extapi-design`)
+
+| Piece | Where |
+|---|---|
+| `<plugin>_ext.hpp` generator: C1 `I<Plugin>` + `Responder<T>` (`std::stop_token`, exactly-once, dtor → `err("dropped")`), C2 `I<Plugin>Sync` (`CAP_REPLY_INLINE`), C3 `Builder`, `Port` (RAII), `Emitter`, `Bytes` as CBOR byte string, POD payloads mapped | `brokers/internal/ext_codegen_hpp.nim`, written by `registerExtPlugin` for foreign-implemented plugins only |
+| `exportExtHost("<lib>")` — lib mode: exports `<lib>_extHost()`, which starts the bridge on first use | `brokers/ext_plugin.nim` |
+| Examples (§14): `examples/extapi/nimhost/{storage_api,storage_host,test_storage_mock}.nim`, `nimlib/storagelib.nim`, `cpp_plugin/` (C1), `cpp_cimport/` (C-ABI lib), `cpp_host_lib/` (lib mode, C3), `CMakeLists.txt` | `examples/extapi/` |
+| `nimble runExtExampleCpp` (orc + refc), `nimble runExtExampleCppAsan` (refc + ASAN host); CI step on Linux / macOS | `brokers.nimble`, `.github/workflows/ci.yml` |
+
+Verified on macOS: scenarios 1, 1b, 2, 3, 4 pass under ORC and refc; the
+ASAN host run is clean.
+
+Findings while implementing:
+
+| Topic | Finding | Handling |
+|---|---|---|
+| Lib mode bridge | §5.1 put the bridge on the library's processing thread | the shared bridge thread also serves lib mode (started by `<lib>_extHost()`); one extra MT hop for `(API)` providers that call EXTAPI brokers; processing-thread bridge left as an optimisation |
+| Plugin registration in a library | the module initialiser ran twice in lib mode, registering the plugin twice; the forwarder then pointed at an unreachable second copy | `extRegisterPlugin` is idempotent per plugin name; the double init itself is an `(API)`-lane observation worth its own look |
+| Provider types across modules | `<T>ProviderWithArgs` is not exported by the MT codegen | examples pass plain `proc`s / closures; no change |
+| Windows | C++ examples not yet run on Windows | CI step gated to Linux / macOS until the phase-4 Windows cell |

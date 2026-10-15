@@ -448,6 +448,14 @@ proc extRegisterPlugin*(desc: ptr ExtPluginDesc): int =
   ## index used by the generated stubs.
   ensureRegLock()
   withLock(gExtRegLock):
+    # Idempotent: a library's module initialiser can run twice (e.g. once at
+    # load and once from `<lib>_initialize`); a second registration of the
+    # same descriptor must not create a second, unreachable plugin.
+    for i in 0 ..< gExtPluginCount.load(moAcquire):
+      if gExtPlugins[i].desc == desc or
+          c_strcmp(gExtPlugins[i].desc.name, desc.name) == 0:
+        gExtPlugins[i].desc = desc
+        return i
     let idx = gExtPluginCount.load(moAcquire)
     if idx >= ExtMaxPlugins:
       error "EXTAPI: too many plugins", max = ExtMaxPlugins
@@ -918,7 +926,11 @@ proc extCall*(
     return err("EXTAPI: extCall must run on the bridge thread")
   let (impl, rt, srcSlot) = acquireSource(pluginIdx, nameIdx, uint32(ctx))
   if impl.isNil:
-    return err("EXTAPI: no provider registered (not provided by any plugin port)")
+    return err(
+      "EXTAPI: no provider registered (" & $gExtPlugins[pluginIdx].desc.name & "." &
+        $gExtPlugins[pluginIdx].desc.names[nameIdx].name &
+        " not provided by any plugin port on ctx " & $uint32(ctx) & ")"
+    )
   defer:
     implRelease(impl)
   let nd = rt.desc.names[nameIdx]
@@ -1491,7 +1503,8 @@ proc resolvePeer(lib: LibHandle, prefix: string): Result[ptr PeerFns, string] =
   let f = cast[ptr PeerFns](c_calloc(1, csize_t(sizeof(PeerFns))))
   var missing: seq[string]
   template res(field, suffix: untyped) =
-    let a = symAddr(lib, prefix & suffix)
+    let symName = prefix & suffix
+    let a = symAddr(lib, cstring(symName))
     if a.isNil:
       missing.add(prefix & suffix)
     else:

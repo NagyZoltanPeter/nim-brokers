@@ -729,6 +729,58 @@ task runFfiExampleCpp,
     buildFfiCmakeTarget("example_cpp")
     exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
 
+# ---------------------------------------------------------------------------
+# EXTAPI examples (doc/design/EXTAPI_PLAN.md §14)
+# ---------------------------------------------------------------------------
+
+proc extSharedLibName(name: string): string =
+  when defined(windows):
+    name & ".dll"
+  elif defined(macosx):
+    "lib" & name & ".dylib"
+  else:
+    "lib" & name & ".so"
+
+proc extExeName(name: string): string =
+  when defined(windows):
+    name & ".exe"
+  else:
+    name
+
+proc buildExtExampleNim(mm, codecLib: string) =
+  ## Lib-mode library (storagelib) + the exe-mode host and mock test; the
+  ## host build also writes storage_ext.hpp / storage_ext_rs the plugins use.
+  var lib =
+    "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/extapi/nimlib/build --mm:" & mm
+  lib.add(nimMainPrefixFlag("storagelib"))
+  lib.add(nimWindowsCcFlag())
+  lib.add(nimWindowsImplibFlag("examples/extapi/nimlib/build", "storagelib"))
+  exec lib & " examples/extapi/nimlib/storagelib.nim"
+  let host =
+    "nim c -d:BrokerFfiApi --threads:on --path:. --outdir:examples/extapi/nimhost/build" &
+    nimWindowsCcFlag() & " --mm:" & mm & " -d:codecLib=" & quoteArg(codecLib)
+  exec host & " examples/extapi/nimhost/storage_host.nim"
+  exec host & " examples/extapi/nimhost/test_storage_mock.nim"
+
+task runExtExampleCpp,
+  "Build and run the EXTAPI C++ examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
+  let buildDir = "examples/extapi/cmake-build"
+  let codecLib = thisDir() / buildDir / extSharedLibName("codec_cpp")
+  let pluginLib = thisDir() / buildDir / extSharedLibName("storage_cpp_plugin")
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtExampleNim(mm, codecLib)
+    mkDir(buildDir)
+    exec "cmake -S examples/extapi -B " & buildDir & cmakeWindowsConfigureExtras()
+    exec "cmake --build " & buildDir
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
+      quoteArg(pluginLib)
+    putEnv("EXT_PLUGIN", pluginLib)
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
+    exec quoteArg(buildDir / extExeName("storage_cpp_host_lib"))
+
 task runFfiExamplePy,
   "Build the FFI example library + Python wrapper and run python_example/main.py (orc + refc)":
   for mm in memoryManagerMatrix():
@@ -1273,6 +1325,23 @@ task testApiTeardownAsanRefc,
   testSan("asan", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
 
 const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
+
+task runExtExampleCppAsan,
+  "EXTAPI C++ examples with the Nim host under ASan+UBSan (refc; needs runExtExampleCpp's CMake build)":
+  let buildDir = "examples/extapi/cmake-build"
+  let codecLib = thisDir() / buildDir / extSharedLibName("codec_cpp")
+  let pluginLib = thisDir() / buildDir / extSharedLibName("storage_cpp_plugin")
+  setMM("refc")
+  buildExtExampleNim("refc", codecLib)
+  mkDir(buildDir)
+  exec "cmake -S examples/extapi -B " & buildDir & cmakeWindowsConfigureExtras()
+  exec "cmake --build " & buildDir
+  exec "nim c -d:BrokerFfiApi --threads:on --path:. --mm:refc -d:useMalloc --debugger:native " &
+    "--outdir:examples/extapi/nimhost/build_asan -d:codecLib=" & quoteArg(codecLib) &
+    " --passC:" & quoteArg(sanitizerCompileFlags("asan")) & " --passL:" &
+    quoteArg(sanitizerLinkFlags("asan")) & " examples/extapi/nimhost/storage_host.nim"
+  exec quoteArg("examples/extapi/nimhost/build_asan" / extExeName("storage_host")) & " " &
+    quoteArg(pluginLib)
 
 const extPluginTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extplugin"
 

@@ -157,6 +157,12 @@ jobs:
       - name: Run C++ parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibCpp -y --verbose
 
+      # EXTAPI C++ examples (plugin, runtime switching, mocking, C import, lib
+      # mode). Windows is enabled with the phase-4 LoadLibrary cell.
+      - name: Run EXTAPI C++ examples
+        if: runner.os != 'Windows'
+        run: ci/nimble-strict.sh runExtExampleCpp -y --verbose
+
       - name: Set up Rust toolchain (stable, MSRV 1.75)
         uses: dtolnay/rust-toolchain@stable
 

@@ -1,14 +1,16 @@
 /* A plain C library imported by test_ext_imports.nim through
  * RequestBroker(EXTAPI[codec], dynlib = ...) — it knows nothing about brokers. */
 #include <stdint.h>
-#include <pthread.h>
 #ifdef _WIN32
 #include <windows.h>
 #define EXPORT __declspec(dllexport)
 static void sleep_ms(uint32_t ms) { Sleep(ms); }
+static uintptr_t self_thread(void) { return (uintptr_t)GetCurrentThreadId(); }
 #else
 #include <time.h>
+#include <pthread.h>
 #define EXPORT __attribute__((visibility("default")))
+static uintptr_t self_thread(void) { return (uintptr_t)pthread_self(); }
 static void sleep_ms(uint32_t ms) {
   struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
   nanosleep(&ts, NULL);
@@ -19,7 +21,7 @@ static uintptr_t lastCrcThread = 0;
 
 /* Simple checksum; records the calling thread (inplace check). */
 EXPORT uint32_t codec_crc(uint32_t seed, const uint8_t* buf, uint32_t len) {
-  lastCrcThread = (uintptr_t)pthread_self();
+  lastCrcThread = self_thread();
   uint32_t h = seed;
   for (uint32_t i = 0; i < len; i++) h = h * 31u + buf[i];
   return h;

@@ -8,7 +8,13 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <windows.h>
+static uintptr_t self_thread(void) { return (uintptr_t)GetCurrentThreadId(); }
+#else
 #include <pthread.h>
+static uintptr_t self_thread(void) { return (uintptr_t)pthread_self(); }
+#endif
 
 #include "broker_ext.h"
 
@@ -73,7 +79,7 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
   } else if (strcmp(name, "kv_note") == 0) {
     if (id == 0) atomic_fetch_add(&noteCount, 1);
   } else if (strcmp(name, "kv_square") == 0) {
-    atomic_store(&squareThread, (uintptr_t)pthread_self());
+    atomic_store(&squareThread, self_thread());
     if (!find_val(buf, len, "x", 0, &s, &v)) v = 0;
     uint8_t out[16]; size_t o = 0;
     o += put_head(out + o, 5, 1);
@@ -103,7 +109,7 @@ int32_t raw_kv_note_count(void) { return atomic_load(&noteCount); }
 int32_t raw_kv_cancel_count(void) { return atomic_load(&cancelCount); }
 int32_t raw_kv_parked(void) { return atomic_load(&parkedCount); }
 uintptr_t raw_kv_square_thread(void) { return atomic_load(&squareThread); }
-uintptr_t raw_kv_self_thread(void) { return (uintptr_t)pthread_self(); }
+uintptr_t raw_kv_self_thread(void) { return self_thread(); }
 
 int32_t raw_kv_release(void) {
   int n = atomic_exchange(&parkedCount, 0);

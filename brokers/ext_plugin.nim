@@ -12,6 +12,7 @@ import std/[macros, algorithm, strutils, os]
 import ./internal/ext_brokers
 import ./broker_context
 import chronos
+import ./internal/ext_codegen_hpp
 import
   ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
 
@@ -339,6 +340,17 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
       try:
         writeFile(outDir / (plugin & "_ext.h"), h)
         writeFile(outDir / (plugin & "_ext.cddl"), cddl)
+        # Only plugins implemented by foreign code get a C++ wrapper; native
+        # (K1) and peer (K2) imports are served by generated Nim adapters.
+        var foreignImpl = true
+        for e in entries:
+          if e.dynlibSrc.len > 0:
+            foreignImpl = false
+        if foreignImpl:
+          writeFile(
+            outDir / (plugin & "_ext.hpp"),
+            generateExtCppHeader(plugin, version, schemaHash, entries),
+          )
         writeFile(
           outDir / "broker_ext.h",
           staticRead(currentSourcePath().parentDir / "broker_ext.h"),
@@ -480,3 +492,16 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
     src.add("extInitPlugin_" & plugin & "()\n")
     result.add(parseStmt(src))
     stampLineInfoExt(result, args[0])
+
+macro exportExtHost*(libName: static string): untyped =
+  ## Lib mode: export `<libName>_extHost()` from a Nim shared library. The C /
+  ## C++ / Rust host app calls it (after `<libName>_initialize()`) to get the
+  ## `broker_ext_host` table and provide plugins in-process. The first call
+  ## starts the EXTAPI bridge thread.
+  let fname = libName & "_extHost"
+  let src =
+    "proc " & fname & "*(): ptr ExtHostTable {.exportc: \"" & fname &
+    "\", cdecl, dynlib.} =\n" & "  when compileOption(\"app\", \"lib\"):\n" &
+    "    when declared(setupForeignThreadGc):\n" & "      setupForeignThreadGc()\n" &
+    "  if ExtHost.start().isErr:\n" & "    return nil\n" & "  ExtHost.table()\n"
+  result = parseStmt(src)
