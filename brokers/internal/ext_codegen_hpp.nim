@@ -75,7 +75,7 @@ proc generateExtCppHeader*(
       "#pragma once\n\n" & "#include \"broker_ext.h\"\n#include \"" & plugin &
       "_ext.h\"\n\n" &
       "#include <jsoncons/json.hpp>\n#include <jsoncons_ext/cbor/cbor.hpp>\n\n" &
-      "#include <cstdint>\n#include <functional>\n#include <memory>\n#include <mutex>\n" &
+      "#include <cstdint>\n#include <exception>\n#include <functional>\n#include <memory>\n#include <mutex>\n" &
       "#include <optional>\n#include <stop_token>\n#include <string>\n#include <string_view>\n" &
       "#include <unordered_map>\n#include <utility>\n#include <vector>\n\n"
   )
@@ -150,28 +150,33 @@ proc generateExtCppHeader*(
   )
   h.add(
     "/// Answers one request exactly once. Move-only; destroying it unanswered\n" &
-      "/// replies err(\"dropped\"). `stop_token()` is signalled when Nim cancels the\n" &
+      "/// replies err(\"dropped\") (except while an exception thrown by the plugin\n" &
+      "/// method unwinds: that becomes err(what())). `stop_token()` is signalled when Nim cancels the\n" &
       "/// call or its deadline expires — the reply is then dropped by id.\n" &
       "template <class T> class Responder {\npublic:\n" &
-      "  Responder(detail::StatePtr st, broker_ext_call_id id) : st_(std::move(st)), id_(id), stop_(detail::track(st_, id)) {}\n" &
-      "  Responder(Responder&& o) noexcept : st_(std::move(o.st_)), id_(o.id_), stop_(std::move(o.stop_)), done_(o.done_) { o.done_ = true; }\n" &
+      "  Responder(detail::StatePtr st, broker_ext_call_id id) : st_(std::move(st)), id_(id), stop_(detail::track(st_, id)), uncaught_(std::uncaught_exceptions()) {}\n" &
+      "  Responder(Responder&& o) noexcept : st_(std::move(o.st_)), id_(o.id_), stop_(std::move(o.stop_)), done_(o.done_), uncaught_(o.uncaught_) { o.done_ = true; }\n" &
       "  Responder& operator=(Responder&&) = delete;\n  Responder(const Responder&) = delete;\n" &
-      "  ~Responder() { if (!done_) err(\"dropped\"); }\n" &
+      "  // Destroyed by an exception unwinding out of the plugin method: leave the\n" &
+      "  // reply to the dispatcher's catch, which answers err(what()).\n" &
+      "  ~Responder() { if (!done_ && std::uncaught_exceptions() <= uncaught_) err(\"dropped\"); }\n" &
       "  void ok(const T& v) { if (done_) return; done_ = true; detail::replyBytes(st_, id_, BROKER_EXT_REPLY_OK, detail::encode(v)); detail::untrack(st_, id_); }\n" &
       "  void err(std::string_view msg) { if (done_) return; done_ = true; detail::replyBytes(st_, id_, BROKER_EXT_REPLY_ERR, std::vector<uint8_t>(msg.begin(), msg.end())); detail::untrack(st_, id_); }\n" &
       "  std::stop_token stop_token() const { return stop_; }\n" &
       "  bool cancelled() const { return stop_.stop_requested(); }\nprivate:\n" &
-      "  detail::StatePtr st_;\n  broker_ext_call_id id_;\n  std::stop_token stop_;\n  bool done_ = false;\n};\n\n" &
+      "  detail::StatePtr st_;\n  broker_ext_call_id id_;\n  std::stop_token stop_;\n  bool done_ = false;\n  int uncaught_ = 0;\n};\n\n" &
       "template <> class Responder<void> {\npublic:\n" &
-      "  Responder(detail::StatePtr st, broker_ext_call_id id) : st_(std::move(st)), id_(id), stop_(detail::track(st_, id)) {}\n" &
-      "  Responder(Responder&& o) noexcept : st_(std::move(o.st_)), id_(o.id_), stop_(std::move(o.stop_)), done_(o.done_) { o.done_ = true; }\n" &
+      "  Responder(detail::StatePtr st, broker_ext_call_id id) : st_(std::move(st)), id_(id), stop_(detail::track(st_, id)), uncaught_(std::uncaught_exceptions()) {}\n" &
+      "  Responder(Responder&& o) noexcept : st_(std::move(o.st_)), id_(o.id_), stop_(std::move(o.stop_)), done_(o.done_), uncaught_(o.uncaught_) { o.done_ = true; }\n" &
       "  Responder& operator=(Responder&&) = delete;\n  Responder(const Responder&) = delete;\n" &
-      "  ~Responder() { if (!done_) err(\"dropped\"); }\n" &
+      "  // Destroyed by an exception unwinding out of the plugin method: leave the\n" &
+      "  // reply to the dispatcher's catch, which answers err(what()).\n" &
+      "  ~Responder() { if (!done_ && std::uncaught_exceptions() <= uncaught_) err(\"dropped\"); }\n" &
       "  void ok() { if (done_) return; done_ = true; detail::replyBytes(st_, id_, BROKER_EXT_REPLY_OK, {}); detail::untrack(st_, id_); }\n" &
       "  void err(std::string_view msg) { if (done_) return; done_ = true; detail::replyBytes(st_, id_, BROKER_EXT_REPLY_ERR, std::vector<uint8_t>(msg.begin(), msg.end())); detail::untrack(st_, id_); }\n" &
       "  std::stop_token stop_token() const { return stop_; }\n" &
       "  bool cancelled() const { return stop_.stop_requested(); }\nprivate:\n" &
-      "  detail::StatePtr st_;\n  broker_ext_call_id id_;\n  std::stop_token stop_;\n  bool done_ = false;\n};\n\n"
+      "  detail::StatePtr st_;\n  broker_ext_call_id id_;\n  std::stop_token stop_;\n  bool done_ = false;\n  int uncaught_ = 0;\n};\n\n"
   )
 
   # Signatures per name.

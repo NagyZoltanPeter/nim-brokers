@@ -445,6 +445,7 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
   let apiRejects = [
     "reject_iface_apicollision", "reject_shutdownreq_noargless",
     "reject_shutdownreq_dualslot", "reject_ext_rawptr_workers",
+    "reject_ext_k1_managed_arg", "reject_ext_k1_managed_ret",
   ]
   for f in apiRejects:
     let (outp, code) = gorgeEx(

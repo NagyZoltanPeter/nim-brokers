@@ -42,6 +42,10 @@ struct RustStorage {
 
 impl Storage for RustStorage {
     async fn fetch_blob(&self, key: String) -> Result<FetchBlob, String> {
+        // A panic becomes an error reply carrying its message on the Nim side.
+        if key == "throw" {
+            panic!("boom");
+        }
         Ok(FetchBlob { data: format!("rust:{key}").into_bytes() })
     }
 

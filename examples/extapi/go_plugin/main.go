@@ -31,6 +31,10 @@ type goStorage struct {
 
 // Quick requests: each runs on its own goroutine (the port is NONBLOCKING).
 func (s *goStorage) FetchBlob(ctx context.Context, key string) (ext.FetchBlob, error) {
+	// A panic becomes an error reply carrying its message on the Nim side.
+	if key == "throw" {
+		panic("boom")
+	}
 	return ext.FetchBlob{Data: []byte("go:" + key)}, nil
 }
 

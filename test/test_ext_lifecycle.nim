@@ -50,6 +50,13 @@ RequestBroker(EXTAPI[life], dispatch = workers(1)):
 
   proc signature*(): Future[Result[LifeHookWorker, string]] {.async.}
 
+RequestBroker(EXTAPI[life]):
+  type LifeDual = object
+    n*: int32
+
+  proc signature*(): Future[Result[LifeDual, string]] {.async.}
+  proc signature*(x: int32): Future[Result[LifeDual, string]] {.async.}
+
 registerExtPlugin(life)
 
 # A second plugin with a two-thread pool: worker-start failure injection hits
@@ -230,4 +237,20 @@ suite "EXTAPI lifecycle":
     check startAndOpen()
     check life_provide("life_work") == ExtOk
     check (waitFor LifeWork.request(Ctx)).isOk
+    check ExtHost.stop().isOk
+
+  test "dual-slot: withdraw then re-provide one slot is served again (H1)":
+    check startAndOpen()
+    check life_provide("life_dual_zero") == ExtOk
+    check life_provide("life_dual_args") == ExtOk
+    check (waitFor LifeDual.request(Ctx)).isOk
+    check (waitFor LifeDual.request(Ctx, 3)).isOk
+    check life_withdraw("life_dual_args") == ExtOk
+    check (waitFor LifeDual.request(Ctx, 3)).isErr
+    check (waitFor LifeDual.request(Ctx)).isOk # the other slot keeps serving
+    check life_provide("life_dual_args") == ExtOk
+    let r = waitFor LifeDual.request(Ctx, 3)
+    check r.isOk
+    if r.isErr:
+      echo "re-provided slot: ", r.error
     check ExtHost.stop().isOk

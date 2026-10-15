@@ -3,6 +3,8 @@
  *   life_bridge      ()  bridge: parks the call (never replies), counts cancels
  *   life_hook_bridge ()  bridge: calls the host hook, then replies
  *   life_hook_worker ()  workers: calls the host hook, then replies
+ *   life_dual_zero / life_dual_args   bridge: the two slots of a dual-slot
+ *                        request, reply at once
  * Every reply is {"n": 5}.
  */
 #include <stdint.h>
@@ -42,6 +44,8 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
   if (strcmp(name, "life_work") == 0) {
     atomic_fetch_add(&workInvokes, 1);
     while (atomic_load(&gate) == 0) sleep_ms(1);
+    reply_ok(id);
+  } else if (strncmp(name, "life_dual", 9) == 0) {
     reply_ok(id);
   } else if (strcmp(name, "life_bridge") == 0) {
     /* parked: no reply */

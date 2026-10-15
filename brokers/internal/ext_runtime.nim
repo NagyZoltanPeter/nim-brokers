@@ -248,6 +248,9 @@ type
   ExtPluginRt = object
     desc: ptr ExtPluginDesc
     lock: Lock
+    loadLock: Lock
+      ## Serialises `extImportLoad` / `extPeerLoad`: the "already loaded on
+      ## this ctx" check, the one-time peer resolve and the port setup.
     ports: array[ExtMaxPorts, ExtPortSlot]
     pool: ptr ExtWorkerPool
     loadError: cstring ## K1: c_malloc'd, last `extImportLoad` diagnostics
@@ -497,6 +500,7 @@ proc extRegisterPlugin*(desc: ptr ExtPluginDesc): int =
     let rt = cast[ptr ExtPluginRt](createShared(ExtPluginRt, 1))
     rt.desc = desc
     initLock(rt.lock)
+    initLock(rt.loadLock)
     gExtPlugins[idx] = rt
     gExtPluginCount.store(idx + 1, moRelease)
     return idx
@@ -775,7 +779,7 @@ proc bridgeProvide(pluginIdx, slot, nameIdx: int, ctx: uint32, gen: uint32): int
     else:
       # The public slot is held by someone else (e.g. a Nim provider). The
       # foreign source stays registered; `extProvider` / `extFallback` reach it.
-      info "EXTAPI: provided name not auto-wired",
+      warn "EXTAPI: provided name not auto-wired",
         plugin = $rt.desc.name, name = $nd.name, reason = r.error
   ExtOk
 
@@ -1360,6 +1364,26 @@ proc extImportReplyErr*(user: pointer, id: uint64, msg: string) =
 
 proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string]
 
+proc setLoadError(rt: ptr ExtPluginRt, msg: string) =
+  withLock(rt.lock):
+    if not rt.loadError.isNil:
+      c_free(rt.loadError)
+      rt.loadError = nil
+    if msg.len > 0:
+      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
+      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
+      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
+
+proc importLoadedOn(rt: ptr ExtPluginRt, ctx: BrokerContext): bool =
+  ## An import (K1) or peer (K2) port of this plugin is already open on `ctx`.
+  withLock(rt.lock):
+    for s in 0 ..< ExtMaxPorts:
+      let ps = addr rt.ports[s]
+      if ps.open.load(moAcquire) and ps.ctx == uint32(ctx) and not ps.impl.isNil and
+          ((ps.impl.impl.caps and ExtCapNative) != 0 or not rt.peers[s].isNil):
+        return true
+  false
+
 proc extImportLoad*(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
   ## K1: resolve every import of the plugin and serve the resolved names on
   ## `ctx` through a synthetic port. Names whose library or symbol is missing
@@ -1372,6 +1396,11 @@ proc extImportLoad*(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
     return err("EXTAPI: unknown plugin")
   let rt = gExtPlugins[pluginIdx]
   let d = rt.desc
+  acquire(rt.loadLock)
+  defer:
+    release(rt.loadLock)
+  if importLoadedOn(rt, ctx):
+    return ok() # idempotent: eager + explicit load, or a repeated load
   if not d.peerLib.isNil:
     return extPeerLoad(pluginIdx, ctx)
   if d.importInvoke.isNil:
@@ -1395,16 +1424,9 @@ proc extImportLoad*(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
       problems.add($nd.name & ": missing symbol " & missing)
       continue
     resolved.add(n)
-  let msg = problems.join("; ")
-  withLock(rt.lock):
-    if not rt.loadError.isNil:
-      c_free(rt.loadError)
-      rt.loadError = nil
-    if msg.len > 0:
-      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
-      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
-      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
   if resolved.len == 0:
+    let msg = problems.join("; ")
+    setLoadError(rt, msg)
     return err("EXTAPI: nothing could be loaded for " & $d.name & ": " & msg)
   let user = cast[ptr ExtImportUser](c_calloc(1, csize_t(sizeof(ExtImportUser))))
   var impl = ExtImplDesc(
@@ -1424,10 +1446,18 @@ proc extImportLoad*(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
     c_free(user)
     return err("EXTAPI: cannot open import port (" & $rc & ")")
   user.port = port
+  var provided = 0
   for n in resolved:
     let prc = extProvide(nil, port, d.names[n].name)
-    if prc != ExtOk:
+    if prc == ExtOk:
+      inc provided
+    else:
       problems.add($d.names[n].name & ": provide failed (" & $prc & ")")
+  let msg = problems.join("; ")
+  setLoadError(rt, msg) # after the provides, so their failures are reported too
+  if provided == 0:
+    discard extClose(nil, port)
+    return err("EXTAPI: nothing could be served for " & $d.name & ": " & msg)
   ok()
 
 proc extImportLoadError*(pluginIdx: int): string =
@@ -1683,16 +1713,9 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
       problems.add($d.names[n].name & ": schema differs from the peer's")
     else:
       accepted.add(n)
-  let msg = problems.join("; ")
-  withLock(rt.lock):
-    if not rt.loadError.isNil:
-      c_free(rt.loadError)
-      rt.loadError = nil
-    if msg.len > 0:
-      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
-      copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
-      cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
   if accepted.len == 0:
+    let msg = problems.join("; ")
+    setLoadError(rt, msg)
     return err("EXTAPI: nothing could be imported from " & $d.peerLib & ": " & msg)
   var errOut: cstring = nil
   let peerCtx = fns.createContext(addr errOut)
@@ -1732,6 +1755,7 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
       let prc = extProvide(nil, port, nd.name)
       if prc != ExtOk:
         problems.add($nd.name & ": provide failed (" & $prc & ")")
+  setLoadError(rt, problems.join("; "))
   ok()
 
 proc shutdownPeers() =

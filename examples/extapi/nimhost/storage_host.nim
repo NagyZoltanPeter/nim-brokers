@@ -103,6 +103,9 @@ proc main() =
   let fb = waitFor FetchBlob.request(ctx, "a")
   expect fb.isOk and fb.value.data.text.endsWith(":a") and
     not fb.value.data.text.startsWith("nim:"), "FetchBlob via extFallback → plugin"
+  let th = waitFor FetchBlob.request(ctx, "throw")
+  expect th.isErr and "boom" in th.error,
+    "plugin exception / panic → err carrying its message"
 
   expect BlobEvicted.listen(
     ctx,

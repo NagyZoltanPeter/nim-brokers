@@ -224,16 +224,22 @@ proc generateExtRustCrate*(
       "    let task = Abortable::new(AssertUnwindSafe(fut).catch_unwind(), reg);\n" &
       "    sp.spawn(\n        async move {\n            match task.await {\n" &
       "                Ok(Ok(r)) => reply(&st2, id, r),\n" &
-      "                Ok(Err(_)) => reply_raw(&st2, id, REPLY_ERR, b\"plugin panicked\"),\n" &
+      "                Ok(Err(p)) => reply_raw(&st2, id, REPLY_ERR, panic_msg(p).as_bytes()),\n" &
       "                Err(_aborted) => {} // cancelled by Nim: the reply would be dropped anyway\n" &
       "            }\n            st2.aborts.lock().unwrap().remove(&id);\n        }\n        .boxed(),\n    );\n}\n\n" &
+      "/// The panic payload's message (`panic!(\"…\")` gives a &str or a String).\n" &
+      "fn panic_msg(p: Box<dyn std::any::Any + Send>) -> String {\n" &
+      "    let m = p.downcast_ref::<&str>().map(|s| s.to_string())\n" &
+      "        .or_else(|| p.downcast_ref::<String>().cloned())\n" &
+      "        .unwrap_or_else(|| \"unknown\".to_string());\n" &
+      "    format!(\"plugin panicked: {m}\")\n}\n\n" &
       "fn cancel_flag(st: &Arc<State>, id: u64) -> CancelFlag {\n" &
       "    let f = CancelFlag::default();\n    st.flags.lock().unwrap().insert(id, f.clone());\n    f\n}\n\n" &
       "unsafe extern \"C\" fn tramp_invoke(user: *mut c_void, id: u64, idx: u32, _n: *const c_char, buf: *const u8, len: usize) {\n" &
       "    let st: &Arc<State> = &*(user as *const Arc<State>);\n" &
       "    let bytes: &[u8] = if buf.is_null() || len == 0 { &[] } else { std::slice::from_raw_parts(buf, len) };\n" &
-      "    if catch_unwind(AssertUnwindSafe(|| (st.dispatch)(st, id, idx, bytes))).is_err() {\n" &
-      "        reply_raw(st, id, REPLY_ERR, b\"plugin panicked\");\n    }\n}\n\n" &
+      "    if let Err(p) = catch_unwind(AssertUnwindSafe(|| (st.dispatch)(st, id, idx, bytes))) {\n" &
+      "        reply_raw(st, id, REPLY_ERR, panic_msg(p).as_bytes());\n    }\n}\n\n" &
       "unsafe extern \"C\" fn tramp_cancel(user: *mut c_void, id: u64) {\n" &
       "    let st: &Arc<State> = &*(user as *const Arc<State>);\n" &
       "    if let Some(h) = st.aborts.lock().unwrap().remove(&id) {\n        h.abort();\n    }\n" &

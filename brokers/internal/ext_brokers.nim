@@ -472,9 +472,33 @@ proc generateExtRequestBroker*(
                 modeNode,
               )
             ret = payloadFieldPairs[0][1]
+          # The short form hands Nim values straight to a `cdecl` C prototype,
+          # so every argument / the return value must have a C ABI layout:
+          # scalars, enums, distinct-of-scalar, `ptr` / `pointer` / `cstring`,
+          # POD objects. Managed types (string, seq, ref, objects holding
+          # them) differ between --mm:refc and --mm:orc and are never C.
+          var abiTypes: seq[string]
           for p in params:
-            if isRawPtrType(p[p.len - 2].repr):
+            let pt = p[p.len - 2].repr.strip()
+            if isRawPtrType(pt):
               rawPtr = true
+            let lpt = pt.toLowerAscii()
+            if lpt.startsWith("openarray") or lpt.startsWith("varargs"):
+              error(
+                "EXTAPI `importc` short form: `" & pt &
+                  "` has no C ABI (pass `ptr T` + a length, or use the body form)",
+                modeNode,
+              )
+            abiTypes.add(pt)
+          if ret.len > 0:
+            abiTypes.add(ret)
+          for t in abiTypes:
+            src.add(
+              "when not supportsCopyMem(" & t & "):\n" &
+                "  {.error: \"EXTAPI `importc` short form (" & typeName & "): `" & t &
+                "` is not a C ABI type (managed: string / seq / ref / objects holding them); " &
+                "use the body form and convert explicitly\".}\n"
+            )
           let v = fnVar(tag, params, ret, dispatch.importc)
           src.add(
             "proc " & adapterName & "*(" & decl & "): " & resTy &
@@ -650,10 +674,13 @@ proc generateExtRequestBroker*(
       src.add(
         "proc " & installName &
           "(ctx: BrokerContext, wirePublic: bool): Result[void, string] {.nimcall, gcsafe, raises: [].} =\n" &
-          "  {.cast(gcsafe).}:\n" & "    discard " & laneType & ".setProvider(ctx, " &
+          "  {.cast(gcsafe).}:\n" & "    discard " & laneType & ".replaceProvider(ctx, " &
           typeName & ".extLaneProvider(ctx))\n" & "    if wirePublic:\n" &
-          "      return " & typeName & ".setProvider(ctx, " & typeName & ".extProvider" &
-          sfx & "(ctx))\n" & "    return ok()\n"
+          # replace-or-insert on the bridge: also replaces the bridge's own
+          # "withdrawn" stub left by a dual-slot uninstall, and still refuses
+          # a slot owned by another thread (setupBucket fails there).
+          "      return " & typeName & ".replaceProvider(ctx, " & typeName &
+          ".extProvider" & sfx & "(ctx))\n" & "    return ok()\n"
       )
       src.add(
         "proc " & uninstallName &

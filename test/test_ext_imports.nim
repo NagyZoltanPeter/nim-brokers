@@ -240,3 +240,43 @@ suite "EXTAPI native C imports (K1)":
       for f in futs:
         discard waitFor withTimeout(f, chronos.seconds(5))
       check (waitFor PeerSlow.request(ctx, 1)).isErr # nothing left serving it
+
+  test "repeated load on one ctx is idempotent (H2)":
+    when defined(windows):
+      skip()
+    else:
+      check ExtHost.start().isOk
+      let ctx = NewBrokerContext()
+      var okLoads = 0
+      for i in 0 ..< 70: # > 64 ports per plugin: a leaked port per load would fail
+        if ExtPlugin.load("codec", ctx).isOk:
+          inc okLoads
+      check okLoads == 70
+      var data = [byte 1, 2, 3, 4]
+      check (waitFor CodecCrc.request(ctx, 7, addr data[0], 4)).isOk
+      check ExtHost.stop().isOk
+
+  test "repeated peer load keeps one peer context (H2)":
+    # Without the guard every load creates another peer context and port, and
+    # the 65th load fails on the 64-port cap.
+    when defined(windows):
+      skip()
+    else:
+      check ExtHost.start().isOk
+      let ctx = NewBrokerContext()
+      var okLoads = 0
+      for i in 0 ..< 66:
+        if ExtPlugin.load("peer", ctx).isOk:
+          inc okLoads
+      check okLoads == 66
+      var ticks: Atomic[int]
+      let tp = addr ticks
+      check PeerTick.listen(
+        ctx,
+        proc(t: PeerTick): Future[void] {.async: (raises: []).} =
+          discard tp[].fetchAdd(1),
+      ).isOk
+      check (waitFor PeerEcho.request(ctx, "x")).isOk
+      waitFor sleepAsync(chronos.milliseconds(200))
+      check ticks.load() == 1
+      check ExtHost.stop().isOk

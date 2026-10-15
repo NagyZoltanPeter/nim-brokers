@@ -11,6 +11,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -35,6 +36,8 @@ public:
 
   // Quick requests: answer inline (bridge dispatch requires NONBLOCKING).
   void fetchBlob(std::string key, Responder<FetchBlob> r) override {
+    // A plugin exception becomes err(what()) on the Nim side.
+    if (key == "throw") throw std::runtime_error("boom");
     FetchBlob b;
     std::string v = "cpp:" + key;
     b.data.assign(v.begin(), v.end());
