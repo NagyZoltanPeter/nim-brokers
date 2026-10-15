@@ -349,6 +349,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
     "test_mt_request_cancel", "test_mt_thread_dispatcher_ownership",
     "test_multi_thread_broker_scope", "test_mt_owner_only_clear",
+    "test_mt_request_infinite_timeout",
   ]
   for f in mtTests:
     for opt in [

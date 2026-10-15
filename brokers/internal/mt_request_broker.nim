@@ -1616,7 +1616,14 @@ proc generateMtRequestBroker*(
           pool: ptr ResponseSlotPool, slotIdx: uint32, slotGen: uint32
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         # Busy-poll the response slot until ready, cancelled, or timed out.
-        let deadline = Moment.now() + `timeoutVarIdent`
+        # Saturate: `now + InfiniteDuration` (or any timeout that large)
+        # overflows int64, so it means "no deadline".
+        let start = Moment.now()
+        let deadline =
+          if `timeoutVarIdent` >= Moment.high() - start:
+            Moment.high()
+          else:
+            start + `timeoutVarIdent`
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx, slotGen):
             var decoded: Result[`payloadType`, string]
