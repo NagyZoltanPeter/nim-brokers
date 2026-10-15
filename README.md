@@ -150,12 +150,17 @@ schema and the `_getSchema()` descriptor. See
 - **Shipping a Nim library to other languages** — one Nim source becomes a
   shared library with typed, memory-safe C / C++ / Python / Rust / Go wrappers
   and no manual binding code.
+- **Consuming plugins written in other languages** — declare a broker
+  `(EXTAPI[<plugin>])` and a C / C++ / Rust / Go plugin, a plain C library or
+  another nim-brokers library provides it; Nim calls it with the usual verbs,
+  with timeout, cancellation and runtime fallback to a Nim implementation
+  ([EXTAPI](doc/FFI_API.md#extapi--consuming-external-plugin-apis)).
 
 ## Documentation
 
 - **[USAGEGUIDE.md](USAGEGUIDE.md)** — full reference: every broker variant,
   the OOP/DI layer, multi-thread tuning, the FFI API, and memory footprints.
-- [Broker FFI API](doc/FFI_API.md) · [Type-support matrix](doc/TYPESUPPORT.md) ·
+- [Broker FFI API](doc/FFI_API.md) · [EXTAPI plugins](doc/FFI_API.md#extapi--consuming-external-plugin-apis) · [Type-support matrix](doc/TYPESUPPORT.md) ·
   [OOP Brokers](doc/OOP_Brokers.md) · [MT config & tuning](doc/MT_BROKER_CONFIG.md) · [Cookbook with examples](doc/COOKBOOK.md)
 - [AI Coding agent skill](doc/CLAUDE_brokers_skill.md) <= Add this to your AGENTS/CLAUDE.md
 
