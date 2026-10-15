@@ -158,6 +158,10 @@ jobs:
         if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExamplePy -y --verbose
 
+      - name: Run EXTAPI Python wrapper tests
+        if: runner.os != 'Windows'
+        run: ci/nimble-strict.sh testExtPyWrapper -y --verbose
+
       - name: Run C++ parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibCpp -y --verbose
 
@@ -179,6 +183,10 @@ jobs:
       - name: Run EXTAPI Rust examples
         if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExampleRust -y --verbose
+
+      - name: Run EXTAPI Rust wrapper tests
+        if: runner.os != 'Windows'
+        run: ci/nimble-strict.sh testExtRustWrapper -y --verbose
 
       - name: Set up Go toolchain (1.21)
         uses: actions/setup-go@v5

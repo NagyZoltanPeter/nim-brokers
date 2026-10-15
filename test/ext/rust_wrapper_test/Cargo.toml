@@ -1,0 +1,15 @@
+# Runtime tests of the generated EXTAPI Rust wrapper (review W3, W7, Rust R2,
+# panic paths) against a fake `broker_ext_host`. The wrapper crate is generated
+# by `nimble testExtRustWrapper` from test/test_ext_lifecycle.nim's `life` plugin.
+
+[package]
+name = "ext_rust_wrapper_test"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+[dependencies]
+life_ext = { path = "../../../build/extwrap/life_ext_rs" }
+futures = "0.3"
+ciborium = "0.2"

@@ -39,7 +39,9 @@ proc pyType(t, plugin: string): string {.compileTime.} =
   h
 
 proc generateExtPyFile*(
-    plugin, version, schemaHash: string, entries: seq[ExtEntryCT]
+    plugin, version, schemaHash: string,
+    entries: seq[ExtEntryCT],
+    defDispatch = "bridge",
 ): string {.compileTime.} =
   let base = pascalPy(plugin)
   var py = ""
@@ -49,7 +51,7 @@ proc generateExtPyFile*(
       "Subclass `" & base & "` and wire it with `Port.open`, or set per-name callables\n" &
       "with `Builder`. The host table comes from the Nim library's\n" &
       "`<lib>_extHost()` export.\n\"\"\"\n\n" & "from __future__ import annotations\n\n" &
-      "import asyncio\nimport ctypes\nimport inspect\nimport threading\n" &
+      "import asyncio\nimport concurrent.futures\nimport ctypes\nimport inspect\nimport threading\nimport warnings\n" &
       "from dataclasses import dataclass, field, fields\n" &
       "from typing import Any, Callable, Dict, List, Optional\n\n" & "import cbor2\n\n" &
       "PLUGIN = \"" & plugin & "\"\nVERSION = \"" & version & "\"\nSCHEMA_HASH = \"" &
@@ -127,7 +129,10 @@ proc generateExtPyFile*(
       ":\n    \"\"\"Override the names this plugin implements. Requests may be\n" &
       "    `async def` (run on the loop given to `Port.open`; a Nim cancel or deadline\n" &
       "    cancels the task) or plain `def` (replies inline on the host's thread).\n" &
-      "    Raise to reply with an error. Signals are one-way.\"\"\"\n\n"
+      "    Raise to reply with an error. Signals are one-way.\n\n" &
+      "    Do not block the loop thread on a synchronous call back into the Nim\n" &
+      "    library: that call may need one of this plugin's `async def` handlers,\n" &
+      "    which then cannot run until it times out.\"\"\"\n\n"
   )
   for e in entries:
     case e.kind
@@ -149,7 +154,8 @@ proc generateExtPyFile*(
 
   # Name table: idx -> (wire name, kind, arg names, payload decode class)
   py.add(
-    "# idx -> (wire name, is_request, arg names, signal payload class or None)\n_NAMES = {\n"
+    "# idx -> (wire name, is_request, arg names, signal payload class or None,\n" &
+      "#         inline: the name is `inplace` — sync handlers reply on the host's thread)\n_NAMES = {\n"
   )
   for i, e in entries:
     case e.kind
@@ -157,17 +163,36 @@ proc generateExtPyFile*(
       var an: seq[string]
       for (n, _) in e.args:
         an.add("\"" & n & "\"")
+      let inline = (if e.dispatch.len > 0: e.dispatch else: defDispatch) == "inplace"
       py.add(
-        "    " & $i & ": (\"" & e.wireName & "\", True, [" & an.join(", ") &
-          "], None),\n"
+        "    " & $i & ": (\"" & e.wireName & "\", True, [" & an.join(", ") & "], None, " &
+          (if inline: "True" else: "False") & "),\n"
       )
     of enkSignal:
       let cls = (if e.payloadType == "void": "\"void\""
       else: decodeCls(e))
-      py.add("    " & $i & ": (\"" & e.wireName & "\", False, [], " & cls & "),\n")
+      let inline = (if e.dispatch.len > 0: e.dispatch else: defDispatch) == "inplace"
+      py.add(
+        "    " & $i & ": (\"" & e.wireName & "\", False, [], " & cls & ", " &
+          (if inline: "True" else: "False") & "),\n"
+      )
     of enkEvent:
       discard
-  py.add("}\nAPIS = [n for (n, _, _, _) in _NAMES.values()]\n\n")
+  py.add(
+    "}\nAPIS = [v[0] for v in _NAMES.values()]\n\n" & "_WARNED: set = set()\n\n\n" &
+      "def _warn_once(msg: str) -> None:\n" &
+      "    if msg not in _WARNED:\n        _WARNED.add(msg)\n        warnings.warn(msg, RuntimeWarning, stacklevel=2)\n\n\n" &
+      "def _is_async(fn: Any) -> bool:\n" &
+      "    \"\"\"`async def` functions / methods, partials of them and objects with an\n" &
+      "    `async def __call__`.\"\"\"\n" &
+      "    if inspect.iscoroutinefunction(fn):\n        return True\n" &
+      "    inner = getattr(fn, \"func\", None)  # functools.partial\n" &
+      "    if inner is not None and inspect.iscoroutinefunction(inner):\n        return True\n" &
+      "    call = getattr(type(fn), \"__call__\", None)\n" &
+      "    return call is not None and inspect.iscoroutinefunction(call)\n\n\n" &
+      "async def _as_coro(fn: Any, args: tuple, kwargs: dict) -> Any:\n" &
+      "    r = fn(*args, **kwargs)\n    if inspect.isawaitable(r):\n        r = await r\n    return r\n\n"
+  )
 
   # Live ports: ctypes callbacks must outlive the host's use of them.
   py.add(
@@ -202,7 +227,7 @@ proc generateExtPyFile*(
       "    def __init__(self, host: Any, handlers: Dict[str, Callable[..., Any]], loop: Optional[asyncio.AbstractEventLoop]) -> None:\n" &
       "        self._host = _host_ptr(host)\n        self._handlers = handlers\n        self._loop = loop\n" &
       "        self._port = 0\n        self._closed = False\n        self._pending: Dict[int, Any] = {}\n" &
-      "        self._lock = threading.Lock()\n" &
+      "        self._lock = threading.Lock()\n        self._pool: Optional[concurrent.futures.ThreadPoolExecutor] = None\n" &
       "        self._cb_invoke = _INVOKE_FN(self._invoke)\n        self._cb_cancel = _CANCEL_FN(self._cancel)\n" &
       "        self._cb_release = _RELEASE_FN(self._release)\n" &
       "        with _LIVE_LOCK:\n            self._key = _NEXT[0]\n            _NEXT[0] += 1\n            _LIVE[self._key] = self\n\n" &
@@ -213,7 +238,10 @@ proc generateExtPyFile*(
       "        return Port._open(host, ctx, handlers, loop)\n\n" &
       "    @staticmethod\n    def _open(host: Any, ctx: int, handlers: Dict[str, Callable[..., Any]], loop: Optional[asyncio.AbstractEventLoop]) -> \"Port\":\n" &
       "        p = Port(host, handlers, loop)\n" &
-      "        impl = _Impl(ABI_VERSION, PLUGIN.encode(), SCHEMA_HASH.encode(), _CAP_NONBLOCKING,\n" &
+      "        # Honest caps: async handlers return at once (NONBLOCKING); sync handlers\n" &
+      "        # reply inline on `inplace` names (REPLY_INLINE) and run on a thread\n" &
+      "        # pool for the others, so they never block the shared bridge.\n" &
+      "        impl = _Impl(ABI_VERSION, PLUGIN.encode(), SCHEMA_HASH.encode(), _CAP_NONBLOCKING | _CAP_REPLY_INLINE,\n" &
       "                     p._cb_invoke, p._cb_cancel, p._cb_release, ctypes.c_void_p(p._key))\n" &
       "        out = ctypes.c_uint64(0)\n        h = p._host.contents\n" &
       "        rc = h.open(h.host, ctx, ctypes.byref(impl), ctypes.byref(out))\n" &
@@ -243,27 +271,41 @@ proc generateExtPyFile*(
       "        except Exception as e:  # noqa: BLE001\n" &
       "            self._reply(call_id, _REPLY_ERR, f\"encode: {e}\".encode())\n            return\n" &
       "        self._reply(call_id, _REPLY_OK, b)\n\n" &
+      "    def _executor(self) -> concurrent.futures.ThreadPoolExecutor:\n" &
+      "        with self._lock:\n            if self._pool is None:\n" &
+      "                self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix=PLUGIN)\n" &
+      "            return self._pool\n\n" &
+      "    @staticmethod\n    def _run_signal(fn: Any, args: tuple) -> None:\n" &
+      "        try:\n            fn(*args)\n" &
+      "        except Exception as e:  # noqa: BLE001\n" &
+      "            _warn_once(f\"{PLUGIN}: signal handler raised: {e}\")\n\n" &
       "    def _invoke(self, _user: Any, call_id: int, idx: int, _name: Any, buf: Any, n: int) -> None:\n" &
       "        try:\n            entry = _NAMES.get(idx)\n            fn = self._handlers.get(entry[0]) if entry else None\n" &
       "            if fn is None:\n                self._reply(call_id, _REPLY_ERR, b\"not implemented by plugin\")\n                return\n" &
       "            data = ctypes.string_at(buf, n) if n else b\"\"\n" &
-      "            _, is_request, arg_names, sig_cls = entry\n" &
+      "            wire, is_request, arg_names, sig_cls, inline = entry\n" &
       "            if not is_request:\n" &
       "                args = () if sig_cls == \"void\" else (_from_wire(sig_cls, cbor2.loads(data)),)\n" &
-      "                if inspect.iscoroutinefunction(fn):\n" &
-      "                    if self._loop is not None:\n" &
-      "                        asyncio.run_coroutine_threadsafe(fn(*args), self._loop)\n" &
-      "                else:\n                    fn(*args)\n                return\n" &
-      "            d = cbor2.loads(data) if data else {}\n" &
-      "            kwargs = {a: d.get(a) for a in arg_names}\n" &
-      "            if inspect.iscoroutinefunction(fn):\n" &
-      "                if self._loop is None:\n" &
+      "                if _is_async(fn):\n" &
+      "                    if self._loop is None:\n" &
+      "                        _warn_once(f\"{wire}: async signal handler without a loop: dropped (Port.open(..., loop=...))\")\n" &
+      "                        return\n" &
+      "                    asyncio.run_coroutine_threadsafe(_as_coro(fn, args, {}), self._loop)\n" &
+      "                elif inline:\n                    fn(*args)\n" &
+      "                else:\n                    self._executor().submit(self._run_signal, fn, args)\n" &
+      "                return\n" & "            d = cbor2.loads(data) if data else {}\n" &
+      "            missing = [a for a in arg_names if not isinstance(d, dict) or a not in d]\n" &
+      "            if missing:\n" &
+      "                self._reply(call_id, _REPLY_ERR, f\"missing argument(s): {', '.join(missing)}\".encode())\n" &
+      "                return\n" & "            kwargs = {a: d[a] for a in arg_names}\n" &
+      "            if _is_async(fn):\n" & "                if self._loop is None:\n" &
       "                    self._reply(call_id, _REPLY_ERR, b\"async handler needs a loop (Port.open(..., loop=...))\")\n" &
       "                    return\n" &
-      "                fut = asyncio.run_coroutine_threadsafe(fn(**kwargs), self._loop)\n" &
-      "                with self._lock:\n                    self._pending[call_id] = fut\n" &
-      "                fut.add_done_callback(lambda f, cid=call_id: self._done(cid, f))\n" &
-      "            else:\n                self._reply_value(call_id, fn(**kwargs))\n" &
+      "                fut = asyncio.run_coroutine_threadsafe(_as_coro(fn, (), kwargs), self._loop)\n" &
+      "            elif inline:\n                self._reply_value(call_id, fn(**kwargs))\n                return\n" &
+      "            else:\n                fut = self._executor().submit(fn, **kwargs)\n" &
+      "            with self._lock:\n                self._pending[call_id] = fut\n" &
+      "            fut.add_done_callback(lambda f, cid=call_id: self._done(cid, f))\n" &
       "        except BaseException as e:  # noqa: BLE001\n" &
       "            self._reply(call_id, _REPLY_ERR, f\"plugin error: {e}\".encode())\n\n" &
       "    def _done(self, call_id: int, fut: Any) -> None:\n" &
@@ -277,7 +319,8 @@ proc generateExtPyFile*(
       "        if fut is not None:\n            fut.cancel()\n\n" &
       "    def _release(self, _user: Any) -> None:\n" &
       "        # The host no longer calls this port: drop the keep-alive reference.\n" &
-      "        with _LIVE_LOCK:\n            _LIVE.pop(self._key, None)\n\n\n"
+      "        with _LIVE_LOCK:\n            _LIVE.pop(self._key, None)\n" &
+      "        if self._pool is not None:\n            self._pool.shutdown(wait=False)\n\n\n"
   )
 
   # Builder.

@@ -2105,7 +2105,7 @@ the `(API)` wrappers:
 | `<plugin>_ext.h`, `broker_ext.h`, `<plugin>_ext.cddl` | always | C names / wire names, the fixed ABI, the CBOR schema |
 | `<plugin>_ext.hpp` | always (foreign-implemented plugins) | **C1** `I<Plugin>` + `Responder<T>` (`std::stop_token`, exactly-once, destructor replies `err("dropped")`), **C2** `I<Plugin>Sync` (`CAP_REPLY_INLINE`), **C3** `Builder`, `Port` (RAII), `Emitter`; jsoncons codec |
 | `<plugin>_ext_rs/` crate | `-d:BrokerFfiApiGenRust` | **R1** async trait (any executor via `Spawn`; cancel drops the future through `Abortable`), **R2** sync trait + `CancelFlag`, **R4** `Builder`, `Port` (`Drop` closes), `Emitter`; ciborium + serde |
-| `<plugin>_ext_go/` module | `-d:BrokerFfiApiGenGo` | `<Plugin>` interface with `context.Context` (cancelled by Nim), one goroutine per request, `Funcs` + `OpenFuncs`, `Port`, `Emitter`; fxamacker/cbor |
+| `<plugin>_ext_go/` module | `-d:BrokerFfiApiGenGo` | `<Plugin>` interface with `context.Context` (cancelled by Nim), one goroutine per request, `Funcs` + `OpenFuncs`, `Port`, `Emitter`; fxamacker/cbor. Go does not support several Go `c-shared` libraries (several Go runtimes) in one process: ship the plugin and any C-ABI exports for K1 as **one** library |
 | `<plugin>_ext.py` | `-d:BrokerFfiApiGenPy` | `<Plugin>` base class (`async def` on a given asyncio loop, cancel → `future.cancel()`; plain `def` replies inline), `Builder`, `Port`, `Emitter`; cbor2. Lib mode only — a Python plugin cannot be a `dlopen`-able library |
 
 No wrapper is generated for K1 / K2 plugins: the Nim side is the adapter.

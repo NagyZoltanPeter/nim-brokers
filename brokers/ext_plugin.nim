@@ -401,7 +401,7 @@ proc emitExtPlugin(args: NimNode, shapes: seq[string]): NimNode {.compileTime.} 
           when defined(BrokerFfiApiGenPy):
             writeFile(
               outDir / (plugin & "_ext.py"),
-              generateExtPyFile(plugin, version, schemaHash, entries),
+              generateExtPyFile(plugin, version, schemaHash, entries, defDispatch[0]),
             )
           when defined(BrokerFfiApiGenGo):
             let gm = generateExtGoModule(plugin, version, schemaHash, entries)

@@ -1598,7 +1598,9 @@ impl storage_ext::Storage for MyStorage {
 
 let port = storage_ext::Port::open(
     mylib_ext_host(), ctx, Arc::new(MyStorage { … }),
-    |fut| { tokio::spawn(fut); },          // or async-std, smol, a thread pool…
+    move |fut| { rt_handle.spawn(fut); },  // a captured tokio Handle (invoke runs
+                                           // on host threads, outside the runtime),
+                                           // or async-std, smol, a thread pool…
 )?;
 port.provide(storage_ext::Api::FetchBlob)?;   // individually, or port.provide_all()?
 let em = port.emitter();

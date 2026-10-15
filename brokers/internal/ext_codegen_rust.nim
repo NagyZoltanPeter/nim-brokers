@@ -191,8 +191,11 @@ proc generateExtRustCrate*(
 
   # Shared runtime.
   rs.add(
-    "/// Where request futures run. Any executor: a closure taking a boxed\n" &
-      "/// future (`|f| { tokio::spawn(f); }`, a thread pool, …).\n" &
+    "/// Where request futures run: any executor, as a closure taking a boxed\n" &
+      "/// future. `invoke` runs on host threads (the bridge / a worker), outside\n" &
+      "/// any async runtime — with tokio capture a handle up front:\n" &
+      "/// `let h = tokio::runtime::Handle::current(); move |f| { h.spawn(f); }`\n" &
+      "/// (`tokio::spawn` there would panic). A thread per call or a pool works too.\n" &
       "pub trait Spawn: Send + Sync + 'static {\n    fn spawn(&self, fut: BoxFuture<'static, ()>);\n}\n" &
       "impl<F: Fn(BoxFuture<'static, ()>) + Send + Sync + 'static> Spawn for F {\n" &
       "    fn spawn(&self, fut: BoxFuture<'static, ()>) {\n        self(fut)\n    }\n}\n\n" &
@@ -207,6 +210,10 @@ proc generateExtRustCrate*(
       "    ciborium::from_reader(b).map_err(|e| format!(\"decode: {e}\"))\n}\n\n" &
       "fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {\n" &
       "    let mut out = Vec::new();\n    ciborium::into_writer(v, &mut out).map_err(|e| format!(\"encode: {e}\"))?;\n    Ok(out)\n}\n\n" &
+      "/// Locks never poison the wrapper: a panicking plugin thread leaves the\n" &
+      "/// maps consistent (single insert / remove under the lock).\n" &
+      "fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {\n" &
+      "    m.lock().unwrap_or_else(|e| e.into_inner())\n}\n\n" &
       "fn reply_raw(st: &Arc<State>, id: u64, status: i32, b: &[u8]) {\n" &
       "    if id == 0 {\n        return;\n    }\n    let t = st.host.t();\n" &
       "    if let Some(f) = t.reply {\n        unsafe { f(t.host, st.port.load(Ordering::Acquire), id, status, b.as_ptr(), b.len()) };\n    }\n}\n\n" &
@@ -219,14 +226,23 @@ proc generateExtRustCrate*(
       "        Err(e) => reply_raw(st, id, REPLY_ERR, e.as_bytes()),\n    }\n}\n\n" &
       "fn spawn_request<T, F>(st: &Arc<State>, id: u64, sp: &Arc<dyn Spawn>, fut: F)\nwhere\n" &
       "    T: Serialize + Send + 'static,\n    F: Future<Output = Result<T, String>> + Send + 'static,\n{\n" &
-      "    let (handle, reg) = AbortHandle::new_pair();\n    st.aborts.lock().unwrap().insert(id, handle);\n" &
+      "    let (handle, reg) = AbortHandle::new_pair();\n    lk(&st.aborts).insert(id, handle);\n" &
       "    let st2 = st.clone();\n" &
+      "    // Built outside the future and moved in: dropped with the task even if\n" &
+      "    // the executor never polls it, so Nim always gets an answer.\n" &
+      "    let guard = ReplyGuard { st: st.clone(), id, done: false };\n" &
       "    let task = Abortable::new(AssertUnwindSafe(fut).catch_unwind(), reg);\n" &
-      "    sp.spawn(\n        async move {\n            match task.await {\n" &
+      "    sp.spawn(\n        async move {\n            let mut guard = guard;\n            match task.await {\n" &
       "                Ok(Ok(r)) => reply(&st2, id, r),\n" &
       "                Ok(Err(p)) => reply_raw(&st2, id, REPLY_ERR, panic_msg(p).as_bytes()),\n" &
       "                Err(_aborted) => {} // cancelled by Nim: the reply would be dropped anyway\n" &
-      "            }\n            st2.aborts.lock().unwrap().remove(&id);\n        }\n        .boxed(),\n    );\n}\n\n" &
+      "            }\n            guard.done = true;\n            lk(&st2.aborts).remove(&id);\n        }\n        .boxed(),\n    );\n}\n\n" &
+      "/// Answers err(\"dropped\") when a request future is dropped by its executor\n" &
+      "/// before finishing (not on a Nim cancel, which marks it done).\n" &
+      "struct ReplyGuard {\n    st: Arc<State>,\n    id: u64,\n    done: bool,\n}\n\n" &
+      "impl Drop for ReplyGuard {\n    fn drop(&mut self) {\n        if !self.done {\n" &
+      "            lk(&self.st.aborts).remove(&self.id);\n" &
+      "            reply_raw(&self.st, self.id, REPLY_ERR, b\"dropped\");\n        }\n    }\n}\n\n" &
       "/// The panic payload's message (`panic!(\"…\")` gives a &str or a String).\n" &
       "fn panic_msg(p: Box<dyn std::any::Any + Send>) -> String {\n" &
       "    let m = p.downcast_ref::<&str>().map(|s| s.to_string())\n" &
@@ -234,18 +250,21 @@ proc generateExtRustCrate*(
       "        .unwrap_or_else(|| \"unknown\".to_string());\n" &
       "    format!(\"plugin panicked: {m}\")\n}\n\n" &
       "fn cancel_flag(st: &Arc<State>, id: u64) -> CancelFlag {\n" &
-      "    let f = CancelFlag::default();\n    st.flags.lock().unwrap().insert(id, f.clone());\n    f\n}\n\n" &
+      "    let f = CancelFlag::default();\n    lk(&st.flags).insert(id, f.clone());\n    f\n}\n\n" &
       "unsafe extern \"C\" fn tramp_invoke(user: *mut c_void, id: u64, idx: u32, _n: *const c_char, buf: *const u8, len: usize) {\n" &
       "    let st: &Arc<State> = &*(user as *const Arc<State>);\n" &
       "    let bytes: &[u8] = if buf.is_null() || len == 0 { &[] } else { std::slice::from_raw_parts(buf, len) };\n" &
       "    if let Err(p) = catch_unwind(AssertUnwindSafe(|| (st.dispatch)(st, id, idx, bytes))) {\n" &
       "        reply_raw(st, id, REPLY_ERR, panic_msg(p).as_bytes());\n    }\n}\n\n" &
+      "// Panics never cross the C boundary (UB at the MSRV): every trampoline\n" &
+      "// catches them.\n" &
       "unsafe extern \"C\" fn tramp_cancel(user: *mut c_void, id: u64) {\n" &
       "    let st: &Arc<State> = &*(user as *const Arc<State>);\n" &
-      "    if let Some(h) = st.aborts.lock().unwrap().remove(&id) {\n        h.abort();\n    }\n" &
-      "    if let Some(f) = st.flags.lock().unwrap().get(&id) {\n        f.0.store(true, Ordering::Release);\n    }\n}\n\n" &
+      "    let _ = catch_unwind(AssertUnwindSafe(|| {\n" &
+      "        if let Some(h) = lk(&st.aborts).remove(&id) {\n            h.abort();\n        }\n" &
+      "        if let Some(f) = lk(&st.flags).get(&id) {\n            f.0.store(true, Ordering::Release);\n        }\n    }));\n}\n\n" &
       "unsafe extern \"C\" fn tramp_release(user: *mut c_void) {\n" &
-      "    drop(Box::from_raw(user as *mut Arc<State>));\n}\n\n"
+      "    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(user as *mut Arc<State>))));\n}\n\n"
   )
 
   # Emitter.
@@ -412,7 +431,7 @@ proc generateExtRustCrate*(
           "                let flag = cancel_flag(st, id);\n" &
           "                let r = imp." & e.wireName & "(" &
           (if am.len > 0: am & ", " else: "") & "&flag);\n" &
-          "                st.flags.lock().unwrap().remove(&id);\n" &
+          "                lk(&st.flags).remove(&id);\n" &
           "                reply(st, id, r);\n            }\n"
       )
     of enkSignal:

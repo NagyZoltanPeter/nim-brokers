@@ -876,6 +876,24 @@ task runExtExampleRust,
     exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
     exec cargo & " run --manifest-path examples/extapi/rust_host_lib/Cargo.toml"
 
+proc buildExtWrapperGen() =
+  ## Generate the `life` plugin's Rust crate + Python module (test_ext_lifecycle)
+  ## into build/extwrap for the wrapper harnesses.
+  exec "nim c --hints:off -d:BrokerFfiApi -d:BrokerFfiApiGenRust -d:BrokerFfiApiGenPy " &
+    "--threads:on --path:. --outdir:build/extwrap --nimMainPrefix:extlife " &
+    "test/test_ext_lifecycle.nim"
+
+task testExtRustWrapper,
+  "EXTAPI: generated Rust wrapper against a fake host (R2, panics, dropped futures, cancel)":
+  buildExtWrapperGen()
+  exec quoteArg(findCargoExe()) &
+    " test --manifest-path test/ext/rust_wrapper_test/Cargo.toml"
+
+task testExtPyWrapper,
+  "EXTAPI: generated Python wrapper against a fake host (caps, sync offload, cancel, args)":
+  buildExtWrapperGen()
+  exec quoteArg(findPythonExe()) & " test/ext/test_ext_py_wrapper.py build/extwrap"
+
 task runExtExampleGo,
   "Build and run the EXTAPI Go examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
   let ex = thisDir() / "examples/extapi"

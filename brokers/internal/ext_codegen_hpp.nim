@@ -417,23 +417,27 @@ proc generateExtCppHeader*(
       let a = argsDecl(e)
       h.add(
         "  Builder& " & m & "(std::function<void(" & (if a.len > 0: a & ", "
-        else: "") & "Responder<" & respType(e) & ">)> f) { st_->" & m &
+        else: "") & "Responder<" & respType(e) & ">)> f) { if (st_) { st_->" & m &
           "Fn = std::move(f); set_.push_back(Api::" & upperCamel(e.wireName) &
-          "); return *this; }\n"
+          "); } return *this; }\n"
       )
     of enkSignal:
       let on = "on" & upperCamel(e.wireName)
       h.add(
-        "  Builder& " & on & "(std::function<void(" & sigValue(e) & ")> f) { st_->" & m &
-          "Fn = std::move(f); set_.push_back(Api::" & upperCamel(e.wireName) &
-          "); return *this; }\n"
+        "  Builder& " & on & "(std::function<void(" & sigValue(e) &
+          ")> f) { if (st_) { st_->" & m & "Fn = std::move(f); set_.push_back(Api::" &
+          upperCamel(e.wireName) & "); } return *this; }\n"
       )
     of enkEvent:
       discard
   h.add(
     "  Builder& caps(uint32_t c) { caps_ = c; return *this; }\n" &
+      "  /// One port per builder: the port takes the builder's state, so a second\n" &
+      "  /// `open` fails instead of sharing it (replies would go out under the\n" &
+      "  /// wrong port handle).\n" &
       "  Result<Port> open(const broker_ext_host* host, uint32_t ctx) {\n" &
-      "    auto r = Port::openState(host, ctx, st_, caps_);\n    if (!r.isOk()) return r;\n" &
+      "    if (!st_) return Result<Port>::err(\"Builder::open: this builder already opened a port\");\n" &
+      "    auto r = Port::openState(host, ctx, std::move(st_), caps_);\n    if (!r.isOk()) return r;\n" &
       "    for (Api a : set_) {\n      int32_t rc = r.value().provide(a);\n" &
       "      if (rc != BROKER_EXT_OK) return Result<Port>::err(std::string(\"provide \") + apiName(a) + \" failed: \" + std::to_string(rc));\n" &
       "    }\n    return r;\n  }\nprivate:\n" &
