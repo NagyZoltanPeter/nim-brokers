@@ -76,6 +76,7 @@ Requirements extracted from the request:
 | R9 | Lib author may choose dispatch "exactly where called" (§D2-5) | `inplace` policy that bypasses every hop |
 | R10 | The interface can be fulfilled from Nim, chosen at runtime; usable as a mock (§D2-6) | Nim impl is an ordinary MT provider; generated `extProvider` / `extFallback` forwarders let the slot owner switch gaplessly (§5.8) |
 | R11 | External libraries consumable as imports (§D2-7) | `importc` + `dynlib` (native C) and `importLib` (nim-brokers peer) sources, lazily loaded |
+| R12 | Not only tests: runnable, effective **example implementations** in C++ and Rust (minimum) showing the whole: external plugin, runtime switch to the Nim impl, mocking, C import | §14; each wrapper phase ships its examples and CI runs them |
 
 Non-goals: out-of-process transport (Approach D, decided out of scope),
 foreign plugin calling *back* into Nim requests (that is just the existing
@@ -93,7 +94,7 @@ foreign plugin calling *back* into Nim requests (that is just the existing
 | `PodRing[T]` (MPSC POD ring) | `api_cbor_courier.nim:101` | reply mailbox, event ingress ring, worker queue |
 | `registerBrokerPoller` | `mt_broker_common.nim:288` | bridge thread drains rings inside its `brokerDispatchLoop` |
 | CBOR codec + per-type schema walk | `api_cbor_codec.nim`, `api_schema.nim` | payload encode/decode, wrapper type generation |
-| FNV-1a-128 schema hash | `api_schema_hash.nim` | per-plugin handshake hash (§6.4) |
+| FNV-1a-128 schema hash | `api_schema_hash.nim` — **not on master yet**: lands with PR #65 (`feat-ffi-schema-handshake`, commit `ac98d25`); phase 0 depends on it | per-plugin handshake hash (§6.4) |
 | `ApiStatus*` code table | `api_common.nim:76` | extended with `ApiStatusExt*` codes |
 | Lane tags `API[ffi, ipc]` + `registerIpcHost("<group>")` | branch `feat-experimental-ipc` (unmerged) | precedent for "brokers tagged, a registration macro collects a group" |
 | `BrokerInterface(API, IFace)` | `brokers/broker_interface.nim` | natural "one plugin = one interface" grouping (Option D2) |
@@ -523,8 +524,19 @@ imports). A Nim implementation has no dispatch mode: it runs where the author
 installed its provider (§D3-2, §5.8). For external sources the lib author
 decides, in Nim, at declaration: a plugin default in
 `registerExtPlugin(p, dispatch = …)` and a per-broker override
-`RequestBroker(EXTAPI[p], dispatch = …)`. The policy is part of the handshake;
-the foreign side cannot change it, only check it.
+`RequestBroker(EXTAPI[p], dispatch = …)`. The foreign side cannot change the
+policy. Because policies are per broker while a port is opened once, the port
+instead declares its **capabilities** (`broker_ext_impl.caps`, §6.2), and each
+`provide(port, name)` is checked against that broker's policy:
+
+| Broker policy | Port must declare | Why |
+|---|---|---|
+| `inplace` | `CAP_REPLY_INLINE` | the reply must arrive before `invoke` returns |
+| `bridge` | `CAP_NONBLOCKING` | `invoke` runs on the shared bridge and must return promptly |
+| `workers(n)` | — (anything) | `invoke` may block its worker and reply now or later |
+
+A mismatch fails `provide` with `BROKER_EXT_DISPATCH_MISMATCH` (nothing
+installed), naming the broker and its policy in the log.
 
 | Policy | Impl runs on | Hops (caller ≠ bridge) | Impl may block? | Reply | Timeout / cancel | Best for |
 |---|---|---|---|---|---|---|
@@ -587,9 +599,10 @@ Rules and consequences:
 Generated wrappers make `bridge` safe for async-style impls: the C++/Rust
 binding's `invoke` trampoline only decodes and hands off to the user's
 executor/runtime (§7, §8), so the user code itself never runs on the bridge.
-A wrapper that exposes a *sync* user API must declare `workers(n≥1)`; the
-generated wrapper asserts the policy matches at `open` (policy is part of the
-handshake, §6.4).
+A wrapper that exposes a *sync* user API declares `CAP_REPLY_INLINE` (it
+replies before returning, possibly after blocking) but not `CAP_NONBLOCKING`,
+so it can serve `inplace` and `workers` brokers and is refused for `bridge`
+brokers at `provide`.
 
 ### 5.5 Events — foreign → Nim listeners
 
@@ -670,14 +683,16 @@ sequenceDiagram
   participant B as Bridge thread
   participant MT as MT brokers
 
-  App->>P: host->open(host, ctx, &impl{abiVer, "storage", schemaHash, dispatch, invoke, cancel, release, user}, &port)
-  P->>P: verify abiVer, plugin, schemaHash (mismatch → -14 unless SKIP env), dispatch
+  App->>P: host->open(host, ctx, &impl{abiVer, "storage", schemaHash, caps, invoke, cancel, release, user}, &port)
+  P->>P: verify abiVer, plugin, schemaHash (mismatch → -14 unless SKIP env), store caps
   P->>P: claim ExtPortSlot, gen++, impl refs = 1
   P-->>App: EXT_OK, port = (slotIdx shl 32 | gen)
 
   App->>P: host->provide(host, port, "fetch_blob")
   P->>B: post ProvideMsg + fireBrokerSignal, wait (readiness-synchronous)
-  alt another port is the foreign source of fetch_blob on ctx
+  alt port caps cannot serve fetch_blob's dispatch policy
+    P-->>App: EXT_DISPATCH_MISMATCH
+  else another port is the foreign source of fetch_blob on ctx
     B-->>P: err
     P-->>App: EXT_ALREADY_PROVIDED
   else ok
@@ -1090,8 +1105,12 @@ enum {
   BROKER_EXT_STALE            = -15,  /* port closed / callId no longer pending */
   BROKER_EXT_ALREADY_PROVIDED = -16,  /* a Nim provider or another port holds it */
   BROKER_EXT_NOT_PROVIDED     = -17,  /* withdraw of a name this port does not provide */
+  BROKER_EXT_DISPATCH_MISMATCH = -18, /* port caps cannot serve this broker's policy (§5.4) */
 };
-enum { BROKER_EXT_DISPATCH_BRIDGE = 0, BROKER_EXT_DISPATCH_WORKERS = 1, BROKER_EXT_DISPATCH_INPLACE = 2 };
+enum {                                 /* broker_ext_impl.caps bit flags */
+  BROKER_EXT_CAP_NONBLOCKING  = 1u << 0,  /* invoke returns promptly (may reply later) */
+  BROKER_EXT_CAP_REPLY_INLINE = 1u << 1,  /* invoke always replies before returning */
+};
 enum { BROKER_EXT_REPLY_OK = 0, BROKER_EXT_REPLY_ERR = 1 };  /* reply() status, §6.6.1 */
 
 /* Foreign side, called by Nim. buf valid only during the call. */
@@ -1105,7 +1124,7 @@ typedef struct {
   uint32_t abiVersion;                 /* BROKER_EXT_ABI_VERSION */
   const char* plugin;                  /* "storage" */
   const char* schemaHash;              /* 32 hex; NULL = unchecked raw tunnel (§6.6) */
-  uint32_t dispatch;                   /* BROKER_EXT_DISPATCH_* */
+  uint32_t caps;                       /* BROKER_EXT_CAP_*, checked per provide (§5.4) */
   broker_ext_invoke_fn invoke;
   broker_ext_cancel_fn cancel;         /* may be NULL */
   broker_ext_release_fn release;       /* may be NULL */
@@ -1177,7 +1196,7 @@ documented in `doc/design/TEARDOWN_UAF_FINDINGS.md`.
 `open` checks, in order: `abiVersion`, `plugin` name known, `schemaHash`
 (FNV-1a-128 over the plugin's canonical ABI via `api_schema_hash.nim`; same
 `BROKERS_FFI_SKIP_SCHEMA_CHECK` / `<PLUGIN>_SKIP_SCHEMA_CHECK` escape hatch),
-`dispatch` compatible with the declared policy. One hash per plugin, so plugins
+then stores `caps` for the per-broker check at `provide` (§5.4). One hash per plugin, so plugins
 version independently (R6). `schemaHash = NULL` opts out (raw tunnel, §6.6):
 accepted, logged once at `info`; wire mismatches then surface as CBOR decode
 errors on the Nim side (`err("ext decode: …")`), never as UB.
@@ -1291,7 +1310,7 @@ int32_t broker_ext_plugin_entry(const broker_ext_host* h) {
   H = h;
   broker_ext_impl impl = {
     BROKER_EXT_ABI_VERSION, "storage", STORAGE_EXT_SCHEMA_HASH,
-    BROKER_EXT_DISPATCH_WORKERS, on_invoke, NULL, NULL, NULL };
+    BROKER_EXT_CAP_REPLY_INLINE, on_invoke, NULL, NULL, NULL };  /* replies synchronously */
   int32_t rc = h->open(h->host, 0 /* default ctx */, &impl, &P);
   if (rc != BROKER_EXT_OK) return rc;
   h->provide(h->host, P, STORAGE_EXT_FETCH_BLOB);
@@ -1336,7 +1355,8 @@ typed declaration in scope — for generic forwarders, scripting bridges, test
 harnesses replaying captured traffic. It reuses the per-broker CBOR adapter the
 `(API)` lane already generates (`<Type>CborAdapter(ctx, reqBuf): Future[seq[byte]]`,
 `api_request_broker_cbor.nim`): decode → `await <Type>.request(ctx, …)` →
-encode. Going through the typed `request` means the call reaches **whatever
+encode. The adapter is generated for EXTAPI brokers too (today only `(API)`
+brokers get one). Going through the typed `request` means the call reaches **whatever
 the public provider is** (§5.8) — Nim impl, forwarder or fallback alike — and
 keeps timeout, cancel and `"no provider registered"`. Cost: one extra decode/encode when the active
 source is itself CBOR (foreign), accepted for a generic path.
@@ -1448,8 +1468,9 @@ em.blobEvicted("k1", "lru");                              // any thread
   a pure virtual still has to exist — use C3 when only a subset is implemented.
 - `ext_cancel` → `std::stop_source::request_stop()` stored per callId in the
   trampoline's small map; C++20 standard, no custom token.
-- compatible with `dispatch = bridge` (the trampoline only decodes and calls the
-  virtual; user posts to their executor) **and** `workers`.
+- declares `CAP_NONBLOCKING` (the trampoline only decodes and calls the
+  virtual; the user posts to their executor), so it serves `bridge` and
+  `workers` brokers; `inplace` brokers need C2.
 - exceptions thrown out of a virtual are caught in the trampoline →
   `err(what())`.
 
@@ -1462,8 +1483,8 @@ struct MyStorage : storage_ext::IStorageSync {
 };
 ```
 
-Simplest to implement; return value = reply. **Requires `dispatch = workers(n)`**
-(asserted at `open`). Can be generated as a thin adapter over C1
+Simplest to implement; return value = reply. Declares `CAP_REPLY_INLINE`, so
+it serves `inplace` and `workers` brokers (refused for `bridge` at `provide`). Can be generated as a thin adapter over C1
 (`IStorageSync` derives from `IStorage` and calls `r.ok(fetchBlob(...))`), so
 both can ship together at near-zero cost.
 
@@ -1495,7 +1516,7 @@ would resume through).
 
 | | C1 Responder | C2 Sync | C3 Builder | C4 Coroutine |
 |---|---|---|---|---|
-| Never blocks bridge | yes (any policy) | only with `workers` | yes | yes |
+| Caps → policies served | `NONBLOCKING` → `bridge`, `workers` | `REPLY_INLINE` → `inplace`, `workers` | per closure kind (async → `NONBLOCKING`, sync → `REPLY_INLINE`) | `NONBLOCKING` |
 | Cancellation | `stop_token` | `stop_token` param | `stop_token` | coroutine cancel via token |
 | Exactly-once enforced | type (move-only + dtor) | return value | type | return |
 | Partial impl | via `provide` subset (virtual must still exist) | same | **natural** | same as C1 |
@@ -1589,7 +1610,8 @@ em.blob_evicted("k1", "lru")?;            // any thread
   `ext_cancel` aborts it → future dropped → `reqwest`/`tokio` I/O inside is
   cancelled by drop semantics. Aborted calls send no reply (Nim already
   resolved).
-- Works with `dispatch = bridge`: the trampoline only decodes + `spawn`s.
+- Declares `CAP_NONBLOCKING`: the trampoline only decodes + `spawn`s, so it
+  serves `bridge` and `workers` brokers; `inplace` brokers need R2.
 - AFIT (`async fn` in trait) is stable since 1.75 = our MSRV; the `Send` bound
   on returned futures is expressed with return-position `impl Future + Send`
   in the generated trait (or `#[trait_variant::make]`), so no `async-trait`
@@ -1605,8 +1627,8 @@ impl storage_ext::StorageSync for MyStorage {
 }
 ```
 
-Requires `dispatch = workers(n)`; `CancelFlag` is an `AtomicBool` set by
-`ext_cancel`. Generated as a blanket adapter, like C2.
+Declares `CAP_REPLY_INLINE` (serves `inplace` and `workers` brokers);
+`CancelFlag` is an `AtomicBool` set by `ext_cancel`. Generated as a blanket adapter, like C2.
 
 ### Option R3 — `Responder<T>` handle
 
@@ -1632,7 +1654,7 @@ let b = storage_ext::Builder::new()
 | Runtime-agnostic | yes (`Spawn`) | n/a (workers) | yes | yes |
 | Cancellation | drop via `Abortable` | `CancelFlag` | `r.is_cancelled()` | drop |
 | Partial impl | via `provide` subset (trait methods get default bodies returning `Err("not provided")`, never reached) | same | same | **natural** |
-| Policy | `bridge` or `workers` | `workers` only | either | either |
+| Caps → policies served | `NONBLOCKING` → `bridge`, `workers` | `REPLY_INLINE` → `inplace`, `workers` | `NONBLOCKING` → `bridge`, `workers` | per closure kind |
 | Recommendation | **primary** | adapter | optional | **ship** (partial plugins) |
 
 ### Emitter lifetime (both languages)
@@ -1734,6 +1756,7 @@ matters.
 | Non-owner thread tries to switch | `replaceProvider` / `setProvider` → `err`; `clearProvider` logged no-op (existing owner-only rule) | — |
 | Nim wants to switch an `autoWire`d broker | `err` (bridge owns the slot) → declare `autoWire = false` for brokers meant to switch | — |
 | `withdraw` of a name the port does not provide | — | `BROKER_EXT_NOT_PROVIDED` |
+| `provide` of a broker whose dispatch policy the port's `caps` can't serve | — | `BROKER_EXT_DISPATCH_MISMATCH`, nothing installed |
 | `provide` / `emit` with an undeclared name | — | `BROKER_EXT_UNKNOWN_NAME` |
 | Timeout / `cancel(id)` while queued for a worker | `err` timeout / cancelled | `invoke` never runs |
 | Timeout / cancel while impl runs | resolves at once | `cancel(callId)` hint; later `reply` → `STALE` |
@@ -1776,10 +1799,83 @@ during implementation (no decision needed up front):
 
 ## 13. Phasing (Approach A)
 
+Every phase is gated by the real builds and tests across ORC / refc, debug /
+release, and refc + ASAN wherever lifetimes are touched; CI keeps every
+existing gate (AGENTS.md "CI expectations") green. A phase that delivers a
+wrapper also delivers its **examples** (§14) and the nimble task that runs
+them in CI — tests alone do not close a phase (R12).
+
 | Phase | Content | Gate |
 |---|---|---|
-| 1 | Nim runtime: `ExtHostRuntime` + shared bridge (exe) / processing-thread bridge (lib), per-plugin port table + worker pools, rings, EXTAPI lowering (public MT broker + hidden `<T>Ext` lane + `extProvider` / `extFallback` / `extAvailable` + `autoWire`), `bridge` / `workers` / **`inplace`** dispatch incl. `directInplace`, `open/provide/withdraw/close`, `EXTAPI[p]` tag parsing + `registerExtPlugin`, `broker_ext.h`, `<plugin>_ext.h` + `.cddl`, `listApis/getSchema`, `ExtTunnel` | new `test/test_ext_plugin.nim` driving a **raw C plugin** through the tunnel (§6.6.3) plus Nim-impl / `withMockProvider` / gapless owner-switch under load — ORC / refc / refc+ASAN / release; every row of §11 |
-| 2 | Library imports: K1 native C (lazy `std/dynlib`, short + body form, `inplace` / `bridge` / `workers(n)` with per-worker internal contexts) against libz; K2 `BrokerLibPort` importing `examples/ffiapi` `mylib`, one peer context per host ctx | `test/test_ext_imports.nim` ORC/refc/refc+ASAN; missing-lib fallback; peer schema mismatch; Windows CI cell |
-| 3 | C++ `<plugin>_ext.hpp` (C1 + C2 adapter + C3 builder) + `examples/extapi/cpp_plugin` (lib mode) | `nimble runExtExampleCpp` orc+refc |
-| 4 | Rust `<plugin>_ext_rs` (R1 + R2 adapter + R4 builder) + example; exe-mode `ExtHost.loadPlugin` (`dlopen` / `LoadLibrary`) + `broker_ext_plugin_entry` | `nimble runExtExampleRust`, Windows CI cell for `LoadLibrary` |
-| 5 | Go / Python wrappers | parity tests |
+| 0 | **Prerequisite.** PR #65 (`<lib>_verifySchema`, `api_schema_hash.nim`, `ApiStatusSchemaMismatch`) merged; rebase `feat-extapi-design` on it | master contains `ac98d25` |
+| 1a | **Foreign lane core.** `ExtHostRuntime` + shared bridge (exe) / processing-thread bridge (lib); per-plugin port table, worker pools, reply / event rings; `broker_ext.h`; `open / provide / withdraw / close` with `caps` check; `reply` / `emit`; `bridge` / `workers(n)` / `inplace` dispatch; `EXTAPI[p]` tag parsing + `registerExtPlugin`; exe-mode `ExtHost.loadPlugin` (`dlopen` / `LoadLibrary` + `broker_ext_plugin_entry`); `<plugin>_ext.h` + `.cddl`; `listApis` / `getSchema` | `test/test_ext_plugin.nim` driving a **raw C plugin** (§6.6.3) through every row of §11 that concerns ports, replies, events, signals, cancel / timeout, stale / shutdown |
+| 1b | **Lowering and switching.** Public MT broker + hidden `<T>Ext` lane, `extProvider` / `extFallback` / `extAvailable`, `autoWire`, `directInplace`, `ExtTunnel` (+ CBOR adapters for EXTAPI brokers) | `test/test_ext_switching.nim`: gapless owner `replaceProvider` under concurrent load (no `"no provider"`, no `ProviderGone` observed), `withMockProvider`, `extFallback` across plugin load / unload, non-owner switch rejected |
+| 2 | **Library imports.** K1 native C: lazy `std/dynlib`, short form + body form, `inplace` / `bridge` / `workers(n)` with per-worker internal contexts, pointer-argument rule; K2 `BrokerLibPort` importing the `examples/ffiapi` `mylib`, one peer context per host ctx | `test/test_ext_imports.nim`: libz + a test C library, missing-library fallback, `workers(n)` parallelism and deadline drops, peer schema mismatch, peer `-6`; Windows CI cell |
+| 3 | **C++.** `<plugin>_ext.hpp` (C1 + C2 adapter + C3 builder), CMake target | **C++ examples, all of §14** — `nimble runExtExampleCpp` (orc + refc), added to CI |
+| 4 | **Rust.** `<plugin>_ext_rs` crate (R1 + R2 adapter + R4 builder) | **Rust examples, all of §14** — `nimble runExtExampleRust` (orc + refc), added to CI, incl. the Windows cell |
+| 5 | Go / Python wrappers + their example variants | parity with phases 3–4 |
+
+---
+
+## 14. Example implementations (R12)
+
+Tests prove the contracts; the examples show a user **the whole flow** with
+real, idiomatic code they can copy. Same layout conventions as
+`examples/ffiapi` and `examples/torpedo` (CMake for C++, Cargo for Rust,
+nimble tasks that iterate `--mm:orc` and `--mm:refc`). Each example prints
+what happens and **asserts** it, so a CI run fails on a behavioural
+regression, not only on a crash.
+
+### 14.1 Layout
+
+```
+examples/extapi/
+  nimhost/
+    storage_host.nim        — Nim exe: EXTAPI[storage] (plugin) + EXTAPI[codec] (C import),
+                              Nim impl of storage, runs the scenarios below
+    storage_lib.nim         — the same API as a Nim *library* (registerBrokerLibrary) for the
+                              in-process (lib-mode) variant of scenario 1
+    test_storage_mock.nim   — scenario 3 as a real test file (testutils/unittests)
+  cpp_plugin/               — storage plugin in C++ (storage_ext.hpp): C1 class + C3 builder,
+                              built as a shared library exporting broker_ext_plugin_entry
+  cpp_host_lib/             — C++ app that loads storage_lib and provides the plugin in-process
+                              through <lib>_extHost() (lib-mode variant)
+  cpp_cimport/              — C++ shared library exporting extern "C" functions for K1
+  rust_plugin/              — storage plugin in Rust (storage_ext_rs): R1 async trait + R4 builder,
+                              cdylib exporting broker_ext_plugin_entry
+  rust_host_lib/            — Rust app, lib-mode variant
+  rust_cimport/             — Rust cdylib exporting #[no_mangle] extern "C" functions for K1
+```
+
+### 14.2 Scenarios × languages
+
+| # | Scenario | What the example does | C++ | Rust | Asserted outcome |
+|---|---|---|---|---|---|
+| 1 | **External plugin implementation** | Nim exe loads the plugin (`ExtHost.loadPlugin`), plugin opens a port and provides a subset (`fetch_blob`, `compact_hint`; `store_blob` left unprovided); Nim requests, listens to `BlobEvicted`, signals `CompactHint`, issues a `requestCancellable` and cancels it, and one request with a tight timeout | `cpp_plugin` (C1 class, `stop_token`) | `rust_plugin` (R1 async trait, `Abortable`) | results round-trip; event received; signal accepted; unprovided broker → `"no provider registered…"`; cancel reaches the plugin (`stop_requested()` / future dropped); timeout → `err` |
+| 1b | — same, lib mode | the C++ / Rust *app* hosts the Nim library and provides the plugin in-process via `<lib>_extHost()` | `cpp_host_lib` | `rust_host_lib` | as 1, with the bridge on the library's processing thread |
+| 2 | **Runtime switching to the internal Nim impl** | `autoWire = false` broker; owner thread installs `extFallback(ctx, localImpl)`; a load generator calls continuously while the host (a) runs without plugin, (b) loads the plugin, (c) `replaceProvider` → Nim impl, (d) back to `extProvider`, (e) unloads the plugin | `cpp_plugin` | `rust_plugin` | every call succeeds; the serving source per phase matches (a) Nim, (b) plugin, (c) Nim, (d) plugin, (e) Nim; zero `"no provider"` / `ProviderGone` during switches |
+| 3 | **Mocking** | `test_storage_mock.nim`: `withMockProvider` with a closure capturing test state, no plugin loaded; then with the C++ / Rust plugin loaded and `autoWire = false`, mock wins for the block and the plugin serves again afterwards; events driven by Nim `emit` | uses `cpp_plugin` | uses `rust_plugin` | mock observed inside the block, plugin observed after it; captured counter incremented |
+| 4 | **C import** | Nim `EXTAPI[codec]` imports from the C++ / Rust library: short form `crc32`-like pure function with `dispatch = inplace`; body form blocking `compress`-like function with `dispatch = workers(2)`; a missing symbol in an optional third broker | `cpp_cimport` (`extern "C"`) | `rust_cimport` (`#[no_mangle] extern "C"`) | results match a Nim reference; two blocking calls overlap in time with `workers(2)` (measured); missing symbol → `loadError` set and `extFallback` serves the Nim impl |
+
+### 14.3 Running
+
+```bash
+nimble runExtExampleCpp
+```
+
+```bash
+nimble runExtExampleRust
+```
+
+Each task builds the Nim host / library, the plugin and the C-import library,
+runs scenarios 1, 1b, 2 and 4 from the host, and runs scenario 3 as a test;
+`MM=orc` / `MM=refc` select a single memory manager as in the existing tasks.
+An ASAN variant (`nimble runExtExampleCppAsan`, refc) covers scenario 2's
+switching under load, the lifetime-heaviest path.
+
+### 14.4 Docs
+
+`doc/FFI_API.md` gains an "EXTAPI" chapter walking through these examples
+(the generated surfaces, the ownership table, the failure table), and
+`README.md` / `USAGEGUIDE.md` link to it — no separate new doc files beyond
+this plan.
