@@ -125,7 +125,7 @@ proc main() =
   expect pump(
     proc(): bool =
       cancels() >= 1
-  ), "plugin observed the cancel (stop_token)"
+  ), "plugin observed the cancel"
   Compact.setRequestTimeout(chronos.milliseconds(150))
   expect (waitFor Compact.request(ctx, 1)).isErr, "Compact times out"
   expect pump(

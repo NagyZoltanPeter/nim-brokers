@@ -1,0 +1,17 @@
+# EXTAPI example — the `storage` plugin in Rust (R1 async trait).
+# Built as a cdylib; the Nim host loads it with ExtHost.loadPlugin(path).
+# Depends on the crate the Nim host build generates (`nimble runExtExampleRust`).
+
+[package]
+name = "storage_rust_plugin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+storage_ext = { path = "../nimhost/build/storage_ext_rs" }
+futures = "0.3"

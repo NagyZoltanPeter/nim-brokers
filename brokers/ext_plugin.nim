@@ -13,6 +13,7 @@ import ./internal/ext_brokers
 import ./broker_context
 import chronos
 import ./internal/ext_codegen_hpp
+import ./internal/ext_codegen_rust
 import
   ./internal/api_schema_hash, ./internal/api_outdir, ./internal/api_codegen_cbor_cddl
 
@@ -351,6 +352,12 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
             outDir / (plugin & "_ext.hpp"),
             generateExtCppHeader(plugin, version, schemaHash, entries),
           )
+          when defined(BrokerFfiApiGenRust):
+            let crate = generateExtRustCrate(plugin, version, schemaHash, entries)
+            ensureGeneratedOutputDir(outDir / (plugin & "_ext_rs"))
+            ensureGeneratedOutputDir(outDir / (plugin & "_ext_rs") / "src")
+            writeFile(outDir / (plugin & "_ext_rs") / "Cargo.toml", crate.cargo)
+            writeFile(outDir / (plugin & "_ext_rs") / "src" / "lib.rs", crate.lib)
         writeFile(
           outDir / "broker_ext.h",
           staticRead(currentSourcePath().parentDir / "broker_ext.h"),

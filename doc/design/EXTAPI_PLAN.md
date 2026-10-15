@@ -1990,3 +1990,22 @@ Findings while implementing:
 | Plugin registration in a library | the module initialiser ran twice in lib mode, registering the plugin twice; the forwarder then pointed at an unreachable second copy | `extRegisterPlugin` is idempotent per plugin name; the double init itself is an `(API)`-lane observation worth its own look |
 | Provider types across modules | `<T>ProviderWithArgs` is not exported by the MT codegen | examples pass plain `proc`s / closures; no change |
 | Windows | C++ examples not yet run on Windows | CI step gated to Linux / macOS until the phase-4 Windows cell |
+
+### Phase 4 — Rust wrapper and Rust examples (implemented on `feat-extapi-design`)
+
+| Piece | Where |
+|---|---|
+| `<plugin>_ext_rs/` crate generator (`-d:BrokerFfiApiGenRust`): `ffi` mirror of `broker_ext.h`, `Host`, R1 `<Plugin>` trait (`fn … -> impl Future + Send`, futures run on a caller-supplied `Spawn`, Nim cancel / deadline drops the future via `Abortable`), R2 `<Plugin>Sync` (`CancelFlag`, `CAP_REPLY_INLINE`), R4 `Builder` (closures, provides exactly what is set; default spawner = thread per call), `Port` (`Drop` closes), `Emitter`; panics become `Err` replies | `brokers/internal/ext_codegen_rust.nim`, written by `registerExtPlugin` for foreign-implemented plugins only |
+| Examples: `rust_plugin/` (R1, cdylib, no async runtime), `rust_cimport/` (C-ABI lib), `rust_host_lib/` (lib mode, R4 + the generated `storagelib_rs`) | `examples/extapi/` |
+| `nimble runExtExampleRust` (orc + refc); CI step on Linux / macOS | `brokers.nimble`, `.github/workflows/ci.yml` |
+
+Verified on macOS: scenarios 1, 1b, 2, 3, 4 pass with the Rust plugin and
+Rust codec under ORC and refc; the ASAN (refc) host run with the Rust plugin
+is clean.
+
+| Topic | Finding | Handling |
+|---|---|---|
+| Runtime | R1 must not force tokio | `Spawn` is any `Fn(BoxFuture)`; crate depends on `futures` only |
+| R2 | compiled and type-checked, not exercised at runtime by the examples (no `inplace` / `workers` foreign broker in `storage`) | follow-up: a raw-kv-style test plugin in Rust |
+| Table keys | non-`String` keys need the `(API)` lane's `cbor_strkey_map` adapter | rejected at compile time for EXTAPI v1 |
+| Windows | Rust and C++ examples not yet run on Windows | CI steps gated to Linux / macOS; Windows cell still open |
