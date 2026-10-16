@@ -2096,7 +2096,7 @@ subset of the names (a name has one source port per context; a second
 | Situation | Nim side | Foreign side |
 |---|---|---|
 | **Exe mode** — Nim program loads a plugin library | `ExtHost.start()`, then `ExtHost.loadPlugin(path)` (`dlopen` / `LoadLibrary`; the library stays loaded for the process lifetime) | exports `int32_t broker_ext_plugin_entry(const broker_ext_host*)`, opens a port, provides names |
-| **Lib mode** — foreign app hosts a Nim library and implements the plugin in-process | `exportExtHost("<lib>")` in the library | calls `<lib>_extHost()` once the library is initialized (the examples call it after `createContext()`; the first call starts the bridge) and opens ports on `lib.ctx()`. Under refc each calling foreign thread is registered with the GC once and never unregistered — call it from long-lived threads |
+| **Lib mode** — foreign app hosts a Nim library and implements the plugin in-process | `exportExtHost("<lib>")` in the library | calls `<lib>_extHost()` after `createContext()` (the first call starts the bridge and the worker pools, and hands the host's lifetime to the library) and opens ports on `lib.ctx()`. `<lib>_shutdown(ctx)` closes the ports opened on `ctx`; shutting down the library's last context stops the host — see "Lib-mode teardown" below. Under refc each calling foreign thread is registered with the GC once and never unregistered — call it from long-lived threads |
 | **K1 native import** — a plain C library | `ExtPlugin.load(name, ctx)`; `ExtPlugin.loadError(name)` reports missing libraries / symbols, which stay unprovided | nothing: plain `extern "C"` exports |
 | **K2 peer import** — another nim-brokers library | `ExtPlugin.load(name, ctx)`: one peer context per host context, schema compared per name | nothing: the peer's own `(API)` surface (`_callAsync` / `_subscribe` / `_call`) |
 
@@ -2107,6 +2107,47 @@ bridge. It returns `Result[void, string]`: `err` when called on the bridge or a
 worker thread (it would join itself, e.g. from inside a plugin `invoke`).
 `start` / `stop` are safe to race from any thread — exactly one caller starts
 the bridge.
+
+#### Lib-mode teardown
+
+In lib mode the library's context lifecycle drives the host; the foreign app
+never calls a stop function.
+
+| Step of `<lib>_shutdown(ctx)` | EXTAPI effect | Thread |
+|---|---|---|
+| 1. in-flight `_call` drain, then the `shutdownRequest` hook | none — the hook can still call plugins | caller / processing |
+| 2. **per-context close** (before `shutdownFlag` is set and the threads are joined) | the bridge closes every port bound to `ctx` (plugin-opened and K1 / K2 synthetic): withdraws its names, clears the providers it auto-wired on `ctx`, fails pending calls with `EXTAPI: port closed` (a call still queued for a worker is dropped, never invoked); the plugin's `release(user)` runs. Then the K2 peer contexts that served `ctx` are shut down | bridge (control op; caller blocks on it), then caller |
+| 3. delivery + processing threads joined, context freed | — | caller |
+| 4. **last context gone** (the library has no live context left) | if `<lib>_extHost()` started the host: `ExtHost.stop()` — bridge and worker pools joined, remaining ports (e.g. on `DefaultBrokerContext`) closed | caller |
+
+Rules and consequences:
+
+- Ports must be opened on a library context. After step 2 the port id is
+  `STALE`; a late `reply` on it is dropped. Opening another port on a
+  shut-down context is not detected — don't.
+- A plugin call stuck in an unresponsive plugin is failed only at step 2, so
+  it is bounded by the 5 s in-flight drain of step 1 (same as any hung
+  provider).
+- After step 4 every table function returns `SHUTDOWN` until the app calls
+  `<lib>_extHost()` again (after a new `createContext()`), which restarts the
+  host; the table pointer stays the same.
+- Calling `<lib>_extHost()` before the first `createContext()` works, but the
+  host then lives until a context has been created and shut down. Do not race
+  `<lib>_extHost()` against the last `_shutdown`.
+- A host the library author started with `ExtHost.start()` (not through
+  `<lib>_extHost()`) gets step 2 but not step 4: its owner stops it.
+- `_shutdown` called on the bridge or a worker thread (from inside a plugin
+  `invoke`): step 2 runs inline on the bridge / is posted from the worker; the
+  step 4 stop is refused and logged, the host keeps running.
+
+| | refc | orc |
+|---|---|---|
+| hooks | `api_library` reads two `nimcall` pointers in `mt_broker_common` (`gApiLibCtxCloseHook`, `gApiLibIdleHook`) set by the EXTAPI runtime's module initialiser — no GC'd state crosses threads | same |
+| caller thread | `_shutdown` registers the foreign thread with the GC first (`ensureForeignThreadGc`); the stop joins Nim threads from it | no registration needed |
+
+Regression test: `test/test_api_ext_lib_teardown.nim` (library
+`test/extteardownlib/`, `-d:extTestHooks` bridge / worker start and exit
+counters), in `nimble testApi` under orc and refc.
 
 ### Switching, fallback and mocking (Nim side)
 

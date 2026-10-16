@@ -613,7 +613,10 @@ macro exportExtHost*(libName: static string): untyped =
   ## Lib mode: export `<libName>_extHost()` from a Nim shared library. The C /
   ## C++ / Rust host app calls it (after `<libName>_initialize()`) to get the
   ## `broker_ext_host` table and provide plugins in-process. The first call
-  ## starts the EXTAPI bridge thread.
+  ## starts the EXTAPI bridge thread; the library then owns the host:
+  ## `<libName>_shutdown(ctx)` closes the ports opened on `ctx`, and the
+  ## shutdown of the library's last context stops the host (bridge + worker
+  ## pools joined). Call it after `<libName>_createContext()`.
   let fname = libName & "_extHost"
   let src =
     "proc " & fname & "*(): ptr ExtHostTable {.exportc: \"" & fname &
@@ -624,5 +627,5 @@ macro exportExtHost*(libName: static string): untyped =
     # from long-lived threads.
     "      var registered {.threadvar.}: bool\n" & "      if not registered:\n" &
     "        registered = true\n" & "        setupForeignThreadGc()\n" &
-    "  if ExtHost.start().isErr:\n" & "    return nil\n" & "  ExtHost.table()\n"
+    "  if extLibHostStart().isErr:\n" & "    return nil\n" & "  ExtHost.table()\n"
   result = parseStmt(src)

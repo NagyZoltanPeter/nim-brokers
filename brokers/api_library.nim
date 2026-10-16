@@ -2028,6 +2028,19 @@ proc registerBrokerLibraryCborImpl(
         # flag / join / free sequence below is unconditional.
         `runShutdownReqProcIdent`(entryToShutdown.arg, ctx)
 
+        # EXTAPI (lib mode): close every plugin port opened on this context.
+        # Withdraws its names (the bridge clears the providers it auto-wired
+        # here) and fails its pending calls, so no bridge-owned provider keeps
+        # answering for a dead context. After the hook above (it may still use
+        # a plugin), before the flag / joins (the processing thread is alive
+        # to receive those failures). Nil unless the library links EXTAPI.
+        block:
+          var closeHook: ApiLibCtxCloseHook
+          {.cast(gcsafe).}:
+            closeHook = gApiLibCtxCloseHook
+          if not closeHook.isNil:
+            closeHook(BrokerContext(ctx))
+
         entryToShutdown.arg.shutdownFlag.store(1, moRelease)
         # Part D: join delivery thread first — it must finish any
         # in-flight foreign callbacks before we tear down the processing
@@ -2084,12 +2097,23 @@ proc registerBrokerLibraryCborImpl(
         freeCborRespCourier(entryToShutdown.arg.respCourier)
         deallocShared(entryToShutdown.arg)
 
+        var libIdle = false
         withLock `ctxsLockIdent`:
           for i in 0 ..< `ctxsIdent`.len:
             if `ctxsIdent`[i] == entryToShutdown:
               `ctxsIdent`.del(i)
               break
+          libIdle = `ctxsIdent`.len == 0
         deallocShared(entryToShutdown)
+        # EXTAPI (lib mode): the library's last context is gone — stop the
+        # EXTAPI host if `<lib>_extHost()` started it (bridge + worker pools
+        # joined here, on this caller's thread). Nil unless EXTAPI is linked.
+        if libIdle:
+          var idleHook: ApiLibIdleHook
+          {.cast(gcsafe).}:
+            idleHook = gApiLibIdleHook
+          if not idleHook.isNil:
+            idleHook()
         return 0'i32
 
   )

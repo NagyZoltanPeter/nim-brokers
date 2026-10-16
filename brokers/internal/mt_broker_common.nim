@@ -102,6 +102,25 @@ proc installApiListenersForCtx*(ctx: BrokerContext) {.gcsafe.} =
       discard
 
 # ---------------------------------------------------------------------------
+# Library-context teardown hooks (lib mode)
+#
+# `<lib>_shutdown(ctx)` calls `gApiLibCtxCloseHook(ctx)` before it stops the
+# context's threads, and `gApiLibIdleHook()` once its last live context is
+# gone. The EXTAPI runtime installs both from its module initialiser (it is
+# linked only when the library imports `brokers/ext_plugin`), so
+# `api_library` needs no dependency on it. Written once by module init
+# (before any library thread exists), read-only afterwards; bare `nimcall`
+# pointers — nothing GC'd, safe from any thread under refc and orc.
+# ---------------------------------------------------------------------------
+
+type
+  ApiLibCtxCloseHook* = proc(ctx: BrokerContext) {.nimcall, gcsafe, raises: [].}
+  ApiLibIdleHook* = proc() {.nimcall, gcsafe, raises: [].}
+
+var gApiLibCtxCloseHook*: ApiLibCtxCloseHook
+var gApiLibIdleHook*: ApiLibIdleHook
+
+# ---------------------------------------------------------------------------
 # Thread identity
 # ---------------------------------------------------------------------------
 

@@ -764,6 +764,24 @@ task testApi, "Run codec unit tests + library init integration tests":
         (if noMain: " -d:initOnceNoMain" else: "") & " -d:initOnceLib=" &
         quoteArg(thisDir() / libDir / libFile), "test_api_module_init_once"
 
+  # Lib-mode EXTAPI teardown: `_shutdown` closes a context's plugin ports and
+  # the last context's shutdown stops the host (bridge + workers joined).
+  let tdLibFile =
+    when defined(windows):
+      "extteardownlib.dll"
+    elif defined(macosx):
+      "libextteardownlib.dylib"
+    else:
+      "libextteardownlib.so"
+  for mm in ["orc", "refc"]:
+    let libDir = "build/extteardownlib_" & mm
+    exec "nim c --hints:off -d:BrokerFfiApi -d:extTestHooks --threads:on --app:lib --mm:" &
+      mm & " --path:. --outdir:" & libDir & nimMainPrefixFlag("extteardownlib") &
+      " test/extteardownlib/extteardownlib.nim"
+    test "-d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm &
+      " -d:extTeardownLib=" & quoteArg(thisDir() / libDir / tdLibFile),
+      "test_api_ext_lib_teardown"
+
 proc findCargoExe(): string =
   ## Returns the cargo invocation token. Resolving the symlink (rustup
   ## multi-call binary on most installs) loses the dispatch hint, so we

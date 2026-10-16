@@ -1973,7 +1973,7 @@ Deviations from §5.9:
 | K2 schema | compare descriptors | per-name canonical `args\|payload` text; the peer's `_getSchema` is JSON (the `(API)` lane's format) | — |
 | K2 `inplace` | via the peer's sync `_call` | not supported (port caps `NONBLOCKING`) | deferred |
 | K2 cancel | drop by id | drop by id (no `_cancelAsync` yet) | as planned |
-| K2 per-ctx unload | `unload(ctx)` | peer contexts shut down at `ExtHost.stop()` | deferred with `unload` |
+| K2 per-ctx unload | `unload(ctx)` | peer contexts shut down at `ExtHost.stop()`, and in lib mode by `<lib>_shutdown(ctx)` for the host context it served | `unload` deferred |
 
 ### Phase 3 — C++ wrapper and C++ examples (implemented on `feat-extapi-design`)
 
@@ -2057,3 +2057,27 @@ nine commits, F1–F9, each with regression tests that fail without the fix
 Not done here: the Windows CI cells for the EXTAPI example steps (gated to
 Linux / macOS until a push lets them run), a worker join timeout at stop,
 and the lib-mode double module initialisation (own follow-ups).
+
+### Lib-mode teardown
+
+Before this, nothing in lib mode stopped the host: `<lib>_shutdown(ctx)`
+joined only the context's own threads, so the bridge, the worker pools, the
+ports opened on the context and the providers the bridge auto-wired there
+outlived it until process exit.
+
+| Piece | Where |
+|---|---|
+| Two `nimcall` hooks `gApiLibCtxCloseHook(ctx)` / `gApiLibIdleHook()`; `api_library` has no EXTAPI dependency, the EXTAPI runtime sets them from its module initialiser | `brokers/internal/mt_broker_common.nim` |
+| `<lib>_shutdown`: close hook after the `shutdownRequest` hook, before `shutdownFlag` / the joins; idle hook once the library has no live context | `brokers/api_library.nim` |
+| `ecoCloseCtx` control op: the bridge closes every port bound to the ctx (`bridgeClose`: withdraw + uninstall auto-wired, fail pending); then the ctx's K2 peer contexts are shut down (`ExtPeerUser.hostCtx`) | `brokers/internal/ext_runtime.nim` (`extLibCtxClose`) |
+| `<lib>_extHost()` → `extLibHostStart()` marks the host library-owned; the idle hook stops only such a host (`extLibIdle`), and a later `_extHost()` restarts it | `ext_runtime.nim`, `brokers/ext_plugin.nim` |
+| Test: two contexts, ports on both, first `_shutdown` closes only its port, last one joins bridge + 2 workers, restart cycle | `test/test_api_ext_lib_teardown.nim`, `test/extteardownlib/`, `testApi` (orc + refc) |
+
+Decisions:
+
+| Topic | Chosen | Alternative | Reason |
+|---|---|---|---|
+| When the host stops | last live library context, any context | refcount of contexts that touched EXTAPI | `_extHost()` takes no ctx, so "touched" is unknowable; a sibling context may open ports later |
+| Explicit `<lib>_extShutdown()` | not added | extra ABI function | the last-context rule covers the leak; no extra surface for the wrappers |
+| Per-ctx close vs. `shutdownRequest` hook | after the hook | before the in-flight drain | the hook may still flush through a plugin; cost: a call stuck in a plugin waits out the 5 s drain |
+| Host started by `ExtHost.start()` in a library | per-ctx close only, no stop | stop it too | whoever started it owns its stop |

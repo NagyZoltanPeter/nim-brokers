@@ -338,6 +338,7 @@ type
     ## after the peer context is shut down); the last one frees it.
     refs: Atomic[int]
     port: uint64
+    hostCtx: uint32 ## the host context its port serves
     peerCtx: uint32
     fns: ptr PeerFns
     subs: array[ExtMaxNames, uint64] ## event subscriptions by nameIdx
@@ -349,6 +350,7 @@ type
     ecoProvide
     ecoWithdraw
     ecoClose
+    ecoCloseCtx ## close every open port on `ctx` (lib `_shutdown`)
 
   ExtCtlMsg = object
     ## Lives on the waiting caller's stack; the caller blocks on `cond` until
@@ -358,6 +360,7 @@ type
     portSlot: int
     gen: uint32
     nameIdx: int
+    ctx: uint32 ## ecoCloseCtx only
     rc: int32
     done: bool
     lock: Lock
@@ -480,10 +483,15 @@ var gExtHostState: Atomic[int]
   ## Host lifecycle: start / stop CAS into it, so concurrent `start` calls run
   ## one bridge and a stop never overlaps a start.
 var gExtIsWorker {.threadvar.}: bool
+var gExtLibOwnsHost: Atomic[bool]
+  ## Lib mode: `<lib>_extHost()` started the host, so the library stops it
+  ## when its last context shuts down (`extLibIdle`).
 
 when defined(extTestHooks):
   var extTestBridgeStarts*: Atomic[int] ## bridge threads started
   var extTestBridgeExits*: Atomic[int] ## bridge threads finished
+  var extTestWorkerStarts*: Atomic[int] ## worker threads started
+  var extTestWorkerExits*: Atomic[int] ## worker threads finished
   var extTestFailWorkerAt*: Atomic[int]
     ## > 0: the n-th worker thread of the next start fails to start.
   var extTestPauseEvents*: Atomic[bool]
@@ -655,6 +663,8 @@ proc poolPush(pool: ptr ExtWorkerPool, m: ExtCallMsg): bool =
 proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
   ## Plain worker: no chronos loop, never touches broker state. Runs the
   ## foreign `invoke` (which may block this thread only).
+  when defined(extTestHooks):
+    discard extTestWorkerStarts.fetchAdd(1)
   gExtIsWorker = true
   while true:
     var m: ExtCallMsg
@@ -683,6 +693,8 @@ proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
       c_free(m.buf)
     stRelease(m.st)
     implRelease(m.impl)
+  when defined(extTestHooks):
+    discard extTestWorkerExits.fetchAdd(1)
 
 const
   ExtInplaceIdBit = 1'u64 shl 63 ## inplace call ids: bit 63 | slot << 32 | gen
@@ -924,7 +936,22 @@ proc bridgeClose(pluginIdx, slot: int, gen: uint32): int32 =
     implRelease(impl)
   ExtOk
 
+proc bridgeCloseCtx(ctx: uint32) =
+  ## Close every open port bound to `ctx` (plugin-opened and K1/K2 synthetic):
+  ## withdraws its names (uninstalling what was auto-wired), fails its
+  ## pending calls. Bridge thread only, like `bridgeClose`.
+  for p in 0 ..< gExtPluginCount.load(moAcquire):
+    let rt = gExtPlugins[p]
+    for s in 0 ..< ExtMaxPorts:
+      let ps = addr rt.ports[s]
+      if ps.open.load(moAcquire) and ps.ctx == ctx:
+        discard bridgeClose(p, s, ps.gen.load(moAcquire))
+
 proc runCtl(m: ptr ExtCtlMsg) =
+  if m.op == ecoCloseCtx:
+    bridgeCloseCtx(m.ctx)
+    m.rc = ExtOk
+    return
   let rt = gExtPlugins[m.pluginIdx]
   let ps = addr rt.ports[m.portSlot]
   if not ps.open.load(moAcquire) or ps.gen.load(moAcquire) != m.gen:
@@ -938,6 +965,8 @@ proc runCtl(m: ptr ExtCtlMsg) =
       bridgeWithdraw(m.pluginIdx, m.portSlot, m.nameIdx, ps.ctx)
     of ecoClose:
       bridgeClose(m.pluginIdx, m.portSlot, m.gen)
+    of ecoCloseCtx:
+      ExtOk # handled above
 
 proc ctlPoll(): int {.gcsafe, raises: [].} =
   {.cast(gcsafe).}:
@@ -1329,7 +1358,9 @@ proc extWarnSignalDropped*(name: string, reason: string) =
 # ---------------------------------------------------------------------------
 
 {.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
-proc postCtl(op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int): int32 =
+proc postCtl(
+    op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int, ctx = 0'u32
+): int32 =
   if not hostRunning():
     return ExtShutdown
   var m: ExtCtlMsg
@@ -1338,6 +1369,7 @@ proc postCtl(op: ExtCtlOp, pluginIdx, slot: int, gen: uint32, nameIdx: int): int
   m.portSlot = slot
   m.gen = gen
   m.nameIdx = nameIdx
+  m.ctx = ctx
   if onBridgeThread():
     # Re-entrant call from an inline invoke: run directly, never wait on
     # ourselves.
@@ -2068,6 +2100,7 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
     return err("EXTAPI: peer createContext failed: " & e)
   let user = cast[ptr ExtPeerUser](c_calloc(1, csize_t(sizeof(ExtPeerUser))))
   user.refs.store(2, moRelease) # the port + `rt.peers`
+  user.hostCtx = uint32(ctx)
   user.peerCtx = peerCtx
   user.fns = fns
   var impl = ExtImplDesc(
@@ -2100,24 +2133,31 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string] =
   setLoadError(rt, problems.join("; "))
   ok()
 
+proc shutdownPeer(rt: ptr ExtPluginRt, u: ptr ExtPeerUser) =
+  ## Unsubscribe, shut the peer context down and drop `rt.peers`' ref (an
+  ## off-bridge call still holding the port's impl keeps the user alive).
+  for n in 0 ..< rt.desc.nameCount:
+    if u.subs[n] != 0:
+      discard rt.peerFns.unsubscribe(u.peerCtx, rt.desc.names[n].name, u.subs[n])
+  discard rt.peerFns.shutdown(u.peerCtx)
+  peerUserRelease(u)
+
 proc shutdownPeers() =
-  ## Host stop, after the bridge and the worker pools are gone: unsubscribe,
-  ## shut every peer context down and drop `rt.peers`' ref on each user (an
-  ## off-bridge call still holding the port's impl keeps it alive).
+  ## Host stop, after the bridge and the worker pools are gone: shut every
+  ## peer context down.
   for p in 0 ..< gExtPluginCount.load(moAcquire):
     let rt = gExtPlugins[p]
     if rt.peerFns.isNil:
       continue
     for s in 0 ..< ExtMaxPorts:
-      let u = rt.peers[s]
-      if u.isNil:
-        continue
-      rt.peers[s] = nil
-      for n in 0 ..< rt.desc.nameCount:
-        if u.subs[n] != 0:
-          discard rt.peerFns.unsubscribe(u.peerCtx, rt.desc.names[n].name, u.subs[n])
-      discard rt.peerFns.shutdown(u.peerCtx)
-      peerUserRelease(u)
+      var u: ptr ExtPeerUser
+      withLock( # vs. a concurrent `extLibCtxClose`
+        rt.lock
+      ):
+        u = rt.peers[s]
+        rt.peers[s] = nil
+      if not u.isNil:
+        shutdownPeer(rt, u)
 
 proc extJoinMissing*(missing: seq[string]): string =
   missing.join(", ")
@@ -2365,5 +2405,65 @@ proc extHostStop*(): Result[void, string] =
       signal(m.cond)
   gExtHostState.store(hsStopped, moRelease)
   ok()
+
+# ---------------------------------------------------------------------------
+# Lib mode: teardown driven by the library's context lifecycle
+# ---------------------------------------------------------------------------
+
+proc extLibHostStart*(): Result[void, string] =
+  ## `<lib>_extHost()`: start the host (idempotent) and hand its lifetime to
+  ## the library — it stops when the library's last context shuts down
+  ## (`extLibIdle`). A later `<lib>_extHost()` starts it again.
+  ?extHostStart()
+  gExtLibOwnsHost.store(true, moRelease)
+  ok()
+
+proc extLibCtxClose(ctx: BrokerContext) {.nimcall, gcsafe, raises: [].} =
+  ## `<lib>_shutdown(ctx)`, before it joins the context's threads: the bridge
+  ## closes every port bound to `ctx` (withdraws its names, uninstalls what it
+  ## auto-wired, fails pending calls; queued worker calls never run), then
+  ## the K2 peer contexts that served `ctx` are shut down. No-op while the
+  ## host is stopped.
+  {.cast(gcsafe).}:
+    if not hostRunning():
+      return
+    let rc = postCtl(ecoCloseCtx, 0, 0, 0, -1, uint32(ctx))
+    if rc != ExtOk:
+      # ExtShutdown: a concurrent host stop closes the ports instead.
+      if rc != ExtShutdown:
+        warn "EXTAPI: ports of a shut-down context not closed",
+          ctx = uint32(ctx), rc = rc
+      return
+    for p in 0 ..< gExtPluginCount.load(moAcquire):
+      let rt = gExtPlugins[p]
+      if rt.peerFns.isNil:
+        continue
+      var mine: array[ExtMaxPorts, ptr ExtPeerUser]
+      var k = 0
+      withLock(rt.lock):
+        for s in 0 ..< ExtMaxPorts:
+          let u = rt.peers[s]
+          if not u.isNil and u.hostCtx == uint32(ctx):
+            rt.peers[s] = nil
+            mine[k] = u
+            inc k
+      for i in 0 ..< k:
+        shutdownPeer(rt, mine[i])
+
+proc extLibIdle() {.nimcall, gcsafe, raises: [].} =
+  ## The library's last context has shut down: stop the host if
+  ## `<lib>_extHost()` started it. Refused (logged, host left running) when
+  ## called on the bridge or a worker thread.
+  var expected = true
+  if not gExtLibOwnsHost.compareExchange(expected, false):
+    return
+  {.cast(gcsafe).}:
+    let r = extHostStop()
+    if r.isErr:
+      gExtLibOwnsHost.store(true, moRelease)
+      warn "EXTAPI: host not stopped after the last library context", reason = r.error
+
+gApiLibCtxCloseHook = extLibCtxClose
+gApiLibIdleHook = extLibIdle
 
 {.pop.}
