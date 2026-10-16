@@ -155,20 +155,17 @@ jobs:
         run: ci/nimble-strict.sh runTypeMapTestLibPy -y --verbose
 
       - name: Run EXTAPI Python example
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExamplePy -y --verbose
 
       - name: Run EXTAPI Python wrapper tests
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh testExtPyWrapper -y --verbose
 
       - name: Run C++ parity matrix
         run: ci/nimble-strict.sh runTypeMapTestLibCpp -y --verbose
 
       # EXTAPI C++ examples (plugin, runtime switching, mocking, C import, lib
-      # mode). Windows is enabled with the phase-4 LoadLibrary cell.
+      # mode). Windows: the `examples-windows` job.
       - name: Run EXTAPI C++ examples
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExampleCpp -y --verbose
 
       - name: Set up Rust toolchain (stable, MSRV 1.75)
@@ -181,11 +178,9 @@ jobs:
         run: ci/nimble-strict.sh runTypeMapTestLibRust -y --verbose
 
       - name: Run EXTAPI Rust examples
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExampleRust -y --verbose
 
       - name: Run EXTAPI Rust wrapper tests
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh testExtRustWrapper -y --verbose
 
       - name: Set up Go toolchain (1.21)
@@ -200,7 +195,6 @@ jobs:
         run: ci/nimble-strict.sh runTypeMapTestLibGo -y --verbose
 
       - name: Run EXTAPI Go examples
-        if: runner.os != 'Windows'
         run: ci/nimble-strict.sh runExtExampleGo -y --verbose
 
       # OOP interface-model examples (hierlib + persistence)
@@ -227,6 +221,105 @@ jobs:
 
       - name: Run persistence Go example
         run: ci/nimble-strict.sh runPersistenceExampleGo -y --verbose
+
+  # EXTAPI examples + wrapper harnesses on Windows (LoadLibrary plugins, lib
+  # mode DLLs, clang-built Nim + cmake/Ninja/clang C++, MSVC Rust, MinGW cgo).
+  # Every step runs (`if: always()`) so one run reports all failures; the job
+  # still fails if any does.
+  examples-windows:
+    runs-on: windows-latest
+    env:
+      NIM_VERSION: '2.2.12'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure clang in PATH
+        shell: pwsh
+        run: |
+          # nimWindowsCcFlag forces --cc:clang for the FFI / EXTAPI builds.
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvmBin) {
+            echo $llvmBin >> $env:GITHUB_PATH
+          } else {
+            choco install llvm -y --no-progress
+            echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
+
+      - name: Install dependencies (nimble)
+        shell: bash
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
+      - name: Install Python cbor2 (Python wrapper dep)
+        shell: bash
+        run: python -m pip install --user cbor2
+
+      - name: Fetch jsoncons (C++ wrapper dep)
+        shell: bash
+        run: |
+          if [ ! -d vendor/jsoncons/include ]; then
+            rm -rf vendor/jsoncons
+            git clone --depth 1 --branch v1.0.0 \
+              https://github.com/danielaparker/jsoncons.git vendor/jsoncons
+          fi
+
+      - name: Set up Rust toolchain (stable, MSRV 1.75)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go toolchain (1.21)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Show tool versions
+        shell: bash
+        run: |
+          nim --version
+          nimble --version
+          cmake --version
+          clang --version
+          gcc --version || true
+          python --version
+          cargo --version
+          go version
+
+      - name: Run EXTAPI Python example
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh runExtExamplePy -y --verbose
+
+      - name: Run EXTAPI Python wrapper tests
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh testExtPyWrapper -y --verbose
+
+      - name: Run EXTAPI C++ examples
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh runExtExampleCpp -y --verbose
+
+      - name: Run EXTAPI Rust examples
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh runExtExampleRust -y --verbose
+
+      - name: Run EXTAPI Rust wrapper tests
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh testExtRustWrapper -y --verbose
+
+      - name: Run EXTAPI Go examples
+        if: always()
+        shell: bash
+        run: ci/nimble-strict.sh runExtExampleGo -y --verbose
 
   nph:
     runs-on: ubuntu-latest

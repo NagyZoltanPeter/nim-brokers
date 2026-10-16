@@ -877,6 +877,14 @@ proc extExeName(name: string): string =
   else:
     name
 
+proc extLibOnPath() =
+  ## Windows has no rpath: the lib-mode hosts (C++ / Rust / Go) find
+  ## storagelib.dll through PATH.
+  when defined(windows):
+    let dir = thisDir() / "examples/extapi/nimlib/build"
+    if dir notin getEnv("PATH"):
+      putEnv("PATH", dir & ";" & getEnv("PATH"))
+
 proc buildExtStoragelib(mm: string, gen = "") =
   ## Lib-mode library (storagelib); `gen` adds wrapper defines
   ## (-d:BrokerFfiApiGenRust / GenGo / GenPy) for notes_ext_* + storagelib_*.
@@ -903,6 +911,7 @@ task runExtExampleCpp,
   let buildDir = "examples/extapi/cmake-build"
   let codecLib = thisDir() / buildDir / extSharedLibName("codec_cpp")
   let pluginLib = thisDir() / buildDir / extSharedLibName("storage_cpp_plugin")
+  extLibOnPath()
   for mm in memoryManagerMatrix():
     echo "\n=== runExtExampleCpp: --mm:" & mm & " ==="
     setMM(mm)
@@ -923,6 +932,7 @@ task runExtExampleRust,
   let pluginLib =
     ex / "rust_plugin/target/debug" / extSharedLibName("storage_rust_plugin")
   let cargo = quoteArg(findCargoExe())
+  extLibOnPath()
   for mm in memoryManagerMatrix():
     echo "\n=== runExtExampleRust: --mm:" & mm & " ==="
     setMM(mm)
@@ -959,6 +969,7 @@ task runExtExampleGo,
   let codecLib = ex / "go_cimport/build" / extSharedLibName("codec_go")
   let pluginLib = ex / "go_plugin/build" / extSharedLibName("storage_go_plugin")
   let go = quoteArg(findGoExe())
+  extLibOnPath()
   for mm in memoryManagerMatrix():
     echo "\n=== runExtExampleGo: --mm:" & mm & " ==="
     setMM(mm)

@@ -61,3 +61,11 @@ set_target_properties(storage_cpp_host_lib PROPERTIES
 if(UNIX)
   target_link_libraries(storage_cpp_host_lib PRIVATE Threads::Threads)
 endif()
+if(WIN32)
+  # No rpath on Windows: the loader looks next to the exe.
+  add_custom_command(TARGET storage_cpp_host_lib POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${NIMLIB_DIR}/storagelib.dll"
+      "$<TARGET_FILE_DIR:storage_cpp_host_lib>/storagelib.dll"
+    COMMENT "Copying storagelib.dll next to storage_cpp_host_lib")
+endif()

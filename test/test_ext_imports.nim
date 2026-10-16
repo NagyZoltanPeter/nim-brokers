@@ -13,13 +13,30 @@ import std/atomics
 import brokers/[request_broker, event_broker, signal_broker, ext_plugin]
 
 const repoRoot = currentSourcePath.parentDir.parentDir
-when defined(macosx):
+when defined(windows):
+  const codecLib = repoRoot & "/build/codec.dll"
+elif defined(macosx):
   const codecLib = repoRoot & "/build/libcodec.dylib"
 else:
   const codecLib = repoRoot & "/build/libcodec.so"
 
-when not defined(windows):
+when defined(windows):
+  proc currentThreadId(): uint32 {.
+    importc: "GetCurrentThreadId", stdcall, dynlib: "kernel32"
+  .}
+
+  proc selfThread(): uint =
+    uint(currentThreadId())
+
+  # The test exe is built with Nim's default Windows cc (MinGW gcc).
+  const cShared = "gcc -shared -o "
+else:
   from std/posix import pthread_self
+
+  proc selfThread(): uint =
+    cast[uint](pthread_self())
+
+  const cShared = "cc -shared -fPIC -o "
 
 RequestBroker(
   EXTAPI[codec], importc = "codec_crc", dynlib = codecLib, dispatch = inplace
@@ -76,7 +93,9 @@ RequestBroker(
 registerExtPlugin(codec)
 
 # --- K2: a nim-brokers peer library (test/ext/peerlib.nim) --------------------
-when defined(macosx):
+when defined(windows):
+  const peerLib = repoRoot & "/build/peerlib.dll"
+elif defined(macosx):
   const peerLib = repoRoot & "/build/libpeerlib.dylib"
 else:
   const peerLib = repoRoot & "/build/libpeerlib.so"
@@ -129,213 +148,194 @@ proc lastCrcThread(): uint =
 
 suite "EXTAPI native C imports (K1)":
   test "load, inplace fast path, workers(2), missing symbol":
-    when defined(windows):
-      skip()
-    else:
-      let cmd =
-        "cc -shared -fPIC -o " & codecLib & " " & repoRoot & "/test/ext/libcodec.c"
-      check execCmd(cmd) == 0
-      check ExtHost.start().isOk
-      let ctx = DefaultBrokerContext
+    let cmd = cShared & codecLib & " " & repoRoot & "/test/ext/libcodec.c"
+    check execCmd(cmd) == 0
+    check ExtHost.start().isOk
+    let ctx = DefaultBrokerContext
 
-      # Not loaded yet: the ordinary "no provider".
-      let data = @[byte 1, 2, 3, 250]
-      check (waitFor CodecCrc.request(ctx, 7, unsafeAddr data[0], 4)).isErr
+    # Not loaded yet: the ordinary "no provider".
+    let data = @[byte 1, 2, 3, 250]
+    check (waitFor CodecCrc.request(ctx, 7, unsafeAddr data[0], 4)).isErr
 
-      check ExtPlugin.load("codec", ctx).isOk
-      check "codec_missing" in ExtPlugin.loadError("codec")
+    check ExtPlugin.load("codec", ctx).isOk
+    check "codec_missing" in ExtPlugin.loadError("codec")
 
-      # Short form, inplace: direct C call on this thread, no CBOR.
-      let c = waitFor CodecCrc.request(ctx, 7, unsafeAddr data[0], 4)
-      check c.isOk
-      check c.get(CodecCrc()).value == nimCrc(7, data)
-      check lastCrcThread() == cast[uint](pthread_self())
+    # Short form, inplace: direct C call on this thread, no CBOR.
+    let c = waitFor CodecCrc.request(ctx, 7, unsafeAddr data[0], 4)
+    check c.isOk
+    check c.get(CodecCrc()).value == nimCrc(7, data)
+    check lastCrcThread() == selfThread()
 
-      # Body form, workers(2): two blocking calls overlap.
-      let t0 = Moment.now()
-      let fa = SlowSum.request(ctx, @[byte 1, 2, 3], 300)
-      let fb = SlowSum.request(ctx, @[byte 4, 5], 300)
-      let ra = waitFor fa
-      let rb = waitFor fb
-      check ra.get(SlowSum()).total == 6
-      check rb.get(SlowSum()).total == 9
-      check Moment.now() - t0 < chronos.milliseconds(550)
+    # Body form, workers(2): two blocking calls overlap.
+    let t0 = Moment.now()
+    let fa = SlowSum.request(ctx, @[byte 1, 2, 3], 300)
+    let fb = SlowSum.request(ctx, @[byte 4, 5], 300)
+    let ra = waitFor fa
+    let rb = waitFor fb
+    check ra.get(SlowSum()).total == 6
+    check rb.get(SlowSum()).total == 9
+    check Moment.now() - t0 < chronos.milliseconds(550)
 
-      # Deadline while running: resolves at once, the C call finishes on its
-      # worker and its result is dropped.
-      let saved = gSlowSumMtTimeout
-      gSlowSumMtTimeout = chronos.milliseconds(100)
-      check (waitFor SlowSum.request(ctx, @[byte 1], 400)).isErr
-      gSlowSumMtTimeout = saved
-      sleep(450)
+    # Deadline while running: resolves at once, the C call finishes on its
+    # worker and its result is dropped.
+    let saved = gSlowSumMtTimeout
+    gSlowSumMtTimeout = chronos.milliseconds(100)
+    check (waitFor SlowSum.request(ctx, @[byte 1], 400)).isErr
+    gSlowSumMtTimeout = saved
+    sleep(450)
 
-      # Missing symbol: unprovided; a Nim fallback serves it.
-      check (waitFor Missing.request(ctx, 3)).isErr
-      check not Missing.extAvailable(ctx)
-      let nimMissing: MissingProviderWithArgs = proc(
-          x: int32
-      ): Future[Result[Missing, string]] {.async.} =
-        return ok(Missing(v: x * 2))
-      check Missing.setProvider(ctx, Missing.extFallback(ctx, nimMissing)).isOk
-      check (waitFor Missing.request(ctx, 3)).get(Missing()).v == 6
+    # Missing symbol: unprovided; a Nim fallback serves it.
+    check (waitFor Missing.request(ctx, 3)).isErr
+    check not Missing.extAvailable(ctx)
+    let nimMissing: MissingProviderWithArgs = proc(
+        x: int32
+    ): Future[Result[Missing, string]] {.async.} =
+      return ok(Missing(v: x * 2))
+    check Missing.setProvider(ctx, Missing.extFallback(ctx, nimMissing)).isOk
+    check (waitFor Missing.request(ctx, 3)).get(Missing()).v == 6
 
-      # Unknown library: nothing loads.
-      check ExtPlugin.load("nope", ctx).isErr
+    # Unknown library: nothing loads.
+    check ExtPlugin.load("nope", ctx).isErr
 
-      check ExtHost.stop().isOk
+    check ExtHost.stop().isOk
   test "peer nim-brokers library (K2)":
-    when defined(windows):
-      skip()
-    else:
-      let mm = (when defined(gcOrc): "orc" else: "refc")
-      let cmd =
-        "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
-        " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
-        "/build/peerlib_out -o:" & peerLib & " " & repoRoot & "/test/ext/peerlib.nim"
-      check execCmd(cmd) == 0
-      check ExtHost.start().isOk
-      let ctx = NewBrokerContext()
-      check (waitFor PeerEcho.request(ctx, "hi")).isErr # not loaded yet
+    let mm = (when defined(gcOrc): "orc" else: "refc")
+    let cmd =
+      "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
+      " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
+      "/build/peerlib_out -o:" & peerLib & " " & repoRoot & "/test/ext/peerlib.nim"
+    check execCmd(cmd) == 0
+    check ExtHost.start().isOk
+    let ctx = NewBrokerContext()
+    check (waitFor PeerEcho.request(ctx, "hi")).isErr # not loaded yet
 
-      let lr = ExtPlugin.load("peer", ctx)
-      check lr.isOk
-      if lr.isErr:
-        echo "peer load: ", lr.error
-      check ExtPlugin.loadError("peer") == ""
+    let lr = ExtPlugin.load("peer", ctx)
+    check lr.isOk
+    if lr.isErr:
+      echo "peer load: ", lr.error
+    check ExtPlugin.loadError("peer") == ""
 
-      check PeerTick.listen(
-        ctx,
-        proc(t: PeerTick): Future[void] {.async: (raises: []).} =
-          gLastTick.store(int(t.n))
-          discard gTicks.fetchAdd(1),
-      ).isOk
+    check PeerTick.listen(
+      ctx,
+      proc(t: PeerTick): Future[void] {.async: (raises: []).} =
+        gLastTick.store(int(t.n))
+        discard gTicks.fetchAdd(1),
+    ).isOk
 
-      let r = waitFor PeerEcho.request(ctx, "hi")
-      check r.isOk
-      check r.get(PeerEcho()).text == "peer:hi"
-      proc pump(cond: proc(): bool {.gcsafe.}): bool =
-        var waited = 0
-        while not cond() and waited < 3000:
-          waitFor sleepAsync(chronos.milliseconds(5))
-          waited += 5
-        cond()
+    let r = waitFor PeerEcho.request(ctx, "hi")
+    check r.isOk
+    check r.get(PeerEcho()).text == "peer:hi"
+    proc pump(cond: proc(): bool {.gcsafe.}): bool =
+      var waited = 0
+      while not cond() and waited < 3000:
+        waitFor sleepAsync(chronos.milliseconds(5))
+        waited += 5
+      cond()
 
-      check pump(
-        proc(): bool =
-          gTicks.load() >= 1
-      )
-      check gLastTick.load() == 2
+    check pump(
+      proc(): bool =
+        gTicks.load() >= 1
+    )
+    check gLastTick.load() == 2
 
-      let f = waitFor PeerFail.request(ctx)
-      check f.isErr
-      if f.isErr:
-        check f.error == "nope"
+    let f = waitFor PeerFail.request(ctx)
+    check f.isErr
+    if f.isErr:
+      check f.error == "nope"
 
-      check PeerPoke.signal(ctx, PeerPoke(n: 5)).isOk
-      check pump(
-        proc(): bool =
-          gLastTick.load() == 105
-      )
+    check PeerPoke.signal(ctx, PeerPoke(n: 5)).isOk
+    check pump(
+      proc(): bool =
+        gLastTick.load() == 105
+    )
 
-      check ExtHost.stop().isOk
+    check ExtHost.stop().isOk
 
   test "stop with peer calls queued for a worker (R2.3)":
     # Run after the K2 test, which built the peer library. Under ASAN this
     # catches a peer `user` freed while workers still invoke through it.
-    when defined(windows):
-      skip()
-    else:
-      check ExtHost.start().isOk
-      let ctx = NewBrokerContext()
-      check ExtPlugin.load("peer", ctx).isOk
-      var futs: seq[Future[Result[PeerSlow, string]]]
-      for i in 0 ..< 300:
-        futs.add(PeerSlow.request(ctx, 20))
-      waitFor sleepAsync(chronos.milliseconds(5))
-      check ExtHost.stop().isOk
-      for f in futs:
-        discard waitFor withTimeout(f, chronos.seconds(5))
-      check (waitFor PeerSlow.request(ctx, 1)).isErr # nothing left serving it
+    check ExtHost.start().isOk
+    let ctx = NewBrokerContext()
+    check ExtPlugin.load("peer", ctx).isOk
+    var futs: seq[Future[Result[PeerSlow, string]]]
+    for i in 0 ..< 300:
+      futs.add(PeerSlow.request(ctx, 20))
+    waitFor sleepAsync(chronos.milliseconds(5))
+    check ExtHost.stop().isOk
+    for f in futs:
+      discard waitFor withTimeout(f, chronos.seconds(5))
+    check (waitFor PeerSlow.request(ctx, 1)).isErr # nothing left serving it
 
   test "repeated load on one ctx is idempotent (H2)":
-    when defined(windows):
-      skip()
-    else:
-      check ExtHost.start().isOk
-      let ctx = NewBrokerContext()
-      var okLoads = 0
-      for i in 0 ..< 70: # > 64 ports per plugin: a leaked port per load would fail
-        if ExtPlugin.load("codec", ctx).isOk:
-          inc okLoads
-      check okLoads == 70
-      var data = [byte 1, 2, 3, 4]
-      check (waitFor CodecCrc.request(ctx, 7, addr data[0], 4)).isOk
-      check ExtHost.stop().isOk
+    check ExtHost.start().isOk
+    let ctx = NewBrokerContext()
+    var okLoads = 0
+    for i in 0 ..< 70: # > 64 ports per plugin: a leaked port per load would fail
+      if ExtPlugin.load("codec", ctx).isOk:
+        inc okLoads
+    check okLoads == 70
+    var data = [byte 1, 2, 3, 4]
+    check (waitFor CodecCrc.request(ctx, 7, addr data[0], 4)).isOk
+    check ExtHost.stop().isOk
 
   test "repeated peer load keeps one peer context (H2)":
     # Without the guard every load creates another peer context and port, and
     # the 65th load fails on the 64-port cap.
-    when defined(windows):
-      skip()
-    else:
-      check ExtHost.start().isOk
-      let ctx = NewBrokerContext()
-      var okLoads = 0
-      for i in 0 ..< 66:
-        if ExtPlugin.load("peer", ctx).isOk:
-          inc okLoads
-      check okLoads == 66
-      var ticks: Atomic[int]
-      let tp = addr ticks
-      check PeerTick.listen(
-        ctx,
-        proc(t: PeerTick): Future[void] {.async: (raises: []).} =
-          discard tp[].fetchAdd(1),
-      ).isOk
-      check (waitFor PeerEcho.request(ctx, "x")).isOk
-      waitFor sleepAsync(chronos.milliseconds(200))
-      check ticks.load() == 1
-      check ExtHost.stop().isOk
+    check ExtHost.start().isOk
+    let ctx = NewBrokerContext()
+    var okLoads = 0
+    for i in 0 ..< 66:
+      if ExtPlugin.load("peer", ctx).isOk:
+        inc okLoads
+    check okLoads == 66
+    var ticks: Atomic[int]
+    let tp = addr ticks
+    check PeerTick.listen(
+      ctx,
+      proc(t: PeerTick): Future[void] {.async: (raises: []).} =
+        discard tp[].fetchAdd(1),
+    ).isOk
+    check (waitFor PeerEcho.request(ctx, "x")).isOk
+    waitFor sleepAsync(chronos.milliseconds(200))
+    check ticks.load() == 1
+    check ExtHost.stop().isOk
 
   test "autoWire ownership: reprovide / fallback / mock need autoWire = false (M12)":
-    when defined(windows):
-      skip()
-    else:
-      check ExtHost.start().isOk
-      let ctx = NewBrokerContext()
-      check ExtPlugin.load("codec", ctx).isOk
-      var data = [byte 1, 2, 3, 4]
-      let c = nimCrc(9, data)
+    check ExtHost.start().isOk
+    let ctx = NewBrokerContext()
+    check ExtPlugin.load("codec", ctx).isOk
+    var data = [byte 1, 2, 3, 4]
+    let c = nimCrc(9, data)
 
-      # autoWire = true: the bridge thread owns the slot once the import loads.
-      proc nimCodec(
-          seed: uint32, buf: ptr uint8, len: uint32
-      ): Future[Result[CodecCrc, string]] {.async.} =
-        return ok(CodecCrc(value: 1))
+    # autoWire = true: the bridge thread owns the slot once the import loads.
+    proc nimCodec(
+        seed: uint32, buf: ptr uint8, len: uint32
+    ): Future[Result[CodecCrc, string]] {.async.} =
+      return ok(CodecCrc(value: 1))
 
-      check CodecCrc.replaceProvider(ctx, nimCodec).isErr
-      check CodecCrc.setProvider(ctx, nimCodec).isErr
+    check CodecCrc.replaceProvider(ctx, nimCodec).isErr
+    check CodecCrc.setProvider(ctx, nimCodec).isErr
 
-      # autoWire = false: this thread owns it.
-      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).isErr # unwired
-      proc nimOwned(
-          seed: uint32, buf: ptr uint8, len: uint32
-      ): Future[Result[OwnedCrc, string]] {.async.} =
-        return ok(OwnedCrc(value: 1))
+    # autoWire = false: this thread owns it.
+    check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).isErr # unwired
+    proc nimOwned(
+        seed: uint32, buf: ptr uint8, len: uint32
+    ): Future[Result[OwnedCrc, string]] {.async.} =
+      return ok(OwnedCrc(value: 1))
 
-      check OwnedCrc.setProvider(ctx, OwnedCrc.extFallback(ctx, nimOwned)).isOk
-      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
-      check OwnedCrc.replaceProvider(ctx, nimOwned).isOk
-      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 1
-      check OwnedCrc.replaceProvider(ctx, OwnedCrc.extProvider(ctx)).isOk
-      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
-      proc mock(
-          seed: uint32, buf: ptr uint8, len: uint32
-      ): Future[Result[OwnedCrc, string]] {.async.} =
-        return ok(OwnedCrc(value: 7))
+    check OwnedCrc.setProvider(ctx, OwnedCrc.extFallback(ctx, nimOwned)).isOk
+    check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+    check OwnedCrc.replaceProvider(ctx, nimOwned).isOk
+    check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 1
+    check OwnedCrc.replaceProvider(ctx, OwnedCrc.extProvider(ctx)).isOk
+    check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+    proc mock(
+        seed: uint32, buf: ptr uint8, len: uint32
+    ): Future[Result[OwnedCrc, string]] {.async.} =
+      return ok(OwnedCrc(value: 7))
 
-      OwnedCrc.withMockProvider(ctx, mock):
-        check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 7
-      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
-      OwnedCrc.clearProvider(ctx)
-      check ExtHost.stop().isOk
+    OwnedCrc.withMockProvider(ctx, mock):
+      check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == 7
+    check (waitFor OwnedCrc.request(ctx, 9, addr data[0], 4)).value.value == c
+    OwnedCrc.clearProvider(ctx)
+    check ExtHost.stop().isOk

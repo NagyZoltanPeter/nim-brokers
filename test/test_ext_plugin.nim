@@ -113,13 +113,16 @@ const repoRoot = currentSourcePath.parentDir.parentDir
 proc buildEchoPlugin(): string =
   ## Build test/ext/raw_echo_plugin.c as a shared library with the system C
   ## compiler; returns its path.
-  when defined(macosx):
-    let ext = "dylib"
+  when defined(windows):
+    # Nim's default Windows cc (MinGW gcc), as for the test exe.
+    result = repoRoot / "build" / "raw_echo.dll"
+    let cc = "gcc -shared"
   else:
-    let ext = "so"
-  result = repoRoot / "build" / ("libraw_echo." & ext)
+    let ext = (when defined(macosx): "dylib" else: "so")
+    result = repoRoot / "build" / ("libraw_echo." & ext)
+    let cc = "cc -shared -fPIC"
   let cmd =
-    "cc -shared -fPIC -I" & repoRoot / "brokers" & " -o " & result & " " &
+    cc & " -I" & repoRoot / "brokers" & " -o " & result & " " &
     repoRoot / "test" / "ext" / "raw_echo_plugin.c"
   doAssert execShellCmd(cmd) == 0, cmd
 
@@ -354,67 +357,64 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
     check raw_calc_close() == ExtOk
     check ExtHost.stop().isOk
   test "loader, schema hash, discovery, generated header":
-    when defined(windows):
-      skip()
-    else:
-      check ExtHost.start().isOk
-      let h = ExtHost.table()
+    check ExtHost.start().isOk
+    let h = ExtHost.table()
 
-      var hash: array[33, char]
-      check h.schemaHash(h.host, "echo", addr hash[0]) == ExtOk
-      let hashStr = $cast[cstring](addr hash[0])
-      check hashStr.len == 32
+    var hash: array[33, char]
+    check h.schemaHash(h.host, "echo", addr hash[0]) == ExtOk
+    let hashStr = $cast[cstring](addr hash[0])
+    check hashStr.len == 32
 
-      # The generated header carries the same hash and the name constants.
-      let hdr = readFile(repoRoot / "build" / "echo_ext.h")
-      check ("ECHO_EXT_SCHEMA_HASH \"" & hashStr & "\"") in hdr
-      check "ECHO_EXT_ECHO_MSG \"echo_msg\"" in hdr
-      check fileExists(repoRoot / "build" / "echo_ext.cddl")
-      check fileExists(repoRoot / "build" / "broker_ext.h")
+    # The generated header carries the same hash and the name constants.
+    let hdr = readFile(repoRoot / "build" / "echo_ext.h")
+    check ("ECHO_EXT_SCHEMA_HASH \"" & hashStr & "\"") in hdr
+    check "ECHO_EXT_ECHO_MSG \"echo_msg\"" in hdr
+    check fileExists(repoRoot / "build" / "echo_ext.cddl")
+    check fileExists(repoRoot / "build" / "broker_ext.h")
 
-      # Discovery.
-      var buf: ptr uint8
-      var blen: csize_t
-      check h.listApis(h.host, "echo", addr buf, addr blen) == ExtOk
-      var blob = newSeq[byte](int(blen))
-      copyMem(addr blob[0], buf, int(blen))
-      h.freeBuffer(h.host, buf)
-      let texts = cborTextValues(blob)
-      check "echo_msg" in texts
-      check "2.1.0" in texts
-      check hashStr in texts
-      check h.getSchema(h.host, "echo", addr buf, addr blen) == ExtOk
-      blob.setLen(int(blen))
-      copyMem(addr blob[0], buf, int(blen))
-      h.freeBuffer(h.host, buf)
-      check "text" in cborTextValues(blob)
-      check h.listApis(h.host, "nope", addr buf, addr blen) == ExtUnknownName
+    # Discovery.
+    var buf: ptr uint8
+    var blen: csize_t
+    check h.listApis(h.host, "echo", addr buf, addr blen) == ExtOk
+    var blob = newSeq[byte](int(blen))
+    copyMem(addr blob[0], buf, int(blen))
+    h.freeBuffer(h.host, buf)
+    let texts = cborTextValues(blob)
+    check "echo_msg" in texts
+    check "2.1.0" in texts
+    check hashStr in texts
+    check h.getSchema(h.host, "echo", addr buf, addr blen) == ExtOk
+    blob.setLen(int(blen))
+    copyMem(addr blob[0], buf, int(blen))
+    h.freeBuffer(h.host, buf)
+    check "text" in cborTextValues(blob)
+    check h.listApis(h.host, "nope", addr buf, addr blen) == ExtUnknownName
 
-      # Wrong hash is refused at open.
-      var impl = ExtImplDesc(
-        abiVersion: ExtAbiVersion,
-        plugin: "echo",
-        schemaHash: "0123456789abcdef0123456789abcdef",
-      )
-      impl.invoke = proc(
-          user: pointer,
-          id: uint64,
-          nameIdx: uint32,
-          name: cstring,
-          buf: ptr uint8,
-          len: csize_t,
-      ) {.cdecl, gcsafe, raises: [].} =
-        discard
-      var port: uint64
-      check h.open(h.host, 1, addr impl, addr port) == ExtSchemaMismatch
+    # Wrong hash is refused at open.
+    var impl = ExtImplDesc(
+      abiVersion: ExtAbiVersion,
+      plugin: "echo",
+      schemaHash: "0123456789abcdef0123456789abcdef",
+    )
+    impl.invoke = proc(
+        user: pointer,
+        id: uint64,
+        nameIdx: uint32,
+        name: cstring,
+        buf: ptr uint8,
+        len: csize_t,
+    ) {.cdecl, gcsafe, raises: [].} =
+      discard
+    var port: uint64
+    check h.open(h.host, 1, addr impl, addr port) == ExtSchemaMismatch
 
-      # Load the shared-library plugin; it pins the host's hash and provides.
-      let path = buildEchoPlugin()
-      check ExtHost.loadPlugin(path).isOk
-      let r = waitFor EchoMsg.request("hello")
-      check r.isOk
-      if r.isOk:
-        check r.value.text == "hello"
-      check ExtHost.loadPlugin(repoRoot / "build" / "nope.so").isErr
+    # Load the shared-library plugin; it pins the host's hash and provides.
+    let path = buildEchoPlugin()
+    check ExtHost.loadPlugin(path).isOk
+    let r = waitFor EchoMsg.request("hello")
+    check r.isOk
+    if r.isOk:
+      check r.value.text == "hello"
+    check ExtHost.loadPlugin(repoRoot / "build" / "nope.so").isErr
 
-      check ExtHost.stop().isOk
+    check ExtHost.stop().isOk

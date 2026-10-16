@@ -37,7 +37,9 @@ const ShapeGoldHash = "622a4cb849160566a4e1a2b0d8ce5476"
 
 # --- K2: a consumer whose PeerEcho has a different field type ---------------
 
-when defined(macosx):
+when defined(windows):
+  const peerLib = repoRoot & "/build/peerlib_schema.dll"
+elif defined(macosx):
   const peerLib = repoRoot & "/build/libpeerlib_schema.dylib"
 else:
   const peerLib = repoRoot & "/build/libpeerlib_schema.so"
@@ -89,21 +91,18 @@ suite "EXTAPI schema":
     check ExtHost.stop().isOk
 
   test "a K2 peer type differing in a field is refused (M13)":
-    when defined(windows):
-      skip()
-    else:
-      let mm = (when defined(gcOrc): "orc" else: "refc")
-      let cmd =
-        "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
-        " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
-        "/build/peerlib_schema_out -o:" & peerLib & " " & repoRoot &
-        "/test/ext/peerlib.nim"
-      check execCmd(cmd) == 0
-      check ExtHost.start().isOk
-      let r = ExtPlugin.load("peerbad", NewBrokerContext())
-      check r.isErr
-      check "schema differs" in ExtPlugin.loadError("peerbad")
-      check ExtHost.stop().isOk
+    let mm = (when defined(gcOrc): "orc" else: "refc")
+    let cmd =
+      "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
+      " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
+      "/build/peerlib_schema_out -o:" & peerLib & " " & repoRoot &
+      "/test/ext/peerlib.nim"
+    check execCmd(cmd) == 0
+    check ExtHost.start().isOk
+    let r = ExtPlugin.load("peerbad", NewBrokerContext())
+    check r.isErr
+    check "schema differs" in ExtPlugin.loadError("peerbad")
+    check ExtHost.stop().isOk
 
   test "skip-schema env vars let a mismatching open through (M14)":
     check ExtHost.start().isOk
