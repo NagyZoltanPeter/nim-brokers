@@ -2043,12 +2043,53 @@ wrappers.
 | Mode | Plugin invoked on | Plugin must advertise | Use for |
 |---|---|---|---|
 | `bridge` | the shared bridge thread | `CAP_NONBLOCKING` (return promptly, reply later from any thread) | async plugins (the default) |
-| `workers(n)` | one of `n` host-owned worker threads | nothing | blocking plugin code; calls overlap up to `n` |
+| `workers(n)` | a thread of the plugin's host-owned worker pool | nothing | blocking plugin code |
 | `inplace` | the **caller's** thread, synchronously | `CAP_REPLY_INLINE` (reply before `invoke` returns) | cheap pure functions; raw pointer arguments |
 
 `provide` checks the port's caps against the broker's mode and returns
 `BROKER_EXT_DISPATCH_MISMATCH` (-18) when they cannot work together, so a
 blocking plugin can never stall the bridge.
+
+**The mode is per broker.** `registerExtPlugin(p, dispatch = …)` sets the
+plugin's default (`bridge` when omitted); each broker overrides it with its own
+`dispatch = …`. One plugin can mix all three modes, and every call is routed
+by its own name's mode — requests and signals alike (events go plugin → Nim
+and have no mode):
+
+```nim
+RequestBroker(EXTAPI[codec], importc = "codec_crc", dynlib = codecLib, dispatch = inplace): ...
+RequestBroker(EXTAPI[codec], dynlib = codecLib, dispatch = workers(2)): ...
+RequestBroker(EXTAPI[codec], dynlib = codecLib): ...   # plugin default: bridge
+```
+
+**One worker pool per plugin, shared by its `workers` names.** It is started
+by `ExtHost.start()` (or the first `<lib>_extHost()`) and sized to the largest
+`n` among the plugin's `workers` names (and the plugin default, if that is
+`workers(n)`). The queue is one FIFO: `workers(2)` on one name and
+`workers(4)` on another give one pool of 4 that both share, so `n` sizes the
+pool — it is not a per-name concurrency cap or isolation boundary. A plugin
+with no `workers` name starts no pool.
+
+**Caps are per port, checked per name at `provide`.** A port that serves both
+`inplace` and `bridge` names must advertise
+`CAP_NONBLOCKING | CAP_REPLY_INLINE`; `workers` names are served by any port.
+You need a second port only when the wrapper style you implement with fixes a
+single cap:
+
+| Implementation | Port caps | Serves | `inplace` + `bridge` names on one port |
+|---|---|---|---|
+| C, hand-written `broker_ext_impl` | what you set | per caps | yes, set both bits (an `inplace` invoke that returns without replying fails the call: `EXTAPI: inplace impl returned without reply`) |
+| C++ `I<Plugin>` (C1) | `NONBLOCKING` | `bridge`, `workers` | no — a second port with `I<Plugin>Sync` for the `inplace` names |
+| C++ `I<Plugin>Sync` (C2) | `REPLY_INLINE` | `inplace`, `workers` | no — a second port with `I<Plugin>` for the `bridge` names |
+| C++ `Builder` (C3) | `NONBLOCKING`, `Builder::caps(…)` overrides | per caps | yes with `.caps(NONBLOCKING \| REPLY_INLINE)`, if the `inplace` closures reply before returning |
+| Rust `<Plugin>` trait (R1) / `Builder` | `NONBLOCKING` | `bridge`, `workers` | no — a second port with `<Plugin>Sync` for the `inplace` names |
+| Rust `<Plugin>Sync` (R2) | `REPLY_INLINE` | `inplace`, `workers` | no — a second port with R1 / `Builder` for the `bridge` names |
+| Go `<Plugin>` / `Funcs` | `NONBLOCKING` (a goroutine per call) | `bridge`, `workers` | no — Go cannot serve `inplace` names; implement those in C |
+| Python `Port` / `Builder` | `NONBLOCKING \| REPLY_INLINE` | all | yes — sync handlers reply inline on `inplace` names and run on a thread pool for the others |
+
+Two ports of one plugin on the same context are fine: each provides its own
+subset of the names (a name has one source port per context; a second
+`provide` of it returns `BROKER_EXT_ALREADY_PROVIDED`, -16).
 
 ### Wiring a source
 
