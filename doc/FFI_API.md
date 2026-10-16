@@ -1963,16 +1963,25 @@ user-facing reference.
 ```mermaid
 sequenceDiagram
   participant N as Nim caller (any thread)
-  participant B as EXTAPI broker (MT lane)
+  participant O as provider owner thread
   participant R as bridge thread
   participant P as plugin (foreign)
-  N->>B: FetchBlob.request(ctx, "k")
-  B->>R: forward (hidden lane) — CBOR args
-  R->>P: invoke(user, id, nameIdx, "fetch_blob", buf, len)
-  P-->>R: host.reply(port, id, REPLY_OK, cbor, len)   (any thread, later)
-  R-->>B: complete future
-  B-->>N: Result[FetchBlob, string]
-  Note over N,P: cancel / deadline → host calls impl.cancel(id); a late reply is dropped by id
+  alt dispatch = inplace
+    N->>P: invoke(user, id, nameIdx, "fetch_blob", buf, len) — on the caller's thread
+    P-->>N: host.reply(…) before invoke returns → Result[FetchBlob, string]
+  else dispatch = bridge / workers(n)
+    alt autoWire = true (the bridge owns the provider slot)
+      N->>R: FetchBlob.request(ctx, "k") — MT request to the forwarder
+    else autoWire = false (the owner installed extProvider)
+      N->>O: FetchBlob.request(ctx, "k") — MT request to the forwarder
+      O->>R: hidden FetchBlobExtLane request — CBOR args
+    end
+    R->>P: invoke(user, id, nameIdx, "fetch_blob", buf, len)
+    Note over R,P: bridge = on this thread, workers(n) = on a pool worker
+    P-->>R: host.reply(port, id, REPLY_OK, cbor, len)   (any thread, later)
+    R-->>N: Result[FetchBlob, string] (through the owner thread when autoWire = false)
+  end
+  Note over N,P: cancel / deadline → host calls impl.cancel(id), a late reply is dropped by id
 ```
 
 Requirements: `--threads:on` and `-d:BrokerFfiApi`. Without
