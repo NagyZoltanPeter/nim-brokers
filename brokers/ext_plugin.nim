@@ -12,6 +12,7 @@ import std/[macros, algorithm, strutils, os]
 import ./internal/ext_brokers
 import ./internal/ext_runtime
 import ./internal/ext_shapes
+import ./internal/broker_debug
 import ./broker_context
 import chronos
 import ./internal/ext_codegen_hpp
@@ -586,6 +587,8 @@ proc emitExtPlugin(args: NimNode, shapes: seq[string]): NimNode {.compileTime.} 
     src.add("extInitPlugin_" & plugin & "()\n")
     result.add(parseStmt(src))
     stampLineInfoExt(result, args[0])
+    when defined(brokerDebug):
+      writeBrokerDebug("ExtPlugin", plugin, result, header = $entries.len & " name(s)")
 
 var gExtPendingArgs {.compileTime.}: seq[(string, NimNode)]
 
@@ -648,3 +651,7 @@ macro exportExtHost*(
     "  if extLibHostStart(" & $workerJoinTimeoutMs & ").isErr:\n" & "    return nil\n" &
     "  ExtHost.table()\n"
   result = parseStmt(src)
+  when defined(brokerDebug):
+    writeBrokerDebug(
+      "ExtHost", libName, result, header = "workerJoinTimeoutMs=" & $workerJoinTimeoutMs
+    )

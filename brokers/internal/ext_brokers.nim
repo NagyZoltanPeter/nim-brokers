@@ -844,6 +844,10 @@ proc generateExtEventBroker*(
     let gen = parseStmt(src)
     stampLineInfo(gen, modeNode)
     result.add(gen)
+    when defined(brokerDebug):
+      writeBrokerDebug(
+        "EventBrokerExt", typeName, result, header = "plugin='" & plugin & "'"
+      )
     gExtEntries.add(
       ExtEntryCT(
         plugin: plugin,
@@ -957,6 +961,10 @@ proc generateExtSignalBroker*(
     let gen = parseStmt(src)
     stampLineInfo(gen, modeNode)
     result.add(gen)
+    when defined(brokerDebug):
+      writeBrokerDebug(
+        "SignalBrokerExt", typeName, result, header = "plugin='" & plugin & "'"
+      )
     gExtEntries.add(
       ExtEntryCT(
         plugin: plugin,

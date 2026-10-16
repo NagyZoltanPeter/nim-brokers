@@ -167,6 +167,23 @@ build/broker_debug/
                                        courier wiring, dispatch table
 ```
 
+EXTAPI brokers and plugins (`-d:BrokerFfiApi`) add:
+
+```
+build/broker_debug/
+  ├── <BrokerType>__RequestBrokerExt.gen.nim  ← EXTAPI request: forwarder, lane
+  │                                              provider, extProvider / extFallback,
+  │                                              inplace hooks (+ the MT broker)
+  ├── <BrokerType>ExtLane__RequestBrokerMt.gen.nim ← hidden raw-CBOR lane
+  ├── <BrokerType>__EventBrokerExt.gen.nim    ← EXTAPI event: bridge decode +
+  │                                              re-emit, tunnel (+ the MT broker)
+  ├── <BrokerType>__SignalBrokerExt.gen.nim   ← EXTAPI signal: forwarder,
+  │                                              extHandler, tunnel (+ the MT broker)
+  ├── <plugin>__ExtPlugin.gen.nim   ← `registerExtPlugin`: name table, plugin
+  │                                   descriptor, import trampolines, init proc
+  └── <lib>__ExtHost.gen.nim        ← `exportExtHost`: `<lib>_extHost()`
+```
+
 Each file starts with a 7-line header naming the role + type + notes.
 `cat build/broker_debug/*.gen.nim` gives the single-file view; `nph
 build/broker_debug/<X>.gen.nim` reformats one for readable browsing.
