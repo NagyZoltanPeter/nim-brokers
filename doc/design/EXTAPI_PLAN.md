@@ -1913,7 +1913,7 @@ Deviations from the sections above, found while implementing:
 | Worker pool shutdown | join timeout, leak a stuck worker | join timeout (`ExtHost.stop(joinTimeout)`, lib mode `exportExtHost(…, workerJoinTimeoutMs)`), stuck worker leaked; `stop` returns `err` instead of `ok` | the leaked pool is kept alive and reaped by a later start / stop |
 | Schema hash scope | full type registry | names, kinds, argument / payload types, inline payload fields | nested external types are identified by name only |
 | Limits | — | 32 plugins, 64 ports and 64 names per plugin, 256 concurrent inplace calls, 4096-entry rings | fixed arrays keep foreign-thread paths allocation-free |
-| Windows | — | loader test skipped | Windows CI cell is phase 4 |
+| Windows | — | loader test runs on the Windows `testApi` cells | test plugins built with MinGW gcc, like the test exe |
 
 ### Phase 1b — lowering and switching (implemented on `feat-extapi-design`)
 
@@ -1994,7 +1994,7 @@ Findings while implementing:
 | Lib mode bridge | §5.1 put the bridge on the library's processing thread | the shared bridge thread also serves lib mode (started by `<lib>_extHost()`); one extra MT hop for `(API)` providers that call EXTAPI brokers; processing-thread bridge left as an optimisation |
 | Plugin registration in a library | the module initialiser ran twice in lib mode, registering the plugin twice; the forwarder then pointed at an unreachable second copy | `extRegisterPlugin` is idempotent per plugin name; the double init itself is an `(API)`-lane observation worth its own look |
 | Provider types across modules | `<T>ProviderWithArgs` is not exported by the MT codegen | examples pass plain `proc`s / closures; no change |
-| Windows | C++ examples not yet run on Windows | CI step gated to Linux / macOS until the phase-4 Windows cell |
+| Windows | C++ examples run on Windows | `examples-windows` CI job (cmake + Ninja + clang); `storagelib.dll` copied next to the host exe |
 
 ### Phase 4 — Rust wrapper and Rust examples (implemented on `feat-extapi-design`)
 
@@ -2013,7 +2013,7 @@ is clean.
 | Runtime | R1 must not force tokio | `Spawn` is any `Fn(BoxFuture)`; crate depends on `futures` only |
 | R2 | compiled and type-checked, not exercised at runtime by the examples (no `inplace` / `workers` foreign broker in `storage`) | follow-up: a raw-kv-style test plugin in Rust |
 | Table keys | non-`String` keys need the `(API)` lane's `cbor_strkey_map` adapter | rejected at compile time for EXTAPI v1 |
-| Windows | Rust and C++ examples not yet run on Windows | CI steps gated to Linux / macOS; Windows cell still open |
+| Windows | Rust examples run on Windows | `examples-windows` CI job (MSVC toolchain); `storagelib.dll` on `PATH` for the lib-mode host |
 
 ### Phase 5 — Go and Python wrappers and examples (implemented on `feat-extapi-design`)
 
@@ -2034,7 +2034,7 @@ and refc; the ASAN (refc) host run with the Go plugin is clean.
 | Two Go runtimes | `go_plugin` and `go_cimport` are separate c-shared libraries loaded into one process; Go does not promise this works | works on macOS (examples green); revisit if Linux CI disagrees — fallback is one c-shared library exporting both |
 | Python cancel | `future.cancel()` path compiled and wired, not exercised (`notes` has no slow request) | follow-up together with the Rust R2 runtime test |
 | gofmt | generated Go is `go vet`-clean; `gofmt` would only re-align struct fields / consts | left as is |
-| Windows | Go / Python examples not yet run on Windows | CI steps gated to Linux / macOS, like C++ / Rust |
+| Windows | Go / Python examples run on Windows | `examples-windows` CI job (cgo on MinGW); `storagelib.dll` on `PATH` for the Go host |
 
 ### Review fixes (doc/design/EXTAPI_REVIEW_FIXES_PLAN.md)
 
@@ -2054,10 +2054,11 @@ nine commits, F1–F9, each with regression tests that fail without the fix
 | F8 | low | EXTAPI runtime imported only under `-d:BrokerFfiApi`; allocation checks; `ExtTunnel.unlisten`; one source lookup per inplace call; GC registration once per foreign thread |
 | F9 | drift, §11 | docs aligned with the code; §11 failure rows asserted in `test_ext_lifecycle`; EXTAPI ASAN tasks in `allAsan` |
 
-Not done here: the Windows CI cells for the EXTAPI example steps (gated to
-Linux / macOS until a push lets them run) and the lib-mode double module
-initialisation (own follow-ups). The worker join timeout at stop is built
-(`ExtHost.stop(joinTimeout)`).
+Follow-ups since done in their own commits: the lib-mode double module
+initialisation, the worker join timeout at stop (`ExtHost.stop(joinTimeout)`),
+and Windows CI — the `examples-windows` job runs every EXTAPI example and
+wrapper harness, and the K1 / K2 / loader / schema tests no longer skip on
+Windows.
 
 ### Lib-mode teardown
 

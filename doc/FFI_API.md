@@ -2403,9 +2403,10 @@ What the Nim caller sees (`Result.error`):
 
 | | macOS | Linux | Windows | Reason |
 |---|---|---|---|---|
-| Runtime + `test_ext_*` (`nimble testApi`), orc / refc | ✅ verified | CI cell, not yet run | CI cell, not yet run | function-table ABI (no exported host symbols), portable thread ids in the test plugins; nothing Windows-specific beyond `LoadLibrary` |
-| C++ / Rust / Go / Python examples (`nimble runExtExample{Cpp,Rust,Go,Py}`), orc / refc | ✅ verified (+ ASAN host with the C++, Rust and Go plugins) | CI step, not yet run | skipped | CI steps gated to Linux / macOS until a Windows cell is verified |
-| Two Go c-shared libraries in one process (`go_plugin` + `go_cimport`) | ✅ | not yet run | — | Go does not promise multiple runtimes per process; fallback is one library exporting both |
+| Runtime + `test_ext_*` + lib-mode teardown (`nimble testApi`), orc / refc × debug / release | ✅ CI (+ local ASAN) | ✅ CI | ✅ CI (Nim 2.2.4 and 2.2.12) | function-table ABI (no exported host symbols); on Windows the test plugins and the K2 peer library are built with Nim's default cc (MinGW gcc), like the test exe |
+| C++ / Rust / Go / Python examples (`nimble runExtExample{Cpp,Rust,Go,Py}`), orc / refc | ✅ (+ ASAN host with the C++, Rust and Go plugins) | ✅ CI (`examples`) | ✅ CI (`examples-windows`) | Windows: Nim and cmake on clang, Rust on MSVC, Go cgo on MinGW; no rpath, so `storagelib.dll` is copied next to the C++ host and put on `PATH` for the Rust / Go hosts |
+| Rust / Python wrapper harnesses (`nimble testExt{Rust,Py}Wrapper`) | ✅ | ✅ CI | ✅ CI | |
+| Two Go c-shared libraries in one process (`go_plugin` + `go_cimport`) | ✅ | ✅ CI | ✅ CI | Go does not promise multiple runtimes per process; it works on all three, the fallback is one library exporting both |
 
 ### Examples
 
