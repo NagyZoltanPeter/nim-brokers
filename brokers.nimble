@@ -11,6 +11,11 @@ skipDirs = @["tests", "examples", "tools"]
 # Dependencies
 requires "nim >= 2.2.4"
 requires "chronos >= 4.0.0"
+# bearssl (via chronos) 0.3.0 requires Nim >= 2.2.12: cap it below that so Nim
+# 2.2.4 .. 2.2.11 still resolve (lower bound as nim-libp2p's `>= 0.2.7`). Nimble
+# evaluates this with the installing Nim, so 2.2.12+ gets the newer bearssl.
+when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
+  requires "bearssl >= 0.2.7 & < 0.3.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
