@@ -2091,6 +2091,44 @@ Two ports of one plugin on the same context are fine: each provides its own
 subset of the names (a name has one source port per context; a second
 `provide` of it returns `BROKER_EXT_ALREADY_PROVIDED`, -16).
 
+### Threads and isolation across contexts
+
+The EXTAPI host is one per process, whatever the number of broker / library
+contexts: one bridge thread, and one worker pool per plugin that has a
+`workers` name. Contexts multiply ports, not threads. In lib mode with `N`
+library contexts:
+
+| Thread | Count | Started by | Stopped by |
+|---|---|---|---|
+| `(API)` delivery thread | `N` (one per context) | `<lib>_createContext()` | that context's `<lib>_shutdown(ctx)` |
+| `(API)` processing thread | `N` (one per context) | `<lib>_createContext()` | that context's `<lib>_shutdown(ctx)` |
+| EXTAPI bridge thread | 1 | first `<lib>_extHost()` / `ExtHost.start()` | last context's `<lib>_shutdown` / `ExtHost.stop()` |
+| plugin worker pool | largest `workers(n)` of that plugin, per plugin | same as the bridge | same as the bridge |
+
+E.g. three contexts, plugin A `bridge`-only, plugin B `workers(2)`:
+3 × 2 + 1 + 2 = 9 threads.
+
+**Isolation is per port — routing and lifecycle, not execution.** A port is
+one `(plugin, context)`:
+
+| Isolated per port | |
+|---|---|
+| who serves the context's calls | each port has its own `broker_ext_impl` / `user`; a call on ctx X reaches only the port providing it on X |
+| names served | `provide` / `withdraw` act on one port |
+| lifecycle | closing a port (or `<lib>_shutdown(ctx)`) fails only that port's pending calls; generation-checked handles drop a stale port's replies |
+| plugin state | per port as far as the plugin keeps it per `impl` / `user` — the generated wrappers create one state per `open` / `Builder` |
+
+| Shared by every context | Consequence |
+|---|---|
+| the bridge thread | a slow `bridge` handler delays the `bridge` names of all contexts |
+| a plugin's worker pool | one FIFO (capacity 4096) across contexts: one context can occupy every worker or fill the queue (`EXTAPI: worker queue full`) |
+| the inplace reply slots (256 per process) and the signal ring (4096) | a burst on one context can exhaust them for the others (`EXTAPI: too many concurrent inplace calls`, `EXTAPI: signal queue full`) |
+| the plugin library | loaded once per process: a crash or deadlock in plugin code reaches every context |
+
+Only `inplace` names run on per-context threads (the caller's — usually that
+context's processing thread). There is no per-context worker pool or bridge;
+put contexts that must not contend in separate processes.
+
 ### Wiring a source
 
 | Situation | Nim side | Foreign side |
