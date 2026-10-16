@@ -2112,7 +2112,7 @@ library contexts:
 | `(API)` delivery thread | `N` (one per context) | `<lib>_createContext()` | that context's `<lib>_shutdown(ctx)` |
 | `(API)` processing thread | `N` (one per context) | `<lib>_createContext()` | that context's `<lib>_shutdown(ctx)` |
 | EXTAPI bridge thread | 1 | first `<lib>_extHost()` / `ExtHost.start()` | last context's `<lib>_shutdown` / `ExtHost.stop()` |
-| plugin worker pool | largest `workers(n)` of that plugin, per plugin | same as the bridge | same as the bridge |
+| plugin worker pool | largest `workers(n)` of that plugin, per plugin | same as the bridge | same as the bridge; joined for up to the join bound, a worker stuck in `invoke` is leaked (see "Wiring a source") |
 
 E.g. three contexts, plugin A `bridge`-only, plugin B `workers(2)`:
 3 × 2 + 1 + 2 = 9 threads.
@@ -2150,8 +2150,21 @@ put contexts that must not contend in separate processes.
 `ExtHost.stop()` closes every port, fails pending calls (a call still queued
 for a worker is dropped, never invoked — at most once), clears auto-wired
 providers, stops the worker pools, shuts K2 peer contexts down and stops the
-bridge. It returns `Result[void, string]`: `err` when called on the bridge or a
-worker thread (it would join itself, e.g. from inside a plugin `invoke`).
+bridge. It returns `Result[void, string]`, `err` in two cases:
+
+- called on the bridge or a worker thread (it would join itself, e.g. from
+  inside a plugin `invoke`) — the host is left **running**;
+- a worker thread is still inside a foreign `invoke` after
+  `ExtHost.stop(joinTimeout)` (default `5.seconds`, `ZeroDuration` waits
+  forever) — that worker is **leaked** and the host is stopped all the same
+  (foreign calls return `SHUTDOWN`, `start` works again). Its pool stays
+  allocated while the thread runs; a later `start` / `stop` joins and frees it
+  once it has left `invoke`. `ExtHost.leakedWorkers()` counts the ones not
+  reaped yet. When the stuck `invoke` returns, its `reply` gets `SHUTDOWN`
+  (or `STALE` after a restart) and the port's last `release(user)` runs on
+  that worker thread. The bridge thread has no bound: a `bridge`-mode
+  `invoke` that blocks breaks `CAP_NONBLOCKING`, and `stop` waits for it.
+
 `start` / `stop` are safe to race from any thread — exactly one caller starts
 the bridge.
 
@@ -2165,7 +2178,7 @@ never calls a stop function.
 | 1. in-flight `_call` drain, then the `shutdownRequest` hook | none — the hook can still call plugins | caller / processing |
 | 2. **per-context close** (before `shutdownFlag` is set and the threads are joined) | the bridge closes every port bound to `ctx` (plugin-opened and K1 / K2 synthetic): withdraws its names, clears the providers it auto-wired on `ctx`, fails pending calls with `EXTAPI: port closed` (a call still queued for a worker is dropped, never invoked); the plugin's `release(user)` runs. Then the K2 peer contexts that served `ctx` are shut down | bridge (control op; caller blocks on it), then caller |
 | 3. delivery + processing threads joined, context freed | — | caller |
-| 4. **last context gone** (the library has no live context left) | if `<lib>_extHost()` started the host: `ExtHost.stop()` — bridge and worker pools joined, remaining ports (e.g. on `DefaultBrokerContext`) closed | caller |
+| 4. **last context gone** (the library has no live context left) | if `<lib>_extHost()` started the host: `ExtHost.stop()` — bridge and worker pools joined, remaining ports (e.g. on `DefaultBrokerContext`) closed. A worker still in a foreign `invoke` after `exportExtHost("<lib>", workerJoinTimeoutMs = 5000)` (0 = wait forever) is leaked and logged (`warn`); `_shutdown` still returns `0` | caller |
 
 Rules and consequences:
 
@@ -2382,7 +2395,8 @@ What the Nim caller sees (`Result.error`):
 | signal not deliverable | `signal()` returns `err` (no handler / queue full) like any SignalBroker; a forward failure (`EXTAPI: signal queue full`, …) is logged (`EXTAPI: signal not delivered`) | one-way: no reply path |
 | event payload fails to decode | logged (`EXTAPI: event payload dropped`), listeners not called | |
 | `ExtHost.loadPlugin` | `cannot load plugin library '…'`, `… does not export broker_ext_plugin_entry`, `plugin entry of '…' failed with N`, `host not started` | |
-| `ExtHost.stop()` on the bridge / a worker thread (e.g. from a plugin `invoke`) | `ExtHost.stop() cannot run on the bridge or a worker thread` | it would join itself; stop from another thread |
+| `ExtHost.stop()` on the bridge / a worker thread (e.g. from a plugin `invoke`) | `ExtHost.stop() cannot run on the bridge or a worker thread` | it would join itself; stop from another thread. Host left running |
+| `ExtHost.stop(joinTimeout)` with a worker stuck in a foreign `invoke` | `EXTAPI: host stopped; N worker(s) of plugin P still in a foreign invoke after T, leaked` | host stopped and restartable; the worker is reaped by a later `start` / `stop` (`ExtHost.leakedWorkers()`) |
 | `ExtPlugin.load` | `nothing could be loaded for …`, `missing peer symbols: …`, `peer schema parse failed: …`, `peer createContext failed: …` | partial success is `ok`; details in `ExtPlugin.loadError(name)` |
 
 ### Platform support

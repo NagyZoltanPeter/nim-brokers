@@ -1772,7 +1772,7 @@ matters.
 | `emit` after `close` / host shutdown | — | `BROKER_EXT_STALE` / `BROKER_EXT_SHUTDOWN`; events queued before the close are dropped (review M5) |
 | C++ exception / Rust panic in impl | `err("panic: …")` / `err(what())` | process survives |
 | Worker blocked > stall threshold | other calls queue, then time out | chronicles warn `ext worker blocked` |
-| Host shutdown with stuck worker | outstanding → `err` (teardown); queued calls never run (review R1) | *as built:* `stop` waits for the stuck `invoke` (no join timeout — follow-up) |
+| Host shutdown with stuck worker | outstanding → `err` (teardown); queued calls never run (review R1) | *as built:* `stop` joins workers for up to `joinTimeout` (default 5 s, `ZeroDuration` = forever); a worker still in `invoke` is leaked, `stop` returns `err` with the count (host stopped, restartable), a later start / stop reaps it |
 | `invoke` calls `withdraw` / `close` on its own port | in-flight call completes or fails normally | allowed (runs directly on the bridge, §5.7); `release` deferred until that `invoke` returns |
 | `invoke` triggers host shutdown | — | `ExtHost.stop()` returns `err` on the bridge / a worker thread (review R2.2); do it from another thread |
 | `inplace` foreign impl returns without replying | `err("inplace impl returned without reply")` | a later `reply` returns `OK` and is dropped (generation CAS) |
@@ -1910,7 +1910,7 @@ Deviations from the sections above, found while implementing:
 | Second / late `reply` | `STALE` | `OK`, dropped on the bridge by call id | the foreign thread cannot see the bridge's pending table synchronously; `STALE` is still returned for a closed port |
 | `inplace` | runs on the caller's thread | phase 1a: on the slot owner's thread; **phase 1b: caller's thread** via the MT inplace hook | — |
 | `extProvider` / `extHandler` off the bridge | forwards over the hidden `<T>Ext` lane | phase 1a: `err`; **phase 1b: implemented** (`<T>ExtLane`) | — |
-| Worker pool shutdown | join timeout, leak a stuck worker | plain join | a worker stuck in a foreign `invoke` delays `ExtHost.stop()`; follow-up |
+| Worker pool shutdown | join timeout, leak a stuck worker | join timeout (`ExtHost.stop(joinTimeout)`, lib mode `exportExtHost(…, workerJoinTimeoutMs)`), stuck worker leaked; `stop` returns `err` instead of `ok` | the leaked pool is kept alive and reaped by a later start / stop |
 | Schema hash scope | full type registry | names, kinds, argument / payload types, inline payload fields | nested external types are identified by name only |
 | Limits | — | 32 plugins, 64 ports and 64 names per plugin, 256 concurrent inplace calls, 4096-entry rings | fixed arrays keep foreign-thread paths allocation-free |
 | Windows | — | loader test skipped | Windows CI cell is phase 4 |
@@ -2055,8 +2055,9 @@ nine commits, F1–F9, each with regression tests that fail without the fix
 | F9 | drift, §11 | docs aligned with the code; §11 failure rows asserted in `test_ext_lifecycle`; EXTAPI ASAN tasks in `allAsan` |
 
 Not done here: the Windows CI cells for the EXTAPI example steps (gated to
-Linux / macOS until a push lets them run), a worker join timeout at stop,
-and the lib-mode double module initialisation (own follow-ups).
+Linux / macOS until a push lets them run) and the lib-mode double module
+initialisation (own follow-ups). The worker join timeout at stop is built
+(`ExtHost.stop(joinTimeout)`).
 
 ### Lib-mode teardown
 

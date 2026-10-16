@@ -35,7 +35,8 @@ RequestBroker(EXTAPI[td]):
   proc signature*(): Future[Result[TdBridge, string]] {.async.}
 
 registerExtPlugin(td, version = "1.0.0")
-exportExtHost("extteardownlib")
+# A short join bound: the stuck-worker test must not wait the 5 s default.
+exportExtHost("extteardownlib", workerJoinTimeoutMs = 200)
 
 proc extteardownlib_bridgeStarts(): cint {.exportc, cdecl, dynlib.} =
   cint(extTestBridgeStarts.load())
@@ -48,6 +49,27 @@ proc extteardownlib_workerStarts(): cint {.exportc, cdecl, dynlib.} =
 
 proc extteardownlib_workerExits(): cint {.exportc, cdecl, dynlib.} =
   cint(extTestWorkerExits.load())
+
+proc extteardownlib_leakedWorkers(): cint {.exportc, cdecl, dynlib.} =
+  cint(ExtHost.leakedWorkers())
+
+# A `td_work` request from a thread of the library, so the test can park the
+# host application's `invoke` on a worker without a chronos loop of its own.
+var gKick: Thread[uint32]
+var gKickDone: Atomic[bool]
+
+proc kickProc(ctx: uint32) {.thread.} =
+  discard TdWork.blockingRequest(BrokerContext(ctx))
+  gKickDone.store(true)
+
+proc extteardownlib_kickWork(ctx: uint32) {.exportc, cdecl, dynlib.} =
+  gKickDone.store(false)
+  createThread(gKick, kickProc, ctx)
+
+proc extteardownlib_joinKick(): cint {.exportc, cdecl, dynlib.} =
+  ## 1 when the kicked request returned (it fails once its port is closed).
+  joinThread(gKick)
+  cint(gKickDone.load())
 
 proc setupProviders(ctx: BrokerContext): Result[void, string] =
   proc initProv(): Future[Result[InitializeRequest, string]] {.async.} =

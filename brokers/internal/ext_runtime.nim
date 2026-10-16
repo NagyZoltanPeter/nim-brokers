@@ -265,7 +265,14 @@ type
     cond: Cond
     stop: bool
     n: int
-    threads: pointer ## ptr UncheckedArray[Thread[ptr ExtWorkerPool]]
+    threads: pointer ## ptr UncheckedArray[Thread[ExtWorkerArg]]
+    exit: ptr UncheckedArray[Atomic[int32]]
+      ## per worker: 0 running, 1 left `workerProc`, 2 joined
+    started: int ## threads created (for an orphaned pool's reap)
+    leaked: int ## workers still running when this pool was orphaned
+    next: ptr ExtWorkerPool ## orphan list link
+
+  ExtWorkerArg = tuple[pool: ptr ExtWorkerPool, idx: int]
 
   ExtInplaceSlot = object
     ## A synchronous `inplace` call waiting for its reply inside `invoke`.
@@ -486,6 +493,18 @@ var gExtIsWorker {.threadvar.}: bool
 var gExtLibOwnsHost: Atomic[bool]
   ## Lib mode: `<lib>_extHost()` started the host, so the library stops it
   ## when its last context shuts down (`extLibIdle`).
+var gExtLibJoinTimeoutMs: Atomic[int]
+  ## Lib mode: the worker join bound `extLibIdle` stops the host with
+  ## (`exportExtHost(…, workerJoinTimeoutMs)`); 0 = wait forever.
+var gExtOrphanPools: ptr ExtWorkerPool
+  ## Pools whose stop timed out on a worker stuck in a foreign `invoke`: kept
+  ## alive (the worker still uses the lock, queue and its `Thread`) and
+  ## reaped by a later start / stop once every worker has left. Touched only
+  ## by the start / stop owner (serialised by `gExtHostState`).
+var gExtLeakedWorkers: Atomic[int] ## workers of orphaned pools still running
+
+const ExtDefaultJoinTimeout* = chronos.seconds(5)
+  ## Default bound for joining a plugin's worker threads at host stop.
 
 when defined(extTestHooks):
   var extTestBridgeStarts*: Atomic[int] ## bridge threads started
@@ -660,9 +679,12 @@ proc poolPush(pool: ptr ExtWorkerPool, m: ExtCallMsg): bool =
     signal(pool.cond)
   true
 
-proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
+proc workerProc(arg: ExtWorkerArg) {.thread.} =
   ## Plain worker: no chronos loop, never touches broker state. Runs the
-  ## foreign `invoke` (which may block this thread only).
+  ## foreign `invoke` (which may block this thread only). A worker still in
+  ## `invoke` when the host stop's join bound expires is left running: its
+  ## pool is orphaned (kept alive) and reaped once it has left.
+  let pool = arg.pool
   when defined(extTestHooks):
     discard extTestWorkerStarts.fetchAdd(1)
   gExtIsWorker = true
@@ -693,8 +715,10 @@ proc workerProc(pool: ptr ExtWorkerPool) {.thread.} =
       c_free(m.buf)
     stRelease(m.st)
     implRelease(m.impl)
+  # Last touch of the pool: from here on the stopper may join and free it.
+  pool.exit[arg.idx].store(1, moRelease)
   when defined(extTestHooks):
-    discard extTestWorkerExits.fetchAdd(1)
+    discard extTestWorkerExits.fetchAdd(1) # after `exit`: tests reap on it
 
 const
   ExtInplaceIdBit = 1'u64 shl 63 ## inplace call ids: bit 63 | slot << 32 | gen
@@ -2233,33 +2257,99 @@ proc extLoadPlugin*(path: string): Result[void, string] =
     return err("EXTAPI: plugin entry of '" & path & "' failed with " & $rc)
   ok()
 
-proc stopPool(pool: ptr ExtWorkerPool, started: int) =
-  ## Stop and join the first `started` worker threads of `pool`, free queued
-  ## messages without invoking them, release the pool.
-  withLock(pool.lock):
-    pool.stop = true
-    broadcast(pool.cond)
-  let threads = cast[ptr UncheckedArray[Thread[ptr ExtWorkerPool]]](pool.threads)
-  for i in 0 ..< started:
-    joinAndReleaseThread(threads[i])
-  var m: ExtCallMsg
-  while pool.q.tryPop(m):
-    if not m.buf.isNil:
-      c_free(m.buf)
-    stRelease(m.st)
-    implRelease(m.impl)
+proc freePool(pool: ptr ExtWorkerPool) =
+  deallocShared(pool.exit)
   deallocShared(pool.threads)
   deinitCond(pool.cond)
   deinitLock(pool.lock)
   deallocShared(pool)
 
-proc stopAllPools() =
+proc joinExited(pool: ptr ExtWorkerPool): int =
+  ## Join the workers that have left `workerProc` and are not joined yet;
+  ## the number still running.
+  let threads = cast[ptr UncheckedArray[Thread[ExtWorkerArg]]](pool.threads)
+  for i in 0 ..< pool.started:
+    case pool.exit[i].load(moAcquire)
+    of 1:
+      joinAndReleaseThread(threads[i])
+      pool.exit[i].store(2, moRelease)
+    of 2:
+      discard
+    else:
+      inc result
+
+proc stopPool(pool: ptr ExtWorkerPool, started: int, joinTimeout: Duration): int =
+  ## Stop the first `started` worker threads of `pool` and free queued messages
+  ## without invoking them. Waits up to `joinTimeout` (`ZeroDuration` or
+  ## `InfiniteDuration`: forever) for the workers to leave; joins those that
+  ## did. With none left running the pool is freed; otherwise it is orphaned
+  ## — kept alive for the workers still inside a foreign `invoke` — and the
+  ## number of those is returned.
+  pool.started = started
+  withLock(pool.lock):
+    pool.stop = true
+    broadcast(pool.cond)
+    # Under the lock: a worker still running may pop concurrently.
+    var m: ExtCallMsg
+    while pool.q.tryPop(m):
+      if not m.buf.isNil:
+        c_free(m.buf)
+      stRelease(m.st)
+      implRelease(m.impl)
+  if joinTimeout <= ZeroDuration or joinTimeout == InfiniteDuration:
+    let threads = cast[ptr UncheckedArray[Thread[ExtWorkerArg]]](pool.threads)
+    for i in 0 ..< started:
+      joinAndReleaseThread(threads[i])
+    freePool(pool)
+    return 0
+  let deadline = Moment.now() + joinTimeout
+  var running = joinExited(pool)
+  while running > 0 and Moment.now() < deadline:
+    os.sleep(1)
+    running = joinExited(pool)
+  if running == 0:
+    freePool(pool)
+    return 0
+  pool.leaked = running
+  pool.next = gExtOrphanPools
+  gExtOrphanPools = pool
+  discard gExtLeakedWorkers.fetchAdd(running, moAcquireRelease)
+  running
+
+proc reapOrphanPools() =
+  ## Join and free orphaned pools whose workers have all left. Start / stop
+  ## owner only.
+  var link = addr gExtOrphanPools
+  while not link[].isNil:
+    let pool = link[]
+    if joinExited(pool) == 0:
+      link[] = pool.next
+      discard gExtLeakedWorkers.fetchSub(pool.leaked, moAcquireRelease)
+      freePool(pool)
+    else:
+      link = addr pool.next
+
+proc stopAllPools(joinTimeout: Duration): string =
+  ## Stop every plugin's pool; "" when every worker was joined, else what was
+  ## left running.
   for p in 0 ..< gExtPluginCount.load(moAcquire):
     let rt = gExtPlugins[p]
     if not rt.pool.isNil:
       let pool = rt.pool
       rt.pool = nil
-      stopPool(pool, pool.n)
+      let stuck = stopPool(pool, pool.n, joinTimeout)
+      if stuck > 0:
+        if result.len > 0:
+          result.add("; ")
+        result.add(
+          $stuck & " worker(s) of plugin " & $rt.desc.name & " still in a foreign " &
+            "invoke after " & $joinTimeout & ", leaked"
+        )
+
+proc extLeakedWorkerCount*(): int =
+  ## Worker threads left running by a host stop whose join bound expired (they
+  ## are joined and freed by a later start / stop once they leave). Any thread.
+  gExtLeakedWorkers.load(moAcquire)
 
 proc stopBridgeThread() =
   gExtHost.stopFlag.store(1, moRelease)
@@ -2270,6 +2360,7 @@ proc stopBridgeThread() =
 proc startHost(): Result[void, string] =
   ## Owner of the `hsStarting` state: bring up the bridge, then the worker
   ## pools. On any failure everything already started is torn down again.
+  reapOrphanPools()
   if gExtHost.isNil:
     gExtHost = cast[ptr ExtHostRt](createShared(ExtHostRt, 1))
     gExtHost.ctlRing.init(ExtRingCap)
@@ -2312,10 +2403,11 @@ proc startHost(): Result[void, string] =
     initLock(pool.lock)
     initCond(pool.cond)
     pool.n = n
-    let threads = cast[ptr UncheckedArray[Thread[ptr ExtWorkerPool]]](createShared(
-      Thread[ptr ExtWorkerPool], n
+    let threads = cast[ptr UncheckedArray[Thread[ExtWorkerArg]]](createShared(
+      Thread[ExtWorkerArg], n
     ))
     pool.threads = threads
+    pool.exit = cast[ptr UncheckedArray[Atomic[int32]]](createShared(Atomic[int32], n))
     for i in 0 ..< n:
       inc attempts
       var failure = ""
@@ -2324,12 +2416,13 @@ proc startHost(): Result[void, string] =
           failure = "injected failure"
       if failure.len == 0:
         try:
-          createThread(threads[i], workerProc, pool)
+          createThread(threads[i], workerProc, (pool, i))
         except ResourceExhaustedError as e:
           failure = e.msg
       if failure.len > 0:
-        stopPool(pool, i)
-        stopAllPools()
+        # Freshly started workers: nothing was invoked, the join cannot hang.
+        discard stopPool(pool, i, InfiniteDuration)
+        discard stopAllPools(InfiniteDuration)
         stopBridgeThread()
         return err("EXTAPI: cannot start worker thread: " & failure)
     rt.pool = pool
@@ -2360,11 +2453,17 @@ proc extHostStart*(): Result[void, string] =
         warn "EXTAPI: eager import load failed", plugin = $d.name, reason = r.error
   ok()
 
-proc extHostStop*(): Result[void, string] =
+proc extHostStop*(joinTimeout = ExtDefaultJoinTimeout): Result[void, string] =
   ## Stop the host: closes every port, fails pending calls (queued worker calls
   ## never run), clears every auto-wired provider, stops the worker pools and
   ## K2 peer contexts. Foreign calls afterwards return SHUTDOWN. Refused on the
-  ## bridge or a worker thread (it would join itself). Idempotent.
+  ## bridge or a worker thread (it would join itself): `err`, host left
+  ## running. Idempotent.
+  ##
+  ## Worker threads get `joinTimeout` (`ZeroDuration`: forever) to leave a
+  ## foreign `invoke` in progress. A worker still inside it is leaked: the
+  ## host is stopped all the same (restartable), and `err` names the plugin
+  ## and count. A later start / stop joins and frees it once it has left.
   if onBridgeThread() or gExtIsWorker:
     return err("EXTAPI: ExtHost.stop() cannot run on the bridge or a worker thread")
   while true:
@@ -2377,9 +2476,10 @@ proc extHostStop*(): Result[void, string] =
   withLock(gExtHost.ctlLock):
     gExtHost.running.store(false, moRelease)
   stopBridgeThread()
+  reapOrphanPools()
   # Pools before peers: queued peer calls are dropped, never invoked against
   # a shut-down peer context.
-  stopAllPools()
+  let leaked = stopAllPools(joinTimeout)
   shutdownPeers()
   # Payloads that raced the stop: free them.
   var rm: ExtReplyMsg
@@ -2404,17 +2504,21 @@ proc extHostStop*(): Result[void, string] =
       m.done = true
       signal(m.cond)
   gExtHostState.store(hsStopped, moRelease)
+  if leaked.len > 0:
+    return err("EXTAPI: host stopped; " & leaked)
   ok()
 
 # ---------------------------------------------------------------------------
 # Lib mode: teardown driven by the library's context lifecycle
 # ---------------------------------------------------------------------------
 
-proc extLibHostStart*(): Result[void, string] =
+proc extLibHostStart*(workerJoinTimeoutMs: int): Result[void, string] =
   ## `<lib>_extHost()`: start the host (idempotent) and hand its lifetime to
   ## the library — it stops when the library's last context shuts down
-  ## (`extLibIdle`). A later `<lib>_extHost()` starts it again.
+  ## (`extLibIdle`), joining worker threads for up to `workerJoinTimeoutMs`
+  ## (0 = forever). A later `<lib>_extHost()` starts it again.
   ?extHostStart()
+  gExtLibJoinTimeoutMs.store(workerJoinTimeoutMs, moRelease)
   gExtLibOwnsHost.store(true, moRelease)
   ok()
 
@@ -2453,15 +2557,27 @@ proc extLibCtxClose(ctx: BrokerContext) {.nimcall, gcsafe, raises: [].} =
 proc extLibIdle() {.nimcall, gcsafe, raises: [].} =
   ## The library's last context has shut down: stop the host if
   ## `<lib>_extHost()` started it. Refused (logged, host left running) when
-  ## called on the bridge or a worker thread.
+  ## called on the bridge or a worker thread. A worker that outlives the join
+  ## bound is logged; the host is stopped all the same.
   var expected = true
   if not gExtLibOwnsHost.compareExchange(expected, false):
     return
   {.cast(gcsafe).}:
-    let r = extHostStop()
-    if r.isErr:
+    let ms = gExtLibJoinTimeoutMs.load(moAcquire)
+    if onBridgeThread() or gExtIsWorker:
       gExtLibOwnsHost.store(true, moRelease)
-      warn "EXTAPI: host not stopped after the last library context", reason = r.error
+      warn "EXTAPI: host not stopped after the last library context",
+        reason = "the last shutdown ran on the bridge or a worker thread"
+      return
+    let r = extHostStop(
+      if ms > 0:
+        chronos.milliseconds(ms)
+      else:
+        ZeroDuration
+    )
+    if r.isErr:
+      # Stopped, but a worker stuck in a foreign `invoke` was leaked.
+      warn "EXTAPI: host stopped after the last library context", reason = r.error
 
 gApiLibCtxCloseHook = extLibCtxClose
 gApiLibIdleHook = extLibIdle

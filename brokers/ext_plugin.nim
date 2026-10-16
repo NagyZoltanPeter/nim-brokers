@@ -30,12 +30,26 @@ proc start*(_: typedesc[ExtHost]): Result[void, string] =
   ## port. Idempotent.
   extHostStart()
 
-proc stop*(_: typedesc[ExtHost]): Result[void, string] =
+proc stop*(
+    _: typedesc[ExtHost], joinTimeout = ExtDefaultJoinTimeout
+): Result[void, string] =
   ## Close every port, fail pending calls (calls queued for a worker never
   ## run), clear auto-wired providers, stop the worker pools, K2 peer contexts
-  ## and the bridge thread. `err` on the bridge or a worker thread — it would
-  ## have to join itself. Idempotent; safe against concurrent `start`.
-  extHostStop()
+  ## and the bridge thread. Idempotent; safe against concurrent `start`.
+  ##
+  ## `err` in two cases:
+  ## - on the bridge or a worker thread (it would have to join itself): the
+  ##   host is left running;
+  ## - a worker thread still inside a foreign `invoke` after `joinTimeout`
+  ##   (`ZeroDuration`: wait forever): it is leaked, the host is stopped all
+  ##   the same and can be started again. The leaked thread is joined and
+  ##   freed by a later `start` / `stop` once it leaves (`leakedWorkers`).
+  extHostStop(joinTimeout)
+
+proc leakedWorkers*(_: typedesc[ExtHost]): int =
+  ## Worker threads a `stop` left running in a foreign `invoke`, not yet
+  ## reaped.
+  extLeakedWorkerCount()
 
 proc table*(_: typedesc[ExtHost]): ptr ExtHostTable =
   ## The `broker_ext_host` function table to hand to a plugin entry point.
@@ -609,14 +623,18 @@ macro registerExtPlugin*(args: varargs[untyped]): untyped =
     gExtPendingArgs.add((plugin, copyNimTree(args)))
     result = newCall(bindSym("extRegisterPluginShaped"), newLit(plugin), shapesCall)
 
-macro exportExtHost*(libName: static string): untyped =
+macro exportExtHost*(
+    libName: static string, workerJoinTimeoutMs: static int = 5000
+): untyped =
   ## Lib mode: export `<libName>_extHost()` from a Nim shared library. The C /
   ## C++ / Rust host app calls it (after `<libName>_initialize()`) to get the
   ## `broker_ext_host` table and provide plugins in-process. The first call
   ## starts the EXTAPI bridge thread; the library then owns the host:
   ## `<libName>_shutdown(ctx)` closes the ports opened on `ctx`, and the
   ## shutdown of the library's last context stops the host (bridge + worker
-  ## pools joined). Call it after `<libName>_createContext()`.
+  ## pools joined, a worker still in a foreign `invoke` after
+  ## `workerJoinTimeoutMs` — 0: wait forever — logged and leaked). Call it
+  ## after `<libName>_createContext()`.
   let fname = libName & "_extHost"
   let src =
     "proc " & fname & "*(): ptr ExtHostTable {.exportc: \"" & fname &
@@ -627,5 +645,6 @@ macro exportExtHost*(libName: static string): untyped =
     # from long-lived threads.
     "      var registered {.threadvar.}: bool\n" & "      if not registered:\n" &
     "        registered = true\n" & "        setupForeignThreadGc()\n" &
-    "  if extLibHostStart().isErr:\n" & "    return nil\n" & "  ExtHost.table()\n"
+    "  if extLibHostStart(" & $workerJoinTimeoutMs & ").isErr:\n" & "    return nil\n" &
+    "  ExtHost.table()\n"
   result = parseStmt(src)

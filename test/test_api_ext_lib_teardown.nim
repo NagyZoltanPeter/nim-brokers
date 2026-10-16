@@ -8,7 +8,7 @@
 ## in via `-d:extTeardownLib=<path>`. The test is a plain foreign host: it
 ## mirrors the `broker_ext_host` ABI below and opens ports like a C plugin.
 
-import std/[atomics, dynlib, os]
+import std/[atomics, dynlib, os, times]
 import testutils/unittests
 
 const extTeardownLib {.strdefine.} = ""
@@ -58,8 +58,11 @@ type
   CreateCtxFn = proc(): uint32 {.cdecl, gcsafe, raises: [].}
   ShutdownFn = proc(ctx: uint32): int32 {.cdecl, gcsafe, raises: [].}
   ExtHostFn = proc(): ptr ExtHostTable {.cdecl, gcsafe, raises: [].}
+  KickFn = proc(ctx: uint32) {.cdecl, gcsafe, raises: [].}
 
 var gReleases: Atomic[int]
+var gGate: Atomic[int] # 0: `td_work` invokes park until it is opened
+var gParked: Atomic[int] # `td_work` invokes that parked
 
 # Called on the library's bridge thread (foreign to this program's runtime).
 {.push checks: off, stackTrace: off, lineTrace: off.}
@@ -71,7 +74,13 @@ proc tdInvoke(
     buf: ptr uint8,
     len: csize_t,
 ) {.cdecl, gcsafe, raises: [].} =
-  discard # never called: the test makes no requests
+  # Only `td_work` (a worker name) is ever called: it parks while the gate
+  # is closed, standing in for a plugin stuck in blocking code. No reply:
+  # by the time it returns, its call has been failed by the teardown.
+  if gGate.load() == 0:
+    discard gParked.fetchAdd(1)
+    while gGate.load() == 0:
+      sleep(1)
 
 proc tdRelease(user: pointer) {.cdecl, gcsafe, raises: [].} =
   discard gReleases.fetchAdd(1)
@@ -96,6 +105,8 @@ proc eventually(f: CountFn, want: cint): cint =
       break
     sleep(1)
   f()
+
+gGate.store(1)
 
 suite "EXTAPI lib-mode teardown":
   test "_shutdown closes a context's ports; the last one stops the host":
@@ -163,3 +174,56 @@ suite "EXTAPI lib-mode teardown":
     check bridgeExits() == 2
     check workerExits() == 4
     # No unloadLib: a Nim runtime is not designed to be unloaded.
+
+  test "the last _shutdown leaks a stuck worker after the join bound":
+    # Same process and library as above: the host was stopped twice so far
+    # (two bridge starts, four worker starts / exits).
+    let lib = loadLib(extTeardownLib)
+    doAssert lib != nil
+    let createContext =
+      cast[CreateCtxFn](lib.checkedSymAddr("extteardownlib_createContext"))
+    let shutdown = cast[ShutdownFn](lib.checkedSymAddr("extteardownlib_shutdown"))
+    let extHost = cast[ExtHostFn](lib.checkedSymAddr("extteardownlib_extHost"))
+    let workerStarts = cast[CountFn](lib.checkedSymAddr("extteardownlib_workerStarts"))
+    let workerExits = cast[CountFn](lib.checkedSymAddr("extteardownlib_workerExits"))
+    let bridgeExits = cast[CountFn](lib.checkedSymAddr("extteardownlib_bridgeExits"))
+    let leaked = cast[CountFn](lib.checkedSymAddr("extteardownlib_leakedWorkers"))
+    let kickWork = cast[KickFn](lib.checkedSymAddr("extteardownlib_kickWork"))
+    let joinKick = cast[CountFn](lib.checkedSymAddr("extteardownlib_joinKick"))
+
+    let ctx = createContext()
+    let t = extHost()
+    check t != nil
+    check eventually(workerStarts, 6) == 6
+    var p: uint64
+    check openTd(t, ctx, p) == ExtOk
+    check t.provide(t.host, p, "td_work") == ExtOk
+
+    gGate.store(0)
+    kickWork(ctx)
+    for _ in 0 ..< 2000:
+      if gParked.load() == 1:
+        break
+      sleep(1)
+    check gParked.load() == 1
+
+    # The worker stays inside `invoke`: `_shutdown` gives up after the 200 ms
+    # bound (`exportExtHost(…, workerJoinTimeoutMs = 200)`) instead of
+    # hanging, still returns 0 and still stops the host.
+    let t0 = epochTime()
+    check shutdown(ctx) == 0
+    check epochTime() - t0 < 2.0
+    check joinKick() == 1 # the parked request failed when its port closed
+    check bridgeExits() == 3
+    check workerExits() == 5 # the idle worker was joined
+    check leaked() == 1
+    check openTd(t, ctx, p) == ExtShutdown
+
+    # Released, the stuck worker leaves; the next start joins and frees it.
+    gGate.store(1)
+    check eventually(workerExits, 6) == 6
+    let ctx2 = createContext()
+    check extHost() == t
+    check leaked() == 0
+    check shutdown(ctx2) == 0
+    check bridgeExits() == 4

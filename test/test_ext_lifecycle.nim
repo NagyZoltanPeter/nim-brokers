@@ -225,6 +225,46 @@ suite "EXTAPI lifecycle":
     settle(200)
     check life_work_invokes() == 1
 
+  test "a worker stuck past the join bound is leaked, then reaped":
+    check startAndOpen()
+    check life_provide("life_work") == ExtOk
+    discard queueWork(1) # parked in `life`'s single worker
+    let exits = extTestWorkerExits.load()
+    let t0 = Moment.now()
+    let r = ExtHost.stop(chronos.milliseconds(200))
+    let took = Moment.now() - t0
+    check r.isErr
+    check "host stopped; 1 worker(s) of plugin life" in r.error
+    check took < chronos.milliseconds(1500)
+    check ExtHost.leakedWorkers() == 1
+    check extTestWorkerExits.load() == exits + 2 # life2's two idle workers
+    # Stopped all the same: foreign calls see SHUTDOWN.
+    check life_open(ExtHost.table, uint32(Ctx)) == ExtShutdown
+    # Released, the worker leaves; the next start joins and frees its pool.
+    life_set_gate(1)
+    check pump(
+      proc(): bool =
+        extTestWorkerExits.load() == exits + 3
+    )
+    check startAndOpen()
+    check ExtHost.leakedWorkers() == 0
+    check life_provide("life_work") == ExtOk
+    let w = waitFor LifeWork.request(Ctx)
+    check w.isOk
+    check ExtHost.stop().isOk
+
+  test "joinTimeout = 0 waits for a stuck worker":
+    check startAndOpen()
+    check life_provide("life_work") == ExtOk
+    discard queueWork(1)
+    var t: Thread[int]
+    createThread(t, unblockLater, 300)
+    let t0 = Moment.now()
+    check ExtHost.stop(ZeroDuration).isOk
+    check Moment.now() - t0 >= chronos.milliseconds(250)
+    joinThread(t)
+    check ExtHost.leakedWorkers() == 0
+
   test "stop from the bridge or a worker is refused (R2.2)":
     check startAndOpen()
     check life_provide("life_hook_bridge") == ExtOk
