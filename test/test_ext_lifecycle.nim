@@ -35,6 +35,9 @@ proc life_provide_on(port: uint64, name: cstring): int32 {.importc, cdecl.}
 proc life_reply_parked_garbage(): int32 {.importc, cdecl.}
 proc life_tid_thread(): uint {.importc, cdecl.}
 proc life_self_thread(): uint {.importc, cdecl.}
+proc life_work_thread(): uint {.importc, cdecl.}
+proc life_echo_thread(): uint {.importc, cdecl.}
+proc life_hook_worker_thread(): uint {.importc, cdecl.}
 
 RequestBroker(EXTAPI[life], dispatch = workers(1)):
   type LifeWork = object
@@ -439,6 +442,27 @@ suite "EXTAPI lifecycle":
     check life_sig_thread() == life_tid_thread()
     check life_sig_thread() != life_self_thread()
     waitFor LifeSig.dropSignalHandler(Ctx)
+    check ExtHost.stop().isOk
+
+  test "one plugin, mixed dispatch: each name runs on its own mode's thread":
+    # `life` mixes all three modes on one port (caps NONBLOCKING |
+    # REPLY_INLINE): `life_tid` bridge, `life_work` + `life_hook_worker`
+    # workers(1), `life_echo` inplace.
+    check startAndOpen()
+    for n in ["life_tid", "life_work", "life_hook_worker", "life_echo"]:
+      check life_provide(cstring(n)) == ExtOk
+    check (waitFor LifeTid.request(Ctx)).isOk
+    check (waitFor LifeWork.request(Ctx)).isOk
+    check (waitFor LifeHookWorker.request(Ctx)).isOk
+    check (waitFor LifeEcho.request(Ctx, 3)).isOk
+    let caller = life_self_thread()
+    let bridge = uint(extTestBridgeThread())
+    check bridge != 0
+    check life_tid_thread() == bridge # bridge: on the bridge thread
+    check life_work_thread() notin [bridge, caller, 0'u] # workers: a pool thread
+    # One pool per plugin, shared by its `workers` names (size 1 here).
+    check life_hook_worker_thread() == life_work_thread()
+    check life_echo_thread() == caller # inplace: on the requesting thread
     check ExtHost.stop().isOk
 
   # --- EXTAPI_PLAN §11 failure rows as assertions (review F9) --------------

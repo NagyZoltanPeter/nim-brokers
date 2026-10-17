@@ -1659,7 +1659,7 @@ let b = storage_ext::Builder::new()
 | Runtime-agnostic | yes (`Spawn`) | n/a (workers) | yes | yes |
 | Cancellation | drop via `Abortable` | `CancelFlag` | `r.is_cancelled()` | drop |
 | Partial impl | via `provide` subset (trait methods get default bodies returning `Err("not provided")`, never reached) | same | same | **natural** |
-| Caps → policies served | `NONBLOCKING` → `bridge`, `workers` | `REPLY_INLINE` → `inplace`, `workers` | `NONBLOCKING` → `bridge`, `workers` | per closure kind |
+| Caps → policies served | `NONBLOCKING` → `bridge`, `workers` | `REPLY_INLINE` → `inplace`, `workers` | `NONBLOCKING` → `bridge`, `workers` | *planned:* per closure kind; *as built:* `NONBLOCKING` → `bridge`, `workers` (`inplace` names need an R2 port) |
 | Recommendation | **primary** | adapter | optional | **ship** (partial plugins) |
 
 ### Emitter lifetime (both languages)

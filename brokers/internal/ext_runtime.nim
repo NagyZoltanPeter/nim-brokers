@@ -513,6 +513,14 @@ when defined(extTestHooks):
   var extTestWorkerExits*: Atomic[int] ## worker threads finished
   var extTestFailWorkerAt*: Atomic[int]
     ## > 0: the n-th worker thread of the next start fails to start.
+  proc extTestBridgeThread*(): uint64 =
+    ## OS id of the running bridge thread (0 when stopped) — the same value
+    ## a C plugin gets from `pthread_self()` / `GetCurrentThreadId()`.
+    if gExtHost.isNil:
+      0'u64
+    else:
+      gExtHost.bridgeTid.load(moAcquire)
+
   var extTestPauseEvents*: Atomic[bool]
     ## true: the bridge leaves queued events in the ring (delivery-order tests).
 const ExtMaxInplace = 256

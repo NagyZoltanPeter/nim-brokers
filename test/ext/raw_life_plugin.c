@@ -11,6 +11,8 @@
  *   life_tick            event {"n": uint} via life_emit_tick()
  *   life_sig    signal   bridge: records the invoking thread
  *   life_tid    ()       bridge: records the invoking thread, replies
+ * life_work, life_echo and life_hook_worker also record their invoking thread
+ * (mixed-dispatch test).
  * Other replies are {"n": 5}. life_bridge records the parked call id so a
  * test can answer it later, from this port or from a second one.
  */
@@ -46,6 +48,9 @@ static _Atomic broker_ext_call_id parkedId = 0;
 static _Atomic broker_ext_call_id doneId = 0;
 static atomic_uintptr_t sigThread = 0;
 static atomic_uintptr_t tidThread = 0;
+static atomic_uintptr_t workThread = 0;
+static atomic_uintptr_t echoThread = 0;
+static atomic_uintptr_t hookWorkerThread = 0;
 
 static size_t put_head(uint8_t* o, uint8_t major, uint64_t v) {
   if (v < 24) { o[0] = (uint8_t)(major << 5 | v); return 1; }
@@ -79,11 +84,13 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
   (void)user; (void)idx; (void)buf; (void)len;
   if (strcmp(name, "life_work") == 0) {
     atomic_fetch_add(&workInvokes, 1);
+    atomic_store(&workThread, self_thread());
     while (atomic_load(&gate) == 0) sleep_ms(1);
     reply_ok(id);
   } else if (strncmp(name, "life_dual", 9) == 0 || strcmp(name, "life_owned") == 0) {
     reply_ok(id);
   } else if (strcmp(name, "life_echo") == 0) {
+    atomic_store(&echoThread, self_thread());
     uint8_t out[8];
     size_t k = enc_n(out, dec_x(buf, len));
     H->reply(H->host, atomic_load(&P), id, BROKER_EXT_REPLY_OK, out, k);
@@ -99,6 +106,8 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
     atomic_store(&parkedId, id); /* parked: answered by life_reply_parked */
   } else if (strcmp(name, "life_hook_bridge") == 0 ||
              strcmp(name, "life_hook_worker") == 0) {
+    if (strcmp(name, "life_hook_worker") == 0)
+      atomic_store(&hookWorkerThread, self_thread());
     life_hook_fn f = atomic_load(&hook);
     if (f) f();
     reply_ok(id);
@@ -160,6 +169,9 @@ int32_t life_reply_parked_garbage(void) {
 uintptr_t life_sig_thread(void) { return atomic_load(&sigThread); }
 uintptr_t life_tid_thread(void) { return atomic_load(&tidThread); }
 uintptr_t life_self_thread(void) { return self_thread(); }
+uintptr_t life_work_thread(void) { return atomic_load(&workThread); }
+uintptr_t life_echo_thread(void) { return atomic_load(&echoThread); }
+uintptr_t life_hook_worker_thread(void) { return atomic_load(&hookWorkerThread); }
 
 int32_t life_emit_tick(uint32_t n) {
   uint8_t out[8];
