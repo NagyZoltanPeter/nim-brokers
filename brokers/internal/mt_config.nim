@@ -57,6 +57,11 @@ type
     maxResponseBytesOrigin*: string
     freeListShardsOrigin*: string
     requestTimeoutMsOrigin*: string
+    extInplaceHook*: bool
+      ## EXTAPI `inplace` brokers only (set by ext_brokers, never by kwargs):
+      ## the generated request procs first ask a per-slot hook whether a
+      ## foreign / native source can serve the call synchronously on the
+      ## calling thread (EXTAPI_PLAN §5.4). Off for every other broker.
 
 # ---------------------------------------------------------------------------
 # Defaults

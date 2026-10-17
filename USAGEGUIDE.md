@@ -37,6 +37,7 @@ footprints. For the short overview start at the [README](README.md).
     - [Type-support matrix](#type-support-matrix)
     - [FFI API strategy](#ffi-api-strategy)
     - [Torpedo Duel — a richer FFI API example](#torpedo-duel--a-richer-ffi-api-example)
+    - [EXTAPI — consuming external plugins](#extapi--consuming-external-plugins)
   - [Non-Object Types](#non-object-types)
   - [Memory Footprint](#memory-footprint)
     - [EventBroker (single-thread)](#eventbroker-single-thread)
@@ -1045,6 +1046,38 @@ nimble runTorpedoExampleGo
 
 See [`examples/torpedo/DESIGN.md`](examples/torpedo/DESIGN.md) for the full
 architecture, sequence diagrams, and API surface reference.
+
+### EXTAPI — consuming external plugins
+
+The inverse of `(API)`: a broker declared `(EXTAPI[<plugin>])` is provided by
+external code and consumed from Nim with the ordinary verbs. An unwired
+EXTAPI broker fails like any unprovided broker; calls keep the MT lane's
+timeout and cancellation.
+
+```nim
+RequestBroker(EXTAPI[storage]):
+  type StoreBlob = object
+    etag*: string
+  proc signature*(key: string, data: seq[byte]): Future[Result[StoreBlob, string]] {.async.}
+
+registerExtPlugin(storage, version = "1.0.0")
+
+# exe mode: load a plugin library that exports broker_ext_plugin_entry()
+doAssert ExtHost.start().isOk
+doAssert ExtHost.loadPlugin("libstorage_plugin.so").isOk
+let r = await StoreBlob.request(DefaultBrokerContext, "k", @[byte 1, 2, 3])
+```
+
+Sources can be a C / C++ / Rust / Go plugin (generated `<plugin>_ext.hpp`,
+`_ext_rs`, `_ext_go`), a Python host app in lib mode (`<plugin>_ext.py`), a
+plain C library imported function by function (`importc` / `dynlib`), or
+another nim-brokers library (`importLib`). `T.extFallback(ctx, nimImpl)`,
+`T.extProvider(ctx)` and `withMockProvider` switch between the plugin and a
+Nim implementation at runtime.
+
+Full reference — dispatch modes, the `broker_ext.h` ABI, generated wrappers,
+ownership and failure tables: [EXTAPI in the FFI API document](doc/FFI_API.md#extapi--consuming-external-plugin-apis).
+Examples: `examples/extapi/` (`nimble runExtExampleCpp` / `Rust` / `Go` / `Py`).
 
 ## Non-Object Types
 

@@ -1,6 +1,6 @@
 ---
 name: nim-brokers
-description: Reference for writing code against the nim-brokers (`brokers`) nimble package — EventBroker, RequestBroker, MultiRequestBroker, SignalBroker, body sugars (listenIt, provideIt, reprovideIt, onSignalIt), bind* sugar, BrokerContext scoping, (mt) multi-thread variants, the (API) FFI shared-library surface, and BrokerInterface/BrokerImplement. Use when declaring brokers, registering listeners/providers/handlers, emitting or requesting, or exposing brokers to C/C++/Python/Rust/Go.
+description: Reference for writing code against the nim-brokers (`brokers`) nimble package — EventBroker, RequestBroker, MultiRequestBroker, SignalBroker, body sugars (listenIt, provideIt, reprovideIt, onSignalIt), bind* sugar, BrokerContext scoping, (mt) multi-thread variants, the (API) FFI shared-library surface, (EXTAPI[plugin]) brokers provided by external plugins / C libraries, and BrokerInterface/BrokerImplement. Use when declaring brokers, registering listeners/providers/handlers, emitting or requesting, exposing brokers to C/C++/Python/Rust/Go, or consuming an API implemented in another language.
 ---
 
 # Working with `nim-brokers`
@@ -26,6 +26,7 @@ type *is* the channel — you call class-method-style on the typedesc: `T.emit`,
 
 `(mt)` suffix → multi-thread variant (cross-thread dispatch). `(sync)` on
 RequestBroker → blocking, non-async. `(API)` → FFI shared-library surface.
+`(EXTAPI[<plugin>])` → the inverse: provided by foreign code, consumed from Nim.
 
 Any provider/handler that is a **class method** (`self.foo`) can be installed
 with the `bind*` / `rebind*` sugar instead of a hand-written forwarding closure —
@@ -40,6 +41,7 @@ import brokers/request_broker
 import brokers/multi_request_broker
 import brokers/signal_broker
 import brokers/broker_context   # only if you need explicit contexts
+import brokers/ext_plugin       # only for EXTAPI (registerExtPlugin, ExtHost, ExtPlugin)
 ```
 
 ---
@@ -456,6 +458,7 @@ be provided again by any thread.
 | Install a class method (`self.foo`) as provider/handler | `bind*` / `rebind*` sugar |
 | Register an inline body without lambda boilerplate | `listenIt` / `provideIt` / `reprovideIt` / `onSignalIt` |
 | Expose to C/C++/Python/Rust/Go | `(API)` + `registerBrokerLibrary` (see AGENTS.md) |
+| Consume an API that foreign code (plugin / C lib / other nim-brokers lib) provides | `(EXTAPI[<plugin>])` + `registerExtPlugin` |
 
 ## Doc comments
 
@@ -493,6 +496,8 @@ module (`//`), `<lib>.cddl` (`;` lines) and the `doc` field of every record in
   thread-local); cross-thread requires the `(mt)` variant.
 - `(mt)` cross-thread request needs cancelling or a per-call deadline? Use
   `requestCancellable` — combinators on plain `request()` stop nothing.
+- `(EXTAPI[p])` without `-d:BrokerFfiApi` silently degrades to `(mt)` — it
+  compiles and is mockable, but no plugin can ever bind it.
 
 ---
 
@@ -580,6 +585,104 @@ FFI rules:
 - `_createContext()` is readiness-synchronous: returns only after providers +
   listeners are installed and the event courier is live.
 - Inspect generated Nim with `-d:brokerDebug` → `build/broker_debug/*.gen.nim`.
+
+---
+
+## EXTAPI `(EXTAPI[<plugin>])` — consume an API that foreign code provides
+
+The inverse of `(API)`: the broker is **provided** by an external plugin (C /
+C++ / Rust / Go shared library, a Python host app in lib mode, a plain C
+library, or another nim-brokers library) and **consumed** from Nim with the
+normal verbs (`request`, `listen`, `signal`). Each EXTAPI broker is an ordinary
+`(mt)` broker plus an extra source. Needs `--threads:on -d:BrokerFfiApi`.
+Full reference: `doc/FFI_API.md` § "EXTAPI".
+
+```nim
+import brokers/[request_broker, event_broker, signal_broker, ext_plugin]
+
+RequestBroker(EXTAPI[storage], autoWire = false):   # the Nim owner wires it
+  type FetchBlob = object
+    data*: seq[byte]
+  proc signature*(key: string): Future[Result[FetchBlob, string]] {.async.}
+
+EventBroker(EXTAPI[storage]):                        # emitted by the plugin
+  type BlobEvicted = object
+    key*: string
+
+SignalBroker(EXTAPI[storage]):                       # one-way Nim → plugin
+  type CompactHint = object
+    urgency*: int32
+
+registerExtPlugin(storage, version = "1.0.0")         # after the plugin's brokers
+
+# C import (K1): the broker IS a C function, loaded lazily by ExtPlugin.load.
+RequestBroker(EXTAPI[codec], importc = "codec_crc", dynlib = "libcodec.so",
+              dispatch = inplace):
+  type Crc = object
+    value*: uint32
+  proc signature*(seed: uint32, buf: ptr uint8, len: uint32): Future[Result[Crc, string]] {.async.}
+registerExtPlugin(codec)
+```
+
+Wire name = snake_case type name (`FetchBlob` → `fetch_blob`).
+
+| Kwarg | Values | Meaning |
+|-------|--------|---------|
+| `dispatch` | `bridge` (default) / `workers(n)` / `inplace` | plugin runs on the bridge thread (must be non-blocking) / a host worker pool (may block) / the caller's thread (must reply inline) |
+| `autoWire` | `true` (default) / `false` | `true`: plugin's `provide` installs itself as the provider; `false`: owner wires via `extProvider` / `extFallback` |
+| `importc` + `dynlib` | C symbol, library pattern | K1 native import (short form); body form = `dynlib` + an `{.importc.}` proc + a real `signature` body |
+| `importLib` + `dynlib` | peer lib name, pattern | K2: names served by another nim-brokers library's `(API)` |
+
+`registerExtPlugin(p, version, dispatch, autoWire, load = eager|manual)` sets
+plugin-wide defaults; `load` applies to imports only.
+
+Wiring a source:
+- **Exe mode:** `ExtHost.start()` then `ExtHost.loadPlugin(path)` — the library
+  exports `broker_ext_plugin_entry(host)`.
+- **Lib mode:** `exportExtHost("<lib>")` in the Nim library; the host app calls
+  `<lib>_extHost()` and opens a port on its context.
+- **Imports:** `ExtPlugin.load(name, ctx)`; missing symbols stay unprovided,
+  details in `ExtPlugin.loadError(name)`.
+
+Switching / mocking (owner thread; the usual owner-only MT verbs apply). With
+`autoWire = true` the **bridge thread owns the slot** once a source provides
+it, so user-thread `replaceProvider` / `setProvider` return `err` and
+`withMockProvider` asserts — use **`autoWire = false`** for anything you
+reprovide, fall back from or mock (K1 imports included):
+
+```nim
+discard FetchBlob.setProvider(ctx, FetchBlob.extFallback(ctx, nimImpl)) # plugin if present, else Nim
+discard FetchBlob.replaceProvider(ctx, nimImpl)                         # force Nim (gapless)
+discard FetchBlob.replaceProvider(ctx, FetchBlob.extProvider(ctx))      # force plugin
+if FetchBlob.extAvailable(ctx): discard                                 # a port provides it?
+FetchBlob.withMockProvider(ctx, mock):                                  # tests: mock wins
+  discard
+# signals: CompactHint.extHandler(ctx) / CompactHint.extFallback(ctx, nimHandler)
+```
+
+Raw CBOR by `(plugin, wire name)`: `ExtTunnel.call / signal / listen`.
+
+Generated plugin-side wrappers (next to the binary; separate from `(API)`'s):
+
+| Flag | Emits |
+|------|-------|
+| *(default)* | `<plugin>_ext.h`, `broker_ext.h`, `<plugin>_ext.cddl`, `<plugin>_ext.hpp` (C1 class + `Responder<T>` / C2 sync / C3 `Builder`) |
+| `-d:BrokerFfiApiGenRust` | `<plugin>_ext_rs/` (R1 async trait / R2 sync / R4 `Builder`) |
+| `-d:BrokerFfiApiGenGo` | `<plugin>_ext_go/` (interface with `context.Context`, `OpenFuncs`) |
+| `-d:BrokerFfiApiGenPy` | `<plugin>_ext.py` (lib mode only) |
+
+EXTAPI rules:
+- Unwired → the same `no provider registered…` error as any unprovided broker;
+  timeout and `requestCancellable` / `cancel` reach the plugin as a cancel hint.
+- Raw pointer args (`ptr`, `pointer`, `openArray`, `cstring`) only with
+  `dispatch = inplace` — otherwise use the body form (compile error).
+- Port caps must fit the dispatch mode or `provide` returns
+  `DISPATCH_MISMATCH` (-18): `bridge` needs `CAP_NONBLOCKING`, `inplace` needs
+  `CAP_REPLY_INLINE`.
+- A plugin is all foreign brokers or all imports, never mixed (compile error).
+- A plugin's withdraw / close fails its in-flight calls at once
+  (`EXTAPI: provider withdrawn` / `port closed`); no silent retry.
+- Examples: `examples/extapi/` — `nimble runExtExample{Cpp,Rust,Go,Py}`.
 
 ---
 

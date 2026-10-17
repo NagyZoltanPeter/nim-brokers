@@ -15,6 +15,8 @@ There are four broker macros; each (except MultiRequestBroker) has single-thread
 - **MultiRequestBroker** — Multi-provider fan-out request/response (async only). Multiple providers register; `request()` calls all of them and aggregates results.
 - **SignalBroker** / **SignalBroker(mt)** — Fire-and-forget, single-handler, no-response: EventBroker's dispatch shape (sync call site + `asyncSpawn`, no reply path) fused with RequestBroker's single-registry and a `Result[void, string]` acceptance check. One handler installed via `TypeName.onSignal(...)`; producers call `TypeName.signal(...)` which returns `ok` (accepted — a handler exists and the queue had room, never "handled") or `err` (`"no signal handler installed"` / `"queue full"`). Handler errors are swallowed (chronicles warn) — for delivery confirmation use RequestBroker with a `void` response.
 
+The **EXTAPI** lane is the inverse of the FFI API: brokers declared `RequestBroker(EXTAPI[p])` / `EventBroker(EXTAPI[p])` / `SignalBroker(EXTAPI[p])` are **provided by an external plugin** (C, C++, Rust, Go, Python, or another nim-brokers library) and consumed from Nim with the ordinary verbs. Plugins bind through the function-table C ABI in `brokers/broker_ext.h`. See "EXTAPI specifics" below and `doc/FFI_API.md` § "EXTAPI".
+
 All brokers support **BrokerContext** for scoping — allowing multiple independent broker instances (e.g. one per component or per thread). The default context (`DefaultBrokerContext`) is used when no context argument is supplied.
 
 ### Single-thread vs Multi-thread brokers
@@ -48,6 +50,7 @@ Current test task coverage:
 - `nimble runFfiExample{Cpp,Py,Rust,Go}` — wrapper smoke-test examples, also iterate both memory managers
 - Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; the default iterates both, on every platform. Windows + refc is CI-green; the historical `skipRefcOnWindows` carve-out was removed after the teardown-sequence fix (`BrokerSignalShared` + `teardownBrokerThread`, regression-gated by `nimble testAllocRace` on the Windows CI cells — see `doc/LIMITATION.md` §2.2 for the mechanism and the remaining app-level caveat).
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
+- EXTAPI: `nimble testApi` runs every `test/test_ext_*.nim`, the lib-mode teardown test (`test_api_ext_lib_teardown`) and the foreign-thread path check (`testExtForeignPath`); `nimble runExtExample{Cpp,Rust,Go,Py}` run the `examples/extapi/` scenarios (orc + refc); `nimble testExt{Rust,Py}Wrapper` run the generated wrappers against a fake host; `nimble testExt{,Imports,Life,Switch}Asan{Orc,Refc}` and `runExtExampleCppAsan` are the ASAN gates (part of `allAsan`); `nimble testSugarRejects` holds the EXTAPI compile-time reject / warn cases
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
 
@@ -167,6 +170,23 @@ build/broker_debug/
                                        courier wiring, dispatch table
 ```
 
+EXTAPI brokers and plugins (`-d:BrokerFfiApi`) add:
+
+```
+build/broker_debug/
+  ├── <BrokerType>__RequestBrokerExt.gen.nim  ← EXTAPI request: forwarder, lane
+  │                                              provider, extProvider / extFallback,
+  │                                              inplace hooks (+ the MT broker)
+  ├── <BrokerType>ExtLane__RequestBrokerMt.gen.nim ← hidden raw-CBOR lane
+  ├── <BrokerType>__EventBrokerExt.gen.nim    ← EXTAPI event: bridge decode +
+  │                                              re-emit, tunnel (+ the MT broker)
+  ├── <BrokerType>__SignalBrokerExt.gen.nim   ← EXTAPI signal: forwarder,
+  │                                              extHandler, tunnel (+ the MT broker)
+  ├── <plugin>__ExtPlugin.gen.nim   ← `registerExtPlugin`: name table, plugin
+  │                                   descriptor, import trampolines, init proc
+  └── <lib>__ExtHost.gen.nim        ← `exportExtHost`: `<lib>_extHost()`
+```
+
 Each file starts with a 7-line header naming the role + type + notes.
 `cat build/broker_debug/*.gen.nim` gives the single-file view; `nph
 build/broker_debug/<X>.gen.nim` reformats one for readable browsing.
@@ -196,6 +216,7 @@ GitHub Actions CI currently runs:
 - `nimble runTypeMapTestLibRust`
 - `nimble runFfiExampleGo`
 - `nimble runTypeMapTestLibGo`
+- `nimble runExtExample{Py,Cpp,Rust,Go}`, `nimble testExt{Py,Rust}Wrapper` — in the Linux `examples` job **and** the `examples-windows` job (the only Windows example job; `examples` is ubuntu-only)
 
 Any change that affects broker runtime behavior, FFI generation, or example integration should preserve all of the above.
 
@@ -371,6 +392,17 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Generated Python wrapper support is optional and enabled with `-d:BrokerFfiApiGenPy`.
 - Generated Rust wrapper support is optional and enabled with `-d:BrokerFfiApiGenRust`. It emits a complete Cargo crate `<libName>_rs/` (Cargo.toml + src/lib.rs) next to the `.so`. The crate declares the C ABI via hand-written `extern "C"` blocks (no bindgen / no clang dep) and exposes the same `Lib::new() / create_context() / <request>(args) -> Result<T, String> / on_<event> / off_<event> / shutdown / Drop` surface the C++ wrapper provides.
 
+### EXTAPI specifics (`brokers/ext_plugin.nim`, `brokers/internal/ext_runtime.nim`, `brokers/internal/ext_brokers.nim`)
+
+- An EXTAPI broker is an ordinary MT broker with an extra source. `registerExtPlugin(p, …)` (two-stage: untyped front → typed `extTypeShapes` → `extRegisterPluginShaped`) emits the plugin descriptor and name table and burns a structural schema hash ("brokers-ext:2", `ext_shapes.nim`). Wire name = snake_case type name. Without `-d:BrokerFfiApi` an EXTAPI broker degrades to `(mt)` and `registerExtPlugin` is a no-op.
+- **Threads:** one shared **bridge** thread per process (chronos loop; runs `provide` / control ops and `bridge`-dispatch invokes) and one **worker pool per plugin**, sized to the largest `workers(n)` among its names and shared by them. Both start at `ExtHost.start()` / the first `<lib>_extHost()`. Contexts multiply ports, not threads: isolation is per port (routing, names, lifecycle), not execution.
+- **Dispatch is per broker** (`dispatch = bridge | workers(n) | inplace`, plugin default via `registerExtPlugin(p, dispatch = …)`): `bridge` needs port cap `NONBLOCKING`, `inplace` needs `REPLY_INLINE` (runs on the caller's thread), `workers` needs none; `provide` returns `DISPATCH_MISMATCH` otherwise. Caps are per port.
+- **autoWire** (default `true`): a plugin's `provide` installs the forwarder as the broker's provider, so the **bridge owns the provider slot** — reprovide / fallback / mock need `autoWire = false` and the owner wiring `extProvider` / `extFallback`. Off-bridge forwarders go through the hidden raw-CBOR `<T>ExtLane` MT broker.
+- **Imports:** K1 native C libraries (`importc` / `dynlib`, `inplace` fast path without CBOR, raw pointer args only with `inplace`); K2 peer nim-brokers libraries (`importLib`, one peer context per host context, schema compared per name). `ExtPlugin.load(name, ctx)`.
+- **Lifecycle:** `ExtHost.stop(joinTimeout = 5.seconds)` closes every port, fails pending calls (queued calls never run — at most once), joins the bridge and the pools. A worker still inside a foreign `invoke` after `joinTimeout` is leaked: `err` with the count, host stopped and restartable, the orphaned pool reaped by a later start / stop (`ExtHost.leakedWorkers()`). Refused (`err`, host left running) on the bridge or a worker thread. The bridge join is unbounded. Lib mode (`exportExtHost("<lib>", workerJoinTimeoutMs = 5000)`): `<lib>_shutdown(ctx)` closes that context's ports; the last context's shutdown stops the host.
+- **Foreign-thread entry points** (`extReply`, `extEmit`, … called from plugin threads) carry `{.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)` and must stay free of Nim heap / threadvars; `testExtForeignPath` scans the generated C for them. Keep that pragma on any new foreign-callable proc.
+- Generated plugin wrappers: `<plugin>_ext.h` + `<plugin>_ext.hpp` (always), `<plugin>_ext_rs/`, `<plugin>_ext_go/`, `<plugin>_ext.py` under the `-d:BrokerFfiApiGen{Rust,Go,Py}` flags, plus `<plugin>_ext.cddl`. Go and the Rust `Builder` serve `NONBLOCKING` names only (no `inplace`).
+
 ### Concurrency safety notes
 
 All brokers are designed for chronos cooperative multitasking on a single thread per context. Key properties:
@@ -389,6 +421,8 @@ brokers/
   multi_request_broker.nim  — Single-thread MultiRequestBroker macro
   signal_broker.nim         — Single-thread SignalBroker macro (re-exports internal/mt_signal_broker when --threads:on)
   api_library.nim           — Shared-library lifecycle/runtime generator (`registerBrokerLibrary`)
+  ext_plugin.nim            — EXTAPI public surface: `registerExtPlugin`, `ExtHost`, `ExtPlugin`, `exportExtHost`
+  broker_ext.h              — EXTAPI C ABI (`broker_ext_host` / `broker_ext_impl` function tables, status codes, caps)
   internal/
     api_common.nim          — Re-export hub for all codegen modules + legacy bridge + runtime memory helpers
     api_codegen_c.nim       — C type mapping, accumulators, header generation (.h)
@@ -418,6 +452,11 @@ brokers/
     mt_request_broker.nim   — Multi-thread RequestBroker(mt) macro
     mt_signal_broker.nim    — Multi-thread SignalBroker(mt) macro
     mt_broker_common.nim    — Shared runtime helpers for MT brokers (thread ID, generation, blockingAwait)
+    ext_runtime.nim         — EXTAPI host runtime: bridge thread, worker pools, ports, the broker_ext_host function table, lib-mode teardown
+    ext_brokers.nim         — EXTAPI codegen for Request/Event/SignalBroker(EXTAPI[p]): forwarder, `<T>ExtLane`, extProvider / extFallback, inplace hooks, tunnels
+    ext_shapes.nim          — Structural wire shapes for the plugin schema hash and K2 peer comparison
+    ext_types.nim           — Shared EXTAPI enums (dispatch mode, name kind)
+    ext_codegen_{hpp,rust,go,py}.nim — Generated plugin-side wrappers per language
     helper/
       broker_utils.nim      — Shared macro parsing utilities
 examples/
@@ -428,6 +467,7 @@ examples/
     python_example/main.py  — Python ctypes wrapper consumer example
     rust_example/           — Rust crate consumer example (Cargo.toml + build.rs + src/main.rs); switches build modes via the `cbor` Cargo feature
     go_example/             — Go module consumer example (go.mod + main.go + main_native.go + main_cbor.go); switches build modes via Go build tags
+  extapi/                   — EXTAPI examples: nimhost/ (exe mode host + mock test), nimlib/ (lib-mode storagelib), {cpp,rust,go}_plugin/, {cpp,rust,go}_cimport/, {cpp,rust,go,python}_host_lib/
   torpedo/                  - more complex demonstration of using API brokers, follows the same code and build structure as ffiapi example (now includes a `rust_example/` and `go_example/` alongside the C++/Python ones).
 test/
   test_event_broker.nim
@@ -438,6 +478,8 @@ test/
   test_api_request_broker.nim
   test_api_event_broker.nim
   test_api_library_init.nim
+  test_ext_*.nim            — EXTAPI: plugin / switching / imports (K1, K2) / lifecycle / schema; C plugins under test/ext/, wrapper harnesses test/ext/rust_wrapper_test/ + test/ext/test_ext_py_wrapper.py
+  test_api_ext_lib_teardown.nim — lib-mode EXTAPI teardown against test/extteardownlib/
   typemappingtestlib/       - exercises every Nim→C→C++/Python/Rust/Go type mapping through FFI and generated bindings. Includes a `rust_test/` Cargo crate and a `go_test/` Go module that run the same parity matrix as `test_typemappingtestlib.{cpp,py}`.
 ```
 

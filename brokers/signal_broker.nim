@@ -70,6 +70,8 @@ import ./internal/broker_debug
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_signal_broker
   export mt_config, mt_signal_broker
+  import ./internal/ext_brokers
+  export ext_brokers
 
 when compileOption("threads") and defined(BrokerFfiApi):
   import ./internal/api_signal_broker_cbor
@@ -614,6 +616,13 @@ macro SignalBroker*(args: varargs[untyped]): untyped =
   var kwargs: seq[NimNode]
   for i in 1 ..< args.len - 1:
     kwargs.add(args[i])
+  if mode.kind == nnkBracketExpr:
+    when not compileOption("threads"):
+      error("SignalBroker(EXTAPI[...]) requires --threads:on", mode)
+    else:
+      if not isExtMode(mode):
+        error("SignalBroker mode must be `mt`, `API` or `EXTAPI[<plugin>]`", mode)
+      return generateExtSignalBroker(mode, kwargs, body)
   let m = parseSignalBrokerMode(mode)
   case m
   of sbMultiThread:
