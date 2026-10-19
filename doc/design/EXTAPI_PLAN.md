@@ -1781,7 +1781,7 @@ matters.
 | K1 import: blocking C call under `inplace` | blocks the caller's loop (author's choice) | — |
 | K1 `bridge` / `workers(n)`: deadline while queued / running | queued → dropped, never called; running → resolves at once, C call finishes on its thread and the result is discarded | — |
 | K1 short form with `ptr` / `pointer` / `openArray` args under `bridge` / `workers` | compile error → use the body form | — |
-| K1 `workers(n)`: all `n` import threads blocked | further calls queue on the least-loaded worker, then hit their deadline | — |
+| K1 `workers(n)`: all `n` import threads blocked | further calls wait in the plugin's shared worker queue (4096 entries, then `EXTAPI: worker queue full`) and hit their deadline; queued calls past their deadline are dropped, never called | *as built:* one queue per plugin, not per worker (§16.3) |
 | K2 peer: `_getSchema` mismatch for an imported name | that broker's source is not registered; reason in `loadError` | — |
 | K2 peer: `_callAsync` returns `-6` | `err("ext: peer busy")` | — |
 | K2 peer: timeout | `err` timeout (peer's `-12`) | late peer response dropped by id |
@@ -2031,7 +2031,7 @@ and refc; the ASAN (refc) host run with the Go plugin is clean.
 | Topic | Finding | Handling |
 |---|---|---|
 | Python scope | a Python plugin cannot be a `dlopen`-able library, so exe mode (scenarios 1–4) needs an embedding host | Python covers lib mode (1b) only |
-| Two Go runtimes | `go_plugin` and `go_cimport` are separate c-shared libraries loaded into one process; Go does not promise this works | works on macOS (examples green); revisit if Linux CI disagrees — fallback is one c-shared library exporting both |
+| Two Go runtimes | `go_plugin` and `go_cimport` are separate c-shared libraries loaded into one process; Go does not promise this works | works on macOS, Linux and Windows (`examples` and `examples-windows` CI jobs, orc + refc); fallback if a Go release breaks it: one c-shared library exporting both |
 | Python cancel | `future.cancel()` path not exercised by the example (`notes` has no slow request) | exercised by `nimble testExtPyWrapper` (review F7): a cancelled async handler sends no reply |
 | gofmt | generated Go is `go vet`-clean; `gofmt` would only re-align struct fields / consts | left as is |
 | Windows | Go / Python examples run on Windows | `examples-windows` CI job (cgo on MinGW); `storagelib.dll` on `PATH` for the Go host |
@@ -2083,3 +2083,56 @@ Decisions:
 | Explicit `<lib>_extShutdown()` | not added | extra ABI function | the last-context rule covers the leak; no extra surface for the wrappers |
 | Per-ctx close vs. `shutdownRequest` hook | after the hook | before the in-flight drain | the hook may still flush through a plugin; cost: a call stuck in a plugin waits out the 5 s drain |
 | Host started by `ExtHost.start()` in a library | per-ctx close only, no stop | stop it too | whoever started it owns its stop |
+
+---
+
+## 16. Deferred, out of scope and open (as of PR #66)
+
+One list of what EXTAPI v1 deliberately does not do. Each row says where the
+decision is recorded; none blocks the merge.
+
+### 16.1 Out of scope by decision
+
+| Item | Decision | Where |
+|---|---|---|
+| Out-of-process plugins (Approach D, IPC transport) | not built; no `ExtTransport` seam | §D-5, §3 |
+| Join bound for the **bridge** thread at stop | not bounded: a `bridge` `invoke` that blocks breaks `CAP_NONBLOCKING`, and stop waits for it. Only worker threads get `joinTimeout` | §15 "Worker pool shutdown", `doc/FFI_API.md` § Wiring a source |
+| Per-context execution isolation | contexts multiply ports, not threads: the bridge, each plugin's worker pool, the inplace reply slots and the signal ring are shared per process | `doc/FFI_API.md` § Threads and isolation across contexts |
+
+### 16.2 Deferred features
+
+| Item | v1 behaviour | Where |
+|---|---|---|
+| `load = lazy` (load a K1 / K2 library on first call) | `eager` / `manual` only | §15 phase 2 deviations |
+| `inplace` for K2 peer libraries | not supported (peer ports advertise `NONBLOCKING`) | §15 phase 2 deviations |
+| `unload()` / per-context `unload(ctx)` | libraries stay mapped; peer contexts shut down at `ExtHost.stop()` and, in lib mode, with the host context they served | §15 phase 2 deviations |
+| K1 signals and events | K1 imports serve requests only ("no use case yet") | §15 phase 2 deviations |
+| K2 cancel | the late reply is dropped by id; there is no `_cancelAsync` to stop the peer's work | §15 phase 2 deviations |
+| Skipping the bridge hop for an author-owned `extProvider` | every off-bridge `bridge` / `workers` call goes through the hidden `<T>ExtLane` to the bridge | §10.1; measure first (§12 question 2) |
+| `Table` keys other than `string` | rejected at compile time | §15 phase 4 |
+| Schema hash of nested external types | identified by name only | §15 "Schema hash scope" |
+| `inplace` from Go and from the Rust `Builder` | both declare `NONBLOCKING` only; serve `inplace` names from C, the C++ C2 / C3 ports, the Rust R2 trait or Python | `doc/FFI_API.md` § Dispatch modes and capabilities |
+| Fixed limits | 32 plugins; 64 ports and 64 names per plugin; 256 concurrent inplace calls; 4096-entry rings | §15 "Limits" (fixed arrays keep foreign-thread paths allocation-free) |
+
+### 16.3 Open questions (§12), with the as-built state
+
+1. **K1 worker selection.** §5's plan (per-worker import threads, each with a
+   chronos loop and its own internal context, picked by least in-flight count)
+   was not built: the K1 adapter is synchronous, so K1 `workers(n)` names run
+   on the plugin's plain worker pool like foreign `workers` names. That pool
+   has **one shared FIFO queue**; whichever worker is idle pops the next call.
+   So the "least in-flight" property holds by construction (no call waits
+   behind a busy worker while another is idle), and the open part is only
+   **affinity**: same key → same worker, or per-key ordering. Not supported;
+   a library that needs it uses `workers(1)` (serialised), `inplace` (caller's
+   thread), or its own lock / per-key queue.
+2. **Cost of the `T → bridge` hop** for an author-owned `extProvider`: not
+   measured yet. Prerequisite for §10.1.
+
+### 16.4 Open, outside the feature
+
+| Item | State |
+|---|---|
+| Mark EXTAPI experimental in `doc/FFI_API.md` / README | not done |
+| EXTAPI under ASAN in CI | `testExt*Asan` are in `allAsan`, which only the manual `memcheck_ci.yml` runs; `runExtExampleCppAsan` runs nowhere in CI |
+
