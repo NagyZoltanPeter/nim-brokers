@@ -1546,6 +1546,17 @@ task testApiTeardownAsanRefc,
 
 const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
 
+proc cxxRuntimeForAsanHost(): string =
+  ## The ASan host is a C program that `dlopen`s a C++ plugin which throws.
+  ## ASan intercepts `__cxa_throw` and resolves the real one when the process
+  ## starts; with no C++ runtime loaded yet it stays null and the first throw
+  ## aborts (`CHECK failed: real___cxa_throw != 0`). Linking libstdc++ into the
+  ## host resolves it at startup. Linux only: macOS' libc++ path is unaffected.
+  when defined(linux):
+    " --passL:" & quoteArg("-Wl,--no-as-needed -lstdc++ -Wl,--as-needed")
+  else:
+    ""
+
 task runExtExampleCppAsan,
   "EXTAPI C++ examples with the Nim host under ASan+UBSan (refc; needs runExtExampleCpp's CMake build)":
   let buildDir = "examples/extapi/cmake-build"
@@ -1559,7 +1570,8 @@ task runExtExampleCppAsan,
   exec "nim c --cc:clang -d:BrokerFfiApi --threads:on --path:. --mm:refc -d:useMalloc --debugger:native " &
     "--outdir:examples/extapi/nimhost/build_asan -d:codecLib=" & quoteArg(codecLib) &
     " --passC:" & quoteArg(sanitizerCompileFlags("asan", "refc")) & " --passL:" &
-    quoteArg(sanitizerLinkFlags("asan")) & " examples/extapi/nimhost/storage_host.nim"
+    quoteArg(sanitizerLinkFlags("asan")) & cxxRuntimeForAsanHost() &
+    " examples/extapi/nimhost/storage_host.nim"
   setAsanEnv()
   exec quoteArg("examples/extapi/nimhost/build_asan" / extExeName("storage_host")) & " " &
     quoteArg(pluginLib)
