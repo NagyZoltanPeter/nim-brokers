@@ -321,6 +321,74 @@ jobs:
         shell: bash
         run: ci/nimble-strict.sh runExtExampleGo -y --verbose
 
+  # EXTAPI under ASan+UBSan (clang, debug): the four EXTAPI test files on orc
+  # and refc, and the C++ examples with an instrumented Nim host. The same
+  # tasks are in `allAsan` (manual memcheck_ci.yml); this job runs them on
+  # every push / PR. Every step runs (`if: always()`).
+  asan-extapi:
+    runs-on: ubuntu-latest
+    env:
+      NIM_VERSION: '2.2.12'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install clang + llvm-symbolizer
+        run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
+
+      - name: Install dependencies (nimble)
+        run: nimble install -d -y
+
+      - name: Fetch jsoncons (C++ wrapper dep)
+        run: |
+          if [ ! -d vendor/jsoncons/include ]; then
+            rm -rf vendor/jsoncons
+            git clone --depth 1 --branch v1.0.0 \
+              https://github.com/danielaparker/jsoncons.git vendor/jsoncons
+          fi
+
+      - name: testExtAsanOrc
+        if: always()
+        run: ci/nimble-strict.sh testExtAsanOrc -y --verbose
+
+      - name: testExtAsanRefc
+        if: always()
+        run: ci/nimble-strict.sh testExtAsanRefc -y --verbose
+
+      - name: testExtImportsAsanOrc
+        if: always()
+        run: ci/nimble-strict.sh testExtImportsAsanOrc -y --verbose
+
+      - name: testExtImportsAsanRefc
+        if: always()
+        run: ci/nimble-strict.sh testExtImportsAsanRefc -y --verbose
+
+      - name: testExtLifeAsanOrc
+        if: always()
+        run: ci/nimble-strict.sh testExtLifeAsanOrc -y --verbose
+
+      - name: testExtLifeAsanRefc
+        if: always()
+        run: ci/nimble-strict.sh testExtLifeAsanRefc -y --verbose
+
+      - name: testExtSwitchAsanOrc
+        if: always()
+        run: ci/nimble-strict.sh testExtSwitchAsanOrc -y --verbose
+
+      - name: testExtSwitchAsanRefc
+        if: always()
+        run: ci/nimble-strict.sh testExtSwitchAsanRefc -y --verbose
+
+      - name: runExtExampleCppAsan
+        if: always()
+        run: ci/nimble-strict.sh runExtExampleCppAsan -y --verbose
+
   nph:
     runs-on: ubuntu-latest
     steps:
