@@ -1300,7 +1300,7 @@ task runTypeMapTestLibPy,
 proc sanitizerSuppPath(name: string): string =
   thisDir() / "tools" / "sanitizers" / name
 
-proc sanitizerCompileFlags(mode: string): string =
+proc sanitizerCompileFlags(mode: string, mm = ""): string =
   case mode
   of "tsan":
     result = "-fsanitize=thread -fno-omit-frame-pointer -g"
@@ -1308,6 +1308,13 @@ proc sanitizerCompileFlags(mode: string): string =
     result =
       "-fsanitize=address -fsanitize=undefined " &
       "-fno-sanitize=function,vptr -fno-omit-frame-pointer -g"
+    if mm == "refc":
+      # refc finds roots by scanning the native stack and treats a write as a
+      # stack write by address (`isOnStack`). ASan's stack-use-after-return
+      # mode moves locals onto a heap-allocated fake stack, where refc sees
+      # neither: live objects get collected (heap corruption, null TNimType).
+      # clang >= 15 enables that mode by default on Linux, not on macOS.
+      result.add(" -fsanitize-address-use-after-return=never")
     when defined(windows):
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
       result.add(" -gcodeview")
@@ -1422,7 +1429,7 @@ proc testSan(mode, mm, path: string, extra = "") =
   if mode == "tsan":
     flags.add(" --tlsEmulation:off")
   flags.add(
-    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
       quoteArg(sanitizerLinkFlags(mode)) & " --path:. --out:" & quoteArg(outputPath)
   )
   if extra.len > 0:
@@ -1549,10 +1556,11 @@ task runExtExampleCppAsan,
   mkDir(buildDir)
   exec "cmake -S examples/extapi -B " & buildDir & cmakeWindowsConfigureExtras()
   exec "cmake --build " & buildDir
-  exec "nim c -d:BrokerFfiApi --threads:on --path:. --mm:refc -d:useMalloc --debugger:native " &
+  exec "nim c --cc:clang -d:BrokerFfiApi --threads:on --path:. --mm:refc -d:useMalloc --debugger:native " &
     "--outdir:examples/extapi/nimhost/build_asan -d:codecLib=" & quoteArg(codecLib) &
-    " --passC:" & quoteArg(sanitizerCompileFlags("asan")) & " --passL:" &
+    " --passC:" & quoteArg(sanitizerCompileFlags("asan", "refc")) & " --passL:" &
     quoteArg(sanitizerLinkFlags("asan")) & " examples/extapi/nimhost/storage_host.nim"
+  setAsanEnv()
   exec quoteArg("examples/extapi/nimhost/build_asan" / extExeName("storage_host")) & " " &
     quoteArg(pluginLib)
 
@@ -1636,7 +1644,7 @@ proc runSanitizedPersistenceCpp(mode, mm: string) =
     libFlags.add(" --tlsEmulation:off")
   libFlags.add(nimMainPrefixFlag("persistence"))
   libFlags.add(
-    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
       quoteArg(sanitizerLinkFlags(mode, sharedLib = true))
   )
   libFlags.add(persistenceLibOutFlag())
