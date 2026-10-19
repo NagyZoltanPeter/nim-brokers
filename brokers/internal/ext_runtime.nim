@@ -439,7 +439,10 @@ type
 # ---------------------------------------------------------------------------
 
 proc init[T](r: var ExtRing[T], cap: int) =
-  r.buf = cast[ptr UncheckedArray[T]](c_calloc(csize_t(cap), csize_t(sizeof(T))))
+  # Nim's shared heap, like the structs that hold the ring: under refc that
+  # heap is not malloc, so a malloc'd buffer referenced only from it would
+  # look unreachable to LeakSanitizer.
+  r.buf = cast[ptr UncheckedArray[T]](allocShared0(cap * sizeof(T)))
   r.cap = cap
   r.head = 0
   r.count = 0
@@ -448,7 +451,7 @@ proc init[T](r: var ExtRing[T], cap: int) =
 proc deinit[T](r: var ExtRing[T]) =
   ## Free the ring's storage; the ring must be empty and unused.
   if not r.buf.isNil:
-    c_free(r.buf)
+    deallocShared(r.buf)
     r.buf = nil
   r.cap = 0
   deinitLock(r.lock)

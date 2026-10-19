@@ -16,3 +16,12 @@
 # here as they are triaged. Example (commented out until confirmed):
 # race:nimGCvisit
 # race:chronos
+
+# EXTAPI K2 tests (test_ext_imports, test_ext_schema) build a peer nim-brokers
+# library at test time WITHOUT TSan instrumentation and load it. TSan cannot
+# see that library's own synchronisation, so a file descriptor it creates on
+# its thread and later signals through (the eventfd behind chronos'
+# ThreadSignalPtr.fireSync) is reported as a race against the bridge thread.
+# Scoped to calls made from those uninstrumented test libraries only.
+called_from_lib:libpeerlib.so
+called_from_lib:libpeerlib_schema.so
