@@ -2011,7 +2011,7 @@ is clean.
 | Topic | Finding | Handling |
 |---|---|---|
 | Runtime | R1 must not force tokio | `Spawn` is any `Fn(BoxFuture)`; crate depends on `futures` only |
-| R2 | compiled and type-checked, not exercised at runtime by the examples (no `inplace` / `workers` foreign broker in `storage`) | follow-up: a raw-kv-style test plugin in Rust |
+| R2 | not exercised at runtime by the examples (no `inplace` / `workers` foreign broker in `storage`) | exercised by `nimble testExtRustWrapper` (review F7): R2 replies inline, R1 / R2 panics become error replies, a dropped future replies `dropped`, cancel drops the future without a reply |
 | Table keys | non-`String` keys need the `(API)` lane's `cbor_strkey_map` adapter | rejected at compile time for EXTAPI v1 |
 | Windows | Rust examples run on Windows | `examples-windows` CI job (MSVC toolchain); `storagelib.dll` on `PATH` for the lib-mode host |
 
@@ -2032,7 +2032,7 @@ and refc; the ASAN (refc) host run with the Go plugin is clean.
 |---|---|---|
 | Python scope | a Python plugin cannot be a `dlopen`-able library, so exe mode (scenarios 1–4) needs an embedding host | Python covers lib mode (1b) only |
 | Two Go runtimes | `go_plugin` and `go_cimport` are separate c-shared libraries loaded into one process; Go does not promise this works | works on macOS (examples green); revisit if Linux CI disagrees — fallback is one c-shared library exporting both |
-| Python cancel | `future.cancel()` path compiled and wired, not exercised (`notes` has no slow request) | follow-up together with the Rust R2 runtime test |
+| Python cancel | `future.cancel()` path not exercised by the example (`notes` has no slow request) | exercised by `nimble testExtPyWrapper` (review F7): a cancelled async handler sends no reply |
 | gofmt | generated Go is `go vet`-clean; `gofmt` would only re-align struct fields / consts | left as is |
 | Windows | Go / Python examples run on Windows | `examples-windows` CI job (cgo on MinGW); `storagelib.dll` on `PATH` for the Go host |
 
