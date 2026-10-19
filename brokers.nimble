@@ -1425,7 +1425,8 @@ proc testSan(mode, mm, path: string, extra = "") =
   # way TSan can't see, producing false-positive races on alloc/dealloc.
   var flags =
     "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE " &
-    "-d:noSignalHandler -d:useMalloc --threads:on --mm:" & mm
+    "-d:noSignalHandler -d:useMalloc --threads:on --mm:" & mm & " -d:brokerSanitizer=" &
+    mode
   if mode == "tsan":
     flags.add(" --tlsEmulation:off")
   flags.add(

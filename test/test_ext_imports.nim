@@ -13,6 +13,19 @@ import std/atomics
 import brokers/[request_broker, event_broker, signal_broker, ext_plugin]
 
 const repoRoot = currentSourcePath.parentDir.parentDir
+
+const brokerSanitizer {.strdefine.} = ""
+  ## Set by the nimble sanitizer tasks (`testSan`): the peer library built at
+  ## test time must be instrumented too, or TSan cannot see its
+  ## synchronisation and reports races on data it hands across threads.
+
+proc peerSanFlags(): string =
+  if brokerSanitizer == "tsan":
+    " --cc:clang -d:useMalloc --tlsEmulation:off --passC:'-fsanitize=thread -g'" &
+      " --passL:-fsanitize=thread"
+  else:
+    ""
+
 when defined(windows):
   const codecLib = repoRoot & "/build/codec.dll"
 elif defined(macosx):
@@ -202,8 +215,9 @@ suite "EXTAPI native C imports (K1)":
     let mm = (when defined(gcOrc): "orc" else: "refc")
     let cmd =
       "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
-      " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
-      "/build/peerlib_out -o:" & peerLib & " " & repoRoot & "/test/ext/peerlib.nim"
+      peerSanFlags() & " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" &
+      repoRoot & "/build/peerlib_out -o:" & peerLib & " " & repoRoot &
+      "/test/ext/peerlib.nim"
     check execCmd(cmd) == 0
     check ExtHost.start().isOk
     let ctx = NewBrokerContext()

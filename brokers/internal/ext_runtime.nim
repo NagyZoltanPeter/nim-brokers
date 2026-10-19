@@ -294,7 +294,7 @@ type
       ## this ctx" check, the one-time peer resolve and the port setup.
     ports: array[ExtMaxPorts, ExtPortSlot]
     pool: ptr ExtWorkerPool
-    loadError: cstring ## K1: c_malloc'd, last `extImportLoad` diagnostics
+    loadError: cstring ## K1: shared heap, last `extImportLoad` diagnostics
     resolved: uint64 ## K1: names whose symbols resolved (bit per nameIdx)
     peerFns: ptr PeerFns ## K2: resolved peer C ABI (once per process)
     peers: array[ExtMaxPorts, ptr ExtPeerUser] ## K2: one per loaded host ctx
@@ -1721,10 +1721,10 @@ proc extPeerLoad(pluginIdx: int, ctx: BrokerContext): Result[void, string]
 proc setLoadError(rt: ptr ExtPluginRt, msg: string) =
   withLock(rt.lock):
     if not rt.loadError.isNil:
-      c_free(rt.loadError)
+      deallocShared(rt.loadError)
       rt.loadError = nil
     if msg.len > 0:
-      rt.loadError = cast[cstring](c_malloc(csize_t(msg.len + 1)))
+      rt.loadError = cast[cstring](allocShared0(msg.len + 1))
       if not rt.loadError.isNil:
         copyMem(rt.loadError, unsafeAddr msg[0], msg.len)
         cast[ptr UncheckedArray[char]](rt.loadError)[msg.len] = '\0'
@@ -1998,7 +1998,8 @@ proc peerInvoke(
 {.pop.}
 
 proc resolvePeer(lib: LibHandle, prefix: string): Result[ptr PeerFns, string] =
-  let f = cast[ptr PeerFns](c_calloc(1, csize_t(sizeof(PeerFns))))
+  # Shared heap, like the plugin record that holds it (see ExtRing.init).
+  let f = cast[ptr PeerFns](allocShared0(sizeof(PeerFns)))
   var missing: seq[string]
   template res(field, suffix: untyped) =
     let symName = prefix & suffix
@@ -2019,7 +2020,7 @@ proc resolvePeer(lib: LibHandle, prefix: string): Result[ptr PeerFns, string] =
   res(unsubscribe, "_unsubscribe")
   res(getSchema, "_getSchema")
   if missing.len > 0:
-    c_free(f)
+    deallocShared(f)
     return err("missing peer symbols: " & missing.join(", "))
   ok(f)
 

@@ -15,6 +15,18 @@ import brokers/internal/ext_runtime
 
 const repoRoot = currentSourcePath.parentDir.parentDir
 
+const brokerSanitizer {.strdefine.} = ""
+  ## Set by the nimble sanitizer tasks (`testSan`): the peer library built at
+  ## test time must be instrumented too, or TSan cannot see its
+  ## synchronisation and reports races on data it hands across threads.
+
+proc peerSanFlags(): string =
+  if brokerSanitizer == "tsan":
+    " --cc:clang -d:useMalloc --tlsEmulation:off --passC:'-fsanitize=thread -g'" &
+      " --passL:-fsanitize=thread"
+  else:
+    ""
+
 # --- a plugin whose hash is pinned (golden) ---------------------------------
 # Foreign plugins get generated wrappers, which map inline payload fields
 # only; nested object shapes are exercised by the K2 test below.
@@ -94,8 +106,8 @@ suite "EXTAPI schema":
     let mm = (when defined(gcOrc): "orc" else: "refc")
     let cmd =
       "nim c --hints:off --app:lib -d:BrokerFfiApi --threads:on --mm:" & mm &
-      " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" & repoRoot &
-      "/build/peerlib_schema_out -o:" & peerLib & " " & repoRoot &
+      peerSanFlags() & " --nimMainPrefix:peerlib --path:" & repoRoot & " --outdir:" &
+      repoRoot & "/build/peerlib_schema_out -o:" & peerLib & " " & repoRoot &
       "/test/ext/peerlib.nim"
     check execCmd(cmd) == 0
     check ExtHost.start().isOk
