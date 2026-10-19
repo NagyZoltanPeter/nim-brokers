@@ -2134,5 +2134,5 @@ decision is recorded; none blocks the merge.
 | Item | State |
 |---|---|
 | Mark EXTAPI experimental in `doc/FFI_API.md` / README | not done |
-| EXTAPI under ASAN in CI | done: the `asan-extapi` CI job (Linux, clang) runs the eight `testExt*Asan` tasks and `runExtExampleCppAsan` on every push / PR |
+| EXTAPI under sanitizers in CI | done: the `asan-extapi` CI job (Linux, clang) runs the eight `testExt*Asan` tasks, `runExtExampleCppAsan`, `testExtTsan` (ThreadSanitizer) and `testExtAsanLeak` (LeakSanitizer) on every push / PR |
 

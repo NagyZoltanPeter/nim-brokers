@@ -50,7 +50,7 @@ Current test task coverage:
 - `nimble runFfiExample{Cpp,Py,Rust,Go}` — wrapper smoke-test examples, also iterate both memory managers
 - Override via `MM=orc nimble runTypeMapTestLibPy` (or `MM=refc`) to run a single MM; the default iterates both, on every platform. Windows + refc is CI-green; the historical `skipRefcOnWindows` carve-out was removed after the teardown-sequence fix (`BrokerSignalShared` + `teardownBrokerThread`, regression-gated by `nimble testAllocRace` on the Windows CI cells — see `doc/LIMITATION.md` §2.2 for the mechanism and the remaining app-level caveat).
 - `nimble perftest` — performance and stress tests for the multi-thread brokers
-- EXTAPI: `nimble testApi` runs every `test/test_ext_*.nim`, the lib-mode teardown test (`test_api_ext_lib_teardown`) and the foreign-thread path check (`testExtForeignPath`); `nimble runExtExample{Cpp,Rust,Go,Py}` run the `examples/extapi/` scenarios (orc + refc); `nimble testExt{Rust,Py}Wrapper` run the generated wrappers against a fake host; `nimble testExt{,Imports,Life,Switch}Asan{Orc,Refc}` (also in `allAsan`) and `runExtExampleCppAsan` are the ASAN gates, run by the `asan-extapi` CI job; `nimble testSugarRejects` holds the EXTAPI compile-time reject / warn cases
+- EXTAPI: `nimble testApi` runs every `test/test_ext_*.nim`, the lib-mode teardown test (`test_api_ext_lib_teardown`) and the foreign-thread path check (`testExtForeignPath`); `nimble runExtExample{Cpp,Rust,Go,Py}` run the `examples/extapi/` scenarios (orc + refc); `nimble testExt{Rust,Py}Wrapper` run the generated wrappers against a fake host; `nimble testExt{,Imports,Life,Switch}Asan{Orc,Refc}` (also in `allAsan`), `runExtExampleCppAsan`, `testExtTsan` (ThreadSanitizer, also in `allTsan`) and `testExtAsanLeak` (LeakSanitizer, Linux; also in `allAsanLeak`) are the sanitizer gates, run by the `asan-extapi` CI job; `nimble testSugarRejects` holds the EXTAPI compile-time reject / warn cases
 
 To compile and run a single test file, always use `--outdir:build` to avoid polluting the git workspace with binaries:
 
@@ -217,7 +217,7 @@ GitHub Actions CI currently runs:
 - `nimble runFfiExampleGo`
 - `nimble runTypeMapTestLibGo`
 - `nimble runExtExample{Py,Cpp,Rust,Go}`, `nimble testExt{Py,Rust}Wrapper` — in the Linux `examples` job **and** the `examples-windows` job (the only Windows example job; `examples` is ubuntu-only)
-- `nimble testExt{,Imports,Life,Switch}Asan{Orc,Refc}`, `nimble runExtExampleCppAsan` — the `asan-extapi` job (Linux, clang)
+- `nimble testExt{,Imports,Life,Switch}Asan{Orc,Refc}`, `runExtExampleCppAsan`, `testExtTsan`, `testExtAsanLeak` — the `asan-extapi` job (Linux, clang)
 
 Any change that affects broker runtime behavior, FFI generation, or example integration should preserve all of the above.
 

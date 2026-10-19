@@ -20,7 +20,7 @@ static const broker_ext_host* H = NULL;
 static broker_ext_port P = 0;
 
 #define MAX_PARKED 64
-static broker_ext_call_id parked[MAX_PARKED];
+static _Atomic broker_ext_call_id parked[MAX_PARKED]; /* 0 = empty */
 static atomic_int parkedCount = 0;
 static atomic_int cancelCount = 0;
 static atomic_int releaseCount = 0;
@@ -110,7 +110,7 @@ static void on_invoke(void* user, broker_ext_call_id id, uint32_t idx,
     }
   } else if (strcmp(name, "slow_op") == 0) {
     int i = atomic_fetch_add(&parkedCount, 1);
-    if (i < MAX_PARKED) parked[i] = id;
+    if (i < MAX_PARKED) atomic_store(&parked[i], id);
   }
 }
 
@@ -143,8 +143,12 @@ int32_t raw_storage_release_slow(void) {
   int n = atomic_exchange(&parkedCount, 0);
   if (n > MAX_PARKED) n = MAX_PARKED;
   const uint8_t out[] = {0xa1, 0x61, 'n', 0x07};
-  for (int i = 0; i < n; i++)
-    H->reply(H->host, P, parked[i], BROKER_EXT_REPLY_OK, out, sizeof out);
+  for (int i = 0; i < n; i++) {
+    broker_ext_call_id id;
+    /* the slot is reserved (count) just before it is stored: wait for it */
+    while ((id = atomic_exchange(&parked[i], 0)) == 0) {}
+    H->reply(H->host, P, id, BROKER_EXT_REPLY_OK, out, sizeof out);
+  }
   return n;
 }
 

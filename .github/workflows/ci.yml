@@ -321,8 +321,9 @@ jobs:
         shell: bash
         run: ci/nimble-strict.sh runExtExampleGo -y --verbose
 
-  # EXTAPI under ASan+UBSan (clang, debug): the four EXTAPI test files on orc
-  # and refc, and the C++ examples with an instrumented Nim host. The same
+  # EXTAPI under the sanitizers (clang, debug): the four EXTAPI test files on
+  # orc and refc under ASan+UBSan, TSan and ASan+LSan (leaks, Linux), and the
+  # C++ examples with an instrumented Nim host. The same
   # tasks are in `allAsan` (manual memcheck_ci.yml); this job runs them on
   # every push / PR. Every step runs (`if: always()`).
   asan-extapi:
@@ -388,6 +389,14 @@ jobs:
       - name: runExtExampleCppAsan
         if: always()
         run: ci/nimble-strict.sh runExtExampleCppAsan -y --verbose
+
+      - name: testExtTsan
+        if: always()
+        run: ci/nimble-strict.sh testExtTsan -y --verbose
+
+      - name: testExtAsanLeak
+        if: always()
+        run: ci/nimble-strict.sh testExtAsanLeak -y --verbose
 
   nph:
     runs-on: ubuntu-latest

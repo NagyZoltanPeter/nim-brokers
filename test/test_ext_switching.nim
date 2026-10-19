@@ -76,6 +76,7 @@ type LoadState = object
   ctx: BrokerContext
   stop: Atomic[int]
   nim, plugin, errors, withdrawRaces, total: Atomic[int]
+  done: Atomic[int] ## set as the thread's last step; `running(t)` is racy
 
 proc loadThread(st: ptr LoadState) {.thread.} =
   proc run() {.async.} =
@@ -97,6 +98,7 @@ proc loadThread(st: ptr LoadState) {.thread.} =
         discard st.nim.fetchAdd(1)
 
   waitFor run()
+  st.done.store(1)
 
 type CancelState = object
   ctx: BrokerContext
@@ -160,7 +162,7 @@ suite "EXTAPI phase 1b: Nim impl, switching, mocking, inplace, tunnel":
     ls.stop.store(1)
     while true: # let the last in-flight request finish on this (owner) thread
       waitFor sleepAsync(chronos.milliseconds(5))
-      if not lt.running:
+      if ls.done.load() == 1:
         break
     joinThread(lt)
     check ls.errors.load() == 0 # owner replaceProvider switches lose nothing

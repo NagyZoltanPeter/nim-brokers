@@ -1616,6 +1616,26 @@ task testExtSwitchAsanRefc,
   "Run the EXTAPI switching test under ASan+UBSan (clang, refc, debug)":
   testSan("asan", "refc", "test_ext_switching", extSwitchTestExtra)
 
+const extSanTests = [
+  ("test_ext_plugin", extPluginTestExtra),
+  ("test_ext_imports", extImportsTestExtra),
+  ("test_ext_lifecycle", extLifeTestExtra),
+  ("test_ext_switching", extSwitchTestExtra),
+]
+
+proc testExtSan(mode: string) =
+  for (path, extra) in extSanTests:
+    for mm in ["orc", "refc"]:
+      testSan(mode, mm, path, extra)
+
+task testExtTsan,
+  "Run the EXTAPI tests under ThreadSanitizer (clang, orc + refc, debug)":
+  testExtSan("tsan")
+
+task testExtAsanLeak,
+  "Run the EXTAPI tests under ASan+UBSan+LSan (leak detection on Linux; orc + refc)":
+  testExtSan("asanleak")
+
 task testApiSignalAsanOrc,
   "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":
   testSan("asan", "orc", "test_api_signal_broker", signalApiTestExtra)
@@ -1901,6 +1921,7 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
 
 task allTsan,
   "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
+  exec "nimble testExtTsan"
   exec "nimble testMtEventBrokerTsanOrc"
   exec "nimble testMtEventBrokerTsanRefc"
   exec "nimble testMtRequestBrokerTsanOrc"
@@ -1916,6 +1937,7 @@ task allTsan,
 
 task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
   # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
+  testExtSan("asanleak")
   testSan("asanleak", "orc", "test_multi_thread_event_broker")
   testSan("asanleak", "refc", "test_multi_thread_event_broker")
   testSan("asanleak", "orc", "test_multi_thread_request_broker")
