@@ -662,16 +662,20 @@ proc generateMtRequestBroker*(
   # ── Timeout knob (per broker type) ──────────────────────────────────
   result.add(
     quote do:
-      var `timeoutVarIdent`*: Duration = chronos.milliseconds(`requestTimeoutMsLit`)
-        ## Timeout for cross-thread requests, seeded from the declaration's
-        ## `requestTimeoutMs` kwarg (default 20 s) and mutable at runtime via
-        ## `setRequestTimeout`.
+      var `timeoutVarIdent`*: Atomic[int64]
+        ## Timeout for cross-thread requests in nanoseconds, seeded from the
+        ## declaration's `requestTimeoutMs` kwarg (default 20 s). Atomic: it is
+        ## set on one thread and read by every requesting thread (and by the
+        ## EXTAPI bridge). Use `setRequestTimeout` / `requestTimeout`.
+      `timeoutVarIdent`.store(
+        chronos.milliseconds(`requestTimeoutMsLit`).nanoseconds, moRelaxed
+      )
 
       proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
-        `timeoutVarIdent` = timeout
+        `timeoutVarIdent`.store(timeout.nanoseconds, moRelaxed)
 
       proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
-        `timeoutVarIdent`
+        chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
 
   )
 
@@ -1451,8 +1455,9 @@ proc generateMtRequestBroker*(
               capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
               return 2
         )
+        let reqTimeout = chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
         let completedRes = catch:
-          await withTimeout(responseFut, `timeoutVarIdent`)
+          await withTimeout(responseFut, reqTimeout)
         if completedRes.isErr():
           responseFut.cancelSoon()
           `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
@@ -1465,7 +1470,7 @@ proc generateMtRequestBroker*(
           `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
           return err(
             "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
-              $`timeoutVarIdent`
+              $reqTimeout
           )
         let recvRes = catch:
           responseFut.read()
@@ -1619,11 +1624,12 @@ proc generateMtRequestBroker*(
         # Saturate: `now + InfiniteDuration` (or any timeout that large)
         # overflows int64, so it means "no deadline".
         let start = Moment.now()
+        let reqTimeout = chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
         let deadline =
-          if `timeoutVarIdent` >= Moment.high() - start:
+          if reqTimeout >= Moment.high() - start:
             Moment.high()
           else:
-            start + `timeoutVarIdent`
+            start + reqTimeout
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx, slotGen):
             var decoded: Result[`payloadType`, string]
@@ -1661,7 +1667,7 @@ proc generateMtRequestBroker*(
           pool[].release(slotIdx, `shardHintIdent`())
         return err(
           "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
-            $`timeoutVarIdent`
+            $reqTimeout
         )
 
       proc `blockingSendAndAwaitIdent`(

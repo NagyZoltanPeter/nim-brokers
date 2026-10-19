@@ -178,10 +178,10 @@ suite "EXTAPI native C imports (K1)":
 
     # Deadline while running: resolves at once, the C call finishes on its
     # worker and its result is dropped.
-    let saved = gSlowSumMtTimeout
-    gSlowSumMtTimeout = chronos.milliseconds(100)
+    let saved = SlowSum.requestTimeout()
+    SlowSum.setRequestTimeout(chronos.milliseconds(100))
     check (waitFor SlowSum.request(ctx, @[byte 1], 400)).isErr
-    gSlowSumMtTimeout = saved
+    SlowSum.setRequestTimeout(saved)
     sleep(450)
 
     # Missing symbol: unprovided; a Nim fallback serves it.

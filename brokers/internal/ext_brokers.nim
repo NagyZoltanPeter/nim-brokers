@@ -362,7 +362,7 @@ proc generateExtRequestBroker*(
       "* {.global.}: int = -1\n" & "var " & argIdxVar & "* {.global.}: int = -1\n"
     # The lane never times out on its own: the bridge's `extCall` enforces the
     # public broker's deadline. Set once here (module init), never per call.
-    src.add("g" & laneType & "MtTimeout = InfiniteDuration\n")
+    src.add(laneType & ".setRequestTimeout(InfiniteDuration)\n")
     # Reply decoding, shared by every path.
     src.add(
       "proc extDecode_" & typeName & "(b: seq[byte]): " & resTy &
@@ -384,8 +384,7 @@ proc generateExtRequestBroker*(
         ", string]] {.async.} =\n" & "    var pIdx, nZero, nArg: int\n" &
         "    {.cast(gcsafe).}:\n" & "      pIdx = " & pluginIdxVar & "\n" &
         "      nZero = " & zeroIdxVar & "\n" & "      nArg = " & argIdxVar & "\n" &
-        "    var tmo: Duration\n" & "    {.cast(gcsafe).}:\n" & "      tmo = g" &
-        typeName & "MtTimeout\n" &
+        "    let tmo = " & typeName & ".requestTimeout()\n" &
         "    let r = await extCall(pIdx, (if slot == 0: nZero else: nArg), ctx, req, tmo)\n" &
         "    if r.isErr:\n" & "      return err(r.error)\n" & "    return ok(" & laneType &
         "(payload: r.value))\n"
@@ -600,8 +599,8 @@ proc generateExtRequestBroker*(
           "    var r: Result[seq[byte], string]\n" &
           "    if extNameDispatch(pIdx, nIdx) == edInplace:\n" &
           "      r = extCallInplace(pIdx, nIdx, ctx, enc.value)\n" &
-          "    elif extOnBridge():\n" & "      var tmo: Duration\n" &
-          "      {.cast(gcsafe).}:\n" & "        tmo = g" & typeName & "MtTimeout\n" &
+          "    elif extOnBridge():\n" & "      let tmo = " & typeName &
+          ".requestTimeout()\n" &
           "      r = await extCall(pIdx, nIdx, ctx, enc.value, tmo)\n" & "    else:\n" &
           "      let (laneId, laneFut) = " & laneType & ".requestCancellable(ctx, " &
           $slotLit & "'i32, enc.value)\n" & "      try:\n" &

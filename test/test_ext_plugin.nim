@@ -224,10 +224,10 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
     discard raw_storage_release_slow() # late reply: dropped, no crash
 
     # Timeout → the same cancel path.
-    let saved = gSlowOpMtTimeout
-    gSlowOpMtTimeout = chronos.milliseconds(100)
+    let saved = SlowOp.requestTimeout()
+    SlowOp.setRequestTimeout(chronos.milliseconds(100))
     let r6 = waitFor SlowOp.request(ctx)
-    gSlowOpMtTimeout = saved
+    SlowOp.setRequestTimeout(saved)
     check r6.isErr
     check waitUntil(
       proc(): bool =
@@ -341,10 +341,10 @@ suite "EXTAPI raw C plugin (bridge dispatch)":
     check elapsed < chronos.milliseconds(550)
 
     # workers: timeout while running → cancel hint, late reply dropped.
-    let saved = gSleepyMtTimeout
-    gSleepyMtTimeout = chronos.milliseconds(100)
+    let saved = Sleepy.requestTimeout()
+    Sleepy.setRequestTimeout(chronos.milliseconds(100))
     let rt = waitFor Sleepy.request(ctx, 400)
-    gSleepyMtTimeout = saved
+    Sleepy.setRequestTimeout(saved)
     check rt.isErr
     # The hint is sent by the bridge when its own deadline fires, which may
     # land just after the caller's (equal) MT timeout returned.

@@ -445,6 +445,14 @@ proc init[T](r: var ExtRing[T], cap: int) =
   r.count = 0
   initLock(r.lock)
 
+proc deinit[T](r: var ExtRing[T]) =
+  ## Free the ring's storage; the ring must be empty and unused.
+  if not r.buf.isNil:
+    c_free(r.buf)
+    r.buf = nil
+  r.cap = 0
+  deinitLock(r.lock)
+
 {.push checks: off, stackTrace: off, lineTrace: off.} # foreign-thread path (M2)
 proc tryPush[T](r: var ExtRing[T], v: T): bool =
   withLock(r.lock):
@@ -2266,6 +2274,7 @@ proc extLoadPlugin*(path: string): Result[void, string] =
   ok()
 
 proc freePool(pool: ptr ExtWorkerPool) =
+  pool.q.deinit()
   deallocShared(pool.exit)
   deallocShared(pool.threads)
   deinitCond(pool.cond)
