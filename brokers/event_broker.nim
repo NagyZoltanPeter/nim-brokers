@@ -92,6 +92,8 @@ import ./internal/broker_debug
 when compileOption("threads"):
   import ./internal/mt_config, ./internal/mt_event_broker
   export mt_config, mt_event_broker
+  import ./internal/ext_brokers
+  export ext_brokers
 
 when compileOption("threads") and defined(BrokerFfiApi):
   # Part A — native C-ABI codegen retired. See note in request_broker.nim.
@@ -674,6 +676,13 @@ macro EventBroker*(args: varargs[untyped]): untyped =
   var kwargs: seq[NimNode]
   for i in 1 ..< args.len - 1:
     kwargs.add(args[i])
+  if mode.kind == nnkBracketExpr:
+    when not compileOption("threads"):
+      error("EventBroker(EXTAPI[...]) requires --threads:on", mode)
+    else:
+      if not isExtMode(mode):
+        error("EventBroker mode must be `mt`, `API` or `EXTAPI[<plugin>]`", mode)
+      return generateExtEventBroker(mode, kwargs, body)
   let m = parseEventBrokerMode(mode)
   let split = (kwargs: kwargs, body: body)
   case m

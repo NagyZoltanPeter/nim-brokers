@@ -11,6 +11,11 @@ skipDirs = @["tests", "examples", "tools"]
 # Dependencies
 requires "nim >= 2.2.4"
 requires "chronos >= 4.0.0"
+# bearssl (via chronos) 0.3.0 requires Nim >= 2.2.12: cap it below that so Nim
+# 2.2.4 .. 2.2.11 still resolve (lower bound as nim-libp2p's `>= 0.2.7`). Nimble
+# evaluates this with the installing Nim, so 2.2.12+ gets the newer bearssl.
+when (NimMajor, NimMinor, NimPatch) < (2, 2, 12):
+  requires "bearssl >= 0.2.7 & < 0.3.0"
 requires "results >= 0.5.0"
 requires "chronicles >= 0.10.0"
 requires "testutils >= 0.5.0"
@@ -349,6 +354,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
     "test_mt_request_cancel", "test_mt_thread_dispatcher_ownership",
     "test_multi_thread_broker_scope", "test_mt_owner_only_clear",
+    "test_mt_request_infinite_timeout",
   ]
   for f in mtTests:
     for opt in [
@@ -444,7 +450,9 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
   # manifest under -d:BrokerFfiApi --threads:on.
   let apiRejects = [
     "reject_iface_apicollision", "reject_shutdownreq_noargless",
-    "reject_shutdownreq_dualslot",
+    "reject_shutdownreq_dualslot", "reject_ext_rawptr_workers",
+    "reject_ext_k1_managed_arg", "reject_ext_k1_managed_ret",
+    "reject_ext_too_many_names", "reject_ext_k1_body_rawptr", "reject_ext_event_dynlib",
   ]
   for f in apiRejects:
     let (outp, code) = gorgeEx(
@@ -455,6 +463,28 @@ task testSugarRejects, "Compile-fail tests: each test/reject/*.nim must NOT comp
       echo outp
       quit("REJECT TEST FAILED: " & f & " compiled but must not", 1)
     echo "  reject OK (correctly rejected): " & f
+  # Compile-with-warning checks: must compile AND print the warning.
+  let warns = [("warn_ext_inplace_timeout", "`dispatch = inplace` runs synchronously")]
+  for (f, needle) in warns:
+    let (outp, code) = gorgeEx(
+      "nim c --hints:off -d:BrokerFfiApi --threads:on --path:. --outdir:build/reject test/warn/" &
+        f & ".nim"
+    )
+    if code != 0 or needle notin outp:
+      echo outp
+      quit("WARN TEST FAILED: " & f & " must compile with the warning", 1)
+    echo "  warn OK: " & f
+  # Must compile (and run) WITHOUT -d:BrokerFfiApi: plain MT builds stay free
+  # of the EXTAPI runtime; EXTAPI brokers degrade to `(mt)`.
+  for f in ["check_ext_not_imported", "check_ext_degrade"]:
+    let (outp, code) = gorgeEx(
+      "nim c -r --hints:off --threads:on --path:. --outdir:build/reject test/warn/" & f &
+        ".nim"
+    )
+    if code != 0:
+      echo outp
+      quit("COMPILE CHECK FAILED: " & f, 1)
+    echo "  compile OK: " & f
   echo "all sugar-reject tests passed"
 
 task runFfiBenchEventStress,
@@ -608,7 +638,63 @@ task perftest, "Run performance and stress tests":
     ]:
       test opt, f
 
+proc checkExtForeignPathC() =
+  ## EXTAPI review M2: host-table procs run on foreign threads, so their C must
+  ## not push Nim frames (`nimfr_`) or contain checked raises. Compiles the raw
+  ## plugin test under refc (stack traces on by default in debug) and scans the
+  ## generated `ext_runtime` C for every function marked as a foreign path.
+  let cache = "build/extforeign/cache"
+  exec "nim c --hints:off -d:BrokerFfiApi --threads:on --mm:refc --path:. " &
+    "--outdir:build/extforeign --nimcache:" & cache & " test/test_ext_plugin.nim"
+  var cfile = ""
+  for f in listFiles(cache):
+    if f.endsWith("ext_runtime.nim.c"):
+      cfile = f
+  if cfile.len == 0:
+    quit("checkExtForeignPathC: ext_runtime C file not found", 1)
+  let src = readFile(cfile)
+  let names = [
+    "extOpen", "extClose", "extProvide", "extWithdraw", "extReply", "extEmit",
+    "extListApis", "extGetSchema", "extFreeBuffer", "extSchemaHash", "nameOp",
+    "postCtl", "inplaceFill", "lookupPort", "peerRespCb", "peerEventCb", "peerInvoke",
+    "cborHeadAt",
+  ]
+  var bad: seq[string]
+  for name in names:
+    var at = 0
+    while true:
+      let i = src.find(name & "__", at)
+      if i < 0:
+        break
+      at = i + 1
+      # A definition: the prototype line ends with "{" before the next ";".
+      let semi = src.find(';', i)
+      let brace = src.find('{', i)
+      if brace < 0 or (semi >= 0 and semi < brace):
+        continue
+      var depth = 1
+      var j = brace + 1
+      while depth > 0 and j < src.len:
+        if src[j] == '{':
+          inc depth
+        elif src[j] == '}':
+          dec depth
+        inc j
+      let body = src[brace .. j - 1]
+      for marker in ["nimfr_", "raiseOverflow", "raiseRangeError", "raiseIndexError"]:
+        if marker in body:
+          bad.add(name & ": " & marker)
+      break
+  if bad.len > 0:
+    quit("EXTAPI foreign-thread procs touch Nim runtime state: " & $bad, 1)
+  echo "  EXTAPI foreign-thread path C: clean (", names.len, " procs)"
+
+task testExtForeignPath,
+  "EXTAPI: foreign-thread host procs compile without Nim frames / checked raises":
+  checkExtForeignPathC()
+
 task testApi, "Run codec unit tests + library init integration tests":
+  checkExtForeignPathC()
   # Codec round-trip tests + event-courier drop evidence (no FFI flags needed).
   let codecTests = [
     "test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload",
@@ -638,6 +724,11 @@ task testApi, "Run codec unit tests + library init integration tests":
     ("test_broker_interface_api", "brokerifaceapi"),
     ("test_broker_interface_mt", "brokerifacemt"),
     ("typemappingtestlib/test_typemappingtestlib", "typemappingtestlib"),
+    ("test_ext_plugin", "extplugin"),
+    ("test_ext_switching", "extswitch"),
+    ("test_ext_imports", "extimports"),
+    ("test_ext_lifecycle", "extlife"),
+    ("test_ext_schema", "extschema"),
   ]
   for (f, prefix) in apiTests:
     for opt in [
@@ -648,6 +739,48 @@ task testApi, "Run codec unit tests + library init integration tests":
     ]:
       let extraOpt = nimMainPrefixFlag(prefix)
       test opt & extraOpt, f
+
+  # Module init runs once in a real `--app:lib` library (loaded via dlopen /
+  # LoadLibrary). `--noMain` (no loader hook, `_initialize` runs NimMain) is a
+  # POSIX-only variant: on Windows the generated `_initialize` never calls it.
+  let libFile =
+    when defined(windows):
+      "initoncelib.dll"
+    elif defined(macosx):
+      "libinitoncelib.dylib"
+    else:
+      "libinitoncelib.so"
+  var noMainVariants = @[false]
+  when not defined(windows):
+    noMainVariants.add true
+  for mm in ["orc", "refc"]:
+    for noMain in noMainVariants:
+      let variant = mm & (if noMain: "_nomain" else: "")
+      let libDir = "build/initoncelib_" & variant
+      exec "nim c --hints:off -d:BrokerFfiApi --threads:on --app:lib --mm:" & mm &
+        (if noMain: " --noMain" else: "") & " --path:. --outdir:" & libDir &
+        nimMainPrefixFlag("initoncelib") & " test/initoncelib/initoncelib.nim"
+      test "-d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm &
+        (if noMain: " -d:initOnceNoMain" else: "") & " -d:initOnceLib=" &
+        quoteArg(thisDir() / libDir / libFile), "test_api_module_init_once"
+
+  # Lib-mode EXTAPI teardown: `_shutdown` closes a context's plugin ports and
+  # the last context's shutdown stops the host (bridge + workers joined).
+  let tdLibFile =
+    when defined(windows):
+      "extteardownlib.dll"
+    elif defined(macosx):
+      "libextteardownlib.dylib"
+    else:
+      "libextteardownlib.so"
+  for mm in ["orc", "refc"]:
+    let libDir = "build/extteardownlib_" & mm
+    exec "nim c --hints:off -d:BrokerFfiApi -d:extTestHooks --threads:on --app:lib --mm:" &
+      mm & " --path:. --outdir:" & libDir & nimMainPrefixFlag("extteardownlib") &
+      " test/extteardownlib/extteardownlib.nim"
+    test "-d:nimUnittestOutputLevel:VERBOSE --threads:on --mm:" & mm &
+      " -d:extTeardownLib=" & quoteArg(thisDir() / libDir / tdLibFile),
+      "test_api_ext_lib_teardown"
 
 proc findCargoExe(): string =
   ## Returns the cargo invocation token. Resolving the symlink (rustup
@@ -725,6 +858,141 @@ task runFfiExampleCpp,
     buildFfiExampleLibrary()
     buildFfiCmakeTarget("example_cpp")
     exec quoteArg(ffiExampleExecutablePath("examples/ffiapi/cpp_example"))
+
+# ---------------------------------------------------------------------------
+# EXTAPI examples (doc/design/EXTAPI_PLAN.md §14)
+# ---------------------------------------------------------------------------
+
+proc extSharedLibName(name: string): string =
+  when defined(windows):
+    name & ".dll"
+  elif defined(macosx):
+    "lib" & name & ".dylib"
+  else:
+    "lib" & name & ".so"
+
+proc extExeName(name: string): string =
+  when defined(windows):
+    name & ".exe"
+  else:
+    name
+
+proc extLibOnPath() =
+  ## Windows has no rpath: the lib-mode hosts (C++ / Rust / Go) find
+  ## storagelib.dll through PATH.
+  when defined(windows):
+    let dir = thisDir() / "examples/extapi/nimlib/build"
+    if dir notin getEnv("PATH"):
+      putEnv("PATH", dir & ";" & getEnv("PATH"))
+
+proc buildExtStoragelib(mm: string, gen = "") =
+  ## Lib-mode library (storagelib); `gen` adds wrapper defines
+  ## (-d:BrokerFfiApiGenRust / GenGo / GenPy) for notes_ext_* + storagelib_*.
+  var lib =
+    "nim c -d:BrokerFfiApi --threads:on --app:lib --path:. " &
+    "--outdir:examples/extapi/nimlib/build --mm:" & mm & gen
+  lib.add(nimMainPrefixFlag("storagelib"))
+  lib.add(nimWindowsCcFlag())
+  lib.add(nimWindowsImplibFlag("examples/extapi/nimlib/build", "storagelib"))
+  exec lib & " examples/extapi/nimlib/storagelib.nim"
+
+proc buildExtExampleNim(mm, codecLib: string, gen = "") =
+  ## storagelib + the exe-mode host and mock test; the host build also writes
+  ## storage_ext.hpp (and storage_ext_rs / _go under `gen`) the plugins use.
+  buildExtStoragelib(mm, gen)
+  let host =
+    "nim c -d:BrokerFfiApi --threads:on --path:. --outdir:examples/extapi/nimhost/build" &
+    nimWindowsCcFlag() & " --mm:" & mm & gen & " -d:codecLib=" & quoteArg(codecLib)
+  exec host & " examples/extapi/nimhost/storage_host.nim"
+  exec host & " examples/extapi/nimhost/test_storage_mock.nim"
+
+task runExtExampleCpp,
+  "Build and run the EXTAPI C++ examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
+  let buildDir = "examples/extapi/cmake-build"
+  let codecLib = thisDir() / buildDir / extSharedLibName("codec_cpp")
+  let pluginLib = thisDir() / buildDir / extSharedLibName("storage_cpp_plugin")
+  extLibOnPath()
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExampleCpp: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtExampleNim(mm, codecLib)
+    mkDir(buildDir)
+    exec "cmake -S examples/extapi -B " & buildDir & cmakeWindowsConfigureExtras()
+    exec "cmake --build " & buildDir
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
+      quoteArg(pluginLib)
+    putEnv("EXT_PLUGIN", pluginLib)
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
+    exec quoteArg(buildDir / extExeName("storage_cpp_host_lib"))
+
+task runExtExampleRust,
+  "Build and run the EXTAPI Rust examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
+  let ex = thisDir() / "examples/extapi"
+  let codecLib = ex / "rust_cimport/target/debug" / extSharedLibName("codec_rust")
+  let pluginLib =
+    ex / "rust_plugin/target/debug" / extSharedLibName("storage_rust_plugin")
+  let cargo = quoteArg(findCargoExe())
+  extLibOnPath()
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExampleRust: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtExampleNim(mm, codecLib, " -d:BrokerFfiApiGenRust")
+    exec cargo & " build --manifest-path examples/extapi/rust_cimport/Cargo.toml"
+    exec cargo & " build --manifest-path examples/extapi/rust_plugin/Cargo.toml"
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
+      quoteArg(pluginLib)
+    putEnv("EXT_PLUGIN", pluginLib)
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
+    exec cargo & " run --manifest-path examples/extapi/rust_host_lib/Cargo.toml"
+
+proc buildExtWrapperGen() =
+  ## Generate the `life` plugin's Rust crate + Python module (test_ext_lifecycle)
+  ## into build/extwrap for the wrapper harnesses.
+  exec "nim c --hints:off -d:BrokerFfiApi -d:BrokerFfiApiGenRust -d:BrokerFfiApiGenPy " &
+    "--threads:on --path:. --outdir:build/extwrap --nimMainPrefix:extlife " &
+    "test/test_ext_lifecycle.nim"
+
+task testExtRustWrapper,
+  "EXTAPI: generated Rust wrapper against a fake host (R2, panics, dropped futures, cancel)":
+  buildExtWrapperGen()
+  exec quoteArg(findCargoExe()) &
+    " test --manifest-path test/ext/rust_wrapper_test/Cargo.toml"
+
+task testExtPyWrapper,
+  "EXTAPI: generated Python wrapper against a fake host (caps, sync offload, cancel, args)":
+  buildExtWrapperGen()
+  exec quoteArg(findPythonExe()) & " test/ext/test_ext_py_wrapper.py build/extwrap"
+
+task runExtExampleGo,
+  "Build and run the EXTAPI Go examples: plugin, switching, mocking, C import, lib mode (orc + refc)":
+  let ex = thisDir() / "examples/extapi"
+  let codecLib = ex / "go_cimport/build" / extSharedLibName("codec_go")
+  let pluginLib = ex / "go_plugin/build" / extSharedLibName("storage_go_plugin")
+  let go = quoteArg(findGoExe())
+  extLibOnPath()
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExampleGo: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtExampleNim(mm, codecLib, " -d:BrokerFfiApiGenGo")
+    withDir "examples/extapi/go_cimport":
+      exec go & " build -buildmode=c-shared -o " & quoteArg(codecLib) & " ."
+    withDir "examples/extapi/go_plugin":
+      exec go & " build -buildmode=c-shared -o " & quoteArg(pluginLib) & " ."
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("storage_host")) & " " &
+      quoteArg(pluginLib)
+    putEnv("EXT_PLUGIN", pluginLib)
+    exec quoteArg("examples/extapi/nimhost/build" / extExeName("test_storage_mock"))
+    withDir "examples/extapi/go_host_lib":
+      exec go & " run ."
+
+task runExtExamplePy,
+  "Build and run the EXTAPI Python example: lib mode, sync + async plugin (orc + refc)":
+  for mm in memoryManagerMatrix():
+    echo "\n=== runExtExamplePy: --mm:" & mm & " ==="
+    setMM(mm)
+    buildExtStoragelib(mm, " -d:BrokerFfiApiGenPy")
+    exec quoteArg(findPythonExe()) & " " &
+      quoteArg("examples/extapi/python_host_lib/main.py")
 
 task runFfiExamplePy,
   "Build the FFI example library + Python wrapper and run python_example/main.py (orc + refc)":
@@ -1032,7 +1300,7 @@ task runTypeMapTestLibPy,
 proc sanitizerSuppPath(name: string): string =
   thisDir() / "tools" / "sanitizers" / name
 
-proc sanitizerCompileFlags(mode: string): string =
+proc sanitizerCompileFlags(mode: string, mm = ""): string =
   case mode
   of "tsan":
     result = "-fsanitize=thread -fno-omit-frame-pointer -g"
@@ -1040,6 +1308,13 @@ proc sanitizerCompileFlags(mode: string): string =
     result =
       "-fsanitize=address -fsanitize=undefined " &
       "-fno-sanitize=function,vptr -fno-omit-frame-pointer -g"
+    if mm == "refc":
+      # refc finds roots by scanning the native stack and treats a write as a
+      # stack write by address (`isOnStack`). ASan's stack-use-after-return
+      # mode moves locals onto a heap-allocated fake stack, where refc sees
+      # neither: live objects get collected (heap corruption, null TNimType).
+      # clang >= 15 enables that mode by default on Linux, not on macOS.
+      result.add(" -fsanitize-address-use-after-return=never")
     when defined(windows):
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
       result.add(" -gcodeview")
@@ -1150,11 +1425,12 @@ proc testSan(mode, mm, path: string, extra = "") =
   # way TSan can't see, producing false-positive races on alloc/dealloc.
   var flags =
     "--cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE " &
-    "-d:noSignalHandler -d:useMalloc --threads:on --mm:" & mm
+    "-d:noSignalHandler -d:useMalloc --threads:on --mm:" & mm & " -d:brokerSanitizer=" &
+    mode
   if mode == "tsan":
     flags.add(" --tlsEmulation:off")
   flags.add(
-    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
       quoteArg(sanitizerLinkFlags(mode)) & " --path:. --out:" & quoteArg(outputPath)
   )
   if extra.len > 0:
@@ -1271,6 +1547,96 @@ task testApiTeardownAsanRefc,
 
 const signalApiTestExtra = "-d:BrokerFfiApi --nimMainPrefix:sigtest"
 
+proc cxxRuntimeForAsanHost(): string =
+  ## The ASan host is a C program that `dlopen`s a C++ plugin which throws.
+  ## ASan intercepts `__cxa_throw` and resolves the real one when the process
+  ## starts; with no C++ runtime loaded yet it stays null and the first throw
+  ## aborts (`CHECK failed: real___cxa_throw != 0`). Linking libstdc++ into the
+  ## host resolves it at startup. Linux only: macOS' libc++ path is unaffected.
+  when defined(linux):
+    " --passL:" & quoteArg("-Wl,--no-as-needed -lstdc++ -Wl,--as-needed")
+  else:
+    ""
+
+task runExtExampleCppAsan,
+  "EXTAPI C++ examples with the Nim host under ASan+UBSan (refc; needs runExtExampleCpp's CMake build)":
+  let buildDir = "examples/extapi/cmake-build"
+  let codecLib = thisDir() / buildDir / extSharedLibName("codec_cpp")
+  let pluginLib = thisDir() / buildDir / extSharedLibName("storage_cpp_plugin")
+  setMM("refc")
+  buildExtExampleNim("refc", codecLib)
+  mkDir(buildDir)
+  exec "cmake -S examples/extapi -B " & buildDir & cmakeWindowsConfigureExtras()
+  exec "cmake --build " & buildDir
+  exec "nim c --cc:clang -d:BrokerFfiApi --threads:on --path:. --mm:refc -d:useMalloc --debugger:native " &
+    "--outdir:examples/extapi/nimhost/build_asan -d:codecLib=" & quoteArg(codecLib) &
+    " --passC:" & quoteArg(sanitizerCompileFlags("asan", "refc")) & " --passL:" &
+    quoteArg(sanitizerLinkFlags("asan")) & cxxRuntimeForAsanHost() &
+    " examples/extapi/nimhost/storage_host.nim"
+  setAsanEnv()
+  exec quoteArg("examples/extapi/nimhost/build_asan" / extExeName("storage_host")) & " " &
+    quoteArg(pluginLib)
+
+const extPluginTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extplugin"
+
+task testExtAsanOrc,
+  "Run the EXTAPI raw-plugin test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_plugin", extPluginTestExtra)
+
+task testExtAsanRefc,
+  "Run the EXTAPI raw-plugin test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_plugin", extPluginTestExtra)
+
+const extSwitchTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extswitch"
+
+const extImportsTestExtra = "-d:BrokerFfiApi --nimMainPrefix:extimports"
+
+task testExtImportsAsanOrc,
+  "Run the EXTAPI native/peer import test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_imports", extImportsTestExtra)
+
+task testExtImportsAsanRefc,
+  "Run the EXTAPI native/peer import test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_imports", extImportsTestExtra)
+
+const extLifeTestExtra = "-d:BrokerFfiApi -d:extTestHooks --nimMainPrefix:extlife"
+
+task testExtLifeAsanOrc,
+  "Run the EXTAPI lifecycle / at-most-once test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_lifecycle", extLifeTestExtra)
+
+task testExtLifeAsanRefc,
+  "Run the EXTAPI lifecycle / at-most-once test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_lifecycle", extLifeTestExtra)
+
+task testExtSwitchAsanOrc,
+  "Run the EXTAPI switching test under ASan+UBSan (clang, orc, debug)":
+  testSan("asan", "orc", "test_ext_switching", extSwitchTestExtra)
+
+task testExtSwitchAsanRefc,
+  "Run the EXTAPI switching test under ASan+UBSan (clang, refc, debug)":
+  testSan("asan", "refc", "test_ext_switching", extSwitchTestExtra)
+
+const extSanTests = [
+  ("test_ext_plugin", extPluginTestExtra),
+  ("test_ext_imports", extImportsTestExtra),
+  ("test_ext_lifecycle", extLifeTestExtra),
+  ("test_ext_switching", extSwitchTestExtra),
+]
+
+proc testExtSan(mode: string) =
+  for (path, extra) in extSanTests:
+    for mm in ["orc", "refc"]:
+      testSan(mode, mm, path, extra)
+
+task testExtTsan,
+  "Run the EXTAPI tests under ThreadSanitizer (clang, orc + refc, debug)":
+  testExtSan("tsan")
+
+task testExtAsanLeak,
+  "Run the EXTAPI tests under ASan+UBSan+LSan (leak detection on Linux; orc + refc)":
+  testExtSan("asanleak")
+
 task testApiSignalAsanOrc,
   "Run FFI SignalBroker(API) slot-free _call test under ASan+UBSan (clang, orc, debug)":
   testSan("asan", "orc", "test_api_signal_broker", signalApiTestExtra)
@@ -1311,7 +1677,7 @@ proc runSanitizedPersistenceCpp(mode, mm: string) =
     libFlags.add(" --tlsEmulation:off")
   libFlags.add(nimMainPrefixFlag("persistence"))
   libFlags.add(
-    " --passC:" & quoteArg(sanitizerCompileFlags(mode)) & " --passL:" &
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
       quoteArg(sanitizerLinkFlags(mode, sharedLib = true))
   )
   libFlags.add(persistenceLibOutFlag())
@@ -1545,9 +1911,18 @@ task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
   exec "nimble testApiTeardownAsanRefc"
   exec "nimble testApiSignalAsanOrc"
   exec "nimble testApiSignalAsanRefc"
+  exec "nimble testExtAsanOrc"
+  exec "nimble testExtAsanRefc"
+  exec "nimble testExtSwitchAsanOrc"
+  exec "nimble testExtSwitchAsanRefc"
+  exec "nimble testExtImportsAsanOrc"
+  exec "nimble testExtImportsAsanRefc"
+  exec "nimble testExtLifeAsanOrc"
+  exec "nimble testExtLifeAsanRefc"
 
 task allTsan,
   "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
+  exec "nimble testExtTsan"
   exec "nimble testMtEventBrokerTsanOrc"
   exec "nimble testMtEventBrokerTsanRefc"
   exec "nimble testMtRequestBrokerTsanOrc"
@@ -1563,6 +1938,7 @@ task allTsan,
 
 task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
   # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
+  testExtSan("asanleak")
   testSan("asanleak", "orc", "test_multi_thread_event_broker")
   testSan("asanleak", "refc", "test_multi_thread_event_broker")
   testSan("asanleak", "orc", "test_multi_thread_request_broker")

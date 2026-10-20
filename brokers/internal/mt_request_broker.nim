@@ -58,6 +58,173 @@ proc isAsyncReturnTypeValid(returnType, typeIdent: NimNode): bool =
     return false
   inner[2].kind == nnkIdent and inner[2].eqIdent("string")
 
+proc addExtInplaceHooks(
+    generated, typeIdent: NimNode,
+    typeDisplayName: string,
+    payloadType: NimNode,
+    argParams: seq[NimNode],
+    hasZero, hasArg: bool,
+    requestIdName: NimNode,
+): NimNode =
+  ## EXTAPI `inplace` support (cfg.extInplaceHook). Forward-declares per-slot
+  ## hooks — implemented later by ext_brokers — and prepends a hook check to
+  ## the keyed `request` / `blockingRequest` / `requestCancellable` /
+  ## `blockingRequestCancellable` procs, so an auto-wired inplace source runs
+  ## on the calling thread with no MT hop. Never used for other brokers.
+  let resTy = quote:
+    Result[`payloadType`, string]
+  # Hook prototypes go right before the first patched proc: after the payload
+  # type section, before any use.
+  var decls = newStmtList()
+  var declsPlaced = false
+
+  proc hookDecl(name: string, params: seq[NimNode], withRes: bool): NimNode =
+    var formal = newTree(nnkFormalParams, ident("bool"))
+    formal.add(
+      newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
+    )
+    for p in params:
+      formal.add(copyNimTree(p))
+    if withRes:
+      formal.add(
+        newTree(
+          nnkIdentDefs,
+          ident("res"),
+          newTree(nnkVarTy, copyNimTree(resTy)),
+          newEmptyNode(),
+        )
+      )
+    newTree(
+      nnkProcDef,
+      ident(name),
+      newEmptyNode(),
+      newEmptyNode(),
+      formal,
+      newTree(
+        nnkPragma,
+        ident("gcsafe"),
+        newTree(nnkExprColonExpr, ident("raises"), newTree(nnkBracket)),
+      ),
+      newEmptyNode(),
+      newEmptyNode(),
+    )
+
+  let base = typeDisplayName & "ExtInplace"
+  if hasZero:
+    decls.add(hookDecl(base & "TryNoArgs", @[], true))
+    decls.add(hookDecl(base & "ActiveNoArgs", @[], false))
+  if hasArg:
+    decls.add(hookDecl(base & "TryArgs", cloneParams(argParams), true))
+    decls.add(hookDecl(base & "ActiveArgs", @[], false))
+
+  proc paramNamesOf(formal: NimNode, first, last: int): seq[NimNode] =
+    for i in first .. last:
+      let d = formal[i]
+      for j in 0 ..< d.len - 2:
+        result.add(copyNimTree(d[j])) # the param node itself: may be a gensym
+
+  proc patch(n: NimNode) =
+    var idx = 0
+    while idx < n.len:
+      let c = n[idx]
+      inc idx
+      if c.kind == nnkStmtList:
+        patch(c)
+      elif c.kind == nnkProcDef:
+        let nm = (if c[0].kind == nnkPostfix: $c[0][1] else: $c[0])
+        if nm notin [
+          "request", "blockingRequest", "requestCancellable",
+          "blockingRequestCancellable",
+        ]:
+          continue
+        let formal = c[3]
+        if formal.len < 3 or formal[2].len < 1 or not formal[2][0].eqIdent("brokerCtx"):
+          continue # non-keyed forwarder
+        var last = formal.len - 1
+        let hasIdOut = formal[last][0].eqIdent("idOut")
+        if hasIdOut:
+          dec last
+        let args = paramNamesOf(formal, 3, last)
+        let ctxNode = copyNimTree(formal[2][0])
+        let isArg = args.len > 0
+        if (isArg and not hasArg) or (not isArg and not hasZero):
+          continue
+        let tryName = ident(base & (if isArg: "TryArgs" else: "TryNoArgs"))
+        let activeName = ident(base & (if isArg: "ActiveArgs" else: "ActiveNoArgs"))
+        # Built node by node: `quote` would gensym the local while the call
+        # refers to it by plain ident.
+        proc ifReturn(cond, value: NimNode): NimNode =
+          newTree(
+            nnkIfStmt,
+            newTree(nnkElifBranch, cond, newStmtList(newTree(nnkReturnStmt, value))),
+          )
+
+        var hook = newStmtList()
+        case nm
+        of "request", "blockingRequest":
+          let resVar = ident("extInplaceRes")
+          var call = newCall(tryName, ctxNode)
+          for a in args:
+            call.add(a)
+          call.add(resVar)
+          hook.add(
+            newTree(
+              nnkVarSection,
+              newTree(nnkIdentDefs, resVar, copyNimTree(resTy), newEmptyNode()),
+            )
+          )
+          hook.add(ifReturn(call, resVar))
+        of "requestCancellable":
+          var fwd = newCall(ident("request"), copyNimTree(typeIdent), ctxNode)
+          for a in args:
+            fwd.add(a)
+          let id0 = newCall(copyNimTree(requestIdName), newLit(0'u64))
+          hook.add(
+            ifReturn(
+              newCall(activeName, copyNimTree(ctxNode)),
+              newTree(nnkTupleConstr, id0, fwd),
+            )
+          )
+        else:
+          var fwd = newCall(ident("blockingRequest"), copyNimTree(typeIdent), ctxNode)
+          for a in args:
+            fwd.add(a)
+          # The inplace path is not cancellable: still honour the `idOut`
+          # contract (published before the call blocks) with id 0, which a
+          # canceller treats as "not cancellable".
+          let idOutNode = copyNimTree(formal[formal.len - 1][0])
+          let publish = newTree(
+            nnkIfStmt,
+            newTree(
+              nnkElifBranch,
+              newCall(ident("not"), newCall(ident("isNil"), idOutNode)),
+              newStmtList(
+                newAssignment(
+                  newTree(nnkBracketExpr, copyNimTree(idOutNode)),
+                  newCall(copyNimTree(requestIdName), newLit(0'u64)),
+                )
+              ),
+            ),
+          )
+          hook.add(
+            newTree(
+              nnkIfStmt,
+              newTree(
+                nnkElifBranch,
+                newCall(activeName, copyNimTree(ctxNode)),
+                newStmtList(publish, newTree(nnkReturnStmt, fwd)),
+              ),
+            )
+          )
+        c[6].insert(0, hook)
+        if not declsPlaced:
+          declsPlaced = true
+          n.insert(idx - 1, decls)
+          inc idx
+
+  patch(generated)
+  result = generated
+
 proc generateMtRequestBroker*(
     body: NimNode, cfgIn: MtReqCfg = defaultMtReqCfg()
 ): NimNode =
@@ -495,16 +662,20 @@ proc generateMtRequestBroker*(
   # ── Timeout knob (per broker type) ──────────────────────────────────
   result.add(
     quote do:
-      var `timeoutVarIdent`*: Duration = chronos.milliseconds(`requestTimeoutMsLit`)
-        ## Timeout for cross-thread requests, seeded from the declaration's
-        ## `requestTimeoutMs` kwarg (default 20 s) and mutable at runtime via
-        ## `setRequestTimeout`.
+      var `timeoutVarIdent`*: Atomic[int64]
+        ## Timeout for cross-thread requests in nanoseconds, seeded from the
+        ## declaration's `requestTimeoutMs` kwarg (default 20 s). Atomic: it is
+        ## set on one thread and read by every requesting thread (and by the
+        ## EXTAPI bridge). Use `setRequestTimeout` / `requestTimeout`.
+      `timeoutVarIdent`.store(
+        chronos.milliseconds(`requestTimeoutMsLit`).nanoseconds, moRelaxed
+      )
 
       proc setRequestTimeout*(_: typedesc[`typeIdent`], timeout: Duration) =
-        `timeoutVarIdent` = timeout
+        `timeoutVarIdent`.store(timeout.nanoseconds, moRelaxed)
 
       proc requestTimeout*(_: typedesc[`typeIdent`]): Duration =
-        `timeoutVarIdent`
+        chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
 
   )
 
@@ -1284,8 +1455,9 @@ proc generateMtRequestBroker*(
               capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
               return 2
         )
+        let reqTimeout = chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
         let completedRes = catch:
-          await withTimeout(responseFut, `timeoutVarIdent`)
+          await withTimeout(responseFut, reqTimeout)
         if completedRes.isErr():
           responseFut.cancelSoon()
           `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
@@ -1298,7 +1470,7 @@ proc generateMtRequestBroker*(
           `giveUpIdent`(waitState, pool, slotIdx, slotGen, mySignal)
           return err(
             "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
-              $`timeoutVarIdent`
+              $reqTimeout
           )
         let recvRes = catch:
           responseFut.read()
@@ -1449,7 +1621,15 @@ proc generateMtRequestBroker*(
           pool: ptr ResponseSlotPool, slotIdx: uint32, slotGen: uint32
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         # Busy-poll the response slot until ready, cancelled, or timed out.
-        let deadline = Moment.now() + `timeoutVarIdent`
+        # Saturate: `now + InfiniteDuration` (or any timeout that large)
+        # overflows int64, so it means "no deadline".
+        let start = Moment.now()
+        let reqTimeout = chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
+        let deadline =
+          if reqTimeout >= Moment.high() - start:
+            Moment.high()
+          else:
+            start + reqTimeout
         while Moment.now() < deadline:
           if pool[].readyState(slotIdx, slotGen):
             var decoded: Result[`payloadType`, string]
@@ -1487,7 +1667,7 @@ proc generateMtRequestBroker*(
           pool[].release(slotIdx, `shardHintIdent`())
         return err(
           "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
-            $`timeoutVarIdent`
+            $reqTimeout
         )
 
       proc `blockingSendAndAwaitIdent`(
@@ -2726,6 +2906,18 @@ proc generateMtRequestBroker*(
         newEmptyNode(),
         newStmtList(newTree(nnkReturnStmt, bcNonKeyedCall)),
       )
+    )
+
+  if cfg.extInplaceHook:
+    result = addExtInplaceHooks(
+      result,
+      typeIdent,
+      typeDisplayName,
+      payloadType,
+      argParams,
+      not zeroArgSig.isNil(),
+      not argSig.isNil(),
+      requestIdName,
     )
 
   when defined(brokerDebug):

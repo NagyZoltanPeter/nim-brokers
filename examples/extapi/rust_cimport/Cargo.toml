@@ -1,0 +1,13 @@
+# EXTAPI example — scenario 4: a plain C-ABI library written in Rust. It knows
+# nothing about brokers; the Nim host imports it with
+# RequestBroker(EXTAPI[codec], importc = ..., dynlib = ...).
+
+[package]
+name = "codec_rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"

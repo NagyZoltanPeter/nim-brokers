@@ -59,6 +59,13 @@ leak:registerCycle
 # request-side analog of the *MtImpl listener entries above, same
 # thread-lifetime-by-design rationale.
 leak:setProvider
+# Same rationale for `replaceProvider`, which EXTAPI's bridge uses to install
+# auto-wired forwarders: it grows the same per-thread provider registry seqs
+# on the bridge thread, whose payloads orc does not free at thread exit.
+leak:replaceProvider
+# The per-thread list of broker cleanup hooks run by teardownBrokerThread
+# (`gBrokerThreadCleanups`, a threadvar seq): thread-lifetime by design.
+leak:registerBrokerThreadCleanup
 # Nim runtime one-time globals (thread-local registries, GC metadata) allocated
 # at startup and intentionally not freed at exit.
 leak:nimRegisterThreadLocalMarkers
