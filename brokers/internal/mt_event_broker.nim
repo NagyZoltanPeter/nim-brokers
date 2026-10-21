@@ -36,13 +36,14 @@ import
   ../broker_scope,
   ./mt_broker_common,
   ./mt_queue,
+  ./mt_transport,
   ./mt_codec,
   ./mt_config,
   ./broker_debug
 
 export
   results, chronos, broker_context, broker_scope, chronicles, mt_broker_common,
-  mt_config
+  mt_transport, mt_config
 
 # Ring-slot sentinel: a slot's payload `uint32` is normally a slab cell
 # index, but this reserved value carries a "clear local tvHandlers"
@@ -121,16 +122,12 @@ proc generateMtEventBroker*(
   let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
 
   let globalSlabIdent = ident("g" & typeDisplayName & "MtSlab")
-  let globalSlabInitIdent = ident("g" & typeDisplayName & "MtSlabInit")
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
-  let initSlabProcIdent = ident("ensureSlab" & typeDisplayName & "MtBroker")
   let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
   let listenerTaskIdent = ident("notify" & typeDisplayName & "Listener")
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
   let clearListenersIdent = ident("clearListeners" & typeDisplayName)
-  let releaseCellIdent = ident("releaseCell" & typeDisplayName)
-  let shardHintIdent = ident("shardHint" & typeDisplayName)
 
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
@@ -206,40 +203,25 @@ proc generateMtEventBroker*(
       var `globalInitIdent`: Atomic[int]
         ## 0 = uninitialised, 1 = initialising, 2 = ready. CAS(0→1) wins;
         ## losers spin until 2.
-      var `globalSlabIdent`: PayloadSlab
-      var `globalSlabInitIdent`: Atomic[int]
+      var `globalSlabIdent`: MtLazySlab
+        ## lazily allocated by the first listen() / emit() caller, whose
+        ## thread must outlive it (never freed).
       # Part D-3 dropAllListeners hook. Single slot per event type;
       # `dropAllHookIdent` is `nil` when no hook is registered.
       var `dropAllHookIdent`: `dropAllHookProcTypeIdent`
       var `dropAllHookLockIdent`: Lock
       var `dropAllHookInitIdent`: Atomic[int]
-        ## same protocol as `globalInitIdent`, gating the global slab.
+        ## same protocol as `globalInitIdent`, gating the hook lock.
   )
 
   # ── Init helpers ──────────────────────────────────────────────────────
   result.add(
     quote do:
-      proc `initSlabProcIdent`() =
-        ## Lazy-init the global event slab on first listen() or emit().
-        ## The caller's thread becomes the slab's owner (must outlive it).
-        if `globalSlabInitIdent`.load(moRelaxed) == 2:
-          return
-        var expected = 0
-        if `globalSlabInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initPayloadSlab(
-            `globalSlabIdent`,
-            capacity = uint32(`slabCapacityLit`),
-            payloadBytes = uint32(`payloadBytesLit`),
-            nShards = `freeListShardsLit`,
-          )
-          `globalSlabInitIdent`.store(2, moRelease)
-        else:
-          while `globalSlabInitIdent`.load(moAcquire) != 2:
-            discard
-
       proc `initProcIdent`() =
         if `globalInitIdent`.load(moRelaxed) == 2:
-          `initSlabProcIdent`()
+          `globalSlabIdent`.ensureInit(
+            uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
+          )
           return
         var expected = 0
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
@@ -265,7 +247,9 @@ proc generateMtEventBroker*(
         else:
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
-        `initSlabProcIdent`()
+        `globalSlabIdent`.ensureInit(
+          uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
+        )
 
   )
 
@@ -315,10 +299,6 @@ proc generateMtEventBroker*(
   # ── Local helpers used by both same-thread emit and cross-thread poll
   result.add(
     quote do:
-      proc `shardHintIdent`(): uint32 {.inline.} =
-        ## Hash of the calling thread's TLS marker → free-list shard.
-        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
-
       proc `clearListenersIdent`(loopCtx: BrokerContext) {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
           for i in 0 ..< `tvListenerCtxIdent`.len:
@@ -328,10 +308,6 @@ proc generateMtEventBroker*(
               `tvListenerHandlersIdent`.del(i)
               `tvNextIdsIdent`.del(i)
               break
-
-      proc `releaseCellIdent`(cellIdx: uint32) {.inline, gcsafe.} =
-        if `globalSlabIdent`.decRefAndCheck(cellIdx):
-          `globalSlabIdent`.release(cellIdx, `shardHintIdent`())
 
   )
 
@@ -373,8 +349,8 @@ proc generateMtEventBroker*(
               # the heap-spill buffer when the payload spilled, else the inline
               # cell region.
               var ev: `typeIdent`
-              let payloadPtr = `globalSlabIdent`.dataPtr(cellIdx)
-              let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
+              let payloadPtr = `globalSlabIdent`.slab.dataPtr(cellIdx)
+              let payloadLen = `globalSlabIdent`.slab.dataLen(cellIdx)
               let ok =
                 try:
                   mtUnmarshal(payloadPtr, payloadLen, ev)
@@ -396,7 +372,7 @@ proc generateMtEventBroker*(
                     asyncSpawn fut
               else:
                 error "Failed to unmarshal event payload", eventType = `typeNameLit`
-              `releaseCellIdent`(cellIdx)
+              releaseCellRef(`globalSlabIdent`.slab, cellIdx)
               return 1
 
   )
@@ -568,59 +544,32 @@ proc generateMtEventBroker*(
         if crossTargets.len == 0:
           return
 
-        # Cross-thread fan-out via shared refcounted cell.
-        let shardHint = `shardHintIdent`()
-        let cellIdx = `globalSlabIdent`.claim(shardHint)
-        if cellIdx == EmptyIdx:
+        # Cross-thread fan-out via one shared cell, refcounted per target.
+        let c = claimCell(
+          `globalSlabIdent`.slab, event, `maxDynPayloadLit`, refs = crossTargets.len
+        )
+        case c.status
+        of mssOk:
+          discard
+        of mssSlabExhausted:
           warn "event dropped: slab exhausted",
             eventType = `typeNameLit`, targets = crossTargets.len
           return
-
-        let cell = `globalSlabIdent`.cellPtr(cellIdx)
-        let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
-        let written =
-          try:
-            mtMarshal(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
-          except Exception:
-            -1
-        if written >= 0:
-          # Fast path: payload fit the fixed cell.
-          cell.payloadSize = uint32(written)
-        else:
-          # Auto-spill: payload exceeded the cell — marshal into an exact-size
-          # heap buffer instead of dropping. Owned by the cell; freed at release.
-          let needed =
-            try:
-              mtMarshalSize(event)
-            except Exception:
-              -1
-          if needed < 0 or needed > `maxDynPayloadLit`:
-            error "event dropped: payload exceeds maxDynamicPayloadBytes",
-              eventType = `typeNameLit`, needed = needed, cap = `maxDynPayloadLit`
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          let spillBuf = queueAlloc0(needed)
-          if spillBuf.isNil:
-            error "event dropped: spill allocation failed",
-              eventType = `typeNameLit`, needed = needed
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          let w2 =
-            try:
-              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, event)
-            except Exception:
-              -1
-          if w2 < 0:
-            queueFree(spillBuf)
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
-        cell.refcount.store(crossTargets.len, moRelease)
+        of mssTooLarge:
+          error "event dropped: payload exceeds maxDynamicPayloadBytes",
+            eventType = `typeNameLit`, needed = c.needed, cap = `maxDynPayloadLit`
+          return
+        of mssSpillFailed:
+          error "event dropped: spill allocation failed",
+            eventType = `typeNameLit`, needed = c.needed
+          return
+        of mssMarshalFailed, mssQueueFull:
+          return
 
         for target in crossTargets:
-          if not target.ring.tryEnqueue(cellIdx):
+          if not target.ring.tryEnqueue(c.idx):
             warn "event dropped: listener queue full", eventType = `typeNameLit`
-            `releaseCellIdent`(cellIdx)
+            releaseCellRef(`globalSlabIdent`.slab, c.idx)
           else:
             fireBrokerSignal(target.signal)
 

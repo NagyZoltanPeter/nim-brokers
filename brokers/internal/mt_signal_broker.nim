@@ -45,13 +45,14 @@ import
   ../broker_scope,
   ./mt_broker_common,
   ./mt_queue,
+  ./mt_transport,
   ./mt_codec,
   ./mt_config,
   ./broker_debug
 
 export
   results, chronos, broker_context, broker_scope, chronicles, mt_broker_common,
-  mt_config, options
+  mt_transport, mt_config, options
 
 # ---------------------------------------------------------------------------
 # Macro code generator
@@ -108,16 +109,12 @@ proc generateMtSignalBroker*(
   let globalLockIdent = ident("g" & typeDisplayName & "MtSigLock")
   let globalInitIdent = ident("g" & typeDisplayName & "MtSigInit")
   let globalSlabIdent = ident("g" & typeDisplayName & "MtSigSlab")
-  let globalSlabInitIdent = ident("g" & typeDisplayName & "MtSigSlabInit")
   let presentIdent = ident("g" & typeDisplayName & "MtSigPresent")
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtSigBroker")
-  let initSlabProcIdent = ident("ensureSlab" & typeDisplayName & "MtSigBroker")
   let growProcIdent = ident("grow" & typeDisplayName & "MtSigBuckets")
   let signalTaskIdent = ident("notify" & typeDisplayName & "Signal")
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName & "Sig")
-  let releaseCellIdent = ident("releaseCell" & typeDisplayName & "Sig")
-  let shardHintIdent = ident("shardHint" & typeDisplayName & "Sig")
 
   let tvCtxIdent = ident("g" & typeDisplayName & "TvSigCtxs")
   let tvHandlerIdent = ident("g" & typeDisplayName & "TvSigHandlers")
@@ -176,8 +173,7 @@ proc generateMtSignalBroker*(
       var `globalLockIdent`: Lock
       var `globalInitIdent`: Atomic[int]
         ## 0 = uninitialised, 1 = initialising, 2 = ready.
-      var `globalSlabIdent`: PayloadSlab
-      var `globalSlabInitIdent`: Atomic[int]
+      var `globalSlabIdent`: MtLazySlab
       var `presentIdent`: Atomic[int]
         ## handler-present counter (# of installed handlers across all ctxs).
         ## `signal()` acquire-loads it; zero → fast-fail with no lock taken.
@@ -186,25 +182,11 @@ proc generateMtSignalBroker*(
   # ── Init helpers ──────────────────────────────────────────────────────
   result.add(
     quote do:
-      proc `initSlabProcIdent`() =
-        if `globalSlabInitIdent`.load(moRelaxed) == 2:
-          return
-        var expected = 0
-        if `globalSlabInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initPayloadSlab(
-            `globalSlabIdent`,
-            capacity = uint32(`slabCapacityLit`),
-            payloadBytes = uint32(`payloadBytesLit`),
-            nShards = `freeListShardsLit`,
-          )
-          `globalSlabInitIdent`.store(2, moRelease)
-        else:
-          while `globalSlabInitIdent`.load(moAcquire) != 2:
-            discard
-
       proc `initProcIdent`() =
         if `globalInitIdent`.load(moRelaxed) == 2:
-          `initSlabProcIdent`()
+          `globalSlabIdent`.ensureInit(
+            uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
+          )
           return
         var expected = 0
         if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
@@ -218,7 +200,9 @@ proc generateMtSignalBroker*(
         else:
           while `globalInitIdent`.load(moAcquire) != 2:
             discard
-        `initSlabProcIdent`()
+        `globalSlabIdent`.ensureInit(
+          uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
+        )
 
       proc `growProcIdent`() =
         ## Must be called under lock.
@@ -230,13 +214,6 @@ proc generateMtSignalBroker*(
         # Intentional leak of the old buffer (see mt_event_broker.nim).
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
-
-      proc `shardHintIdent`(): uint32 {.inline.} =
-        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
-
-      proc `releaseCellIdent`(cellIdx: uint32) {.inline, gcsafe.} =
-        if `globalSlabIdent`.decRefAndCheck(cellIdx):
-          `globalSlabIdent`.release(cellIdx, `shardHintIdent`())
 
   )
 
@@ -301,8 +278,8 @@ proc generateMtSignalBroker*(
                 return 2
               return 0
             var ev: `typeIdent`
-            let payloadPtr = `globalSlabIdent`.dataPtr(cellIdx)
-            let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
+            let payloadPtr = `globalSlabIdent`.slab.dataPtr(cellIdx)
+            let payloadLen = `globalSlabIdent`.slab.dataLen(cellIdx)
             let ok =
               try:
                 mtUnmarshal(payloadPtr, payloadLen, ev)
@@ -316,7 +293,7 @@ proc generateMtSignalBroker*(
                 asyncSpawn fut
             else:
               error "Failed to unmarshal signal payload", signalType = `typeNameLit`
-            `releaseCellIdent`(cellIdx)
+            releaseCellRef(`globalSlabIdent`.slab, cellIdx)
             return 1
 
   )
@@ -443,51 +420,21 @@ proc generateMtSignalBroker*(
 
         # Cross-thread: marshal payload into a refcounted global slab cell,
         # enqueue its index on the handler thread's ring, wake that thread.
-        let shardHint = `shardHintIdent`()
-        let cellIdx = `globalSlabIdent`.claim(shardHint)
-        if cellIdx == EmptyIdx:
-          return err("queue full")
-        let cell = `globalSlabIdent`.cellPtr(cellIdx)
-        let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
-        let written =
-          try:
-            mtMarshal(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), signalValue)
-          except Exception:
-            -1
-        if written >= 0:
-          cell.payloadSize = uint32(written)
-        else:
-          let needed =
-            try:
-              mtMarshalSize(signalValue)
-            except Exception:
-              -1
-          if needed < 0 or needed > `maxDynPayloadLit`:
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return err(
-              "SignalBroker(" & `typeNameLit` &
-                "): payload exceeds maxDynamicPayloadBytes"
-            )
-          let spillBuf = queueAlloc0(needed)
-          if spillBuf.isNil:
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return err("SignalBroker(" & `typeNameLit` & "): spill allocation failed")
-          let w2 =
-            try:
-              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, signalValue)
-            except Exception:
-              -1
-          if w2 < 0:
-            queueFree(spillBuf)
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return err("SignalBroker(" & `typeNameLit` & "): payload marshal failed")
-          `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
-        cell.refcount.store(1, moRelease)
-        if not ring.tryEnqueue(cellIdx):
-          `releaseCellIdent`(cellIdx)
-          return err("queue full")
-        fireBrokerSignal(handlerSig)
-        ok()
+        case sendCell(
+          `globalSlabIdent`.slab, ring, handlerSig, signalValue, `maxDynPayloadLit`
+        )
+        of mssOk:
+          ok()
+        of mssSlabExhausted, mssQueueFull:
+          err("queue full")
+        of mssTooLarge:
+          err(
+            "SignalBroker(" & `typeNameLit` & "): payload exceeds maxDynamicPayloadBytes"
+          )
+        of mssSpillFailed:
+          err("SignalBroker(" & `typeNameLit` & "): spill allocation failed")
+        of mssMarshalFailed:
+          err("SignalBroker(" & `typeNameLit` & "): payload marshal failed")
 
   )
 

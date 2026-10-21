@@ -29,11 +29,11 @@ import chronos, chronicles
 import results
 import ./helper/broker_utils, ../broker_context, ../broker_scope
 
-import ./mt_broker_common, ./mt_queue, ./mt_codec, ./mt_config
+import ./mt_broker_common, ./mt_queue, ./mt_transport, ./mt_codec, ./mt_config
 import ./broker_debug
 export
   results, chronos, chronicles, broker_context, broker_scope, mt_broker_common,
-  mt_config, options
+  mt_transport, mt_config, options
 # The generated provideIt/reprovideIt templates expand `providerBody` at the
 # user's call site, so the checker macro must be visible there.
 export providerBody
@@ -419,7 +419,6 @@ proc generateMtRequestBroker*(
   let sendReplyIdent = ident("sendReply" & typeDisplayName)
   let handleMsgIdent = ident("handleMsg" & typeDisplayName)
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
-  let shardHintIdent = ident("shardHint" & typeDisplayName)
   let marshalRespIdent = ident(typeDisplayName & "MtMarshalResp")
   let unmarshalRespIdent = ident(typeDisplayName & "MtUnmarshalResp")
   let marshalRespSizeIdent = ident(typeDisplayName & "MtMarshalRespSize")
@@ -718,9 +717,6 @@ proc generateMtRequestBroker*(
         `globalBucketsIdent` = newBuf
         `globalBucketCapIdent` = newCap
 
-      proc `shardHintIdent`(): uint32 {.inline.} =
-        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
-
   )
 
   # ── Threadvar provider storage ──────────────────────────────────────
@@ -806,7 +802,7 @@ proc generateMtRequestBroker*(
         case pool[].beginWrite(slotIdx, slotGen)
         of BeginWriteResult.Abandoned:
           # Requester already abandoned — provider owns the release.
-          pool[].release(slotIdx, `shardHintIdent`())
+          pool[].release(slotIdx, mtShardHint())
           return
         of BeginWriteResult.Stale:
           return
@@ -868,7 +864,7 @@ proc generateMtRequestBroker*(
         if not published:
           # Requester abandoned while we were writing — nobody is waiting for
           # this response, and the release is ours.
-          pool[].release(slotIdx, `shardHintIdent`())
+          pool[].release(slotIdx, mtShardHint())
           return
         if not requesterSignal.isNil:
           fireBrokerSignal(requesterSignal)
@@ -1085,14 +1081,14 @@ proc generateMtRequestBroker*(
                 # CAS won, so the slot is ours to release and the provider is
                 # never invoked. A ring cannot drop an element, so a dead
                 # request is tombstoned in the slot and skipped here.
-                capturedPool[].release(msg.responseSlotIdx, `shardHintIdent`())
+                capturedPool[].release(msg.responseSlotIdx, mtShardHint())
               else:
                 asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
             else:
               error "Failed to unmarshal request payload", requestType = `typeNameLit`
             # Release the cell back to the slab — the unmarshaled msg
             # holds its own copy on this thread's GC heap.
-            capturedSlab[].release(cellIdx, `shardHintIdent`())
+            capturedSlab[].release(cellIdx, mtShardHint())
             return 1
 
   )
@@ -1279,7 +1275,7 @@ proc generateMtRequestBroker*(
       ) {.gcsafe, raises: [].} =
         waitState.gaveUp = true
         if pool[].giveUpSlot(slotIdx, slotGen) == SlotGiveUp.CallerReleases:
-          pool[].release(slotIdx, `shardHintIdent`())
+          pool[].release(slotIdx, mtShardHint())
         fireBrokerSignal(mySignal)
 
   )
@@ -1308,7 +1304,7 @@ proc generateMtRequestBroker*(
           msg: sink `requestMsgName`,
       ): `prologueName` {.gcsafe, raises: [].} =
         # Reserve the response slot.
-        let slotIdx = pool[].claim(`shardHintIdent`())
+        let slotIdx = pool[].claim(mtShardHint())
         if slotIdx == EmptyIdx:
           return `prologueName`(
             slotIdx: EmptyIdx,
@@ -1322,74 +1318,24 @@ proc generateMtRequestBroker*(
         # Record who to wake if a third thread cancels this request. `nil` for
         # blocking requesters: they poll the slot themselves.
         pool[].setWaker(slotIdx, mySignal)
-        # Reserve a slab cell, marshal ReqMsg into it.
-        let cellIdx = slab[].claim(`shardHintIdent`())
-        if cellIdx == EmptyIdx:
-          pool[].release(slotIdx, `shardHintIdent`())
-          return `prologueName`(
-            slotIdx: EmptyIdx,
-            error: "RequestBroker(" & `typeNameLit` & "): request slab exhausted",
-          )
-        let cellPtr = slab[].cellPtr(cellIdx)
-        let payloadPtr = slab[].cellPayloadPtr(cellIdx)
+        # Marshal ReqMsg into a slab cell, enqueue it, wake the provider.
         var msgCopy = msg
         msgCopy.responseSlotIdx = slotIdx
         msgCopy.responseSlotGen = slotGen
         msgCopy.requesterSignal = mySignal
-        let written =
-          try:
-            mtMarshal(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
-          except Exception:
-            -1
-        if written >= 0:
-          cellPtr.payloadSize = uint32(written)
-        else:
-          # Auto-spill the request onto the heap instead of failing.
-          let needed =
-            try:
-              mtMarshalSize(msgCopy)
-            except Exception:
-              -1
-          if needed < 0 or needed > `maxDynPayloadLit`:
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return `prologueName`(
-              slotIdx: EmptyIdx,
-              error:
-                "RequestBroker(" & `typeNameLit` &
-                "): request payload exceeds maxDynamicPayloadBytes",
-            )
-          let spillBuf = queueAlloc0(needed)
-          if spillBuf.isNil:
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return `prologueName`(
-              slotIdx: EmptyIdx,
-              error: "RequestBroker(" & `typeNameLit` & "): request spill alloc failed",
-            )
-          let w2 =
-            try:
-              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
-            except Exception:
-              -1
-          if w2 < 0:
-            queueFree(spillBuf)
-            slab[].release(cellIdx, `shardHintIdent`())
-            pool[].release(slotIdx, `shardHintIdent`())
-            return `prologueName`(
-              slotIdx: EmptyIdx,
-              error: "RequestBroker(" & `typeNameLit` & "): request marshal failed",
-            )
-          slab[].setOverflow(cellIdx, spillBuf, uint32(w2))
-        cellPtr.refcount.store(1, moRelease)
-        if not ring.tryEnqueue(cellIdx):
-          slab[].release(cellIdx, `shardHintIdent`())
-          pool[].release(slotIdx, `shardHintIdent`())
+        let status = sendCell(slab[], ring, providerSignal, msgCopy, `maxDynPayloadLit`)
+        if status != mssOk:
+          pool[].release(slotIdx, mtShardHint())
+          let reason =
+            case status
+            of mssSlabExhausted: "request slab exhausted"
+            of mssTooLarge: "request payload exceeds maxDynamicPayloadBytes"
+            of mssSpillFailed: "request spill alloc failed"
+            of mssMarshalFailed: "request marshal failed"
+            of mssQueueFull, mssOk: "provider queue full"
           return `prologueName`(
-            slotIdx: EmptyIdx,
-            error: "RequestBroker(" & `typeNameLit` & "): provider queue full",
+            slotIdx: EmptyIdx, error: "RequestBroker(" & `typeNameLit` & "): " & reason
           )
-        fireBrokerSignal(providerSignal)
         `prologueName`(slotIdx: slotIdx, slotGen: slotGen, error: "")
 
   )
@@ -1433,7 +1379,7 @@ proc generateMtRequestBroker*(
                         "): provider was cleared while the request was outstanding",
                     )
                   )
-                capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
+                capturedPool[].release(capturedSlotIdx, mtShardHint())
                 return 2
               if capturedPool[].isAbandoned(capturedSlotIdx, capturedSlotGen):
                 # Someone else cancelled this request. Their CAS won, so the
@@ -1468,7 +1414,7 @@ proc generateMtRequestBroker*(
                 )
               if not capturedResponseFut.finished:
                 capturedResponseFut.complete(decoded)
-              capturedPool[].release(capturedSlotIdx, `shardHintIdent`())
+              capturedPool[].release(capturedSlotIdx, mtShardHint())
               return 2
         )
         let reqTimeout = chronos.nanoseconds(`timeoutVarIdent`.load(moRelaxed))
@@ -1669,7 +1615,7 @@ proc generateMtRequestBroker*(
                 `unmarshalRespIdent`(payloadPtr, payloadSize, decoded)
               except Exception:
                 false
-            pool[].release(slotIdx, `shardHintIdent`())
+            pool[].release(slotIdx, mtShardHint())
             if ok:
               return decoded
             return
@@ -1677,7 +1623,7 @@ proc generateMtRequestBroker*(
           if pool[].isProviderGone(slotIdx, slotGen):
             # Provider cleared mid-request: nothing will answer, and the slot
             # is ours to hand back.
-            pool[].release(slotIdx, `shardHintIdent`())
+            pool[].release(slotIdx, mtShardHint())
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): provider was cleared while the request was outstanding"
@@ -1693,7 +1639,7 @@ proc generateMtRequestBroker*(
         # for a late commit would either block past its own deadline or, if it
         # gave up waiting, leak the slot.
         if pool[].giveUpSlot(slotIdx, slotGen) == SlotGiveUp.CallerReleases:
-          pool[].release(slotIdx, `shardHintIdent`())
+          pool[].release(slotIdx, mtShardHint())
         return err(
           "RequestBroker(" & `typeNameLit` & "): cross-thread request timed out after " &
             $reqTimeout
