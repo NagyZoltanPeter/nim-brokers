@@ -1,7 +1,10 @@
 ## Multi-Thread Broker Common
 ## --------------------------
-## Shared runtime helpers used by both mt_request_broker and mt_event_broker.
-## These are not generated — they are used directly by generated code.
+## Shared runtime helpers used by the MT broker macros (request, event,
+## signal): thread identity, the per-thread dispatcher (signal + pollers),
+## the ring lease and thread teardown. These are not generated — they are used
+## directly by generated code and by `mt_transport`, which composes them with
+## the `mt_queue` primitives into the registry / send / receive path.
 
 {.push raises: [].}
 
@@ -382,7 +385,7 @@ proc brokerDispatchLoop*(signal: ptr BrokerSignalShared) {.async: (raises: []).}
 # ---------------------------------------------------------------------------
 # Ring lease — refcounted ownership of a bucket's shared transport
 # ---------------------------------------------------------------------------
-# A cross-thread sender looks a bucket up under the broker's globalLock and
+# A cross-thread sender looks a bucket up under the broker's registry lock and
 # then uses its ring (and, for RequestBroker, its slab + response pool) AFTER
 # releasing the lock: enqueue, wake, and for a request the whole reply wait.
 # Freeing those after a timed grace window was unsound — a requester whose
@@ -390,7 +393,7 @@ proc brokerDispatchLoop*(signal: ptr BrokerSignalShared) {.async: (raises: []).}
 # test_mt_owner_only_clear "pool outlives it").
 #
 # Instead every holder owns a reference: the bucket's owner holds one from
-# creation; a sender takes one inside the same globalLock section that found
+# creation; a sender takes one inside the same registry-lock section that found
 # the bucket (so the owner cannot have released yet) and drops it after its
 # last access. Whoever drops the last reference frees the transport, on
 # whatever thread that is. The lease and everything it frees come from the C
@@ -416,7 +419,7 @@ proc newBrokerRingLease*(
   result.refs.store(1, moRelaxed)
 
 proc acquireLease*(lease: ptr BrokerRingLease) {.gcsafe, inline.} =
-  ## Only while holding the broker's globalLock with the owning bucket still
+  ## Only while holding the broker's registry lock with the owning bucket still
   ## registered, or while already holding a reference: either guarantees the
   ## count is > 0 here.
   discard lease.refs.fetchAdd(1, moRelaxed)

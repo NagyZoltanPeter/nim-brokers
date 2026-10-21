@@ -3,16 +3,27 @@
 ## Non-generated runtime shared by the three MT broker macros
 ## (`mt_request_broker`, `mt_event_broker`, `mt_signal_broker`). It composes
 ## the primitives of `mt_queue` (ring, slab, response pool) and
-## `mt_broker_common` (lease, signal, poller) into the send path every lane
-## used to generate its own copy of. The macros keep only what is genuinely
+## `mt_broker_common` (lease, signal, poller) into the bucket registry and the
+## send / receive paths every lane used to generate its own copy of. The macros keep only what is genuinely
 ## per type: codecs, threadvars, dispatch and the typed public verbs.
 ##
 ## Generic procs here are instantiated in the user's module, where the
 ## per-type codec overloads (`mtMarshal` / `mtUnmarshal` / `mtMarshalSize`,
 ## emitted by `genMtCodecProcs`) are visible; they are resolved with `mixin`.
 ##
-## Memory: everything touched here is C heap (`queueAlloc0`, mt_queue I0) or
-## plain globals holding no GC refs, so behaviour is identical under
+## Per-lane differences that stay in the macros, on purpose:
+##   - request: per-bucket slab + response pool (`MtBucketHead` + 2 fields),
+##     the response-slot protocol, cancel and the blocking paths;
+##   - event: fan-out (one cell, refcount = targets), a second lease reference
+##     held by the poll fn, and no thread-exit cleanup hook — the async
+##     `shutdown` owns teardown (the drop impls stay suspension-free);
+##   - signal / request: owner-only removal (`removeOwned`) plus a per-type
+##     `{.nimcall.}` thread-exit cleanup (`BrokerThreadCleanupFn` is not a
+##     closure), which walks `ownedCtxs`.
+##
+## Memory: transport memory is C heap (`queueAlloc0`, mt_queue I0); the
+## registry array is `createShared` and never freed, exactly as the generated
+## registries were. None of it holds GC refs, so behaviour is identical under
 ## --mm:refc and --mm:orc. Codec calls stay wrapped in `try/except
 ## Exception`: the codecs are `raises: []`, but the callers' `raises: []`
 ## contract must not depend on that.
