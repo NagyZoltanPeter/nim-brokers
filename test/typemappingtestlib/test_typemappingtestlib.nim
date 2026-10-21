@@ -77,10 +77,18 @@ type RawSlot = object
 var gSlots: array[256, RawSlot]
 var gSlotIdx: Atomic[int]
 
+# The payload copy is made on the library's delivery thread and freed on this
+# thread after that delivery thread has been joined. Under --mm:orc
+# `allocShared` is the calling thread's allocator, and `deallocShared` from
+# another thread then routes the block back to the dead thread's region
+# (addToSharedFreeList: SIGSEGV). The C heap is thread-agnostic under both MMs.
+proc slotCalloc(n, size: csize_t): pointer {.importc: "calloc", header: "<stdlib.h>".}
+proc slotFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
+
 proc resetSlots() =
   for i in 0 ..< gSlots.len:
     if gSlots[i].data != nil:
-      deallocShared(gSlots[i].data)
+      slotFree(gSlots[i].data)
       gSlots[i].data = nil
       gSlots[i].len = 0
     gSlots[i].name = nil
@@ -95,7 +103,7 @@ proc captureCb(
   if idx >= gSlots.len:
     return
   if payloadLen > 0 and not payloadBuf.isNil:
-    let buf = allocShared0(payloadLen.int)
+    let buf = slotCalloc(1, csize_t(payloadLen))
     copyMem(buf, payloadBuf, payloadLen.int)
     gSlots[idx].data = buf
     gSlots[idx].len = payloadLen
