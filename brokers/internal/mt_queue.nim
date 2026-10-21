@@ -21,8 +21,8 @@
 ##     pre-allocated cells, and `ThreadSignalPtr.fireSync()` (external).
 ## I2  The owner thread must outlive every structure it owns.
 ##
-## Phase 1 deliverable: this module + its tests. No broker code calls it
-## yet — that lands in Phases 2-4.
+## The MT brokers use these primitives through `mt_transport` (registry,
+## send / receive path) and `mt_broker_common` (ring lease, dispatcher).
 
 {.push raises: [].}
 

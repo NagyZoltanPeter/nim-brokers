@@ -1,8 +1,8 @@
 ## Runtime marshal / unmarshal helpers for (mt) broker payloads.
 ##
-## The broker macro emits two thin per-type wrappers
-## (`<TypeName>MtMarshal` / `<TypeName>MtUnmarshal`) that call into the
-## generic `mtMarshalValue` / `mtUnmarshalValue` defined here. Those
+## The broker macro emits thin per-type overloads (`mtMarshal` /
+## `mtUnmarshal` / `mtMarshalSize`) that call into the generic
+## `mtMarshalValue` / `mtUnmarshalValue` / `mtMarshalSizeValue` defined here. Those
 ## generics use `when supportsCopyMem(T):` + Nim's `fieldPairs` to walk
 ## arbitrary payload types at compile time, recursing into:
 ##
@@ -303,24 +303,23 @@ proc mtMarshalSizeValue*[T](value: T): int {.gcsafe.} =
 # Per-type wrapper proc generation (called from broker macros)
 # ---------------------------------------------------------------------------
 
-proc genMtCodecProcs*(
-    marshalIdent, unmarshalIdent: NimNode, typeIdent: NimNode
-): seq[NimNode] =
-  ## Emits per-type marshal/unmarshal/size wrappers that bottom out to the
-  ## generic primitives above. Three procs returned:
-  ## [marshalProc, unmarshalProc, sizeProc]. The size proc is named
-  ## `<marshalIdent>Size` and returns the exact marshaled byte length (used by
-  ## the heap-spill path to size an allocShared0 buffer in one pass).
+proc genMtCodecProcs*(typeIdent: NimNode): seq[NimNode] =
+  ## Emits the per-type marshal / unmarshal / size procs that bottom out to the
+  ## generic primitives above, as overloads on the payload type:
+  ## `mtMarshal(buf, cap, value: T): int`, `mtUnmarshal(buf, len, dst: var T):
+  ## bool` and `mtMarshalSize(value: T): int` (the exact marshaled byte length,
+  ## used by the heap-spill path). Uniform names let the generic runtime in
+  ## `mt_transport.nim` resolve them with `mixin`. Every broker macro passes a
+  ## type it declares itself, so two brokers never emit the same overload.
   let bufIdent = ident("buf")
   let capIdent = ident("cap")
   let lenIdent = ident("len")
   let valueIdent = ident("value")
   let dstIdent = ident("dst")
   let posIdent = ident("pos")
-  let sizeIdent = ident($marshalIdent & "Size")
 
   let marshalProc = quote:
-    proc `marshalIdent`(
+    proc mtMarshal(
         `bufIdent`: ptr UncheckedArray[byte], `capIdent`: int, `valueIdent`: `typeIdent`
     ): int {.gcsafe, raises: [].} =
       var `posIdent` = 0
@@ -329,7 +328,7 @@ proc genMtCodecProcs*(
       return -1
 
   let unmarshalProc = quote:
-    proc `unmarshalIdent`(
+    proc mtUnmarshal(
         `bufIdent`: ptr UncheckedArray[byte],
         `lenIdent`: int,
         `dstIdent`: var `typeIdent`,
@@ -338,7 +337,7 @@ proc genMtCodecProcs*(
       return mtUnmarshalValue(`bufIdent`, `lenIdent`, `dstIdent`, `posIdent`)
 
   let sizeProc = quote:
-    proc `sizeIdent`(`valueIdent`: `typeIdent`): int {.gcsafe, raises: [].} =
+    proc mtMarshalSize(`valueIdent`: `typeIdent`): int {.gcsafe, raises: [].} =
       mtMarshalSizeValue(`valueIdent`)
 
   @[marshalProc, unmarshalProc, sizeProc]

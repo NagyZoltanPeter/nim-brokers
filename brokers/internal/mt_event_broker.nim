@@ -36,13 +36,14 @@ import
   ../broker_scope,
   ./mt_broker_common,
   ./mt_queue,
+  ./mt_transport,
   ./mt_codec,
   ./mt_config,
   ./broker_debug
 
 export
   results, chronos, broker_context, broker_scope, chronicles, mt_broker_common,
-  mt_config
+  mt_transport, mt_config
 
 # Ring-slot sentinel: a slot's payload `uint32` is normally a slab cell
 # index, but this reserved value carries a "clear local tvHandlers"
@@ -114,27 +115,14 @@ proc generateMtEventBroker*(
 
   let bucketName = ident(typeDisplayName & "MtEventBucket")
 
-  let globalBucketsIdent = ident("g" & typeDisplayName & "MtBuckets")
-  let globalBucketCountIdent = ident("g" & typeDisplayName & "MtBucketCount")
-  let globalBucketCapIdent = ident("g" & typeDisplayName & "MtBucketCap")
-  let globalLockIdent = ident("g" & typeDisplayName & "MtLock")
-  let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
+  let regIdent = ident("g" & typeDisplayName & "MtRegistry")
 
   let globalSlabIdent = ident("g" & typeDisplayName & "MtSlab")
-  let globalSlabInitIdent = ident("g" & typeDisplayName & "MtSlabInit")
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
-  let initSlabProcIdent = ident("ensureSlab" & typeDisplayName & "MtBroker")
-  let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
   let listenerTaskIdent = ident("notify" & typeDisplayName & "Listener")
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
   let clearListenersIdent = ident("clearListeners" & typeDisplayName)
-  let releaseCellIdent = ident("releaseCell" & typeDisplayName)
-  let shardHintIdent = ident("shardHint" & typeDisplayName)
-
-  let marshalIdent = ident(typeDisplayName & "MtMarshal")
-  let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
-  let marshalSizeIdent = ident(typeDisplayName & "MtMarshalSize")
 
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
@@ -182,80 +170,40 @@ proc generateMtEventBroker*(
       `dropAllHookProcTypeIdent` = proc(brokerCtx: BrokerContext) {.gcsafe, raises: [].}
 
       `bucketName` = object
-        brokerCtx: BrokerContext
-        ring: ptr VyukovMpscRing[uint32]
-        lease: ptr BrokerRingLease
-          ## bucket + poll fn + in-flight emit refs (frees the ring)
-        listenerSignal: ptr BrokerSignalShared
-        threadId: pointer
-        threadGen: uint64 ## disambiguates reused threadvar addresses
-        active: bool
-        hasListeners: bool
+        head: MtBucketHead ## lease = bucket + poll fn + in-flight emit refs
 
   # Attach the captured `##` doc text to the re-emitted event type (#50).
   attachFirstTypeDefDoc(brokerTypes, parsed.docText)
   result.add(brokerTypes)
 
   # ── Codec procs (marshal / unmarshal) ─────────────────────────────────
-  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):
+  for procNode in genMtCodecProcs(typeIdent):
     result.add(procNode)
 
   # ── Global shared state ───────────────────────────────────────────────
   result.add(
     quote do:
-      var `globalBucketsIdent`: ptr UncheckedArray[`bucketName`]
-      var `globalBucketCountIdent`: int
-      var `globalBucketCapIdent`: int
-      var `globalLockIdent`: Lock
-      var `globalInitIdent`: Atomic[int]
-        ## 0 = uninitialised, 1 = initialising, 2 = ready. CAS(0→1) wins;
-        ## losers spin until 2.
-      var `globalSlabIdent`: PayloadSlab
-      var `globalSlabInitIdent`: Atomic[int]
+      var `regIdent`: MtRegistry[`bucketName`]
+      var `globalSlabIdent`: MtLazySlab
+        ## lazily allocated by the first listen() / emit() caller, whose
+        ## thread must outlive it (never freed).
       # Part D-3 dropAllListeners hook. Single slot per event type;
       # `dropAllHookIdent` is `nil` when no hook is registered.
       var `dropAllHookIdent`: `dropAllHookProcTypeIdent`
       var `dropAllHookLockIdent`: Lock
       var `dropAllHookInitIdent`: Atomic[int]
-        ## same protocol as `globalInitIdent`, gating the global slab.
+        ## 0 = uninitialised, 1 = initialising, 2 = ready; gates the hook lock.
   )
 
   # ── Init helpers ──────────────────────────────────────────────────────
   result.add(
     quote do:
-      proc `initSlabProcIdent`() =
-        ## Lazy-init the global event slab on first listen() or emit().
-        ## The caller's thread becomes the slab's owner (must outlive it).
-        if `globalSlabInitIdent`.load(moRelaxed) == 2:
-          return
-        var expected = 0
-        if `globalSlabInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initPayloadSlab(
-            `globalSlabIdent`,
-            capacity = uint32(`slabCapacityLit`),
-            payloadBytes = uint32(`payloadBytesLit`),
-            nShards = `freeListShardsLit`,
-          )
-          `globalSlabInitIdent`.store(2, moRelease)
-        else:
-          while `globalSlabInitIdent`.load(moAcquire) != 2:
-            discard
-
       proc `initProcIdent`() =
-        if `globalInitIdent`.load(moRelaxed) == 2:
-          `initSlabProcIdent`()
-          return
-        var expected = 0
-        if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initLock(`globalLockIdent`)
-          `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
-            `bucketName`, `globalBucketCapIdent`
-          ))
-          `globalBucketCountIdent` = 0
-          # Part D-3 dropAllListeners hook storage init. Same one-shot
-          # CAS-init protocol as the main globals so concurrent callers
-          # see an initialised lock before any reader/writer touches it.
+        `regIdent`.ensureInit()
+        # Part D-3 dropAllListeners hook storage: same one-shot CAS-init
+        # protocol, so concurrent callers see an initialised lock before any
+        # reader / writer touches it.
+        if `dropAllHookInitIdent`.load(moRelaxed) != 2:
           var hookExpected = 0
           if `dropAllHookInitIdent`.compareExchange(
             hookExpected, 1, moAcquire, moRelaxed
@@ -265,27 +213,9 @@ proc generateMtEventBroker*(
           else:
             while `dropAllHookInitIdent`.load(moAcquire) != 2:
               discard
-          `globalInitIdent`.store(2, moRelease)
-        else:
-          while `globalInitIdent`.load(moAcquire) != 2:
-            discard
-        `initSlabProcIdent`()
-
-  )
-
-  # ── Grow helper ───────────────────────────────────────────────────────
-  result.add(
-    quote do:
-      proc `growProcIdent`() =
-        ## Must be called under lock.
-        let newCap = `globalBucketCapIdent` * 2
-        let newBuf =
-          cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
-        for i in 0 ..< `globalBucketCountIdent`:
-          newBuf[i] = `globalBucketsIdent`[i]
-        # Intentional leak of the old buffer: see mt_request_broker.nim.
-        `globalBucketsIdent` = newBuf
-        `globalBucketCapIdent` = newCap
+        `globalSlabIdent`.ensureInit(
+          uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
+        )
 
   )
 
@@ -319,10 +249,6 @@ proc generateMtEventBroker*(
   # ── Local helpers used by both same-thread emit and cross-thread poll
   result.add(
     quote do:
-      proc `shardHintIdent`(): uint32 {.inline.} =
-        ## Hash of the calling thread's TLS marker → free-list shard.
-        cast[uint32](cast[uint](currentMtThreadId()) shr 4)
-
       proc `clearListenersIdent`(loopCtx: BrokerContext) {.gcsafe, raises: [].} =
         {.cast(gcsafe).}:
           for i in 0 ..< `tvListenerCtxIdent`.len:
@@ -332,10 +258,6 @@ proc generateMtEventBroker*(
               `tvListenerHandlersIdent`.del(i)
               `tvNextIdsIdent`.del(i)
               break
-
-      proc `releaseCellIdent`(cellIdx: uint32) {.inline, gcsafe.} =
-        if `globalSlabIdent`.decRefAndCheck(cellIdx):
-          `globalSlabIdent`.release(cellIdx, `shardHintIdent`())
 
   )
 
@@ -356,51 +278,37 @@ proc generateMtEventBroker*(
         let capturedShutdownFut = shutdownFut
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
-            var cellIdx: uint32
-            if not capturedRing.tryDequeue(cellIdx):
-              # Empty.  If the ring has been closed by shutdown, this is
-              # the definitive "drained" point (no more producers can
-              # enqueue past `closed=true`).  Complete the shutdown
-              # future and self-unregister.
-              if capturedRing.isClosed():
-                if not capturedShutdownFut.finished:
-                  capturedShutdownFut.complete()
-                releaseLease(capturedLease)
-                return 2
+            var ev: `typeIdent`
+            case pollCell(capturedRing, `globalSlabIdent`.slab, ev, CtrlClearListeners)
+            of mpsEmpty:
               return 0
-            case cellIdx
-            of CtrlClearListeners:
+            of mpsClosed:
+              # Shutdown closed the ring and it is drained: complete the
+              # shutdown future and self-unregister.
+              if not capturedShutdownFut.finished:
+                capturedShutdownFut.complete()
+              releaseLease(capturedLease)
+              return 2
+            of mpsSentinel:
               `clearListenersIdent`(capturedCtx)
               return 1
-            else:
-              # Normal cell: decode, dispatch, decRef. dataPtr/dataLen resolve
-              # the heap-spill buffer when the payload spilled, else the inline
-              # cell region.
-              var ev: `typeIdent`
-              let payloadPtr = `globalSlabIdent`.dataPtr(cellIdx)
-              let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
-              let ok =
-                try:
-                  `unmarshalIdent`(payloadPtr, payloadLen, ev)
-                except Exception:
-                  false
-              if ok:
-                var idx = -1
-                for i in 0 ..< `tvListenerCtxIdent`.len:
-                  if `tvListenerCtxIdent`[i] == capturedCtx:
-                    idx = i
-                    break
-                if idx >= 0:
-                  var callbacks: seq[`handlerProcIdent`] = @[]
-                  for cb in `tvListenerHandlersIdent`[idx].values:
-                    callbacks.add(cb)
-                  for cb in callbacks:
-                    let fut: Future[void] = `listenerTaskIdent`(cb, ev)
-                    `tvListenerFutsIdent`.add((capturedCtx, fut))
-                    asyncSpawn fut
-              else:
-                error "Failed to unmarshal event payload", eventType = `typeNameLit`
-              `releaseCellIdent`(cellIdx)
+            of mpsBadValue:
+              error "Failed to unmarshal event payload", eventType = `typeNameLit`
+              return 1
+            of mpsValue:
+              var idx = -1
+              for i in 0 ..< `tvListenerCtxIdent`.len:
+                if `tvListenerCtxIdent`[i] == capturedCtx:
+                  idx = i
+                  break
+              if idx >= 0:
+                var callbacks: seq[`handlerProcIdent`] = @[]
+                for cb in `tvListenerHandlersIdent`[idx].values:
+                  callbacks.add(cb)
+                for cb in callbacks:
+                  let fut: Future[void] = `listenerTaskIdent`(cb, ev)
+                  `tvListenerFutsIdent`.add((capturedCtx, fut))
+                  asyncSpawn fut
               return 1
 
   )
@@ -433,45 +341,22 @@ proc generateMtEventBroker*(
         `tvListenerHandlersIdent`[tvIdx][newId] = handler
 
         # Ensure a bucket + ring exists for (brokerCtx, this thread).
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
-        var bucketExists = false
         var spawnRing: ptr VyukovMpscRing[uint32]
         var spawnLease: ptr BrokerRingLease
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].threadId == myThreadId and
-                `globalBucketsIdent`[i].threadGen == myThreadGen:
-              `globalBucketsIdent`[i].hasListeners = true
-              `globalBucketsIdent`[i].active = true
-              bucketExists = true
-              break
-          if not bucketExists:
-            if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-              `growProcIdent`()
+        `regIdent`.locked:
+          if `regIdent`.setupCheck(brokerCtx, mspReuseOwned) == msoCreate:
             let ring = newVyukovMpscRing[uint32](`queueDepthLit`)
             # One reference for the bucket (dropped by shutdownProcessLoopsForCtx)
             # and one for the poll fn registered below.
             let lease = newBrokerRingLease(ring)
             acquireLease(lease)
-            let listenerSig = getOrInitBrokerSignal()
-            let idx = `globalBucketCountIdent`
-            `globalBucketsIdent`[idx] = `bucketName`(
-              brokerCtx: brokerCtx,
-              ring: ring,
-              lease: lease,
-              listenerSignal: listenerSig,
-              threadId: myThreadId,
-              threadGen: myThreadGen,
-              active: true,
-              hasListeners: true,
-            )
-            `globalBucketCountIdent` += 1
+            var head = initHead(brokerCtx, ring, lease)
+            head.hasListeners = true
+            `regIdent`.append(`bucketName`(head: head))
             spawnRing = ring
             spawnLease = lease
 
-        if not bucketExists and not spawnRing.isNil:
+        if not spawnRing.isNil:
           let shutdownFut =
             newFuture[void]("eventBroker." & `typeNameLit` & ".shutdown")
           `tvShutdownFutsIdent`.add((brokerCtx, shutdownFut))
@@ -480,7 +365,7 @@ proc generateMtEventBroker*(
           )
           ensureBrokerDispatchStarted()
 
-        return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
+        return ok(`listenerHandleIdent`(id: newId, threadId: currentMtThreadId()))
 
   )
 
@@ -533,24 +418,17 @@ proc generateMtEventBroker*(
           for target in crossTargets:
             releaseLease(target.lease)
         var hasSameThread = false
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
 
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].active and `globalBucketsIdent`[i].hasListeners:
-              if `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
+        `regIdent`.locked:
+          for i in 0 ..< `regIdent`.count:
+            let head = `regIdent`.buckets[i].head
+            if head.ctx == brokerCtx and head.active and head.hasListeners:
+              if head.isOwnedHere():
                 hasSameThread = true
               else:
-                acquireLease(`globalBucketsIdent`[i].lease)
+                acquireLease(head.lease)
                 crossTargets.add(
-                  CrossTarget(
-                    ring: `globalBucketsIdent`[i].ring,
-                    signal: `globalBucketsIdent`[i].listenerSignal,
-                    lease: `globalBucketsIdent`[i].lease,
-                  )
+                  CrossTarget(ring: head.ring, signal: head.signal, lease: head.lease)
                 )
 
         # Same-thread fast path: bypass ring entirely.
@@ -572,59 +450,32 @@ proc generateMtEventBroker*(
         if crossTargets.len == 0:
           return
 
-        # Cross-thread fan-out via shared refcounted cell.
-        let shardHint = `shardHintIdent`()
-        let cellIdx = `globalSlabIdent`.claim(shardHint)
-        if cellIdx == EmptyIdx:
+        # Cross-thread fan-out via one shared cell, refcounted per target.
+        let c = claimCell(
+          `globalSlabIdent`.slab, event, `maxDynPayloadLit`, refs = crossTargets.len
+        )
+        case c.status
+        of mssOk:
+          discard
+        of mssSlabExhausted:
           warn "event dropped: slab exhausted",
             eventType = `typeNameLit`, targets = crossTargets.len
           return
-
-        let cell = `globalSlabIdent`.cellPtr(cellIdx)
-        let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
-        let written =
-          try:
-            `marshalIdent`(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
-          except Exception:
-            -1
-        if written >= 0:
-          # Fast path: payload fit the fixed cell.
-          cell.payloadSize = uint32(written)
-        else:
-          # Auto-spill: payload exceeded the cell — marshal into an exact-size
-          # heap buffer instead of dropping. Owned by the cell; freed at release.
-          let needed =
-            try:
-              `marshalSizeIdent`(event)
-            except Exception:
-              -1
-          if needed < 0 or needed > `maxDynPayloadLit`:
-            error "event dropped: payload exceeds maxDynamicPayloadBytes",
-              eventType = `typeNameLit`, needed = needed, cap = `maxDynPayloadLit`
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          let spillBuf = queueAlloc0(needed)
-          if spillBuf.isNil:
-            error "event dropped: spill allocation failed",
-              eventType = `typeNameLit`, needed = needed
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          let w2 =
-            try:
-              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, event)
-            except Exception:
-              -1
-          if w2 < 0:
-            queueFree(spillBuf)
-            `globalSlabIdent`.release(cellIdx, shardHint)
-            return
-          `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
-        cell.refcount.store(crossTargets.len, moRelease)
+        of mssTooLarge:
+          error "event dropped: payload exceeds maxDynamicPayloadBytes",
+            eventType = `typeNameLit`, needed = c.needed, cap = `maxDynPayloadLit`
+          return
+        of mssSpillFailed:
+          error "event dropped: spill allocation failed",
+            eventType = `typeNameLit`, needed = c.needed
+          return
+        of mssMarshalFailed, mssQueueFull:
+          return
 
         for target in crossTargets:
-          if not target.ring.tryEnqueue(cellIdx):
+          if not target.ring.tryEnqueue(c.idx):
             warn "event dropped: listener queue full", eventType = `typeNameLit`
-            `releaseCellIdent`(cellIdx)
+            releaseCellRef(`globalSlabIdent`.slab, c.idx)
           else:
             fireBrokerSignal(target.signal)
 
@@ -765,15 +616,10 @@ proc generateMtEventBroker*(
           `tvListenerHandlersIdent`.del(tvIdx)
           `tvNextIdsIdent`.del(tvIdx)
 
-          let myThreadId = currentMtThreadId()
-          let myThreadGen = currentMtThreadGen()
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                  `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                `globalBucketsIdent`[i].hasListeners = false
-                break
+          `regIdent`.locked:
+            let i = `regIdent`.findOwnedIdx(brokerCtx)
+            if i >= 0:
+              `regIdent`.buckets[i].head.hasListeners = false
 
   )
 
@@ -795,26 +641,21 @@ proc generateMtEventBroker*(
       proc `dropAllListenersImplIdent`(brokerCtx: BrokerContext) =
         `initProcIdent`()
 
-        let myThreadId = currentMtThreadId()
         var crossRings:
           seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared, ptr BrokerRingLease)] =
           @[]
 
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].hasListeners:
-              `globalBucketsIdent`[i].hasListeners = false
-              if `globalBucketsIdent`[i].threadId != myThreadId:
+        `regIdent`.locked:
+          for i in 0 ..< `regIdent`.count:
+            let head = `regIdent`.buckets[i].head
+            if head.ctx == brokerCtx and head.hasListeners:
+              `regIdent`.buckets[i].head.hasListeners = false
+              # (threadId, threadGen): a reused threadvar address from a later
+              # thread is not this thread.
+              if not head.isOwnedHere():
                 # Held until the sentinel is enqueued (BrokerRingLease).
-                acquireLease(`globalBucketsIdent`[i].lease)
-                crossRings.add(
-                  (
-                    `globalBucketsIdent`[i].ring,
-                    `globalBucketsIdent`[i].listenerSignal,
-                    `globalBucketsIdent`[i].lease,
-                  )
-                )
+                acquireLease(head.lease)
+                crossRings.add((head.ring, head.signal, head.lease))
 
         # Same-thread tv clear.
         var tvIdx = -1
@@ -953,28 +794,16 @@ proc generateMtEventBroker*(
       proc `shutdownProcessLoopsForCtxIdent`(
           ctx: BrokerContext
       ) {.async: (raises: []).} =
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
         var ringsToShutdown:
           seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared, ptr BrokerRingLease)] =
           @[]
-        withLock(`globalLockIdent`):
+        `regIdent`.locked:
           var i = 0
-          while i < `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == ctx and
-                `globalBucketsIdent`[i].threadId == myThreadId and
-                `globalBucketsIdent`[i].threadGen == myThreadGen and
-                `globalBucketsIdent`[i].active:
-              ringsToShutdown.add(
-                (
-                  `globalBucketsIdent`[i].ring,
-                  `globalBucketsIdent`[i].listenerSignal,
-                  `globalBucketsIdent`[i].lease,
-                )
-              )
-              for j in i ..< `globalBucketCountIdent` - 1:
-                `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
-              `globalBucketCountIdent` -= 1
+          while i < `regIdent`.count:
+            let head = `regIdent`.buckets[i].head
+            if head.ctx == ctx and head.isOwnedHere() and head.active:
+              ringsToShutdown.add((head.ring, head.signal, head.lease))
+              `regIdent`.removeAt(i)
             else:
               inc i
 
