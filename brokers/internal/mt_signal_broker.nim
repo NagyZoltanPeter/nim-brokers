@@ -17,9 +17,10 @@
 ## RequestBroker(mt)'s single-registry ownership model:
 ##   - one bucket per (brokerCtx) — `onSignal` rejects a duplicate;
 ##   - the bucket-owning thread (the one that ran `onSignal`) allocates the
-##     ring and, on `dropSignalHandler`, closes it; the poll fn hands the ring
-##     to the per-thread pending-free registry, freed at `teardownBrokerThread`
-##     (Invariant I0 — the owning thread is the only safe deallocator);
+##     ring and, on `dropSignalHandler`, closes it; the poll fn hands the
+##     ring's lease to the per-thread pending registry and `teardownBrokerThread`
+##     drops the owner reference — an in-flight cross-thread `signal()` holds
+##     its own reference, so the last holder frees the ring (BrokerRingLease);
 ##   - the global payload slab is allocated lazily by the first
 ##     onSignal/signal caller, whose thread must outlive it (never freed,
 ##     like the EventBroker global slab).
@@ -156,6 +157,7 @@ proc generateMtSignalBroker*(
       `bucketName` = object
         brokerCtx: BrokerContext
         ring: ptr VyukovMpscRing[uint32]
+        lease: ptr BrokerRingLease ## owner + in-flight signal() refs (frees the ring)
         handlerSignal: ptr BrokerSignalShared
         threadId: pointer
         threadGen: uint64 ## disambiguates reused threadvar addresses
@@ -286,17 +288,20 @@ proc generateMtSignalBroker*(
   result.add(
     quote do:
       proc `pollFnMakerIdent`(
-          ring: ptr VyukovMpscRing[uint32], loopCtx: BrokerContext
+          ring: ptr VyukovMpscRing[uint32],
+          lease: ptr BrokerRingLease,
+          loopCtx: BrokerContext,
       ): ThreadDispatchPollFn =
         let capturedRing = ring
+        let capturedLease = lease
         let capturedCtx = loopCtx
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
             var cellIdx: uint32
             if not capturedRing.tryDequeue(cellIdx):
               if capturedRing.isClosed():
-                # Owner-thread deferred free (global slab + no pool → nil, nil).
-                enqueuePendingRingFree(capturedRing, nil, nil)
+                # Owner reference dropped at thread exit (global slab, no pool).
+                enqueuePendingRingFree(capturedLease)
                 return 2
               return 0
             var ev: `typeIdent`
@@ -339,6 +344,7 @@ proc generateMtSignalBroker*(
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
         var ring: ptr VyukovMpscRing[uint32]
+        var lease: ptr BrokerRingLease
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
@@ -347,18 +353,20 @@ proc generateMtSignalBroker*(
           if `globalBucketCountIdent` >= `globalBucketCapIdent`:
             `growProcIdent`()
           ring = newVyukovMpscRing[uint32](`queueDepthLit`)
+          lease = newBrokerRingLease(ring)
           let handlerSig = getOrInitBrokerSignal()
           let idx = `globalBucketCountIdent`
           `globalBucketsIdent`[idx] = `bucketName`(
             brokerCtx: brokerCtx,
             ring: ring,
+            lease: lease,
             handlerSignal: handlerSig,
             threadId: myThreadId,
             threadGen: myThreadGen,
             active: true,
           )
           `globalBucketCountIdent` += 1
-        registerBrokerPoller(`pollFnMakerIdent`(ring, brokerCtx))
+        registerBrokerPoller(`pollFnMakerIdent`(ring, lease, brokerCtx))
         registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
         ok(ring)
@@ -400,6 +408,11 @@ proc generateMtSignalBroker*(
         var ring: ptr VyukovMpscRing[uint32]
         var handlerSig: ptr BrokerSignalShared
         var sameThread = false
+        # Taken with the bucket under the lock, held until the enqueue + wake
+        # are done: the owner may drop the handler meanwhile (BrokerRingLease).
+        var lease: ptr BrokerRingLease = nil
+        defer:
+          releaseLease(lease)
         var found = false
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
@@ -414,6 +427,8 @@ proc generateMtSignalBroker*(
               else:
                 ring = `globalBucketsIdent`[i].ring
                 handlerSig = `globalBucketsIdent`[i].handlerSignal
+                lease = `globalBucketsIdent`[i].lease
+                acquireLease(lease)
               break
 
         if not found:
@@ -459,7 +474,7 @@ proc generateMtSignalBroker*(
               "SignalBroker(" & `typeNameLit` &
                 "): payload exceeds maxDynamicPayloadBytes"
             )
-          let spillBuf = allocShared0(needed)
+          let spillBuf = queueAlloc0(needed)
           if spillBuf.isNil:
             `globalSlabIdent`.release(cellIdx, shardHint)
             return err("SignalBroker(" & `typeNameLit` & "): spill allocation failed")
@@ -471,7 +486,7 @@ proc generateMtSignalBroker*(
             except Exception:
               -1
           if w2 < 0:
-            deallocShared(spillBuf)
+            queueFree(spillBuf)
             `globalSlabIdent`.release(cellIdx, shardHint)
             return err("SignalBroker(" & `typeNameLit` & "): payload marshal failed")
           `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
@@ -486,8 +501,8 @@ proc generateMtSignalBroker*(
 
   # ── dropSignalHandler impl (suspension-free; mirrors clearProvider) ───
   # NO async / NO await — the public overload is async only for cross-lane
-  # shape parity. Removes the bucket, closes the ring (poll fn hands it to the
-  # per-thread pending-free registry, freed at teardownBrokerThread), cleans
+  # shape parity. Removes the bucket, closes the ring (poll fn hands its lease to
+  # the per-thread pending registry; owner ref dropped at teardownBrokerThread), cleans
   # the owning thread's threadvar, and decrements the handler-present counter.
   result.add(
     quote do:
@@ -779,9 +794,15 @@ proc generateMtSignalBroker*(
         ## restore the captured handler (or drop it if none was set).
         let savedMockSignalHandler = getCurrentSignalHandler(t, brokerCtx)
         let mockInstalled = replaceSignalHandler(t, brokerCtx, mock)
-        doAssert mockInstalled.isOk(),
-          "withMockSignalHandler: " & mockInstalled.error &
-            " (only the handler's owning thread may mock it)"
+        if mockInstalled.isErr():
+          # Not `doAssert`: under --mm:orc a failing doAssert leaks its message
+          # temporary (the noreturn assert path skips its destructor), and this
+          # misuse path is exercised on purpose by test_mt_owner_only_clear.
+          raise newException(
+            AssertionDefect,
+            "withMockSignalHandler: " & mockInstalled.error &
+              " (only the handler's owning thread may mock it)",
+          )
         try:
           body
         finally:

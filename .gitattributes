@@ -1,0 +1,4 @@
+# Sanitizer suppression files are parsed by the sanitizer runtimes, which do
+# not strip '\r': a CRLF checkout (the Windows runners) turns every blank line
+# into an unparseable "\r" entry and the runtime aborts the test.
+tools/sanitizers/*.supp text eol=lf

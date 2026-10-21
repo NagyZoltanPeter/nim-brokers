@@ -424,53 +424,38 @@ suite "mt_queue — §2.6 invariant smoke":
 # ───────────────────────────────────────────────────────────────────────────
 
 suite "ResponseSlotPool — basics":
+  # Sequential give-up / abandon ownership is covered by the "response slot
+  # ownership" suite in test_mt_request_slot_lifecycle.nim.
   test "claim + write bytes + commit + release":
     var pool: ResponseSlotPool
     initResponseSlotPool(pool, capacity = 4, maxPayloadBytes = 32, nShards = 1)
     let idx = pool.claim(0)
     check idx != EmptyIdx
-    check pool.beginWrite(idx)
+    let gen = pool.slotGen(idx)
+    check pool.beginWrite(idx, gen) == BeginWriteResult.Acquired
     let payload = pool.slotPayloadPtr(idx)
     payload[0] = 42'u8
     payload[1] = 99'u8
-    pool.commitWrite(idx, 2'u16)
-    check pool.readyState(idx)
-    check pool.payloadSize(idx) == 2'u16
-    let payload2 = pool.slotPayloadPtr(idx)
+    check pool.commitWrite(idx, gen, 2'u32)
+    check pool.readyState(idx, gen)
+    check pool.respDataLen(idx) == 2
+    let payload2 = pool.respDataPtr(idx)
     check payload2[0] == 42'u8
     check payload2[1] == 99'u8
     pool.release(idx, 0)
     deinitResponseSlotPool(pool)
 
-  test "abandon prevents subsequent beginWrite":
-    var pool: ResponseSlotPool
-    initResponseSlotPool(pool, capacity = 4, maxPayloadBytes = 16, nShards = 1)
-    let idx = pool.claim(0)
-    check pool.abandon(idx)
-    check (not pool.beginWrite(idx))
-    pool.release(idx, 0)
-    deinitResponseSlotPool(pool)
-
-  test "beginWrite then abandon: beginWrite wins":
-    var pool: ResponseSlotPool
-    initResponseSlotPool(pool, capacity = 4, maxPayloadBytes = 16, nShards = 1)
-    let idx = pool.claim(0)
-    check pool.beginWrite(idx)
-    # abandon after beginWrite should fail (state already Writing, not Empty)
-    check (not pool.abandon(idx))
-    pool.commitWrite(idx, 0'u16)
-    check pool.readyState(idx)
-    pool.release(idx, 0)
-    deinitResponseSlotPool(pool)
-
-# Race: provider and requester race; verify mutual exclusion semantics.
+# Race: provider (beginWrite/commitWrite) vs requester (giveUpSlot). Whatever
+# the interleaving, exactly one side must end up owning the release.
 
 const respRaceRounds = 200
 
 type RespRaceShared = object
   pool: ResponseSlotPool
   idx: uint32
-  outcome: Atomic[int] # 1=write won, 2=abandon won, 0=neither/error
+  gen: uint32
+  writerReleases: Atomic[int] # 1 = provider owns the release
+  callerReleases: Atomic[int] # 1 = requester owns the release
   startGate: Atomic[bool]
 
 var respRace: RespRaceShared
@@ -478,36 +463,42 @@ var respRace: RespRaceShared
 proc respWriter() {.thread.} =
   while not respRace.startGate.load(moAcquire):
     sleep(0)
-  if respRace.pool.beginWrite(respRace.idx):
-    respRace.pool.commitWrite(respRace.idx, 0'u16)
-    var expected = 0
-    discard respRace.outcome.compareExchange(expected, 1, moAcquireRelease, moAcquire)
+  case respRace.pool.beginWrite(respRace.idx, respRace.gen)
+  of BeginWriteResult.Acquired:
+    respRace.pool.slotPayloadPtr(respRace.idx)[0] = 7'u8
+    if not respRace.pool.commitWrite(respRace.idx, respRace.gen, 1'u32):
+      respRace.writerReleases.store(1, moRelease) # gave up mid-write
+  of BeginWriteResult.Abandoned:
+    respRace.writerReleases.store(1, moRelease)
+  of BeginWriteResult.Stale:
+    discard
 
-proc respAbandoner() {.thread.} =
+proc respGiver() {.thread.} =
   while not respRace.startGate.load(moAcquire):
     sleep(0)
-  if respRace.pool.abandon(respRace.idx):
-    var expected = 0
-    discard respRace.outcome.compareExchange(expected, 2, moAcquireRelease, moAcquire)
+  if respRace.pool.giveUpSlot(respRace.idx, respRace.gen) == SlotGiveUp.CallerReleases:
+    respRace.callerReleases.store(1, moRelease)
 
 suite "ResponseSlotPool — race":
-  test "concurrent write vs abandon — exactly one wins":
+  test "concurrent write vs give-up — exactly one side releases":
     for round in 0 ..< respRaceRounds:
       initResponseSlotPool(
         respRace.pool, capacity = 2, maxPayloadBytes = 16, nShards = 1
       )
       respRace.idx = respRace.pool.claim(0)
-      respRace.outcome.store(0, moRelaxed)
+      respRace.gen = respRace.pool.slotGen(respRace.idx)
+      respRace.writerReleases.store(0, moRelaxed)
+      respRace.callerReleases.store(0, moRelaxed)
       respRace.startGate.store(false, moRelease)
 
-      var tw, ta: Thread[void]
+      var tw, tg: Thread[void]
       tw.createThread(respWriter)
-      ta.createThread(respAbandoner)
+      tg.createThread(respGiver)
       respRace.startGate.store(true, moRelease)
       tw.joinThread()
-      ta.joinThread()
+      tg.joinThread()
 
-      let outcome = respRace.outcome.load(moAcquire)
-      check (outcome == 1 or outcome == 2)
+      check respRace.writerReleases.load(moAcquire) +
+        respRace.callerReleases.load(moAcquire) == 1
       respRace.pool.release(respRace.idx, 0)
       deinitResponseSlotPool(respRace.pool)

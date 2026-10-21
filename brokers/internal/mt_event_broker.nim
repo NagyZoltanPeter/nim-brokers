@@ -16,8 +16,9 @@
 ##
 ## §2.6 safety contract honored by construction (Invariant I0):
 ##   - The bucket-owning thread (the listener thread) allocates its ring
-##     via `createShared` and frees it via `shutdown(ctx)` on the same
-##     thread.
+##     on the C heap under a `BrokerRingLease`; the bucket, its poll fn and
+##     every in-flight cross-thread emit hold a reference, and the last one
+##     to drop it frees the ring (no timed grace window).
 ##   - The global event slab is allocated lazily, by whichever thread
 ##     first calls `listen()` or `emit()`. That thread MUST outlive the
 ##     slab.
@@ -183,6 +184,8 @@ proc generateMtEventBroker*(
       `bucketName` = object
         brokerCtx: BrokerContext
         ring: ptr VyukovMpscRing[uint32]
+        lease: ptr BrokerRingLease
+          ## bucket + poll fn + in-flight emit refs (frees the ring)
         listenerSignal: ptr BrokerSignalShared
         threadId: pointer
         threadGen: uint64 ## disambiguates reused threadvar addresses
@@ -341,10 +344,14 @@ proc generateMtEventBroker*(
     quote do:
       proc `pollFnMakerIdent`(
           ring: ptr VyukovMpscRing[uint32],
+          lease: ptr BrokerRingLease,
           loopCtx: BrokerContext,
           shutdownFut: Future[void],
       ): ThreadDispatchPollFn =
+        ## The poll fn owns one `lease` reference (taken by the caller) and
+        ## drops it when it retires on a closed, drained ring.
         let capturedRing = ring
+        let capturedLease = lease
         let capturedCtx = loopCtx
         let capturedShutdownFut = shutdownFut
         return proc(): int {.gcsafe, raises: [].} =
@@ -358,6 +365,7 @@ proc generateMtEventBroker*(
               if capturedRing.isClosed():
                 if not capturedShutdownFut.finished:
                   capturedShutdownFut.complete()
+                releaseLease(capturedLease)
                 return 2
               return 0
             case cellIdx
@@ -429,6 +437,7 @@ proc generateMtEventBroker*(
         let myThreadGen = currentMtThreadGen()
         var bucketExists = false
         var spawnRing: ptr VyukovMpscRing[uint32]
+        var spawnLease: ptr BrokerRingLease
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
@@ -442,11 +451,16 @@ proc generateMtEventBroker*(
             if `globalBucketCountIdent` >= `globalBucketCapIdent`:
               `growProcIdent`()
             let ring = newVyukovMpscRing[uint32](`queueDepthLit`)
+            # One reference for the bucket (dropped by shutdownProcessLoopsForCtx)
+            # and one for the poll fn registered below.
+            let lease = newBrokerRingLease(ring)
+            acquireLease(lease)
             let listenerSig = getOrInitBrokerSignal()
             let idx = `globalBucketCountIdent`
             `globalBucketsIdent`[idx] = `bucketName`(
               brokerCtx: brokerCtx,
               ring: ring,
+              lease: lease,
               listenerSignal: listenerSig,
               threadId: myThreadId,
               threadGen: myThreadGen,
@@ -455,12 +469,15 @@ proc generateMtEventBroker*(
             )
             `globalBucketCountIdent` += 1
             spawnRing = ring
+            spawnLease = lease
 
         if not bucketExists and not spawnRing.isNil:
           let shutdownFut =
             newFuture[void]("eventBroker." & `typeNameLit` & ".shutdown")
           `tvShutdownFutsIdent`.add((brokerCtx, shutdownFut))
-          registerBrokerPoller(`pollFnMakerIdent`(spawnRing, brokerCtx, shutdownFut))
+          registerBrokerPoller(
+            `pollFnMakerIdent`(spawnRing, spawnLease, brokerCtx, shutdownFut)
+          )
           ensureBrokerDispatchStarted()
 
         return ok(`listenerHandleIdent`(id: newId, threadId: myThreadId))
@@ -506,8 +523,15 @@ proc generateMtEventBroker*(
         type CrossTarget = object
           ring: ptr VyukovMpscRing[uint32]
           signal: ptr BrokerSignalShared
+          lease: ptr BrokerRingLease
 
         var crossTargets: seq[CrossTarget] = @[]
+        # Each target's lease is taken under the lock and held until its
+        # enqueue + wake are done (every return path): the listener thread may
+        # shut its bucket down meanwhile (BrokerRingLease).
+        defer:
+          for target in crossTargets:
+            releaseLease(target.lease)
         var hasSameThread = false
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
@@ -520,10 +544,12 @@ proc generateMtEventBroker*(
                   `globalBucketsIdent`[i].threadGen == myThreadGen:
                 hasSameThread = true
               else:
+                acquireLease(`globalBucketsIdent`[i].lease)
                 crossTargets.add(
                   CrossTarget(
                     ring: `globalBucketsIdent`[i].ring,
                     signal: `globalBucketsIdent`[i].listenerSignal,
+                    lease: `globalBucketsIdent`[i].lease,
                   )
                 )
 
@@ -577,7 +603,7 @@ proc generateMtEventBroker*(
               eventType = `typeNameLit`, needed = needed, cap = `maxDynPayloadLit`
             `globalSlabIdent`.release(cellIdx, shardHint)
             return
-          let spillBuf = allocShared0(needed)
+          let spillBuf = queueAlloc0(needed)
           if spillBuf.isNil:
             error "event dropped: spill allocation failed",
               eventType = `typeNameLit`, needed = needed
@@ -589,7 +615,7 @@ proc generateMtEventBroker*(
             except Exception:
               -1
           if w2 < 0:
-            deallocShared(spillBuf)
+            queueFree(spillBuf)
             `globalSlabIdent`.release(cellIdx, shardHint)
             return
           `globalSlabIdent`.setOverflow(cellIdx, spillBuf, uint32(w2))
@@ -770,7 +796,9 @@ proc generateMtEventBroker*(
         `initProcIdent`()
 
         let myThreadId = currentMtThreadId()
-        var crossRings: seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared)] = @[]
+        var crossRings:
+          seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared, ptr BrokerRingLease)] =
+          @[]
 
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
@@ -778,8 +806,14 @@ proc generateMtEventBroker*(
                 `globalBucketsIdent`[i].hasListeners:
               `globalBucketsIdent`[i].hasListeners = false
               if `globalBucketsIdent`[i].threadId != myThreadId:
+                # Held until the sentinel is enqueued (BrokerRingLease).
+                acquireLease(`globalBucketsIdent`[i].lease)
                 crossRings.add(
-                  (`globalBucketsIdent`[i].ring, `globalBucketsIdent`[i].listenerSignal)
+                  (
+                    `globalBucketsIdent`[i].ring,
+                    `globalBucketsIdent`[i].listenerSignal,
+                    `globalBucketsIdent`[i].lease,
+                  )
                 )
 
         # Same-thread tv clear.
@@ -795,9 +829,10 @@ proc generateMtEventBroker*(
           `tvNextIdsIdent`.del(tvIdx)
 
         # Cross-thread: send control sentinel.
-        for (ring, sig) in crossRings:
+        for (ring, sig, lease) in crossRings:
           discard ring.tryEnqueue(CtrlClearListeners)
           fireBrokerSignal(sig)
+          releaseLease(lease)
 
         # Part D-3: invoke the companion cleanup hook (if any) AFTER
         # listener clearing. The CBOR FFI library registers this hook
@@ -911,9 +946,8 @@ proc generateMtEventBroker*(
 
   # ── shutdownProcessLoopsForCtx (internal; used by API teardown) ───────
   # Must run on the bucket-owning thread. Drains the bucket's ring,
-  # decRefs remaining cells, removes the bucket from the registry, and
-  # deallocs its ring. The owner thread is the only safe deallocator
-  # (Invariant I0).
+  # decRefs remaining cells, removes the bucket from the registry, and drops
+  # the bucket's ring lease (the last holder frees the ring).
   result.add(
     quote do:
       proc `shutdownProcessLoopsForCtxIdent`(
@@ -921,7 +955,8 @@ proc generateMtEventBroker*(
       ) {.async: (raises: []).} =
         let myThreadId = currentMtThreadId()
         let myThreadGen = currentMtThreadGen()
-        var ringsToShutdown: seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared)] =
+        var ringsToShutdown:
+          seq[(ptr VyukovMpscRing[uint32], ptr BrokerSignalShared, ptr BrokerRingLease)] =
           @[]
         withLock(`globalLockIdent`):
           var i = 0
@@ -931,7 +966,11 @@ proc generateMtEventBroker*(
                 `globalBucketsIdent`[i].threadGen == myThreadGen and
                 `globalBucketsIdent`[i].active:
               ringsToShutdown.add(
-                (`globalBucketsIdent`[i].ring, `globalBucketsIdent`[i].listenerSignal)
+                (
+                  `globalBucketsIdent`[i].ring,
+                  `globalBucketsIdent`[i].listenerSignal,
+                  `globalBucketsIdent`[i].lease,
+                )
               )
               for j in i ..< `globalBucketCountIdent` - 1:
                 `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
@@ -951,7 +990,7 @@ proc generateMtEventBroker*(
         # Close each ring; the poll fn observes `closed && empty` and
         # self-unregisters via return-code 2 + completes shutdownFut.
         # Signal the dispatcher so the poll fn actually runs.
-        for (ring, sig) in ringsToShutdown:
+        for (ring, sig, _) in ringsToShutdown:
           ring.close()
           fireBrokerSignal(sig)
 
@@ -976,19 +1015,11 @@ proc generateMtEventBroker*(
           else:
             inc j
 
-        # Grace window: an emit that captured ring pointers under lock
-        # before we removed the bucket may still be mid-`tryEnqueue`.
-        # The poll fn has already self-unregistered (return 2), and the
-        # ring is closed, so any new tryEnqueue gets rejected — but we
-        # need a brief delay before deallocShared so the in-flight
-        # callers can complete their access. 50ms matches the original
-        # `deferredFreeEventChan` window.
-        try:
-          await sleepAsync(chronos.milliseconds(50))
-        except CatchableError:
-          discard
-        for (ring, _) in ringsToShutdown:
-          freeVyukovMpscRing(ring)
+        # Drop the bucket's reference. An emit that found the bucket before it
+        # was removed holds its own, as does the poll fn until it retires, so
+        # whichever finishes last frees the ring — no timed grace window.
+        for (_, _, lease) in ringsToShutdown:
+          releaseLease(lease)
 
   )
 

@@ -326,6 +326,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_broker_oop", "test_broker_lifecycle", "test_broker_ctor_shapes",
     "test_broker_interface_signal", "test_handler_sugar",
     "test_handler_sugar_generic_scope", "test_doc_comments", "test_broker_scope",
+    "test_broker_method_tunneling", "test_table_recognition",
   ]
   # Run every file before reporting. `test` raises OSError on a failing
   # compile or a non-zero exit, which used to abort the whole task at the
@@ -354,7 +355,7 @@ task test, "Run all single and multi-threaded broker tests":
     "test_multi_thread_handler_sugar", "test_mt_request_slot_lifecycle",
     "test_mt_request_cancel", "test_mt_thread_dispatcher_ownership",
     "test_multi_thread_broker_scope", "test_mt_owner_only_clear",
-    "test_mt_request_infinite_timeout",
+    "test_mt_request_infinite_timeout", "test_mt_provider_mock", "test_mt_queue",
   ]
   for f in mtTests:
     for opt in [
@@ -698,7 +699,7 @@ task testApi, "Run codec unit tests + library init integration tests":
   # Codec round-trip tests + event-courier drop evidence (no FFI flags needed).
   let codecTests = [
     "test_api_codec", "test_api_table_codec", "test_api_event_drop_under_overload",
-    "test_api_schema_hash",
+    "test_api_schema_hash", "test_api_courier_growth",
   ]
   for f in codecTests:
     for opt in [
@@ -1318,21 +1319,27 @@ proc sanitizerCompileFlags(mode: string, mm = ""): string =
     when defined(windows):
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
       result.add(" -gcodeview")
+      # clang's MSVC target defaults to MS volatile semantics: every volatile
+      # access becomes an acquire/release atomic. refc's setjmp exceptions
+      # mark locals assigned inside `try` volatile, and a misaligned field
+      # store (an 8-byte `Result` value at 4-byte alignment in cborDecode)
+      # then lowers to the generic `__atomic_store` libcall, which the MSVC
+      # toolchain cannot resolve (no libatomic). ISO volatile is what the
+      # setjmp code needs anyway.
+      result.add(" -fno-ms-volatile")
 
-proc sanitizerLinkFlags(mode: string, sharedLib: bool = false): string =
+proc sanitizerLinkFlags(mode: string): string =
+  ## Same flags for executables and shared libraries. On Linux clang links the
+  ## sanitizer runtime only into the executable (static by default); an
+  ## instrumented .so resolves its runtime symbols from that host. Linking the
+  ## .so against the shared runtime instead makes ASan abort with
+  ## "incompatible ASan runtimes" next to a static-runtime host, and clang has
+  ## no `-shared-libtsan` at all.
   case mode
   of "tsan":
     result = "-fsanitize=thread -g"
-    when defined(linux):
-      if sharedLib:
-        result.add(" -shared-libtsan")
   else: # asan / asanleak
     result = "-fsanitize=address -fsanitize=undefined -g"
-    when defined(linux):
-      # The Nim .so links the shared sanitizer runtime; a foreign exe linked
-      # with the static runtime otherwise can't satisfy the .so's dep.
-      if sharedLib:
-        result.add(" -shared-libasan")
     when defined(windows):
       # Tell lld to emit a PDB so ASAN frames carry function/line info.
       result.add(" -Wl,/debug")
@@ -1406,8 +1413,8 @@ proc setAsanEnv() =
 proc asanCompileFlags(): string =
   sanitizerCompileFlags("asan")
 
-proc asanLinkFlags(sharedLib: bool = false): string =
-  sanitizerLinkFlags("asan", sharedLib)
+proc asanLinkFlags(): string =
+  sanitizerLinkFlags("asan")
 
 proc testSan(mode, mm, path: string, extra = "") =
   ## Build `test/<path>.nim` under the requested sanitizer `mode` + memory
@@ -1678,7 +1685,7 @@ proc runSanitizedPersistenceCpp(mode, mm: string) =
   libFlags.add(nimMainPrefixFlag("persistence"))
   libFlags.add(
     " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
-      quoteArg(sanitizerLinkFlags(mode, sharedLib = true))
+      quoteArg(sanitizerLinkFlags(mode))
   )
   libFlags.add(persistenceLibOutFlag())
   exec "nim c " & libFlags & " examples/persistence/nimlib/IPersistenceLib.nim"
@@ -1898,55 +1905,183 @@ task alltests,
   exec "nimble runTypeMapTestLibCpp"
   exec "nimble runTypeMapTestLibPy"
 
-task allAsan, "Run all tests under ASan+UBSan (clang, orc/refc, debug)":
-  exec "nimble testMtEventBrokerAsanOrc"
-  exec "nimble testMtEventBrokerAsanRefc"
-  exec "nimble testMtRequestBrokerAsanOrc"
-  exec "nimble testMtRequestBrokerAsanRefc"
-  exec "nimble testMtBrokerConfigsAsanOrc"
-  exec "nimble testMtBrokerConfigsAsanRefc"
-  exec "nimble testMtSignalBrokerAsanOrc"
-  exec "nimble testMtSignalBrokerAsanRefc"
-  exec "nimble testApiTeardownAsanOrc"
-  exec "nimble testApiTeardownAsanRefc"
-  exec "nimble testApiSignalAsanOrc"
-  exec "nimble testApiSignalAsanRefc"
-  exec "nimble testExtAsanOrc"
-  exec "nimble testExtAsanRefc"
-  exec "nimble testExtSwitchAsanOrc"
-  exec "nimble testExtSwitchAsanRefc"
-  exec "nimble testExtImportsAsanOrc"
-  exec "nimble testExtImportsAsanRefc"
-  exec "nimble testExtLifeAsanOrc"
-  exec "nimble testExtLifeAsanRefc"
+# ---------------------------------------------------------------------------
+# Table-driven sanitizer suite — what `allAsan` / `allTsan` / `allAsanLeak` run
+# and what the CI `sanitizers` jobs call.
+#
+#   group   — CI job split: st (single-thread) | mt | api | ext
+#   prefix  — `--nimMainPrefix` for FFI builds ("" = none)
+#   tsan    — also run under ThreadSanitizer (st rows have no threads to race)
+#   shallow — part of the reduced macOS / Windows PR set: platform-sensitive
+#             runtime (thread teardown + TLS, per-thread dispatcher, dlopen)
+#
+# Env knobs: SAN_GROUPS=mt,api (default all), SAN_SHALLOW=1, MM=orc|refc,
+# SAN_TESTS=<row path>,... (rerun selected rows only).
+# Every run is collected; the task fails once at the end (like `task test`).
+# ---------------------------------------------------------------------------
+type SanRow = tuple[path, extra, prefix, group: string, tsan, shallow: bool]
 
-task allTsan,
-  "Run all multi-thread + FFI-teardown tests under ThreadSanitizer (orc/refc)":
-  exec "nimble testExtTsan"
-  exec "nimble testMtEventBrokerTsanOrc"
-  exec "nimble testMtEventBrokerTsanRefc"
-  exec "nimble testMtRequestBrokerTsanOrc"
-  exec "nimble testMtRequestBrokerTsanRefc"
-  exec "nimble testMtBrokerConfigsTsanOrc"
-  exec "nimble testMtBrokerConfigsTsanRefc"
-  exec "nimble testMtSignalBrokerTsanOrc"
-  exec "nimble testMtSignalBrokerTsanRefc"
-  exec "nimble testApiTeardownTsanOrc"
-  exec "nimble testApiTeardownTsanRefc"
-  exec "nimble testApiSignalTsanOrc"
-  exec "nimble testApiSignalTsanRefc"
+const
+  ffi = "-d:BrokerFfiApi"
+  sanRows: seq[SanRow] = @[
+    ("test_event_broker", "", "", "st", false, false),
+    ("test_request_broker", "", "", "st", false, false),
+    ("test_request_broker_sugar", "", "", "st", false, false),
+    ("test_request_broker_sync_void", "", "", "st", false, false),
+    ("test_multi_request_broker", "", "", "st", false, false),
+    ("test_signal_broker", "", "", "st", false, false),
+    ("test_broker_oop", "", "", "st", false, false),
+    ("test_broker_lifecycle", "", "", "st", false, false),
+    ("test_broker_ctor_shapes", "", "", "st", false, false),
+    ("test_broker_interface_signal", "", "", "st", false, false),
+    ("test_broker_method_tunneling", "", "", "st", false, false),
+    ("test_handler_sugar", "", "", "st", false, false),
+    ("test_handler_sugar_generic_scope", "", "", "st", false, false),
+    ("test_doc_comments", "", "", "st", false, false),
+    ("test_broker_scope", "", "", "st", false, false),
+    ("test_api_codec", "", "", "st", false, false),
+    ("test_api_table_codec", "", "", "st", false, false),
+    ("test_api_schema_hash", "", "", "st", false, false),
+    ("test_multi_thread_event_broker", "", "", "mt", true, true),
+    ("test_multi_thread_request_broker", "", "", "mt", true, true),
+    ("test_multi_thread_broker_configs", "", "", "mt", true, false),
+    ("test_multi_thread_signal_broker", "", "", "mt", true, false),
+    ("test_multi_thread_broker_scope", "", "", "mt", true, false),
+    ("test_multi_thread_handler_sugar", "", "", "mt", true, false),
+    ("test_mt_owner_only_clear", "", "", "mt", true, false),
+    ("test_mt_request_cancel", "", "", "mt", true, false),
+    ("test_mt_request_slot_lifecycle", "", "", "mt", true, false),
+    ("test_mt_request_infinite_timeout", "", "", "mt", true, false),
+    ("test_mt_large_payload", "", "", "mt", true, false),
+    ("test_mt_drop_async_eager", "", "", "mt", true, false),
+    ("test_mt_thread_dispatcher_ownership", "", "", "mt", true, true),
+    ("test_mt_provider_mock", "", "", "mt", true, false),
+    ("test_mt_queue", "", "", "mt", true, true),
+    ("test_alloc_race_variants", "", "", "mt", true, false),
+    ("test_api_event_drop_under_overload", "", "", "api", true, false),
+    ("test_api_courier_growth", "", "", "api", true, false),
+    ("test_api_library_init", ffi, "apitest", "api", true, true),
+    ("test_api_verify_schema", ffi, "vstest", "api", true, false),
+    ("test_api_callAsync", ffi, "acbtest", "api", true, false),
+    ("test_api_signal_broker", ffi, "sigtest", "api", true, false),
+    ("test_api_event_teardown_isolation", ffi, "cbevt", "api", true, true),
+    ("test_api_shutdown_request", ffi, "sdreq", "api", true, false),
+    ("test_api_discovery", ffi, "apidisc", "api", true, false),
+    ("test_doc_comments_api", ffi, "cbdoc", "api", true, false),
+    ("test_broker_interface_api", ffi, "brokerifaceapi", "api", true, false),
+    ("test_broker_interface_mt", ffi, "brokerifacemt", "api", true, false),
+    (
+      "typemappingtestlib/test_typemappingtestlib", ffi, "typemappingtestlib", "api",
+      true, false,
+    ),
+    ("test_api_module_init_once", "", "", "api", true, false), # + sanHelperLib
+    ("test_api_ext_lib_teardown", "", "", "api", true, false), # + sanHelperLib
+    ("test_ext_plugin", ffi, "extplugin", "ext", true, true),
+    ("test_ext_imports", ffi, "extimports", "ext", true, false),
+    ("test_ext_lifecycle", ffi & " -d:extTestHooks", "extlife", "ext", true, false),
+    ("test_ext_switching", ffi, "extswitch", "ext", true, false),
+    ("test_ext_schema", ffi, "extschema", "ext", true, false),
+  ]
 
-task allAsanLeak, "Run all tests under ASan+UBSan+LSan (Linux leak detection; orc/refc)":
-  # LSan is Linux-only; on macOS/Windows these degrade to plain ASan+UBSan.
-  testExtSan("asanleak")
-  testSan("asanleak", "orc", "test_multi_thread_event_broker")
-  testSan("asanleak", "refc", "test_multi_thread_event_broker")
-  testSan("asanleak", "orc", "test_multi_thread_request_broker")
-  testSan("asanleak", "refc", "test_multi_thread_request_broker")
-  testSan("asanleak", "orc", "test_multi_thread_broker_configs")
-  testSan("asanleak", "refc", "test_multi_thread_broker_configs")
-  testSan("asanleak", "orc", "test_api_event_teardown_isolation", teardownTestExtra)
-  testSan("asanleak", "refc", "test_api_event_teardown_isolation", teardownTestExtra)
+proc sanHelperLib(mode, mm, src, prefix, outDir, defs: string) =
+  ## Build a test-time `--app:lib` helper with the same instrumentation as the
+  ## host (an uninstrumented library is invisible to ASan and floods TSan with
+  ## false races). No `-shared-lib*san`: the runtime comes from the host exe.
+  var flags =
+    "--hints:off -d:BrokerFfiApi --threads:on --app:lib --cc:clang --debugger:native " &
+    "-d:noSignalHandler -d:useMalloc --mm:" & mm & " " & defs
+  if mode == "tsan":
+    flags.add(" --tlsEmulation:off")
+  flags.add(
+    " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
+      quoteArg(sanitizerLinkFlags(mode)) & " --path:. --outdir:" & outDir &
+      nimMainPrefixFlag(prefix) & " " & src
+  )
+  exec "nim c " & flags
+
+proc runSanRow(mode, mm: string, row: SanRow) =
+  let prefixFlag =
+    if row.prefix.len > 0:
+      nimMainPrefixFlag(row.prefix)
+    else:
+      ""
+  let base = (row.extra & prefixFlag).strip()
+  case row.path
+  of "test_api_module_init_once":
+    var noMainVariants = @[false]
+    when not defined(windows):
+      noMainVariants.add true
+    for noMain in noMainVariants:
+      let libDir =
+        "build/initoncelib_" & mode & "_" & mm & (if noMain: "_nomain" else: "")
+      sanHelperLib(
+        mode,
+        mm,
+        "test/initoncelib/initoncelib.nim",
+        "initoncelib",
+        libDir,
+        if noMain: "--noMain" else: "",
+      )
+      testSan(
+        mode,
+        mm,
+        row.path,
+        (if noMain: "-d:initOnceNoMain " else: "") & "-d:initOnceLib=" &
+          quoteArg(thisDir() / libDir / extSharedLibName("initoncelib")),
+      )
+  of "test_api_ext_lib_teardown":
+    let libDir = "build/extteardownlib_" & mode & "_" & mm
+    sanHelperLib(
+      mode, mm, "test/extteardownlib/extteardownlib.nim", "extteardownlib", libDir,
+      "-d:extTestHooks",
+    )
+    testSan(
+      mode,
+      mm,
+      row.path,
+      "-d:extTeardownLib=" &
+        quoteArg(thisDir() / libDir / extSharedLibName("extteardownlib")),
+    )
+  else:
+    testSan(mode, mm, row.path, base)
+
+proc runSanSuite(mode: string) =
+  let groupsEnv = getEnv("SAN_GROUPS")
+  let groups =
+    if groupsEnv.len == 0 or groupsEnv == "all":
+      @["st", "mt", "api", "ext"]
+    else:
+      groupsEnv.split(',')
+  let shallow = getEnv("SAN_SHALLOW") == "1"
+  let only = getEnv("SAN_TESTS") # comma list of row paths; "" = all
+  var failed: seq[string]
+  for row in sanRows:
+    if row.group notin groups or (shallow and not row.shallow) or
+        (mode == "tsan" and not row.tsan) or
+        (only.len > 0 and row.path notin only.split(',')):
+      continue
+    for mm in memoryManagerMatrix():
+      try:
+        runSanRow(mode, mm, row)
+      except OSError:
+        echo "=== FAIL " & row.path & " [" & mode & ", mm:" & mm & "] ==="
+        failed.add(row.path & " [" & mode & ", mm:" & mm & "]")
+  if failed.len > 0:
+    echo "=== FAILED: " & $failed.len & " sanitizer run(s) ==="
+    for f in failed:
+      echo "  " & f
+    quit(1)
+
+task allAsan, "Run the sanitizer suite under ASan+UBSan (clang, orc/refc, debug)":
+  runSanSuite("asan")
+
+task allTsan, "Run the sanitizer suite under ThreadSanitizer (clang, orc/refc, debug)":
+  runSanSuite("tsan")
+
+task allAsanLeak,
+  "Run the sanitizer suite under ASan+UBSan+LSan (leak detection on Linux; orc/refc)":
+  # LSan is Linux-only; on macOS/Windows this is plain ASan+UBSan.
+  runSanSuite("asanleak")
 
 task allSan, "Run the full sanitizer matrix: ASan+UBSan, then ThreadSanitizer":
   exec "nimble allAsan"

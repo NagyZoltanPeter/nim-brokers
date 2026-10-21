@@ -896,6 +896,11 @@ proc setupProviders(ctx: BrokerContext) =
   discard ShutdownRequest.setProvider(
     ctx,
     proc(): Future[Result[ShutdownRequest, string]] {.closure, async.} =
+      # `_shutdown` runs this on the processing thread just before it exits.
+      # ORC never destroys threadvars at thread exit, so release the string
+      # payloads here or LSan reports them as leaked per context.
+      gLabel = ""
+      gSigLabel = ""
       return ok(ShutdownRequest(status: 0)),
   )
 

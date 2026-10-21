@@ -179,7 +179,9 @@ versions only by single-shot CI sampling:
   unmapped. Identical semantics under refc and orc, all platforms.
 - `teardownBrokerThread()` (in `brokers/internal/mt_broker_common.nim`)
   runs retire-owned-providers/signal-handlers → stop-dispatch-loop →
-  close signal wrapper → `drainPendingRingFrees`, **before** the thread's
+  close signal wrapper → `drainPendingRingFrees` (drops the owner's ring
+  lease references; queue memory is C-heap, so a requester that still holds
+  a lease frees it later on its own thread), **before** the thread's
   refc heap dies. It leaves the thread's chronos dispatcher open, since
   the thread may belong to someone else who still drives it;
   `closeThreadDispatcherSelector()` reclaims that handle, and only a
