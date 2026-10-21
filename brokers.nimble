@@ -1319,6 +1319,14 @@ proc sanitizerCompileFlags(mode: string, mm = ""): string =
     when defined(windows):
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
       result.add(" -gcodeview")
+      # clang's MSVC target defaults to MS volatile semantics: every volatile
+      # access becomes an acquire/release atomic. refc's setjmp exceptions
+      # mark locals assigned inside `try` volatile, and a misaligned field
+      # store (an 8-byte `Result` value at 4-byte alignment in cborDecode)
+      # then lowers to the generic `__atomic_store` libcall, which the MSVC
+      # toolchain cannot resolve (no libatomic). ISO volatile is what the
+      # setjmp code needs anyway.
+      result.add(" -fno-ms-volatile")
 
 proc sanitizerLinkFlags(mode: string): string =
   ## Same flags for executables and shared libraries. On Linux clang links the

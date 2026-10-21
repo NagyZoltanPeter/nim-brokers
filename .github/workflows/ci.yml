@@ -462,58 +462,6 @@ jobs:
               https://github.com/danielaparker/jsoncons.git vendor/jsoncons
           fi
 
-      # TEMPORARY (PR #67): locate the unresolved `__atomic_store` that breaks
-      # the refc ASan link of test_api_library_init on clang/MSVC. Not
-      # reproducible off the runner. Remove once the source is fixed.
-      - name: "DIAG: __atomic_store source (test_api_library_init, refc)"
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          clang --version
-          mkdir -p build/diag
-          nim c --hints:off --cc:clang --debugger:native -d:nimUnittestOutputLevel:VERBOSE \
-            -d:noSignalHandler -d:useMalloc --threads:on --mm:refc -d:brokerSanitizer=asan \
-            -d:BrokerFfiApi --path:. --compileOnly --nimcache:build/diag/nc \
-            --passC:"-fsanitize=address -fsanitize=undefined -fno-sanitize=function,vptr -fno-omit-frame-pointer -g -fsanitize-address-use-after-return=never -gcodeview" \
-            test/test_api_library_init.nim
-          python - <<'PY'
-          import json, glob, re, subprocess
-          meta = json.load(open(glob.glob("build/diag/nc/*.json")[0]))
-          src, cmd = next(c for c in meta["compile"] if "@mtest_api_library_init.nim.c" in c[0])
-          cmd = re.sub(r"\s-o\s+\S+", " ", cmd).replace(" -c ", " ").replace(" -w ", " ")
-          for ext, extra in [("s", "-S"), ("ll", "-S -emit-llvm")]:
-              out = f"build/diag/adapter.{ext}"
-              full = f'{cmd} {extra} -Watomic-alignment -o "{out}"'
-              print("::group::", full[:400]); r = subprocess.run(full, shell=True, capture_output=True, text=True)
-              print(r.returncode, r.stderr[-4000:]); print("::endgroup::")
-          asm = open("build/diag/adapter.s", errors="replace").read().splitlines()
-          hits = [i for i, l in enumerate(asm) if "__atomic" in l and ("call" in l or "jmp" in l)]
-          print("__atomic call sites:", len(hits))
-          for i in hits[:5]:
-              fn = next((asm[j] for j in range(i, -1, -1) if re.match(r"^[A-Za-z_?@$][^\s:]*:", asm[j])), "?")
-              locs = [l.strip() for l in asm[max(0, i - 120):i] if ".cv_loc" in l][-6:]
-              print("=== in", fn); print("\n".join(locs)); print("\n".join(asm[max(0, i - 25):i + 2]))
-          files = [l.strip() for l in asm if l.strip().startswith(".cv_file")]
-          print("\n".join(files[:200]))
-          ll = open("build/diag/adapter.ll", errors="replace").read().splitlines()
-          print("IR lines mentioning atomic:", sum("atomic" in l for l in ll))
-          for l in ll:
-              if re.search(r"\b(load|store) atomic|atomicrmw|cmpxchg|@__atomic", l): print("  ", l.strip()[:200])
-          PY
-
-      - name: "DIAG: upload generated C / IR / asm"
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: diag-atomic-store
-          path: |
-            build/diag/adapter.s
-            build/diag/adapter.ll
-            build/diag/nc/@mtest_api_library_init.nim.c
-          if-no-files-found: warn
-
       - name: allAsan (shallow)
         shell: bash
         run: ci/nimble-strict.sh allAsan -y --verbose
