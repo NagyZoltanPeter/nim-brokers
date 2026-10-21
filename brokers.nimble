@@ -1320,20 +1320,18 @@ proc sanitizerCompileFlags(mode: string, mm = ""): string =
       # Windows ASAN symbolizes via PDB (CodeView), not DWARF.
       result.add(" -gcodeview")
 
-proc sanitizerLinkFlags(mode: string, sharedLib: bool = false): string =
+proc sanitizerLinkFlags(mode: string): string =
+  ## Same flags for executables and shared libraries. On Linux clang links the
+  ## sanitizer runtime only into the executable (static by default); an
+  ## instrumented .so resolves its runtime symbols from that host. Linking the
+  ## .so against the shared runtime instead makes ASan abort with
+  ## "incompatible ASan runtimes" next to a static-runtime host, and clang has
+  ## no `-shared-libtsan` at all.
   case mode
   of "tsan":
     result = "-fsanitize=thread -g"
-    when defined(linux):
-      if sharedLib:
-        result.add(" -shared-libtsan")
   else: # asan / asanleak
     result = "-fsanitize=address -fsanitize=undefined -g"
-    when defined(linux):
-      # The Nim .so links the shared sanitizer runtime; a foreign exe linked
-      # with the static runtime otherwise can't satisfy the .so's dep.
-      if sharedLib:
-        result.add(" -shared-libasan")
     when defined(windows):
       # Tell lld to emit a PDB so ASAN frames carry function/line info.
       result.add(" -Wl,/debug")
@@ -1407,8 +1405,8 @@ proc setAsanEnv() =
 proc asanCompileFlags(): string =
   sanitizerCompileFlags("asan")
 
-proc asanLinkFlags(sharedLib: bool = false): string =
-  sanitizerLinkFlags("asan", sharedLib)
+proc asanLinkFlags(): string =
+  sanitizerLinkFlags("asan")
 
 proc testSan(mode, mm, path: string, extra = "") =
   ## Build `test/<path>.nim` under the requested sanitizer `mode` + memory
@@ -1679,7 +1677,7 @@ proc runSanitizedPersistenceCpp(mode, mm: string) =
   libFlags.add(nimMainPrefixFlag("persistence"))
   libFlags.add(
     " --passC:" & quoteArg(sanitizerCompileFlags(mode, mm)) & " --passL:" &
-      quoteArg(sanitizerLinkFlags(mode, sharedLib = true))
+      quoteArg(sanitizerLinkFlags(mode))
   )
   libFlags.add(persistenceLibOutFlag())
   exec "nim c " & libFlags & " examples/persistence/nimlib/IPersistenceLib.nim"
