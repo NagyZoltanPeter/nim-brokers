@@ -1942,10 +1942,7 @@ const
     ("test_multi_thread_signal_broker", "", "", "mt", true, false),
     ("test_multi_thread_broker_scope", "", "", "mt", true, false),
     ("test_multi_thread_handler_sugar", "", "", "mt", true, false),
-    # held (tsan): provider-thread teardown frees the response pool after a
-    # timed grace window (drainPendingRingFrees) while a ProviderGone requester
-    # may still release into it — needs a pool lifetime fix, not a suppression.
-    ("test_mt_owner_only_clear", "", "", "mt", false, false),
+    ("test_mt_owner_only_clear", "", "", "mt", true, false),
     ("test_mt_request_cancel", "", "", "mt", true, false),
     ("test_mt_request_slot_lifecycle", "", "", "mt", true, false),
     ("test_mt_request_infinite_timeout", "", "", "mt", true, false),
@@ -1972,8 +1969,7 @@ const
       true, false,
     ),
     ("test_api_module_init_once", "", "", "api", true, false), # + sanHelperLib
-    # held (tsan): same provider-teardown pool-free race as test_mt_owner_only_clear.
-    ("test_api_ext_lib_teardown", "", "", "api", false, false), # + sanHelperLib
+    ("test_api_ext_lib_teardown", "", "", "api", true, false), # + sanHelperLib
     ("test_ext_plugin", ffi, "extplugin", "ext", true, true),
     ("test_ext_imports", ffi, "extimports", "ext", true, false),
     ("test_ext_lifecycle", ffi & " -d:extTestHooks", "extlife", "ext", true, false),

@@ -5,18 +5,18 @@
 ##
 ## Invariants enforced by *structural design*, not by runtime asserts:
 ##
-## I0  every `createShared` / `deallocShared` runs on a persistent owner
-##     thread (bucket-owner for per-bucket structures, global-slab-owner
-##     for events). Hot path (claim / release / enqueue / dequeue) never
-##     calls any Nim allocator.
-##     CARVE-OUT (flexible-mt-dispatch): when a marshaled payload exceeds the
-##     fixed cell, the producer `allocShared0`s a heap-spill buffer and the
-##     consumer-side `release` `deallocShared`s it. So the spill path DOES
-##     allocate on the hot path — a deliberate trade so oversized payloads
-##     (>cell, e.g. >1 MiB) succeed instead of being dropped. The common
-##     fits-the-cell path is unchanged and allocator-free. Spill buffers are
-##     POD bytes with single producer→consumer ownership, same cross-thread
-##     contract as `storage` itself.
+## I0  every allocation behind a ring / slab / pool — and the heap-spill
+##     buffers that ride in their cells — comes from the C heap
+##     (`queueAlloc0` / `queueFree`), never Nim's allocator. Under --mm:orc
+##     `allocShared` is the *calling thread's* allocator, and freeing such a
+##     block from another thread after its allocating thread exited reaches
+##     into that thread's dead TLS region (the §2.6 mechanism). The C heap is
+##     thread-agnostic under refc and orc alike, so a ring lease's last holder
+##     can free the transport on whatever thread it runs (BrokerRingLease in
+##     mt_broker_common), and a consumer can free a producer's spill buffer.
+##     Hot path (claim / release / enqueue / dequeue) allocates nothing,
+##     except the oversized-payload spill branch (producer allocates, consumer
+##     frees) — a deliberate trade so >cell payloads succeed.
 ## I1  Senders only execute: atomic load / store / CAS, memcpy into
 ##     pre-allocated cells, and `ThreadSignalPtr.fireSync()` (external).
 ## I2  The owner thread must outlive every structure it owns.
@@ -27,6 +27,30 @@
 {.push raises: [].}
 
 import std/atomics
+
+# ---------------------------------------------------------------------------
+# C-heap backing for queue memory (see I0)
+# ---------------------------------------------------------------------------
+
+proc queueCalloc(
+  n, size: csize_t
+): pointer {.importc: "calloc", header: "<stdlib.h>", gcsafe, raises: [].}
+
+proc queueCFree(
+  p: pointer
+) {.importc: "free", header: "<stdlib.h>", gcsafe, raises: [].}
+
+proc queueAlloc0*(size: Natural): pointer {.gcsafe, inline.} =
+  ## Zeroed, thread-agnostic allocation for queue structures and spill
+  ## buffers; release with `queueFree` from any thread.
+  queueCalloc(1, csize_t(max(size, 1)))
+
+proc queueFree*(p: pointer) {.gcsafe, inline.} =
+  if not p.isNil:
+    queueCFree(p)
+
+template queueCreate*(T: typedesc, n: Natural = 1): ptr T =
+  cast[ptr T](queueAlloc0(sizeof(T) * n))
 
 # ---------------------------------------------------------------------------
 # Cache-line padding helpers
@@ -81,19 +105,19 @@ proc initShardedFreeList*(
   fl.nShards = nShards
   fl.nShardsMask = nShards - 1
   fl.shards =
-    cast[ptr UncheckedArray[FreeListShard]](createShared(FreeListShard, nShards.int))
+    cast[ptr UncheckedArray[FreeListShard]](queueCreate(FreeListShard, nShards.int))
   for i in 0 ..< nShards.int:
     fl.shards[i].head.store(makeHead(EmptyIdx, 0), moRelaxed)
-  fl.nextLinks = cast[ptr UncheckedArray[uint32]](createShared(uint32, capacity.int))
+  fl.nextLinks = cast[ptr UncheckedArray[uint32]](queueCreate(uint32, capacity.int))
   for i in 0 ..< capacity.int:
     fl.nextLinks[i] = EmptyIdx
 
 proc deinitShardedFreeList*(fl: var ShardedFreeList) {.gcsafe.} =
   if not fl.shards.isNil:
-    deallocShared(fl.shards)
+    queueFree(fl.shards)
     fl.shards = nil
   if not fl.nextLinks.isNil:
-    deallocShared(fl.nextLinks)
+    queueFree(fl.nextLinks)
     fl.nextLinks = nil
 
 proc push*(fl: var ShardedFreeList, idx: uint32, shardHint: uint32) {.gcsafe.} =
@@ -190,24 +214,24 @@ proc newVyukovMpscRing*[T](capacity: int): ptr VyukovMpscRing[T] {.gcsafe.} =
   ## Returns ownership; deinit via `freeVyukovMpscRing`.
   doAssert capacity > 0 and (capacity and (capacity - 1)) == 0,
     "capacity must be power-of-2"
-  result = cast[ptr VyukovMpscRing[T]](createShared(VyukovMpscRing[T], 1))
+  result = queueCreate(VyukovMpscRing[T])
   result.capacity = uint64(capacity)
   result.mask = uint64(capacity - 1)
   result.closed.store(false, moRelaxed)
   result.enqPos.store(0, moRelaxed)
   result.deqPos = 0
-  result.slots = cast[ptr UncheckedArray[Slot[T]]](createShared(Slot[T], capacity))
+  result.slots = cast[ptr UncheckedArray[Slot[T]]](queueCreate(Slot[T], capacity))
   for i in 0 ..< capacity:
     result.slots[i].seq.store(uint64(i), moRelaxed)
 
 proc freeVyukovMpscRing*[T](ring: ptr VyukovMpscRing[T]) {.gcsafe.} =
-  ## Deallocate. Must be called on the owner thread, with the ring already
-  ## drained (caller responsibility).
+  ## Deallocate, with the ring already drained and no producer left holding
+  ## it (callers go through BrokerRingLease). Any thread (C heap, see I0).
   if ring.isNil:
     return
   if not ring.slots.isNil:
-    deallocShared(ring.slots)
-  deallocShared(ring)
+    queueFree(ring.slots)
+  queueFree(ring)
 
 proc isClosed*[T](ring: ptr VyukovMpscRing[T]): bool {.gcsafe.} =
   ring.closed.load(moAcquire)
@@ -290,7 +314,7 @@ type
       ## spilled to the heap (see `overflow`).
     overflowLen*: uint32 ## spilled byte count; 0 when the payload fit inline.
     overflow*: pointer
-      ## heap-spill buffer (`allocShared0`) when the marshaled payload exceeded
+      ## heap-spill buffer (`queueAlloc0`) when the marshaled payload exceeded
       ## the fixed cell; `nil` on the inline fast path. Owned by the cell: freed
       ## in `release` (refcount→0 chokepoint) and walked by `deinitPayloadSlab`.
       ## POD bytes only — same cross-thread ownership contract as `storage`.
@@ -319,9 +343,8 @@ proc initPayloadSlab*(
   slab.capacity = capacity
   slab.cellPayloadCap = payloadBytes
   slab.cellStride = alignUp(cellHeaderSize() + payloadBytes, 8'u32)
-  slab.storage = cast[ptr UncheckedArray[byte]](createShared(
-    byte, int(capacity) * int(slab.cellStride)
-  ))
+  slab.storage =
+    cast[ptr UncheckedArray[byte]](queueAlloc0(int(capacity) * int(slab.cellStride)))
   initShardedFreeList(slab.freeList, nShards, capacity)
   # Seed the free-list with every cell.
   for i in 0 ..< capacity:
@@ -351,12 +374,12 @@ proc deinitPayloadSlab*(slab: var PayloadSlab) {.gcsafe.} =
     for i in 0'u32 ..< slab.capacity:
       let cell = slab.cellPtr(i)
       if not cell.overflow.isNil:
-        deallocShared(cell.overflow)
+        queueFree(cell.overflow)
         cell.overflow = nil
         cell.overflowLen = 0
   deinitShardedFreeList(slab.freeList)
   if not slab.storage.isNil:
-    deallocShared(slab.storage)
+    queueFree(slab.storage)
     slab.storage = nil
 
 proc setOverflow*(
@@ -398,7 +421,7 @@ proc release*(slab: var PayloadSlab, idx: uint32, shardHint: uint32) {.gcsafe.} 
   ## freed here exactly once.
   let cell = slab.cellPtr(idx)
   if not cell.overflow.isNil:
-    deallocShared(cell.overflow)
+    queueFree(cell.overflow)
     cell.overflow = nil
     cell.overflowLen = 0
   push(slab.freeList, idx, shardHint)
@@ -532,9 +555,8 @@ proc initResponseSlotPool*(
   pool.slotPayloadCap = maxPayloadBytes
   pool.cancelEpoch.store(0, moRelaxed)
   pool.slotStride = alignUp(respSlotHeaderSize() + maxPayloadBytes, 8'u32)
-  pool.storage = cast[ptr UncheckedArray[byte]](createShared(
-    byte, int(capacity) * int(pool.slotStride)
-  ))
+  pool.storage =
+    cast[ptr UncheckedArray[byte]](queueAlloc0(int(capacity) * int(pool.slotStride)))
   initShardedFreeList(pool.freeList, nShards, capacity)
   for i in 0 ..< capacity:
     let hdr = pool.slotHeaderPtr(i)
@@ -550,12 +572,12 @@ proc deinitResponseSlotPool*(pool: var ResponseSlotPool) {.gcsafe.} =
     for i in 0'u32 ..< pool.capacity:
       let hdr = pool.slotHeaderPtr(i)
       if not hdr.overflow.isNil:
-        deallocShared(hdr.overflow)
+        queueFree(hdr.overflow)
         hdr.overflow = nil
         hdr.overflowLen = 0
   deinitShardedFreeList(pool.freeList)
   if not pool.storage.isNil:
-    deallocShared(pool.storage)
+    queueFree(pool.storage)
     pool.storage = nil
 
 proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
@@ -568,7 +590,7 @@ proc claim*(pool: var ResponseSlotPool, shardHint: uint32): uint32 {.gcsafe.} =
     # release() already frees+nils any spill, but defend against a slot that
     # reached the free-list without passing release (it should not).
     if not hdr.overflow.isNil:
-      deallocShared(hdr.overflow)
+      queueFree(hdr.overflow)
       hdr.overflow = nil
     hdr.overflowLen = 0
     hdr.waker = nil
@@ -586,7 +608,7 @@ proc release*(pool: var ResponseSlotPool, idx: uint32, shardHint: uint32) {.gcsa
   ## after read, or provider on abandon). Free any heap-spill buffer here.
   let hdr = pool.slotHeaderPtr(idx)
   if not hdr.overflow.isNil:
-    deallocShared(hdr.overflow)
+    queueFree(hdr.overflow)
     hdr.overflow = nil
     hdr.overflowLen = 0
   push(pool.freeList, idx, shardHint)

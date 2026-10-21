@@ -14,8 +14,10 @@
 ## §2.6 safety contract honored by construction (Invariant I0):
 ##   - The bucket-owning thread (the provider thread, the one that
 ##     called `setProvider`) allocates its ring + request slab +
-##     response slot pool via `createShared`, and frees them via
-##     `clearProvider` on the same thread.
+##     response slot pool on the C heap (`queueAlloc0`) under a
+##     `BrokerRingLease`. The owner and every in-flight requester hold a
+##     reference; the last one to drop it frees the transport, on any
+##     thread (no timed grace window).
 ##   - Sender threads only ever touch atomics + memcpy + signal-fire on
 ##     the hot path — never the Nim allocator beyond `claim`/`release`
 ##     of pre-allocated slab cells and response slots.
@@ -530,6 +532,14 @@ proc generateMtRequestBroker*(
   bucketRecList.add(
     newTree(
       nnkIdentDefs,
+      ident("lease"),
+      newTree(nnkPtrTy, ident("BrokerRingLease")),
+      newEmptyNode(),
+    )
+  )
+  bucketRecList.add(
+    newTree(
+      nnkIdentDefs,
       ident("providerSignal"),
       newTree(nnkPtrTy, ident("BrokerSignalShared")),
       newEmptyNode(),
@@ -827,7 +837,7 @@ proc generateMtRequestBroker*(
               -1
           var spilled = false
           if needed >= 0 and needed <= `maxDynPayloadLit`:
-            let spillBuf = allocShared0(needed)
+            let spillBuf = queueAlloc0(needed)
             if not spillBuf.isNil:
               let w2 =
                 try:
@@ -837,7 +847,7 @@ proc generateMtRequestBroker*(
                 except Exception:
                   -1
               if w2 < 0:
-                deallocShared(spillBuf)
+                queueFree(spillBuf)
               else:
                 published =
                   pool[].commitWriteOverflow(slotIdx, slotGen, spillBuf, uint32(w2))
@@ -1028,19 +1038,21 @@ proc generateMtRequestBroker*(
 
   # ── Poll fn maker ────────────────────────────────────────────────────
   # Dequeues cell idx from ring, unmarshals ReqMsg, dispatches.  When the
-  # ring is closed and empty, registers its (ring, slab, pool) triple for
-  # synchronous deferred free at thread exit (see drainPendingRingFrees).
+  # ring is closed and empty, hands the bucket's lease to the pending registry
+  # so the owner reference is dropped at thread exit (drainPendingRingFrees).
   result.add(
     quote do:
       proc `pollFnMakerIdent`(
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
+          lease: ptr BrokerRingLease,
           loopCtx: BrokerContext,
       ): ThreadDispatchPollFn =
         let capturedRing = ring
         let capturedSlab = slab
         let capturedPool = pool
+        let capturedLease = lease
         let capturedCtx = loopCtx
         var lastCancelEpoch = capturedPool[].cancelEpochValue()
         return proc(): int {.gcsafe, raises: [].} =
@@ -1057,7 +1069,7 @@ proc generateMtRequestBroker*(
                 # drainAsyncOps. Doing the free asynchronously here ran the
                 # refc allocator during shutdown teardown and SEGV'd on
                 # Linux + macOS ASAN (PR #13, deferredFreeReqRing path).
-                enqueuePendingRingFree(capturedRing, capturedSlab, capturedPool)
+                enqueuePendingRingFree(capturedLease)
                 return 2
               return 0
             # Got a cell — unmarshal ReqMsg, dispatch. dataPtr/dataLen resolve
@@ -1110,6 +1122,7 @@ proc generateMtRequestBroker*(
         var ring: ptr VyukovMpscRing[uint32]
         var slab: ptr PayloadSlab
         var pool: ptr ResponseSlotPool
+        var lease: ptr BrokerRingLease
         withLock(`globalLockIdent`):
           for i in 0 ..< `globalBucketCountIdent`:
             if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
@@ -1123,20 +1136,21 @@ proc generateMtRequestBroker*(
           if `globalBucketCountIdent` >= `globalBucketCapIdent`:
             `growProcIdent`()
           ring = newVyukovMpscRing[uint32](`queueDepthLit`)
-          slab = cast[ptr PayloadSlab](createShared(PayloadSlab, 1))
+          slab = queueCreate(PayloadSlab)
           initPayloadSlab(
             slab[],
             capacity = uint32(`slabCapacityLit`),
             payloadBytes = uint32(`payloadBytesLit`),
             nShards = `freeListShardsLit`,
           )
-          pool = cast[ptr ResponseSlotPool](createShared(ResponseSlotPool, 1))
+          pool = queueCreate(ResponseSlotPool)
           initResponseSlotPool(
             pool[],
             capacity = uint32(`responseSlotsLit`),
             maxPayloadBytes = uint32(`responseBytesLit`),
             nShards = `freeListShardsLit`,
           )
+          lease = newBrokerRingLease(ring, slab, pool)
           let providerSig = getOrInitBrokerSignal()
           let idx = `globalBucketCountIdent`
           `globalBucketsIdent`[idx] = `bucketName`(
@@ -1144,12 +1158,13 @@ proc generateMtRequestBroker*(
             ring: ring,
             slab: slab,
             responseSlotPool: pool,
+            lease: lease,
             providerSignal: providerSig,
             threadId: myThreadId,
             threadGen: myThreadGen,
           )
           `globalBucketCountIdent` += 1
-        registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, brokerCtx))
+        registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, lease, brokerCtx))
         registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
         ok()
@@ -1347,7 +1362,7 @@ proc generateMtRequestBroker*(
                 "RequestBroker(" & `typeNameLit` &
                 "): request payload exceeds maxDynamicPayloadBytes",
             )
-          let spillBuf = allocShared0(needed)
+          let spillBuf = queueAlloc0(needed)
           if spillBuf.isNil:
             slab[].release(cellIdx, `shardHintIdent`())
             pool[].release(slotIdx, `shardHintIdent`())
@@ -1361,7 +1376,7 @@ proc generateMtRequestBroker*(
             except Exception:
               -1
           if w2 < 0:
-            deallocShared(spillBuf)
+            queueFree(spillBuf)
             slab[].release(cellIdx, `shardHintIdent`())
             pool[].release(slotIdx, `shardHintIdent`())
             return `prologueName`(
@@ -1536,21 +1551,30 @@ proc generateMtRequestBroker*(
         return err(message)
 
       proc `sendAndAwaitIdent`(
+          lease: ptr BrokerRingLease,
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
           providerSignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
       ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
+        ## Consumes one `lease` reference. The reply poller never touches the
+        ## pool once `awaitReply` has returned (it retires on `gaveUp`, or it
+        ## released the slot before completing the future), so the lease can
+        ## end here.
         ensureBrokerDispatchStarted()
         let mySignal = getOrInitBrokerSignal()
         let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
         if pro.error.len > 0:
+          releaseLease(lease)
           return err(pro.error)
-        return await `awaitReplyIdent`(pool, pro.slotIdx, pro.slotGen, mySignal)
+        let res = await `awaitReplyIdent`(pool, pro.slotIdx, pro.slotGen, mySignal)
+        releaseLease(lease)
+        return res
 
       proc `sendCancellableIdent`(
           brokerCtx: BrokerContext,
+          lease: ptr BrokerRingLease,
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
@@ -1572,6 +1596,7 @@ proc generateMtRequestBroker*(
         let mySignal = getOrInitBrokerSignal()
         let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
         if pro.error.len > 0:
+          releaseLease(lease)
           return (`requestIdName`(0'u64), `immediateErrIdent`(pro.error))
         let reqId = `requestIdName`((uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen))
         let inner = `awaitReplyIdent`(pool, pro.slotIdx, pro.slotGen, mySignal)
@@ -1585,6 +1610,7 @@ proc generateMtRequestBroker*(
         let capturedId = reqId
         let capturedInner = inner
         let capturedOuter = outer
+        let capturedLease = lease
         # Captures ctx and id as *values*, never the pool pointer: this runs
         # later, by which time the provider thread may have freed the pool.
         # Going through cancelById keeps the lock-covered lookup that makes
@@ -1597,6 +1623,8 @@ proc generateMtRequestBroker*(
         # real response arrived anyway.
         capturedInner.addCallback(
           proc(udata: pointer) {.gcsafe, raises: [].} =
+            # The waiter is done with the pool: end this request's lease.
+            releaseLease(capturedLease)
             if not capturedOuter.finished():
               let readRes = catch:
                 capturedInner.read()
@@ -1675,6 +1703,7 @@ proc generateMtRequestBroker*(
         )
 
       proc `blockingSendAndAwaitIdent`(
+          lease: ptr BrokerRingLease,
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
@@ -1684,10 +1713,13 @@ proc generateMtRequestBroker*(
         # No async loop on this thread, so no waker: the wait below polls.
         let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
         if pro.error.len > 0:
+          releaseLease(lease)
           return err(pro.error)
-        `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
+        result = `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
+        releaseLease(lease)
 
       proc `blockingSendCancellableIdent`(
+          lease: ptr BrokerRingLease,
           ring: ptr VyukovMpscRing[uint32],
           slab: ptr PayloadSlab,
           pool: ptr ResponseSlotPool,
@@ -1705,6 +1737,7 @@ proc generateMtRequestBroker*(
         if pro.error.len > 0:
           if not idOut.isNil:
             atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
+          releaseLease(lease)
           return err(pro.error)
         if not idOut.isNil:
           atomicStoreN(
@@ -1712,7 +1745,8 @@ proc generateMtRequestBroker*(
             (uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen),
             ATOMIC_RELEASE,
           )
-        `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
+        result = `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
+        releaseLease(lease)
 
   )
 
@@ -1728,6 +1762,7 @@ proc generateMtRequestBroker*(
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
           var providerSignal: ptr BrokerSignalShared
+          var lease: ptr BrokerRingLease
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -1741,6 +1776,10 @@ proc generateMtRequestBroker*(
                   slab = `globalBucketsIdent`[i].slab
                   pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
+                  # Held until the reply wait ends: the owner may tear the
+                  # bucket down meanwhile (BrokerRingLease).
+                  lease = `globalBucketsIdent`[i].lease
+                  acquireLease(lease)
                 break
           if sameThread:
             var provider: `zeroArgProviderName`
@@ -1766,7 +1805,7 @@ proc generateMtRequestBroker*(
                 "): no zero-arg provider registered for broker context " & $brokerCtx
             )
           var msg = `requestMsgName`(requestKind: 0)
-          return await `sendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+          return await `sendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
 
         proc request*(
             _: typedesc[`typeIdent`]
@@ -1797,6 +1836,7 @@ proc generateMtRequestBroker*(
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
           var providerSignal: ptr BrokerSignalShared
+          var lease: ptr BrokerRingLease
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -1810,6 +1850,10 @@ proc generateMtRequestBroker*(
                   slab = `globalBucketsIdent`[i].slab
                   pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
+                  # Held until the reply wait ends: the owner may tear the
+                  # bucket down meanwhile (BrokerRingLease).
+                  lease = `globalBucketsIdent`[i].lease
+                  acquireLease(lease)
                 break
           if sameThread:
             var provider: `zeroArgProviderName`
@@ -1835,7 +1879,7 @@ proc generateMtRequestBroker*(
                 "): no zero-arg provider registered for broker context " & $brokerCtx
             )
           var msg = `requestMsgName`(requestKind: 0)
-          `blockingSendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+          `blockingSendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
 
         proc blockingRequest*(
             _: typedesc[`typeIdent`]
@@ -1892,6 +1936,7 @@ proc generateMtRequestBroker*(
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
       var providerSignal: ptr BrokerSignalShared
+      var lease: ptr BrokerRingLease
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -1905,6 +1950,10 @@ proc generateMtRequestBroker*(
               slab = `globalBucketsIdent`[i].slab
               pool = `globalBucketsIdent`[i].responseSlotPool
               providerSignal = `globalBucketsIdent`[i].providerSignal
+              # Held until the reply wait ends: the owner may tear the
+              # bucket down meanwhile (BrokerRingLease).
+              lease = `globalBucketsIdent`[i].lease
+              acquireLease(lease)
             break
       if sameThread:
         var `providerSym`: `argProviderName`
@@ -1931,7 +1980,7 @@ proc generateMtRequestBroker*(
             "): no provider registered for broker context " & $brokerCtx
         )
       var msg = `msgCtor`
-      return await `sendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+      return await `sendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
 
     result.add(
       newTree(
@@ -2014,6 +2063,7 @@ proc generateMtRequestBroker*(
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
       var providerSignal: ptr BrokerSignalShared
+      var lease: ptr BrokerRingLease
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -2027,6 +2077,10 @@ proc generateMtRequestBroker*(
               slab = `globalBucketsIdent`[i].slab
               pool = `globalBucketsIdent`[i].responseSlotPool
               providerSignal = `globalBucketsIdent`[i].providerSignal
+              # Held until the reply wait ends: the owner may tear the
+              # bucket down meanwhile (BrokerRingLease).
+              lease = `globalBucketsIdent`[i].lease
+              acquireLease(lease)
             break
       if sameThread:
         var `brProviderSym`: `argProviderName`
@@ -2053,7 +2107,7 @@ proc generateMtRequestBroker*(
             "): no provider registered for broker context " & $brokerCtx
         )
       var msg = `brMsgCtor`
-      `blockingSendAndAwaitIdent`(ring, slab, pool, providerSignal, msg)
+      `blockingSendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
 
     result.add(
       newTree(
@@ -2641,6 +2695,7 @@ proc generateMtRequestBroker*(
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
           var providerSignal: ptr BrokerSignalShared
+          var lease: ptr BrokerRingLease
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -2654,6 +2709,10 @@ proc generateMtRequestBroker*(
                   slab = `globalBucketsIdent`[i].slab
                   pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
+                  # Held until the reply wait ends: the owner may tear the
+                  # bucket down meanwhile (BrokerRingLease).
+                  lease = `globalBucketsIdent`[i].lease
+                  acquireLease(lease)
                 break
           if sameThread:
             # Same-thread requests call the provider directly: no queue, no
@@ -2668,7 +2727,9 @@ proc generateMtRequestBroker*(
               ),
             )
           var msg = `requestMsgName`(requestKind: 0)
-          `sendCancellableIdent`(brokerCtx, ring, slab, pool, providerSignal, msg)
+          `sendCancellableIdent`(
+            brokerCtx, lease, ring, slab, pool, providerSignal, msg
+          )
 
         proc requestCancellable*(_: typedesc[`typeIdent`]): `cancelReturnType` =
           requestCancellable(`typeIdent`, DefaultBrokerContext)
@@ -2688,6 +2749,7 @@ proc generateMtRequestBroker*(
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
           var providerSignal: ptr BrokerSignalShared
+          var lease: ptr BrokerRingLease
           var sameThread = false
           let myThreadGen = currentMtThreadGen()
           withLock(`globalLockIdent`):
@@ -2701,11 +2763,17 @@ proc generateMtRequestBroker*(
                   slab = `globalBucketsIdent`[i].slab
                   pool = `globalBucketsIdent`[i].responseSlotPool
                   providerSignal = `globalBucketsIdent`[i].providerSignal
+                  # Held until the reply wait ends: the owner may tear the
+                  # bucket down meanwhile (BrokerRingLease).
+                  lease = `globalBucketsIdent`[i].lease
+                  acquireLease(lease)
                 break
           if sameThread or ring.isNil:
             return blockingRequest(`typeIdent`, brokerCtx)
           var msg = `requestMsgName`(requestKind: 0)
-          `blockingSendCancellableIdent`(ring, slab, pool, providerSignal, msg, idOut)
+          `blockingSendCancellableIdent`(
+            lease, ring, slab, pool, providerSignal, msg, idOut
+          )
 
         proc blockingRequestCancellable*(
             _: typedesc[`typeIdent`], idOut: ptr `requestIdName`
@@ -2737,6 +2805,7 @@ proc generateMtRequestBroker*(
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
       var providerSignal: ptr BrokerSignalShared
+      var lease: ptr BrokerRingLease
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -2750,6 +2819,10 @@ proc generateMtRequestBroker*(
               slab = `globalBucketsIdent`[i].slab
               pool = `globalBucketsIdent`[i].responseSlotPool
               providerSignal = `globalBucketsIdent`[i].providerSignal
+              # Held until the reply wait ends: the owner may tear the
+              # bucket down meanwhile (BrokerRingLease).
+              lease = `globalBucketsIdent`[i].lease
+              acquireLease(lease)
             break
       if sameThread:
         return (`requestIdName`(0'u64), `ccForwardCall`)
@@ -2762,7 +2835,8 @@ proc generateMtRequestBroker*(
           ),
         )
       var msg = `ccMsgCtor`
-      return `sendCancellableIdent`(brokerCtx, ring, slab, pool, providerSignal, msg)
+      return
+        `sendCancellableIdent`(brokerCtx, lease, ring, slab, pool, providerSignal, msg)
 
     var ccFormalParams = newTree(nnkFormalParams)
     ccFormalParams.add(copyNimTree(cancelReturnType))
@@ -2831,6 +2905,7 @@ proc generateMtRequestBroker*(
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool
       var providerSignal: ptr BrokerSignalShared
+      var lease: ptr BrokerRingLease
       var sameThread = false
       let myThreadGen = currentMtThreadGen()
       withLock(`globalLockIdent`):
@@ -2844,12 +2919,17 @@ proc generateMtRequestBroker*(
               slab = `globalBucketsIdent`[i].slab
               pool = `globalBucketsIdent`[i].responseSlotPool
               providerSignal = `globalBucketsIdent`[i].providerSignal
+              # Held until the reply wait ends: the owner may tear the
+              # bucket down meanwhile (BrokerRingLease).
+              lease = `globalBucketsIdent`[i].lease
+              acquireLease(lease)
             break
       if sameThread or ring.isNil:
         return `bcForwardCall`
       var msg = `ccMsgCtor`
-      return
-        `blockingSendCancellableIdent`(ring, slab, pool, providerSignal, msg, idOut)
+      return `blockingSendCancellableIdent`(
+        lease, ring, slab, pool, providerSignal, msg, idOut
+      )
 
     let bcPragmas = quote:
       {.gcsafe, raises: [].}

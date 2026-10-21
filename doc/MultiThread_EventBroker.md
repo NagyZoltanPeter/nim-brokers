@@ -144,10 +144,13 @@ The three operations have distinct in-flight guarantees:
 emitters that already captured the ring pointer); the poll fn on the
 listener thread observes empty + closed, completes a shutdown
 `Future[void]`, and self-unregisters (returns 2). The caller then awaits
-each shutdown future (up to 5 seconds), waits a 50 ms grace window for
-in-flight emit callers, and finally drains any remaining in-flight
-listener futures tracked in `tvListenerFuts` before returning. This
-guarantees no callbacks are running after the call returns.
+each shutdown future (up to 5 seconds), drains any remaining in-flight
+listener futures tracked in `tvListenerFuts`, and drops the bucket's
+`BrokerRingLease` reference before returning. An emitter that captured the
+ring under the lock holds its own reference until its enqueue + wake are
+done, as does the poll fn until it retires, so whichever finishes last
+frees the ring — no timed grace window. This guarantees no callbacks are
+running after the call returns.
 
 The FFI API library lifecycle (`registerBrokerLibrary`) calls
 `shutdownProcessLoopsForCtx` automatically on `mylib_shutdown(ctx)`.

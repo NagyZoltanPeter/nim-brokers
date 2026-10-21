@@ -726,9 +726,9 @@ thread; the new design isolates per-bucket to keep ownership clean.)
 | Global bucket array | `4 * sizeof(MtBucket)` initially (~256 bytes), doubles on growth | Process lifetime |
 | `Lock` (OS mutex) | ~40-64 bytes (platform-dependent) | Process lifetime |
 | Init + count + cap vars | 3 `int` + 1 `bool` = ~25 bytes | Process lifetime |
-| `VyukovMpscRing[uint32]` per bucket | ring header (~256 B w/ cache padding) + `maxQueueDepth × 16 B` slots | Until `clearProvider` (deferred-free with 50ms grace) |
-| `PayloadSlab` per bucket (request side) | `slabCapacity × (16 + maxPayloadBytes)` bytes + free-list (~1 KB) | Until `clearProvider` |
-| `ResponseSlotPool` per bucket | `responseSlots × (16 + maxResponseBytes)` bytes + free-list (~1 KB) | Until `clearProvider` |
+| `VyukovMpscRing[uint32]` per bucket | ring header (~256 B w/ cache padding) + `maxQueueDepth × 16 B` slots | Until `clearProvider` and the last in-flight requester (`BrokerRingLease`; C heap) |
+| `PayloadSlab` per bucket (request side) | `slabCapacity × (16 + maxPayloadBytes)` bytes + free-list (~1 KB) | Same lease as the ring |
+| `ResponseSlotPool` per bucket | `responseSlots × (16 + maxResponseBytes)` bytes + free-list (~1 KB) | Same lease as the ring |
 | `ThreadSignalPtr` (providerSignal) | ~2 OS fds (macOS), shared by all broker types on the thread | Thread lifetime |
 | Threadvar seqs (per provider thread) | 2 `seq` headers (~32 bytes) + entries | Thread lifetime |
 | Poll fn closure | Registered in `gBrokerThreadPollers` (~32 bytes) | Until `clearProvider` (returns 2 → removed) |

@@ -200,6 +200,28 @@ suite "RequestBroker(mt): owner-only clear / replace":
     OwnedEcho.clearProvider(gCtx)
     OwnedEcho.setRequestTimeout(chronos.seconds(20))
 
+  test "provider thread exits while the requester is not polling: pool outlives it":
+    # The request's synchronous prologue arms it; then this thread joins the
+    # provider thread WITHOUT running its event loop, so the reply poller
+    # first runs after the provider thread has torn down. The requester's
+    # lease must keep the ring / slab / pool alive until it is done with them
+    # (a timed grace window on the provider side cannot: we are > 50 ms late).
+    OwnedEcho.setRequestTimeout(chronos.seconds(10))
+    var th: Thread[void]
+    createThread(th, requestOwnerExitsThread)
+    spinUntil(gOwnerReady)
+
+    let fut = OwnedEcho.request(gCtx, "late")
+    gSent.store(true)
+    joinThread(th)
+    sleep(100) # well past any provider-side grace window
+
+    let r = waitFor fut
+    check r.isErr()
+    check "cleared" in r.error
+    check not OwnedEcho.isProvided(gCtx)
+    OwnedEcho.setRequestTimeout(chronos.seconds(20))
+
 suite "SignalBroker(mt): owner-only drop / replace":
   setup:
     resetFlags()

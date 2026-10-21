@@ -308,10 +308,10 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - **`clearProvider` fails outstanding requests** (MT lane): every slot still
   awaiting an answer is flipped to `ProviderGone` under the bucket lock and its
   requester's signal fired, so in-flight requests resolve at once instead of
-  waiting out their timeout. Required for safety, not just ergonomics — the
-  response pool is freed when the provider thread exits while a waiting
-  requester's poller is still reading it (plain SIGSEGV, pre-existing on
-  master). `ProviderGone` is the mirror of `Abandoned`: the **requester**
+  waiting out their timeout. Memory safety does not depend on it: the
+  requester holds a `BrokerRingLease` reference until its reply wait ends, so
+  the pool outlives the provider thread if need be (see "Transport lifetime"
+  below). `ProviderGone` is the mirror of `Abandoned`: the **requester**
   releases, since no provider is left to. Gated by
   `test/test_mt_request_slot_lifecycle.nim`.
 - **Owner-only clear / replace** (MT lane): only the thread that installed a
@@ -354,7 +354,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - `ok()` = **accepted** (best-effort snapshot: a handler exists + the queue had room), never "handled". `err` = definitely not delivered: `"no signal handler installed"` or `"queue full"`. Handler exceptions are swallowed with a chronicles warn.
 - `dropSignalHandler()` is async `Future[void]` (uniform with `dropListener`; suspension-free body). Mock/replace trio: `replaceSignalHandler` / `getCurrentSignalHandler` / `withMockSignalHandler` (MT variants are owning-thread only).
 - **`onSignalIt` body sugar** (all lanes): `TypeName.onSignalIt[(ctx)]: body` installs the handler with the signal value injected as `it` (nothing for `void` payloads); duplicate-guard and return value are `onSignal`'s. See `doc/design/BROKER_HANDLER_SUGAR_PLAN.md`.
-- **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` (owning thread only — a foreign drop is a logged no-op) closes it → the poll fn hands it to the per-thread pending-free registry, freed at `teardownBrokerThread`, which also drops any handler the thread still owns.
+- **MT lane** (`mt_signal_broker.nim`): EventBroker(mt)'s global refcounted slab + per-bucket Vyukov ring transport, RequestBroker(mt)'s single-registry ownership (one bucket per ctx). Same-thread `signal` → direct `asyncSpawn`; cross-thread → marshal payload → enqueue → wake. Lock-free `signal()` fast-fail via a per-type `Atomic[int]` handler-present counter (`signalHandlerPresent`). Owning thread allocs the ring; `dropSignalHandler` (owning thread only — a foreign drop is a logged no-op) closes it → the poll fn hands the ring's lease to the per-thread pending registry, whose owner reference `teardownBrokerThread` drops (it also drops any handler the thread still owns); an in-flight `signal()` holds its own lease reference.
 
 ### BrokerScope (`brokers/broker_scope.nim`)
 
@@ -371,6 +371,7 @@ When a broker type is declared as a native type, alias, or externally-defined ty
 - Cross-thread dispatch: `Channel[T]` (0 OS fds) per bucket. A single shared `ThreadSignalPtr` per thread wakes one `brokerDispatchLoop` coroutine that drains all registered `ThreadDispatchPollFn` closures via non-blocking `tryRecv`. fd count: **O(threads)** regardless of broker type count.
 - Shared dispatcher infrastructure lives in `brokers/internal/mt_broker_common.nim`: `getOrInitBrokerSignal`, `registerBrokerPoller`, `brokerDispatchLoop`, `ensureBrokerDispatchStarted`, `fireBrokerSignal`.
 - Initialization: atomic CAS-based one-time init per broker type.
+- **Transport lifetime — `BrokerRingLease`** (`mt_broker_common.nim`): a bucket's ring (+ request slab + response pool) is refcounted. The owner holds one reference; a cross-thread sender takes one in the same `globalLock` section that found the bucket and drops it after its last access (request: end of the reply wait; emit / signal: after enqueue + wake); the event poll fn holds one until it retires. The last holder frees the transport on whatever thread it runs — no timed grace window. All queue memory (ring, slab, pool, spill buffers, lease) is **C heap** (`queueAlloc0` / `queueFree`, `mt_queue.nim` I0): under `--mm:orc` `allocShared` is the calling thread's allocator and a cross-thread free after that thread exited is the §2.6 UAF. Gated by `test_mt_owner_only_clear` "pool outlives it" (deterministic ASan UAF on the old timed window).
 
 ### Broker FFI API specifics (`brokers/api_library.nim`, `brokers/internal/api_common.nim`, `brokers/internal/api_request_broker.nim`, `brokers/internal/api_event_broker.nim`)
 

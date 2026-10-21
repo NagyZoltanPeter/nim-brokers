@@ -380,71 +380,109 @@ proc brokerDispatchLoop*(signal: ptr BrokerSignalShared) {.async: (raises: []).}
   closeBrokerSignalShared(sig)
 
 # ---------------------------------------------------------------------------
-# Pending-ring-free registry — synchronous deferred cleanup at thread exit
+# Ring lease — refcounted ownership of a bucket's shared transport
 # ---------------------------------------------------------------------------
-# When clearProvider(ctx) closes a request broker's ring on the provider
-# thread, the corresponding poll fn (registered via brokerDispatchLoop's
-# pollers seq) detects `ring.isClosed()` on its next iteration and needs to
-# free the shared-memory (ring, slab, pool) triple — but only after a grace
-# window long enough for any cross-thread sender that snapshotted those
-# pointers under the previous globalLock state to finish its enqueue.
+# A cross-thread sender looks a bucket up under the broker's globalLock and
+# then uses its ring (and, for RequestBroker, its slab + response pool) AFTER
+# releasing the lock: enqueue, wake, and for a request the whole reply wait.
+# Freeing those after a timed grace window was unsound — a requester whose
+# reply poller runs late reads a freed pool (heap-use-after-free, gated by
+# test_mt_owner_only_clear "pool outlives it").
 #
-# Previous design: `asyncSpawn deferredFreeReqRing(...)` — start an async
-# proc that does `await sleepAsync(50ms)` then frees. Two problems:
-#
-#   1. Allocating the sleepAsync Future inside an asyncSpawn started during
-#      `cleanupAllRequestsIdent` runs the refc allocator at a moment where
-#      the thread's gch state is fragile from teardown churn. Observed as a
-#      hard SEGV in rawAlloc on Linux refc + ASAN (PR #13).
-#
-#   2. drainAsyncOps only polls chronos for 1ms — the 50ms sleepAsync would
-#      never fire before the processing thread exits, so the buffers either
-#      leak or are freed by an orphaned coroutine racing thread teardown.
-#
-# Current design: the poll fn instead records the triple in a thread-local
-# seq; the processing-thread proc drains the seq AFTER drainAsyncOps via a
-# single synchronous `sleep(50)` followed by direct free calls. No chronos
-# involvement in the cleanup path; the grace window applies once for the
-# whole ctx instead of once per broker.
-type PendingRingFree* = object
+# Instead every holder owns a reference: the bucket's owner holds one from
+# creation; a sender takes one inside the same globalLock section that found
+# the bucket (so the owner cannot have released yet) and drops it after its
+# last access. Whoever drops the last reference frees the transport, on
+# whatever thread that is. The lease and everything it frees come from the C
+# heap (`queueAlloc0`, mt_queue I0) and hold no GC refs, so a free on any
+# thread — even after the allocating owner thread exited — behaves
+# identically under --mm:refc and --mm:orc.
+type BrokerRingLease* = object
+  refs: Atomic[int]
   ring*: ptr VyukovMpscRing[uint32]
-  slab*: ptr PayloadSlab
-  pool*: ptr ResponseSlotPool
+  slab*: ptr PayloadSlab ## nil for event / signal brokers (global slab)
+  pool*: ptr ResponseSlotPool ## nil for event / signal brokers
 
-var gPendingRingFrees* {.threadvar.}: seq[PendingRingFree]
+proc newBrokerRingLease*(
+    ring: ptr VyukovMpscRing[uint32],
+    slab: ptr PayloadSlab = nil,
+    pool: ptr ResponseSlotPool = nil,
+): ptr BrokerRingLease {.gcsafe.} =
+  ## The caller (the bucket owner) holds the first reference.
+  result = queueCreate(BrokerRingLease)
+  result.ring = ring
+  result.slab = slab
+  result.pool = pool
+  result.refs.store(1, moRelaxed)
 
-proc enqueuePendingRingFree*(
-    ring: ptr VyukovMpscRing[uint32], slab: ptr PayloadSlab, pool: ptr ResponseSlotPool
-) {.gcsafe.} =
-  ## Called from a broker poll fn on the provider thread when its ring has
-  ## been closed by clearProvider(). The (ring, slab, pool) triple will be
-  ## freed by `drainPendingRingFrees()` at thread shutdown.
-  {.cast(gcsafe).}:
-    gPendingRingFrees.add(PendingRingFree(ring: ring, slab: slab, pool: pool))
+proc acquireLease*(lease: ptr BrokerRingLease) {.gcsafe, inline.} =
+  ## Only while holding the broker's globalLock with the owning bucket still
+  ## registered, or while already holding a reference: either guarantees the
+  ## count is > 0 here.
+  discard lease.refs.fetchAdd(1, moRelaxed)
+
+proc releaseLease*(lease: ptr BrokerRingLease) {.gcsafe.} =
+  ## Drop one reference; the last one frees the ring, slab, pool and lease.
+  if lease.isNil:
+    return
+  if lease.refs.fetchSub(1, moAcquireRelease) != 1:
+    return
+  if not lease.ring.isNil:
+    freeVyukovMpscRing(lease.ring)
+  if not lease.slab.isNil:
+    deinitPayloadSlab(lease.slab[])
+    queueFree(lease.slab)
+  if not lease.pool.isNil:
+    deinitResponseSlotPool(lease.pool[])
+    queueFree(lease.pool)
+  queueFree(lease)
+
+# ---------------------------------------------------------------------------
+# Pending-ring-free registry — owner releases at thread exit
+# ---------------------------------------------------------------------------
+# When clearProvider / dropSignalHandler closes a broker's ring on its owning
+# thread, the poll fn detects `ring.isClosed()` and hands the bucket's lease
+# here instead of releasing it inline: an earlier design freed from an
+# asyncSpawn'd coroutine during teardown and SEGV'd in the refc allocator
+# (PR #13). `drainPendingRingFrees` drops the owner references synchronously
+# at thread exit; senders still holding a reference keep the transport alive
+# and free it themselves.
+#
+# The registry is a C-heap array, not a Nim seq: under --mm:refc a seq payload
+# lives on the refc heap, which LeakSanitizer does not scan, so the C-heap
+# leases it holds (e.g. on the main thread, which never runs teardown) would
+# read as leaked. Anchored in threadvars, it is a TLS root under both MMs.
+type PendingLeases = ptr UncheckedArray[ptr BrokerRingLease]
+
+var gPendingRingFrees {.threadvar.}: PendingLeases
+var gPendingRingFreesLen {.threadvar.}: int
+var gPendingRingFreesCap {.threadvar.}: int
+
+proc enqueuePendingRingFree*(lease: ptr BrokerRingLease) {.gcsafe.} =
+  ## Called from a broker poll fn on the owning thread once its ring is
+  ## closed and drained. The owner reference is dropped by
+  ## `drainPendingRingFrees()` at thread shutdown.
+  if gPendingRingFreesLen == gPendingRingFreesCap:
+    let newCap = max(8, gPendingRingFreesCap * 2)
+    let grown = cast[PendingLeases](queueAlloc0(newCap * sizeof(ptr BrokerRingLease)))
+    for i in 0 ..< gPendingRingFreesLen:
+      grown[i] = gPendingRingFrees[i]
+    queueFree(gPendingRingFrees)
+    gPendingRingFrees = grown
+    gPendingRingFreesCap = newCap
+  gPendingRingFrees[gPendingRingFreesLen] = lease
+  inc gPendingRingFreesLen
 
 proc drainPendingRingFrees*() {.gcsafe.} =
-  ## Drain the per-thread pending-ring-free registry synchronously.
-  ## Sleeps once for a 50ms grace window covering all queued frees, then
-  ## releases each (ring, slab, pool) triple. Must be called from the owning
-  ## thread AFTER any chronos work that may still touch the buffers has
-  ## completed (i.e. after `drainAsyncOps` in the processing-thread proc).
-  if gPendingRingFrees.len == 0:
-    return
-  # Single grace window: 50ms is enough for any sender that snapshotted
-  # pool/slab/ring pointers before clearProvider closed the ring to either
-  # complete its enqueue (which then fails on isClosed()) or abort. Without
-  # this, a stale sender deref'ing the about-to-be-freed slab/pool crashes.
-  sleep(50)
-  for entry in gPendingRingFrees:
-    if not entry.ring.isNil:
-      freeVyukovMpscRing(entry.ring)
-    if not entry.slab.isNil:
-      deinitPayloadSlab(entry.slab[])
-      deallocShared(entry.slab)
-    if not entry.pool.isNil:
-      deinitResponseSlotPool(entry.pool[])
-      deallocShared(entry.pool)
-  gPendingRingFrees.setLen(0)
+  ## Drop the owner reference of every lease queued on this thread. Must run
+  ## on the owning thread after any chronos work that may still touch the
+  ## transport has completed (teardownBrokerThread calls it last).
+  for i in 0 ..< gPendingRingFreesLen:
+    releaseLease(gPendingRingFrees[i])
+  queueFree(gPendingRingFrees)
+  gPendingRingFrees = nil
+  gPendingRingFreesLen = 0
+  gPendingRingFreesCap = 0
 
 var gBrokerThreadTeardownDone {.threadvar.}: bool
 var gBrokerThreadHookRegistered {.threadvar.}: bool
@@ -562,8 +600,9 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
   ##      (waiting out concurrent firers) and, on Windows, dismantles the
   ##      pending RegisterWaitForSingleObject registration whose thread-pool
   ##      callback would otherwise dereference this thread's freed refc heap.
-  ##   2. drainPendingRingFrees() — releases (ring, slab, pool) triples of
-  ##      brokers cleared on this thread, after the 50 ms sender grace window.
+  ##   2. drainPendingRingFrees() — drops this thread's owner reference on the
+  ##      ring leases of brokers cleared here (a sender still holding one frees
+  ##      the transport when it is done).
   ##
   ## It leaves the thread's chronos dispatcher open: the thread may belong to
   ## someone else who still drives it, e.g. code after an explicit call or a
@@ -587,7 +626,7 @@ proc teardownBrokerThread*() {.gcsafe, raises: [].} =
   # signal handlers it installed, so do it now for any it left behind — the
   # ctx becomes free again and outstanding requests fail fast instead of
   # timing out. One poll pass then lets each closed ring's poll fn queue its
-  # (ring, slab, pool) for drainPendingRingFrees below; the loop is not
+  # lease for drainPendingRingFrees below; the loop is not
   # relied on, since it exits on the stop request without polling.
   var retired = 0
   for fn in gBrokerThreadCleanups:
