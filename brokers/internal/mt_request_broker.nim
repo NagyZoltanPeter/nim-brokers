@@ -199,9 +199,13 @@ proc addExtInplaceHooks(
               nnkElifBranch,
               newCall(ident("not"), newCall(ident("isNil"), idOutNode)),
               newStmtList(
-                newAssignment(
-                  newTree(nnkBracketExpr, copyNimTree(idOutNode)),
-                  newCall(copyNimTree(requestIdName), newLit(0'u64)),
+                newCall(
+                  ident("atomicStoreN"),
+                  newTree(
+                    nnkCast, newTree(nnkPtrTy, ident("uint64")), copyNimTree(idOutNode)
+                  ),
+                  newLit(0'u64),
+                  ident("ATOMIC_RELEASE"),
                 )
               ),
             ),
@@ -1696,12 +1700,18 @@ proc generateMtRequestBroker*(
         ## canceller can read. The caller's own frame is alive for the whole
         ## call, which is what makes that pointer safe.
         let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
+        # Release-store: the canceller reads `idOut` from another thread, so a
+        # plain store would be a data race (read it with an acquire load).
         if pro.error.len > 0:
           if not idOut.isNil:
-            idOut[] = `requestIdName`(0'u64)
+            atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
           return err(pro.error)
         if not idOut.isNil:
-          idOut[] = `requestIdName`((uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen))
+          atomicStoreN(
+            cast[ptr uint64](idOut),
+            (uint64(pro.slotIdx) shl 32) or uint64(pro.slotGen),
+            ATOMIC_RELEASE,
+          )
         `blockingWaitIdent`(pool, pro.slotIdx, pro.slotGen)
 
   )
@@ -2317,9 +2327,15 @@ proc generateMtRequestBroker*(
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProviderNoArgs(t, brokerCtx)
           let mockInstalled = replaceProvider(t, brokerCtx, mock)
-          doAssert mockInstalled.isOk(),
-            "withMockProvider: " & mockInstalled.error &
-              " (only the provider's owning thread may mock it)"
+          if mockInstalled.isErr():
+            # Not `doAssert`: under --mm:orc a failing doAssert leaks its message
+            # temporary (the noreturn assert path skips its destructor), and this
+            # misuse path is exercised on purpose by test_mt_owner_only_clear.
+            raise newException(
+              AssertionDefect,
+              "withMockProvider: " & mockInstalled.error &
+                " (only the provider's owning thread may mock it)",
+            )
           try:
             body
           finally:
@@ -2371,9 +2387,15 @@ proc generateMtRequestBroker*(
           ## restore the captured provider (or clear it if none was set).
           let savedMockProvider = getCurrentProvider(t, brokerCtx)
           let mockInstalled = replaceProvider(t, brokerCtx, mock)
-          doAssert mockInstalled.isOk(),
-            "withMockProvider: " & mockInstalled.error &
-              " (only the provider's owning thread may mock it)"
+          if mockInstalled.isErr():
+            # Not `doAssert`: under --mm:orc a failing doAssert leaks its message
+            # temporary (the noreturn assert path skips its destructor), and this
+            # misuse path is exercised on purpose by test_mt_owner_only_clear.
+            raise newException(
+              AssertionDefect,
+              "withMockProvider: " & mockInstalled.error &
+                " (only the provider's owning thread may mock it)",
+            )
           try:
             body
           finally:
@@ -2661,7 +2683,7 @@ proc generateMtRequestBroker*(
           ## blocked and cannot publish the id itself.
           `initProcIdent`()
           if not idOut.isNil:
-            idOut[] = `requestIdName`(0'u64)
+            atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
           var ring: ptr VyukovMpscRing[uint32]
           var slab: ptr PayloadSlab
           var pool: ptr ResponseSlotPool
@@ -2804,7 +2826,7 @@ proc generateMtRequestBroker*(
     let bcBody = quote:
       `initProcIdent`()
       if not idOut.isNil:
-        idOut[] = `requestIdName`(0'u64)
+        atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
       var ring: ptr VyukovMpscRing[uint32]
       var slab: ptr PayloadSlab
       var pool: ptr ResponseSlotPool

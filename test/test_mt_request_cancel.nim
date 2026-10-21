@@ -203,10 +203,16 @@ suite "MT RequestBroker — explicit cancellation":
 
     var th: Thread[void]
     th.createThread(requesterBlockingCancellable)
-    while uint64(gBlockingId) == 0'u64:
+    # The prologue release-stores the id; acquire-load it from this thread.
+    proc publishedId(): CancelReqRequestId =
+      CancelReqRequestId(
+        atomicLoadN(cast[ptr uint64](addr gBlockingId), ATOMIC_ACQUIRE)
+      )
+
+    while uint64(publishedId()) == 0'u64:
       await sleepAsync(chronos.milliseconds(5))
     await sleepAsync(chronos.milliseconds(50))
-    check CancelReq.cancel(gBlockingId)
+    check CancelReq.cancel(publishedId())
 
     while not gDone.load():
       await sleepAsync(chronos.milliseconds(5))

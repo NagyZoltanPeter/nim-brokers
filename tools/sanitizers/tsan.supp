@@ -17,3 +17,13 @@
 # race:nimGCvisit
 # race:chronos
 
+
+# Nim stdlib (lib/system/threadimpl.nim, nimThreadProcWrapperBody): on exit a
+# thread writes `thrd.core = nil` / `thrd.dataFn = nil` into the caller-owned
+# Thread object, while `joinThread` takes that Thread BY VALUE, so the caller
+# copies the whole struct before pthread_join establishes happens-before.
+# The copied core/dataFn are never read (only `sys`, written before the thread
+# starts). Benign, upstream. `race_top` (top frame only) keeps this narrow:
+# threadProcWrapper is the bottom frame of every worker stack, so a plain
+# `race:` entry would hide every worker-thread race. Seen on Linux (clang 19).
+race_top:threadProcWrapper

@@ -11,3 +11,10 @@
 #
 # Keep MINIMAL — prefer fixing real UB over suppressing it. Add entries only
 # for confirmed-benign reports in generated C or third-party code.
+
+# faststreams 0.6.0 `write(OutputStream, openArray[char])` (outputs.nim:556)
+# converts an EMPTY string with `toOpenArrayByte(0, -1)`; under --mm:refc an
+# empty string has a nil data pointer, so the generated C computes `nil + 0`
+# ("applying zero offset to null pointer"). Third-party, zero-length, never
+# dereferenced. Hit by the CBOR codec writing empty string fields.
+pointer-overflow:faststreams/outputs.nim

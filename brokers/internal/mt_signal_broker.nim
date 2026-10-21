@@ -779,9 +779,15 @@ proc generateMtSignalBroker*(
         ## restore the captured handler (or drop it if none was set).
         let savedMockSignalHandler = getCurrentSignalHandler(t, brokerCtx)
         let mockInstalled = replaceSignalHandler(t, brokerCtx, mock)
-        doAssert mockInstalled.isOk(),
-          "withMockSignalHandler: " & mockInstalled.error &
-            " (only the handler's owning thread may mock it)"
+        if mockInstalled.isErr():
+          # Not `doAssert`: under --mm:orc a failing doAssert leaks its message
+          # temporary (the noreturn assert path skips its destructor), and this
+          # misuse path is exercised on purpose by test_mt_owner_only_clear.
+          raise newException(
+            AssertionDefect,
+            "withMockSignalHandler: " & mockInstalled.error &
+              " (only the handler's owning thread may mock it)",
+          )
         try:
           body
         finally:

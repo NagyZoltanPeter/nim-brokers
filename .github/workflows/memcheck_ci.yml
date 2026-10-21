@@ -36,12 +36,60 @@ on:
           - allTsan
           - allAsanLeak
           - allSan
-          - testApiTeardownAsanOrc
-          - testApiTeardownTsanOrc
+          - testMtEventBrokerAsanOrc
+          - testMtEventBrokerAsanRefc
+          - testMtRequestBrokerAsanOrc
+          - testMtRequestBrokerAsanRefc
+          - testMtBrokerConfigsAsanOrc
+          - testMtBrokerConfigsAsanRefc
+          - testMtSignalBrokerAsanOrc
+          - testMtSignalBrokerAsanRefc
+          - testMtBrokerScopeAsanOrc
+          - testMtBrokerScopeAsanRefc
+          - testMtOwnerOnlyClearAsanOrc
+          - testMtOwnerOnlyClearAsanRefc
           - testMtEventBrokerTsanOrc
+          - testMtEventBrokerTsanRefc
           - testMtRequestBrokerTsanOrc
+          - testMtRequestBrokerTsanRefc
+          - testMtBrokerConfigsTsanOrc
+          - testMtBrokerConfigsTsanRefc
+          - testMtSignalBrokerTsanOrc
+          - testMtSignalBrokerTsanRefc
+          - testApiTeardownAsanOrc
+          - testApiTeardownAsanRefc
+          - testApiTeardownTsanOrc
+          - testApiTeardownTsanRefc
+          - testApiSignalAsanOrc
+          - testApiSignalAsanRefc
+          - testApiSignalTsanOrc
+          - testApiSignalTsanRefc
+          - testExtAsanOrc
+          - testExtAsanRefc
+          - testExtImportsAsanOrc
+          - testExtImportsAsanRefc
+          - testExtLifeAsanOrc
+          - testExtLifeAsanRefc
+          - testExtSwitchAsanOrc
+          - testExtSwitchAsanRefc
+          - testExtTsan
+          - testExtAsanLeak
+          - runExtExampleCppAsan
+          - sanitizePersistenceCppAsan
+          - sanitizePersistenceCppTsan
+          - runFfiBenchEventStressAsan
           - probeWinTlsUninitOrc
           - probeWinTlsUninitRefc
+      groups:
+        description: "SAN_GROUPS for allAsan/allTsan/allAsanLeak: comma list of st,mt,api,ext ('all' = every group)"
+        required: false
+        type: string
+        default: all
+      shallow:
+        description: "SAN_SHALLOW: only the platform-sensitive subset (what the macOS/Windows PR jobs run)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -84,6 +132,9 @@ jobs:
 
   memcheck-ci:
     needs: setup-matrix
+    env:
+      SAN_GROUPS: ${{ inputs.groups }}
+      SAN_SHALLOW: ${{ inputs.shallow && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:

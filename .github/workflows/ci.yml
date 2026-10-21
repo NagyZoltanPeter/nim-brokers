@@ -47,6 +47,10 @@ jobs:
           # via memcheck_ci.yml workflow_dispatch.
           - nim: "devel"
             platform: { id: win-amd64, runs-on: windows-latest }
+          # Frees a macOS slot (5 concurrent per account) for the
+          # sanitizers-macos job; macos-arm64/devel still covers devel.
+          - nim: "devel"
+            platform: { id: macos-amd64, runs-on: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
 
@@ -326,10 +330,26 @@ jobs:
   # C++ examples with an instrumented Nim host. The same
   # tasks are in `allAsan` (manual memcheck_ci.yml); this job runs them on
   # every push / PR. Every step runs (`if: always()`).
-  asan-extapi:
+  # Sanitizer suite (`sanRows` in brokers.nimble). Linux runs everything:
+  # asanleak = ASan+UBSan+LSan in one build, plus TSan. macOS / Windows run
+  # the shallow, platform-sensitive subset (SAN_SHALLOW=1).
+  sanitizers-linux:
+    name: sanitizers-linux / ${{ matrix.mode }} / ${{ matrix.groups }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { mode: asanleak, task: allAsanLeak, groups: st }
+          - { mode: asanleak, task: allAsanLeak, groups: mt }
+          - { mode: asanleak, task: allAsanLeak, groups: api, extra: sanitizePersistenceCppAsan }
+          - { mode: asanleak, task: allAsanLeak, groups: ext, extra: runExtExampleCppAsan }
+          - { mode: tsan, task: allTsan, groups: mt }
+          - { mode: tsan, task: allTsan, groups: api, extra: sanitizePersistenceCppTsan }
+          - { mode: tsan, task: allTsan, groups: ext }
     env:
       NIM_VERSION: '2.2.12'
+      SAN_GROUPS: ${{ matrix.groups }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -354,49 +374,97 @@ jobs:
               https://github.com/danielaparker/jsoncons.git vendor/jsoncons
           fi
 
-      - name: testExtAsanOrc
-        if: always()
-        run: ci/nimble-strict.sh testExtAsanOrc -y --verbose
+      - name: ${{ matrix.task }} (${{ matrix.groups }})
+        run: ci/nimble-strict.sh ${{ matrix.task }} -y --verbose
 
-      - name: testExtAsanRefc
-        if: always()
-        run: ci/nimble-strict.sh testExtAsanRefc -y --verbose
+      - name: ${{ matrix.extra }}
+        if: always() && matrix.extra
+        run: ci/nimble-strict.sh ${{ matrix.extra }} -y --verbose
 
-      - name: testExtImportsAsanOrc
-        if: always()
-        run: ci/nimble-strict.sh testExtImportsAsanOrc -y --verbose
+  sanitizers-macos:
+    runs-on: macos-latest
+    env:
+      NIM_VERSION: '2.2.12'
+      SAN_SHALLOW: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: testExtImportsAsanRefc
-        if: always()
-        run: ci/nimble-strict.sh testExtImportsAsanRefc -y --verbose
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: testExtLifeAsanOrc
-        if: always()
-        run: ci/nimble-strict.sh testExtLifeAsanOrc -y --verbose
+      - name: Install dependencies (nimble)
+        run: nimble install -d -y
 
-      - name: testExtLifeAsanRefc
-        if: always()
-        run: ci/nimble-strict.sh testExtLifeAsanRefc -y --verbose
+      - name: Fetch jsoncons (C++ wrapper dep)
+        run: |
+          if [ ! -d vendor/jsoncons/include ]; then
+            rm -rf vendor/jsoncons
+            git clone --depth 1 --branch v1.0.0 \
+              https://github.com/danielaparker/jsoncons.git vendor/jsoncons
+          fi
 
-      - name: testExtSwitchAsanOrc
-        if: always()
-        run: ci/nimble-strict.sh testExtSwitchAsanOrc -y --verbose
+      - name: allAsan (shallow)
+        run: ci/nimble-strict.sh allAsan -y --verbose
 
-      - name: testExtSwitchAsanRefc
+      - name: allTsan (shallow)
         if: always()
-        run: ci/nimble-strict.sh testExtSwitchAsanRefc -y --verbose
+        run: ci/nimble-strict.sh allTsan -y --verbose
 
-      - name: runExtExampleCppAsan
-        if: always()
-        run: ci/nimble-strict.sh runExtExampleCppAsan -y --verbose
+  sanitizers-windows:
+    # ASan+UBSan only: clang has no TSan / LSan on Windows.
+    runs-on: windows-latest
+    env:
+      NIM_VERSION: '2.2.12'
+      SAN_SHALLOW: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: testExtTsan
-        if: always()
-        run: ci/nimble-strict.sh testExtTsan -y --verbose
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: testExtAsanLeak
-        if: always()
-        run: ci/nimble-strict.sh testExtAsanLeak -y --verbose
+      - name: Ensure clang + ASan runtime in PATH
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) {
+            choco install llvm -y --no-progress
+          }
+          echo $llvmBin >> $env:GITHUB_PATH
+          # The ASan exe links clang_rt.asan_dynamic-x86_64.dll, which lives
+          # under LLVM\lib\clang\<ver>\lib\windows, not LLVM\bin. Without it
+          # on PATH the test fails STATUS_DLL_NOT_FOUND with no stderr.
+          $asan = Get-ChildItem "C:\Program Files\LLVM\lib\clang" `
+            -Filter "clang_rt.asan_dynamic-x86_64.dll" `
+            -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($asan) { echo $asan.DirectoryName >> $env:GITHUB_PATH }
+          else { Write-Host "::warning::clang_rt.asan_dynamic-x86_64.dll not found" }
+
+      - name: Install dependencies (nimble)
+        shell: bash
+        run: |
+          nimble setup -l
+          nimble install -d -y
+
+      - name: Fetch jsoncons (C++ wrapper dep)
+        shell: bash
+        run: |
+          if [ ! -d vendor/jsoncons/include ]; then
+            rm -rf vendor/jsoncons
+            git clone --depth 1 --branch v1.0.0 \
+              https://github.com/danielaparker/jsoncons.git vendor/jsoncons
+          fi
+
+      - name: allAsan (shallow)
+        shell: bash
+        run: ci/nimble-strict.sh allAsan -y --verbose
 
   nph:
     runs-on: ubuntu-latest

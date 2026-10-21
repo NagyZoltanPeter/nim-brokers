@@ -43,4 +43,10 @@ if grep -qE "Exception raised during nimble script execution" "$log"; then
   exit 1
 fi
 
+# Same backstop for sanitizer reports (memcheck_ci.yml uses the same markers).
+if grep -qE "AddressSanitizer:|ThreadSanitizer:|LeakSanitizer:|runtime error:|==[0-9]+==ABORTING" "$log"; then
+  echo "::error::nimble exited 0 but a sanitizer reported an error (see log above)."
+  exit 1
+fi
+
 exit 0

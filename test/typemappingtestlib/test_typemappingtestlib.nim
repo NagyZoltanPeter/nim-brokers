@@ -72,6 +72,7 @@ type RawSlot = object
   name: cstring
   data: pointer
   len: int32
+  ready: Atomic[bool] ## release-set by captureCb once the fields above are written
 
 var gSlots: array[256, RawSlot]
 var gSlotIdx: Atomic[int]
@@ -83,6 +84,7 @@ proc resetSlots() =
       gSlots[i].data = nil
       gSlots[i].len = 0
     gSlots[i].name = nil
+    gSlots[i].ready.store(false, moRelaxed)
   gSlotIdx.store(0)
   gDeliveredCount.store(0)
 
@@ -98,6 +100,9 @@ proc captureCb(
     gSlots[idx].data = buf
     gSlots[idx].len = payloadLen
   gSlots[idx].name = eventName
+  # Publish: the slot index was claimed before the fields were written, so a
+  # reader must not touch them until `ready` (it runs on another thread).
+  gSlots[idx].ready.store(true, moRelease)
   discard gDeliveredCount.fetchAdd(1)
 
 proc nowMs(): int64 =
@@ -108,7 +113,8 @@ proc waitForEvent(name: string, timeoutMs: int = 500): seq[byte] =
   while nowMs() < deadline:
     let count = gSlotIdx.load()
     for i in 0 ..< count:
-      if gSlots[i].name != nil and $gSlots[i].name == name and gSlots[i].len > 0:
+      if gSlots[i].ready.load(moAcquire) and gSlots[i].name != nil and
+          $gSlots[i].name == name and gSlots[i].len > 0:
         var outBytes = newSeq[byte](gSlots[i].len.int)
         copyMem(addr outBytes[0], gSlots[i].data, gSlots[i].len.int)
         return outBytes

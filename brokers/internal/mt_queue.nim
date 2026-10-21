@@ -102,7 +102,10 @@ proc push*(fl: var ShardedFreeList, idx: uint32, shardHint: uint32) {.gcsafe.} =
   let shard = addr fl.shards[shardIdx]
   while true:
     let oldHead = shard.head.load(moAcquire)
-    fl.nextLinks[idx] = headIdx(oldHead)
+    # Relaxed atomic, not a plain store: a concurrent `pop` may still read
+    # this link from a stale head (its tagged CAS then fails and retries),
+    # which is a data race for plain accesses. Same codegen on x86-64/arm64.
+    atomicStoreN(addr fl.nextLinks[idx], headIdx(oldHead), ATOMIC_RELAXED)
     # Tag increments on every successful push to dodge ABA.
     let newHead = makeHead(idx, headTag(oldHead) + 1)
     var expected = oldHead
@@ -121,7 +124,7 @@ proc pop*(fl: var ShardedFreeList, shardHint: uint32): uint32 {.gcsafe.} =
       let idx = headIdx(oldHead)
       if idx == EmptyIdx:
         break # try next shard
-      let nextIdx = fl.nextLinks[idx]
+      let nextIdx = atomicLoadN(addr fl.nextLinks[idx], ATOMIC_RELAXED)
       let newHead = makeHead(nextIdx, headTag(oldHead) + 1)
       var expected = oldHead
       if shard.head.compareExchangeWeak(expected, newHead, moAcquireRelease, moAcquire):
