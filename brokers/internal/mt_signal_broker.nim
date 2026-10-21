@@ -119,10 +119,6 @@ proc generateMtSignalBroker*(
   let releaseCellIdent = ident("releaseCell" & typeDisplayName & "Sig")
   let shardHintIdent = ident("shardHint" & typeDisplayName & "Sig")
 
-  let marshalIdent = ident(typeDisplayName & "MtSigMarshal")
-  let unmarshalIdent = ident(typeDisplayName & "MtSigUnmarshal")
-  let marshalSizeIdent = ident($marshalIdent & "Size")
-
   let tvCtxIdent = ident("g" & typeDisplayName & "TvSigCtxs")
   let tvHandlerIdent = ident("g" & typeDisplayName & "TvSigHandlers")
   let tvFutsIdent = ident("g" & typeDisplayName & "TvSigFuts")
@@ -168,7 +164,7 @@ proc generateMtSignalBroker*(
   result.add(brokerTypes)
 
   # ── Codec procs (marshal / unmarshal / size of the payload value) ─────
-  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):
+  for procNode in genMtCodecProcs(typeIdent):
     result.add(procNode)
 
   # ── Global shared state ───────────────────────────────────────────────
@@ -309,7 +305,7 @@ proc generateMtSignalBroker*(
             let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
             let ok =
               try:
-                `unmarshalIdent`(payloadPtr, payloadLen, ev)
+                mtUnmarshal(payloadPtr, payloadLen, ev)
               except Exception:
                 false
             if ok:
@@ -455,9 +451,7 @@ proc generateMtSignalBroker*(
         let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
         let written =
           try:
-            `marshalIdent`(
-              payloadPtr, int(`globalSlabIdent`.cellPayloadCap), signalValue
-            )
+            mtMarshal(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), signalValue)
           except Exception:
             -1
         if written >= 0:
@@ -465,7 +459,7 @@ proc generateMtSignalBroker*(
         else:
           let needed =
             try:
-              `marshalSizeIdent`(signalValue)
+              mtMarshalSize(signalValue)
             except Exception:
               -1
           if needed < 0 or needed > `maxDynPayloadLit`:
@@ -480,9 +474,7 @@ proc generateMtSignalBroker*(
             return err("SignalBroker(" & `typeNameLit` & "): spill allocation failed")
           let w2 =
             try:
-              `marshalIdent`(
-                cast[ptr UncheckedArray[byte]](spillBuf), needed, signalValue
-              )
+              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, signalValue)
             except Exception:
               -1
           if w2 < 0:

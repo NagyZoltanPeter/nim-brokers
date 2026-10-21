@@ -420,9 +420,6 @@ proc generateMtRequestBroker*(
   let handleMsgIdent = ident("handleMsg" & typeDisplayName)
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
   let shardHintIdent = ident("shardHint" & typeDisplayName)
-  let marshalIdent = ident(typeDisplayName & "MtMarshal")
-  let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
-  let marshalSizeIdent = ident(typeDisplayName & "MtMarshalSize")
   let marshalRespIdent = ident(typeDisplayName & "MtMarshalResp")
   let unmarshalRespIdent = ident(typeDisplayName & "MtUnmarshalResp")
   let marshalRespSizeIdent = ident(typeDisplayName & "MtMarshalRespSize")
@@ -594,7 +591,7 @@ proc generateMtRequestBroker*(
   )
 
   # ── Codec procs for ReqMsg ───────────────────────────────────────────
-  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, requestMsgName):
+  for procNode in genMtCodecProcs(requestMsgName):
     result.add(procNode)
 
   # ── Codec procs for Result[typeIdent, string] ───────────────────────
@@ -1079,7 +1076,7 @@ proc generateMtRequestBroker*(
             let payloadLen = capturedSlab[].dataLen(cellIdx)
             let ok =
               try:
-                `unmarshalIdent`(payloadPtr, payloadLen, msg)
+                mtUnmarshal(payloadPtr, payloadLen, msg)
               except Exception:
                 false
             if ok:
@@ -1341,7 +1338,7 @@ proc generateMtRequestBroker*(
         msgCopy.requesterSignal = mySignal
         let written =
           try:
-            `marshalIdent`(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
+            mtMarshal(payloadPtr, int(slab[].cellPayloadCap), msgCopy)
           except Exception:
             -1
         if written >= 0:
@@ -1350,7 +1347,7 @@ proc generateMtRequestBroker*(
           # Auto-spill the request onto the heap instead of failing.
           let needed =
             try:
-              `marshalSizeIdent`(msgCopy)
+              mtMarshalSize(msgCopy)
             except Exception:
               -1
           if needed < 0 or needed > `maxDynPayloadLit`:
@@ -1372,7 +1369,7 @@ proc generateMtRequestBroker*(
             )
           let w2 =
             try:
-              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
+              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, msgCopy)
             except Exception:
               -1
           if w2 < 0:

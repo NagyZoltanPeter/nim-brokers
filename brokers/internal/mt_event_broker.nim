@@ -132,10 +132,6 @@ proc generateMtEventBroker*(
   let releaseCellIdent = ident("releaseCell" & typeDisplayName)
   let shardHintIdent = ident("shardHint" & typeDisplayName)
 
-  let marshalIdent = ident(typeDisplayName & "MtMarshal")
-  let unmarshalIdent = ident(typeDisplayName & "MtUnmarshal")
-  let marshalSizeIdent = ident(typeDisplayName & "MtMarshalSize")
-
   let tvListenerCtxIdent = ident("g" & typeDisplayName & "TvListenerCtxs")
   let tvListenerHandlersIdent = ident("g" & typeDisplayName & "TvListenerHandlers")
   let tvNextIdsIdent = ident("g" & typeDisplayName & "TvNextIds")
@@ -197,7 +193,7 @@ proc generateMtEventBroker*(
   result.add(brokerTypes)
 
   # ── Codec procs (marshal / unmarshal) ─────────────────────────────────
-  for procNode in genMtCodecProcs(marshalIdent, unmarshalIdent, typeIdent):
+  for procNode in genMtCodecProcs(typeIdent):
     result.add(procNode)
 
   # ── Global shared state ───────────────────────────────────────────────
@@ -381,7 +377,7 @@ proc generateMtEventBroker*(
               let payloadLen = `globalSlabIdent`.dataLen(cellIdx)
               let ok =
                 try:
-                  `unmarshalIdent`(payloadPtr, payloadLen, ev)
+                  mtUnmarshal(payloadPtr, payloadLen, ev)
                 except Exception:
                   false
               if ok:
@@ -584,7 +580,7 @@ proc generateMtEventBroker*(
         let payloadPtr = `globalSlabIdent`.cellPayloadPtr(cellIdx)
         let written =
           try:
-            `marshalIdent`(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
+            mtMarshal(payloadPtr, int(`globalSlabIdent`.cellPayloadCap), event)
           except Exception:
             -1
         if written >= 0:
@@ -595,7 +591,7 @@ proc generateMtEventBroker*(
           # heap buffer instead of dropping. Owned by the cell; freed at release.
           let needed =
             try:
-              `marshalSizeIdent`(event)
+              mtMarshalSize(event)
             except Exception:
               -1
           if needed < 0 or needed > `maxDynPayloadLit`:
@@ -611,7 +607,7 @@ proc generateMtEventBroker*(
             return
           let w2 =
             try:
-              `marshalIdent`(cast[ptr UncheckedArray[byte]](spillBuf), needed, event)
+              mtMarshal(cast[ptr UncheckedArray[byte]](spillBuf), needed, event)
             except Exception:
               -1
           if w2 < 0:
