@@ -20,7 +20,7 @@
 {.push raises: [].}
 
 import std/[atomics, locks]
-import ../broker_context
+import ../broker_context, ../broker_scope
 import ./mt_queue, ./mt_broker_common
 
 export mt_queue
@@ -146,6 +146,43 @@ proc sendCell*[T](
     return mssQueueFull
   fireBrokerSignal(signal)
   mssOk
+
+# ---------------------------------------------------------------------------
+# Receive path: dequeue → closed + empty → unmarshal → release
+# ---------------------------------------------------------------------------
+
+type MtPollStep* = enum
+  mpsEmpty ## nothing queued; poll fn returns 0
+  mpsClosed ## ring closed and drained; the poll fn retires (returns 2)
+  mpsSentinel ## a control value (`sentinel`) instead of a cell index
+  mpsValue ## `value` holds the decoded payload
+  mpsBadValue ## the payload did not unmarshal
+
+proc pollCell*[T](
+    ring: ptr VyukovMpscRing[uint32],
+    slab: var PayloadSlab,
+    value: var T,
+    sentinel = EmptyIdx,
+): MtPollStep {.inline, gcsafe.} =
+  ## One receive step of a broker poll fn. The cell is released (one
+  ## reference) before returning: `value` is a copy on this thread's heap.
+  ## Dispatching the value stays at the generated call site, which owns the
+  ## per-type threadvars and their `{.cast(gcsafe).}`.
+  mixin mtUnmarshal
+  var cellIdx: uint32
+  if not ring.tryDequeue(cellIdx):
+    # `closed` is set before the last producer can have enqueued, so closed +
+    # empty is the definitive drained point.
+    return (if ring.isClosed(): mpsClosed else: mpsEmpty)
+  if cellIdx == sentinel:
+    return mpsSentinel
+  let ok =
+    try:
+      mtUnmarshal(slab.dataPtr(cellIdx), slab.dataLen(cellIdx), value)
+    except Exception:
+      false
+  releaseCellRef(slab, cellIdx)
+  if ok: mpsValue else: mpsBadValue
 
 # ---------------------------------------------------------------------------
 # Bucket registry
@@ -341,3 +378,28 @@ proc ownedCtxs*[B](
       if reg.buckets[i].head.isOwnedHere() and
           (not requireActive or reg.buckets[i].head.active):
         result.add(reg.buckets[i].head.ctx)
+
+proc removeOwnedLocked*[B](
+    reg: var MtRegistry[B], ctx: BrokerContext, requireActive: bool, removed: var B
+): BrokerReleaseOutcome {.gcsafe.} =
+  ## Owner-only removal (call with `reg.lock` held). The bucket for `ctx` is
+  ## removed only when this thread owns it, decided in the same critical
+  ## section as the removal, so no other thread can retire + re-register in
+  ## between: `broReleased` (copied to `removed`), `broAlreadyGone` (no
+  ## bucket) or `broOwnerChanged` (owned by another thread, left in place).
+  ## The caller then closes the ring and runs its lane-specific extras.
+  let i = reg.findIdx(ctx, requireActive)
+  if i < 0:
+    return broAlreadyGone
+  if not reg.buckets[i].head.isOwnedHere():
+    return broOwnerChanged
+  removed = reg.buckets[i]
+  reg.removeAt(i)
+  broReleased
+
+proc removeOwned*[B](
+    reg: var MtRegistry[B], ctx: BrokerContext, requireActive: bool, removed: var B
+): BrokerReleaseOutcome {.gcsafe.} =
+  ## Self-locking `removeOwnedLocked`.
+  reg.locked:
+    result = reg.removeOwnedLocked(ctx, requireActive, removed)

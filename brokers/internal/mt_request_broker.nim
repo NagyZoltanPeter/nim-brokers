@@ -996,28 +996,25 @@ proc generateMtRequestBroker*(
             if epoch != lastCancelEpoch:
               lastCancelEpoch = epoch
               `scanCancelledIdent`(capturedPool)
-            var cellIdx: uint32
-            if not capturedRing.tryDequeue(cellIdx):
-              if capturedRing.isClosed():
-                # Hand off to the thread-local pending-free registry; the
-                # processing-thread proc drains it synchronously after
-                # drainAsyncOps. Doing the free asynchronously here ran the
-                # refc allocator during shutdown teardown and SEGV'd on
-                # Linux + macOS ASAN (PR #13, deferredFreeReqRing path).
-                enqueuePendingRingFree(capturedLease)
-                return 2
-              return 0
-            # Got a cell — unmarshal ReqMsg, dispatch. dataPtr/dataLen resolve
-            # the heap-spill buffer when the request spilled, else inline.
+            # dataPtr/dataLen inside pollCell resolve the heap-spill buffer when
+            # the request spilled; the cell is released before dispatch (the
+            # unmarshaled msg is a copy on this thread's heap).
             var msg: `requestMsgName`
-            let payloadPtr = capturedSlab[].dataPtr(cellIdx)
-            let payloadLen = capturedSlab[].dataLen(cellIdx)
-            let ok =
-              try:
-                mtUnmarshal(payloadPtr, payloadLen, msg)
-              except Exception:
-                false
-            if ok:
+            case pollCell(capturedRing, capturedSlab[], msg)
+            of mpsEmpty, mpsSentinel:
+              return 0
+            of mpsClosed:
+              # Hand off to the thread-local pending-free registry; the
+              # processing-thread proc drains it synchronously after
+              # drainAsyncOps. Doing the free asynchronously here ran the
+              # refc allocator during shutdown teardown and SEGV'd on
+              # Linux + macOS ASAN (PR #13, deferredFreeReqRing path).
+              enqueuePendingRingFree(capturedLease)
+              return 2
+            of mpsBadValue:
+              error "Failed to unmarshal request payload", requestType = `typeNameLit`
+              return 1
+            of mpsValue:
               if capturedPool[].isAbandoned(msg.responseSlotIdx, msg.responseSlotGen):
                 # Cancelled (or timed out) before we got to it: the requester's
                 # CAS won, so the slot is ours to release and the provider is
@@ -1026,12 +1023,7 @@ proc generateMtRequestBroker*(
                 capturedPool[].release(msg.responseSlotIdx, mtShardHint())
               else:
                 asyncSpawn `handleMsgIdent`(msg, capturedCtx, capturedPool)
-            else:
-              error "Failed to unmarshal request payload", requestType = `typeNameLit`
-            # Release the cell back to the slab — the unmarshaled msg
-            # holds its own copy on this thread's GC heap.
-            capturedSlab[].release(cellIdx, mtShardHint())
-            return 1
+              return 1
 
   )
 
@@ -1949,39 +1941,26 @@ proc generateMtRequestBroker*(
   let requireOwnerParam = ident("requireOwner")
   let clearBody = quote:
     `initProcIdent`()
-    var ring: ptr VyukovMpscRing[uint32]
-    var pool: ptr ResponseSlotPool
-    var providerSignal: ptr BrokerSignalShared
-    var found = false
-    var foreignOwned = false
+    var removed: `bucketName`
+    var outcome: BrokerReleaseOutcome
     `regIdent`.locked:
-      var foundIdx = -1
-      let i = `regIdent`.findIdx(`brokerCtxParam`)
-      if i >= 0:
-        found = true
-        # The provider closure lives in its owner's threadvars, so only the
-        # owner can retire it consistently.
-        if not `regIdent`.buckets[i].head.isOwnedHere():
-          foreignOwned = true
-        else:
-          ring = `regIdent`.buckets[i].head.ring
-          pool = `regIdent`.buckets[i].responseSlotPool
-          providerSignal = `regIdent`.buckets[i].head.signal
-          foundIdx = i
-          `regIdent`.removeAt(i)
+      # The provider closure lives in its owner's threadvars, so only the owner
+      # can retire it consistently.
+      outcome = `regIdent`.removeOwnedLocked(`brokerCtxParam`, false, removed)
       # Fail outstanding requests fast, under the same lock that publishes the
       # bucket's disappearance. Leaving them to time out means every waiting
       # requester keeps polling this pool for up to its full timeout — and the
       # provider thread frees the pool shortly after this returns.
-      if foundIdx >= 0 and not pool.isNil:
-        discard pool[].markProviderGone()
-    if foreignOwned:
+      if outcome == broReleased and not removed.responseSlotPool.isNil:
+        discard removed.responseSlotPool[].markProviderGone()
+    if outcome == broOwnerChanged:
       if not `requireOwnerParam`:
         error "clearProvider ignored: called from a thread that does not own the provider",
           requestType = `typeNameLit`, brokerCtx = uint32(`brokerCtxParam`)
       return broOwnerChanged
-    if not found:
-      return broAlreadyGone
+    if outcome != broReleased:
+      return outcome
+    let pool = removed.responseSlotPool
     if not pool.isNil:
       # Wake every requester so it resolves now rather than at its next
       # unrelated dispatch tick. Firing a stale or closed signal is a no-op.
@@ -1990,9 +1969,8 @@ proc generateMtRequestBroker*(
         if not waker.isNil:
           fireBrokerSignal(waker)
     `tvCleanup`
-    if not ring.isNil:
-      ring.close()
-      fireBrokerSignal(providerSignal)
+    removed.head.ring.close()
+    fireBrokerSignal(removed.head.signal)
     broReleased
 
   let clearImplIdent = ident("clear" & typeDisplayName & "ProviderImpl")

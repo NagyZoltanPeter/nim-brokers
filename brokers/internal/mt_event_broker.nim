@@ -278,51 +278,37 @@ proc generateMtEventBroker*(
         let capturedShutdownFut = shutdownFut
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
-            var cellIdx: uint32
-            if not capturedRing.tryDequeue(cellIdx):
-              # Empty.  If the ring has been closed by shutdown, this is
-              # the definitive "drained" point (no more producers can
-              # enqueue past `closed=true`).  Complete the shutdown
-              # future and self-unregister.
-              if capturedRing.isClosed():
-                if not capturedShutdownFut.finished:
-                  capturedShutdownFut.complete()
-                releaseLease(capturedLease)
-                return 2
+            var ev: `typeIdent`
+            case pollCell(capturedRing, `globalSlabIdent`.slab, ev, CtrlClearListeners)
+            of mpsEmpty:
               return 0
-            case cellIdx
-            of CtrlClearListeners:
+            of mpsClosed:
+              # Shutdown closed the ring and it is drained: complete the
+              # shutdown future and self-unregister.
+              if not capturedShutdownFut.finished:
+                capturedShutdownFut.complete()
+              releaseLease(capturedLease)
+              return 2
+            of mpsSentinel:
               `clearListenersIdent`(capturedCtx)
               return 1
-            else:
-              # Normal cell: decode, dispatch, decRef. dataPtr/dataLen resolve
-              # the heap-spill buffer when the payload spilled, else the inline
-              # cell region.
-              var ev: `typeIdent`
-              let payloadPtr = `globalSlabIdent`.slab.dataPtr(cellIdx)
-              let payloadLen = `globalSlabIdent`.slab.dataLen(cellIdx)
-              let ok =
-                try:
-                  mtUnmarshal(payloadPtr, payloadLen, ev)
-                except Exception:
-                  false
-              if ok:
-                var idx = -1
-                for i in 0 ..< `tvListenerCtxIdent`.len:
-                  if `tvListenerCtxIdent`[i] == capturedCtx:
-                    idx = i
-                    break
-                if idx >= 0:
-                  var callbacks: seq[`handlerProcIdent`] = @[]
-                  for cb in `tvListenerHandlersIdent`[idx].values:
-                    callbacks.add(cb)
-                  for cb in callbacks:
-                    let fut: Future[void] = `listenerTaskIdent`(cb, ev)
-                    `tvListenerFutsIdent`.add((capturedCtx, fut))
-                    asyncSpawn fut
-              else:
-                error "Failed to unmarshal event payload", eventType = `typeNameLit`
-              releaseCellRef(`globalSlabIdent`.slab, cellIdx)
+            of mpsBadValue:
+              error "Failed to unmarshal event payload", eventType = `typeNameLit`
+              return 1
+            of mpsValue:
+              var idx = -1
+              for i in 0 ..< `tvListenerCtxIdent`.len:
+                if `tvListenerCtxIdent`[i] == capturedCtx:
+                  idx = i
+                  break
+              if idx >= 0:
+                var callbacks: seq[`handlerProcIdent`] = @[]
+                for cb in `tvListenerHandlersIdent`[idx].values:
+                  callbacks.add(cb)
+                for cb in callbacks:
+                  let fut: Future[void] = `listenerTaskIdent`(cb, ev)
+                  `tvListenerFutsIdent`.add((capturedCtx, fut))
+                  asyncSpawn fut
               return 1
 
   )

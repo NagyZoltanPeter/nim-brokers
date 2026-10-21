@@ -227,31 +227,24 @@ proc generateMtSignalBroker*(
         let capturedCtx = loopCtx
         return proc(): int {.gcsafe, raises: [].} =
           {.cast(gcsafe).}:
-            var cellIdx: uint32
-            if not capturedRing.tryDequeue(cellIdx):
-              if capturedRing.isClosed():
-                # Owner reference dropped at thread exit (global slab, no pool).
-                enqueuePendingRingFree(capturedLease)
-                return 2
-              return 0
             var ev: `typeIdent`
-            let payloadPtr = `globalSlabIdent`.slab.dataPtr(cellIdx)
-            let payloadLen = `globalSlabIdent`.slab.dataLen(cellIdx)
-            let ok =
-              try:
-                mtUnmarshal(payloadPtr, payloadLen, ev)
-              except Exception:
-                false
-            if ok:
+            case pollCell(capturedRing, `globalSlabIdent`.slab, ev)
+            of mpsEmpty, mpsSentinel:
+              return 0
+            of mpsClosed:
+              # Owner reference dropped at thread exit (global slab, no pool).
+              enqueuePendingRingFree(capturedLease)
+              return 2
+            of mpsBadValue:
+              error "Failed to unmarshal signal payload", signalType = `typeNameLit`
+              return 1
+            of mpsValue:
               let handler = `findHandlerIdent`(capturedCtx)
               if not handler.isNil:
                 let fut: Future[void] = `signalTaskIdent`(handler, ev)
                 `tvFutsIdent`.add((capturedCtx, fut))
                 asyncSpawn fut
-            else:
-              error "Failed to unmarshal signal payload", signalType = `typeNameLit`
-            releaseCellRef(`globalSlabIdent`.slab, cellIdx)
-            return 1
+              return 1
 
   )
 
@@ -375,32 +368,15 @@ proc generateMtSignalBroker*(
         ## `broOwnerChanged`. `requireOwner` only says the caller expects that
         ## outcome (BrokerScope release); otherwise a foreign call is logged.
         `initProcIdent`()
-        var ring: ptr VyukovMpscRing[uint32]
-        var handlerSig: ptr BrokerSignalShared
-        var foreignOwned = false
-        var found = false
-        `regIdent`.locked:
-          let i = `regIdent`.findIdx(brokerCtx, requireActive = true)
-          if i >= 0:
-            found = true
-            # Owner-only: the handler closure lives in its owner's
-            # threadvars, so only the owner can retire it consistently.
-            if not `regIdent`.buckets[i].head.isOwnedHere():
-              foreignOwned = true
-            else:
-              ring = `regIdent`.buckets[i].head.ring
-              handlerSig = `regIdent`.buckets[i].head.signal
-              `regIdent`.removeAt(i)
-
-        if foreignOwned:
+        var removed: `bucketName`
+        result = `regIdent`.removeOwned(brokerCtx, requireActive = true, removed)
+        if result == broOwnerChanged:
           if not requireOwner:
             error "dropSignalHandler ignored: called from a thread that does not own the handler",
               signalType = `typeNameLit`, brokerCtx = uint32(brokerCtx)
-          return broOwnerChanged
-
-        if not found:
-          return broAlreadyGone
-        result = broReleased
+          return
+        if result != broReleased:
+          return
 
         {.cast(gcsafe).}:
           for i in countdown(`tvCtxIdent`.len - 1, 0):
@@ -409,9 +385,8 @@ proc generateMtSignalBroker*(
               `tvHandlerIdent`.del(i)
               break
         discard `presentIdent`.fetchSub(1, moRelease)
-        if not ring.isNil:
-          ring.close()
-          fireBrokerSignal(handlerSig)
+        removed.head.ring.close()
+        fireBrokerSignal(removed.head.signal)
 
   )
 
