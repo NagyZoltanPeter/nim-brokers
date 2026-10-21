@@ -407,15 +407,10 @@ proc generateMtRequestBroker*(
   let requestMsgName = ident(typeDisplayName & "MtRequestMsg")
   let bucketName = ident(typeDisplayName & "MtBucket")
 
-  let globalBucketsIdent = ident("g" & typeDisplayName & "MtBuckets")
-  let globalBucketCountIdent = ident("g" & typeDisplayName & "MtBucketCount")
-  let globalBucketCapIdent = ident("g" & typeDisplayName & "MtBucketCap")
-  let globalLockIdent = ident("g" & typeDisplayName & "MtLock")
-  let globalInitIdent = ident("g" & typeDisplayName & "MtInit")
+  let regIdent = ident("g" & typeDisplayName & "MtRegistry")
   let timeoutVarIdent = ident("g" & typeDisplayName & "MtTimeout")
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtBroker")
-  let growProcIdent = ident("grow" & typeDisplayName & "MtBuckets")
   let sendReplyIdent = ident("sendReply" & typeDisplayName)
   let handleMsgIdent = ident("handleMsg" & typeDisplayName)
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName)
@@ -502,20 +497,15 @@ proc generateMtRequestBroker*(
     )
   )
 
-  # Bucket struct.
+  # Bucket struct: the shared head + the request-only slab and response pool.
   let responseSlotPoolType = quote:
     ptr ResponseSlotPool
-  let requestRingType = quote:
-    ptr VyukovMpscRing[uint32]
   let requestSlabType = quote:
     ptr PayloadSlab
 
   var bucketRecList = newTree(nnkRecList)
   bucketRecList.add(
-    newTree(nnkIdentDefs, ident("brokerCtx"), ident("BrokerContext"), newEmptyNode())
-  )
-  bucketRecList.add(
-    newTree(nnkIdentDefs, ident("ring"), requestRingType, newEmptyNode())
+    newTree(nnkIdentDefs, ident("head"), ident("MtBucketHead"), newEmptyNode())
   )
   bucketRecList.add(
     newTree(nnkIdentDefs, ident("slab"), requestSlabType, newEmptyNode())
@@ -524,28 +514,6 @@ proc generateMtRequestBroker*(
     newTree(
       nnkIdentDefs, ident("responseSlotPool"), responseSlotPoolType, newEmptyNode()
     )
-  )
-  bucketRecList.add(
-    newTree(
-      nnkIdentDefs,
-      ident("lease"),
-      newTree(nnkPtrTy, ident("BrokerRingLease")),
-      newEmptyNode(),
-    )
-  )
-  bucketRecList.add(
-    newTree(
-      nnkIdentDefs,
-      ident("providerSignal"),
-      newTree(nnkPtrTy, ident("BrokerSignalShared")),
-      newEmptyNode(),
-    )
-  )
-  bucketRecList.add(
-    newTree(nnkIdentDefs, ident("threadId"), ident("pointer"), newEmptyNode())
-  )
-  bucketRecList.add(
-    newTree(nnkIdentDefs, ident("threadGen"), ident("uint64"), newEmptyNode())
   )
   typeSection.add(
     newTree(
@@ -662,11 +630,7 @@ proc generateMtRequestBroker*(
   # ── Global state ────────────────────────────────────────────────────
   result.add(
     quote do:
-      var `globalBucketsIdent`: ptr UncheckedArray[`bucketName`]
-      var `globalBucketCountIdent`: int
-      var `globalBucketCapIdent`: int
-      var `globalLockIdent`: Lock
-      var `globalInitIdent`: Atomic[int]
+      var `regIdent`: MtRegistry[`bucketName`]
   )
 
   # ── Timeout knob (per broker type) ──────────────────────────────────
@@ -693,29 +657,7 @@ proc generateMtRequestBroker*(
   result.add(
     quote do:
       proc `initProcIdent`() =
-        if `globalInitIdent`.load(moRelaxed) == 2:
-          return
-        var expected = 0
-        if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initLock(`globalLockIdent`)
-          `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
-            `bucketName`, `globalBucketCapIdent`
-          ))
-          `globalBucketCountIdent` = 0
-          `globalInitIdent`.store(2, moRelease)
-        else:
-          while `globalInitIdent`.load(moAcquire) != 2:
-            discard
-
-      proc `growProcIdent`() =
-        let newCap = `globalBucketCapIdent` * 2
-        let newBuf =
-          cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
-        for i in 0 ..< `globalBucketCountIdent`:
-          newBuf[i] = `globalBucketsIdent`[i]
-        `globalBucketsIdent` = newBuf
-        `globalBucketCapIdent` = newCap
+        `regIdent`.ensureInit()
 
   )
 
@@ -1110,24 +1052,21 @@ proc generateMtRequestBroker*(
   result.add(
     quote do:
       proc `setupBucketIdent`(brokerCtx: BrokerContext): Result[void, string] =
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
         var ring: ptr VyukovMpscRing[uint32]
         var slab: ptr PayloadSlab
         var pool: ptr ResponseSlotPool
         var lease: ptr BrokerRingLease
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-              if `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                return ok() # already set on this thread
-              return err(
-                "RequestBroker(" & `typeNameLit` &
-                  "): provider already set from another thread"
-              )
-          if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-            `growProcIdent`()
+        `regIdent`.locked:
+          case `regIdent`.setupCheck(brokerCtx, mspOkIfOwned)
+          of msoExisting:
+            return ok() # already set on this thread
+          of msoRejected:
+            return err(
+              "RequestBroker(" & `typeNameLit` &
+                "): provider already set from another thread"
+            )
+          of msoCreate:
+            discard
           ring = newVyukovMpscRing[uint32](`queueDepthLit`)
           slab = queueCreate(PayloadSlab)
           initPayloadSlab(
@@ -1144,19 +1083,11 @@ proc generateMtRequestBroker*(
             nShards = `freeListShardsLit`,
           )
           lease = newBrokerRingLease(ring, slab, pool)
-          let providerSig = getOrInitBrokerSignal()
-          let idx = `globalBucketCountIdent`
-          `globalBucketsIdent`[idx] = `bucketName`(
-            brokerCtx: brokerCtx,
-            ring: ring,
-            slab: slab,
-            responseSlotPool: pool,
-            lease: lease,
-            providerSignal: providerSig,
-            threadId: myThreadId,
-            threadGen: myThreadGen,
+          `regIdent`.append(
+            `bucketName`(
+              head: initHead(brokerCtx, ring, lease), slab: slab, responseSlotPool: pool
+            )
           )
-          `globalBucketCountIdent` += 1
         registerBrokerPoller(`pollFnMakerIdent`(ring, slab, pool, lease, brokerCtx))
         registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
@@ -1174,17 +1105,9 @@ proc generateMtRequestBroker*(
             handler: `zeroArgProviderName`,
         ): Result[void, string] =
           `initProcIdent`()
-          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvNoArgCtxIdent`.len:
             if `tvNoArgCtxIdent`[i] == brokerCtx:
-              var isStale = true
-              withLock(`globalLockIdent`):
-                for j in 0 ..< `globalBucketCountIdent`:
-                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                      `globalBucketsIdent`[j].threadGen == myThreadGen:
-                    isStale = false
-                    break
+              let isStale = not `regIdent`.hasOwnedBucket(brokerCtx)
               if isStale:
                 `tvNoArgCtxIdent`.del(i)
                 `tvNoArgHandlerIdent`.del(i)
@@ -1220,17 +1143,9 @@ proc generateMtRequestBroker*(
             handler: `argProviderName`,
         ): Result[void, string] =
           `initProcIdent`()
-          let myThreadGen = currentMtThreadGen()
           for i in 0 ..< `tvWithArgCtxIdent`.len:
             if `tvWithArgCtxIdent`[i] == brokerCtx:
-              var isStale = true
-              withLock(`globalLockIdent`):
-                for j in 0 ..< `globalBucketCountIdent`:
-                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx and
-                      `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                      `globalBucketsIdent`[j].threadGen == myThreadGen:
-                    isStale = false
-                    break
+              let isStale = not `regIdent`.hasOwnedBucket(brokerCtx)
               if isStale:
                 `tvWithArgCtxIdent`.del(i)
                 `tvWithArgHandlerIdent`.del(i)
@@ -1296,13 +1211,11 @@ proc generateMtRequestBroker*(
         error: string ## empty on success
 
       proc `sendPrologueIdent`(
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-          providerSignal: ptr BrokerSignalShared,
+          bucket: `bucketName`,
           mySignal: ptr BrokerSignalShared,
           msg: sink `requestMsgName`,
       ): `prologueName` {.gcsafe, raises: [].} =
+        let pool = bucket.responseSlotPool
         # Reserve the response slot.
         let slotIdx = pool[].claim(mtShardHint())
         if slotIdx == EmptyIdx:
@@ -1323,7 +1236,10 @@ proc generateMtRequestBroker*(
         msgCopy.responseSlotIdx = slotIdx
         msgCopy.responseSlotGen = slotGen
         msgCopy.requesterSignal = mySignal
-        let status = sendCell(slab[], ring, providerSignal, msgCopy, `maxDynPayloadLit`)
+        let status = sendCell(
+          bucket.slab[], bucket.head.ring, bucket.head.signal, msgCopy,
+          `maxDynPayloadLit`,
+        )
         if status != mssOk:
           pool[].release(slotIdx, mtShardHint())
           let reason =
@@ -1459,17 +1375,16 @@ proc generateMtRequestBroker*(
         var won = false
         var providerSignal: ptr BrokerSignalShared = nil
         var requesterSignal: ptr BrokerSignalShared = nil
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-              let pool = `globalBucketsIdent`[i].responseSlotPool
-              if not pool.isNil:
-                won = pool[].abandonIfGen(slotIdx, slotGen)
-                if won:
-                  pool[].bumpCancelEpoch()
-                  requesterSignal = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
-              providerSignal = `globalBucketsIdent`[i].providerSignal
-              break
+        `regIdent`.locked:
+          let i = `regIdent`.findIdx(brokerCtx)
+          if i >= 0:
+            let pool = `regIdent`.buckets[i].responseSlotPool
+            if not pool.isNil:
+              won = pool[].abandonIfGen(slotIdx, slotGen)
+              if won:
+                pool[].bumpCancelEpoch()
+                requesterSignal = cast[ptr BrokerSignalShared](pool[].waker(slotIdx))
+            providerSignal = `regIdent`.buckets[i].head.signal
         if won:
           # Wake the provider so it drops the request (still queued) or cancels
           # the running provider future, and the requester so it resolves now
@@ -1494,12 +1409,7 @@ proc generateMtRequestBroker*(
         return err(message)
 
       proc `sendAndAwaitIdent`(
-          lease: ptr BrokerRingLease,
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-          providerSignal: ptr BrokerSignalShared,
-          msg: sink `requestMsgName`,
+          bucket: `bucketName`, msg: sink `requestMsgName`
       ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
         ## Consumes one `lease` reference. The reply poller never touches the
         ## pool once `awaitReply` has returned (it retires on `gaveUp`, or it
@@ -1507,7 +1417,9 @@ proc generateMtRequestBroker*(
         ## end here.
         ensureBrokerDispatchStarted()
         let mySignal = getOrInitBrokerSignal()
-        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
+        let lease = bucket.head.lease
+        let pool = bucket.responseSlotPool
+        let pro = `sendPrologueIdent`(bucket, mySignal, msg)
         if pro.error.len > 0:
           releaseLease(lease)
           return err(pro.error)
@@ -1516,13 +1428,7 @@ proc generateMtRequestBroker*(
         return res
 
       proc `sendCancellableIdent`(
-          brokerCtx: BrokerContext,
-          lease: ptr BrokerRingLease,
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-          providerSignal: ptr BrokerSignalShared,
-          msg: sink `requestMsgName`,
+          brokerCtx: BrokerContext, bucket: `bucketName`, msg: sink `requestMsgName`
       ): tuple[
         reqId: `requestIdName`,
         respFut: Future[Result[`payloadType`, string]].Raising([]),
@@ -1537,7 +1443,9 @@ proc generateMtRequestBroker*(
         ## `raises: []` waiter that has no handler for it.
         ensureBrokerDispatchStarted()
         let mySignal = getOrInitBrokerSignal()
-        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, mySignal, msg)
+        let lease = bucket.head.lease
+        let pool = bucket.responseSlotPool
+        let pro = `sendPrologueIdent`(bucket, mySignal, msg)
         if pro.error.len > 0:
           releaseLease(lease)
           return (`requestIdName`(0'u64), `immediateErrIdent`(pro.error))
@@ -1646,15 +1554,12 @@ proc generateMtRequestBroker*(
         )
 
       proc `blockingSendAndAwaitIdent`(
-          lease: ptr BrokerRingLease,
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-          providerSignal: ptr BrokerSignalShared,
-          msg: sink `requestMsgName`,
+          bucket: `bucketName`, msg: sink `requestMsgName`
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         # No async loop on this thread, so no waker: the wait below polls.
-        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
+        let lease = bucket.head.lease
+        let pool = bucket.responseSlotPool
+        let pro = `sendPrologueIdent`(bucket, nil, msg)
         if pro.error.len > 0:
           releaseLease(lease)
           return err(pro.error)
@@ -1662,19 +1567,15 @@ proc generateMtRequestBroker*(
         releaseLease(lease)
 
       proc `blockingSendCancellableIdent`(
-          lease: ptr BrokerRingLease,
-          ring: ptr VyukovMpscRing[uint32],
-          slab: ptr PayloadSlab,
-          pool: ptr ResponseSlotPool,
-          providerSignal: ptr BrokerSignalShared,
-          msg: sink `requestMsgName`,
-          idOut: ptr `requestIdName`,
+          bucket: `bucketName`, msg: sink `requestMsgName`, idOut: ptr `requestIdName`
       ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
         ## The id is published before the wait begins — a blocking caller
         ## cannot hand it out afterwards, so `idOut` must point at storage the
         ## canceller can read. The caller's own frame is alive for the whole
         ## call, which is what makes that pointer safe.
-        let pro = `sendPrologueIdent`(ring, slab, pool, providerSignal, nil, msg)
+        let lease = bucket.head.lease
+        let pool = bucket.responseSlotPool
+        let pro = `sendPrologueIdent`(bucket, nil, msg)
         # Release-store: the canceller reads `idOut` from another thread, so a
         # plain store would be a data race (read it with an acquire load).
         if pro.error.len > 0:
@@ -1701,30 +1602,10 @@ proc generateMtRequestBroker*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
         ): Future[Result[`payloadType`, string]] {.async: (raises: []).} =
           `initProcIdent`()
-          var ring: ptr VyukovMpscRing[uint32]
-          var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool
-          var providerSignal: ptr BrokerSignalShared
-          var lease: ptr BrokerRingLease
-          var sameThread = false
-          let myThreadGen = currentMtThreadGen()
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  sameThread = true
-                else:
-                  ring = `globalBucketsIdent`[i].ring
-                  slab = `globalBucketsIdent`[i].slab
-                  pool = `globalBucketsIdent`[i].responseSlotPool
-                  providerSignal = `globalBucketsIdent`[i].providerSignal
-                  # Held until the reply wait ends: the owner may tear the
-                  # bucket down meanwhile (BrokerRingLease).
-                  lease = `globalBucketsIdent`[i].lease
-                  acquireLease(lease)
-                break
-          if sameThread:
+          # Holds a lease reference unless same-thread / not found; the send
+          # helper drops it once the reply wait ends (BrokerRingLease).
+          let target = `regIdent`.snapshot(brokerCtx)
+          if target.sameThread:
             var provider: `zeroArgProviderName`
             for i in 0 ..< `tvNoArgCtxIdent`.len:
               if `tvNoArgCtxIdent`[i] == brokerCtx:
@@ -1742,13 +1623,13 @@ proc generateMtRequestBroker*(
                   catchedRes.error.msg
               )
             return catchedRes.get()
-          if ring.isNil:
+          if not target.found:
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): no zero-arg provider registered for broker context " & $brokerCtx
             )
           var msg = `requestMsgName`(requestKind: 0)
-          return await `sendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
+          return await `sendAndAwaitIdent`(target.bucket, msg)
 
         proc request*(
             _: typedesc[`typeIdent`]
@@ -1775,30 +1656,10 @@ proc generateMtRequestBroker*(
             _: typedesc[`typeIdent`], brokerCtx: BrokerContext
         ): Result[`payloadType`, string] {.gcsafe, raises: [].} =
           `initProcIdent`()
-          var ring: ptr VyukovMpscRing[uint32]
-          var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool
-          var providerSignal: ptr BrokerSignalShared
-          var lease: ptr BrokerRingLease
-          var sameThread = false
-          let myThreadGen = currentMtThreadGen()
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  sameThread = true
-                else:
-                  ring = `globalBucketsIdent`[i].ring
-                  slab = `globalBucketsIdent`[i].slab
-                  pool = `globalBucketsIdent`[i].responseSlotPool
-                  providerSignal = `globalBucketsIdent`[i].providerSignal
-                  # Held until the reply wait ends: the owner may tear the
-                  # bucket down meanwhile (BrokerRingLease).
-                  lease = `globalBucketsIdent`[i].lease
-                  acquireLease(lease)
-                break
-          if sameThread:
+          # Holds a lease reference unless same-thread / not found; the send
+          # helper drops it once the reply wait ends (BrokerRingLease).
+          let target = `regIdent`.snapshot(brokerCtx)
+          if target.sameThread:
             var provider: `zeroArgProviderName`
             for i in 0 ..< `tvNoArgCtxIdent`.len:
               if `tvNoArgCtxIdent`[i] == brokerCtx:
@@ -1816,13 +1677,13 @@ proc generateMtRequestBroker*(
                   catchedRes.error.msg
               )
             return catchedRes.get()
-          if ring.isNil:
+          if not target.found:
             return err(
               "RequestBroker(" & `typeNameLit` &
                 "): no zero-arg provider registered for broker context " & $brokerCtx
             )
           var msg = `requestMsgName`(requestKind: 0)
-          `blockingSendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
+          `blockingSendAndAwaitIdent`(target.bucket, msg)
 
         proc blockingRequest*(
             _: typedesc[`typeIdent`]
@@ -1875,30 +1736,10 @@ proc generateMtRequestBroker*(
 
     let keyedBody = quote:
       `initProcIdent`()
-      var ring: ptr VyukovMpscRing[uint32]
-      var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool
-      var providerSignal: ptr BrokerSignalShared
-      var lease: ptr BrokerRingLease
-      var sameThread = false
-      let myThreadGen = currentMtThreadGen()
-      withLock(`globalLockIdent`):
-        for i in 0 ..< `globalBucketCountIdent`:
-          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                `globalBucketsIdent`[i].threadGen == myThreadGen:
-              sameThread = true
-            else:
-              ring = `globalBucketsIdent`[i].ring
-              slab = `globalBucketsIdent`[i].slab
-              pool = `globalBucketsIdent`[i].responseSlotPool
-              providerSignal = `globalBucketsIdent`[i].providerSignal
-              # Held until the reply wait ends: the owner may tear the
-              # bucket down meanwhile (BrokerRingLease).
-              lease = `globalBucketsIdent`[i].lease
-              acquireLease(lease)
-            break
-      if sameThread:
+      # Holds a lease reference unless same-thread / not found; the send
+      # helper drops it once the reply wait ends (BrokerRingLease).
+      let target = `regIdent`.snapshot(brokerCtx)
+      if target.sameThread:
         var `providerSym`: `argProviderName`
         for i in 0 ..< `tvWithArgCtxIdent`.len:
           if `tvWithArgCtxIdent`[i] == brokerCtx:
@@ -1917,13 +1758,13 @@ proc generateMtRequestBroker*(
               catchedRes.error.msg
           )
         return catchedRes.get()
-      if ring.isNil:
+      if not target.found:
         return err(
           "RequestBroker(" & `typeNameLit` &
             "): no provider registered for broker context " & $brokerCtx
         )
       var msg = `msgCtor`
-      return await `sendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
+      return await `sendAndAwaitIdent`(target.bucket, msg)
 
     result.add(
       newTree(
@@ -2002,30 +1843,10 @@ proc generateMtRequestBroker*(
 
     let brKeyedBody = quote:
       `initProcIdent`()
-      var ring: ptr VyukovMpscRing[uint32]
-      var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool
-      var providerSignal: ptr BrokerSignalShared
-      var lease: ptr BrokerRingLease
-      var sameThread = false
-      let myThreadGen = currentMtThreadGen()
-      withLock(`globalLockIdent`):
-        for i in 0 ..< `globalBucketCountIdent`:
-          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                `globalBucketsIdent`[i].threadGen == myThreadGen:
-              sameThread = true
-            else:
-              ring = `globalBucketsIdent`[i].ring
-              slab = `globalBucketsIdent`[i].slab
-              pool = `globalBucketsIdent`[i].responseSlotPool
-              providerSignal = `globalBucketsIdent`[i].providerSignal
-              # Held until the reply wait ends: the owner may tear the
-              # bucket down meanwhile (BrokerRingLease).
-              lease = `globalBucketsIdent`[i].lease
-              acquireLease(lease)
-            break
-      if sameThread:
+      # Holds a lease reference unless same-thread / not found; the send
+      # helper drops it once the reply wait ends (BrokerRingLease).
+      let target = `regIdent`.snapshot(brokerCtx)
+      if target.sameThread:
         var `brProviderSym`: `argProviderName`
         for i in 0 ..< `tvWithArgCtxIdent`.len:
           if `tvWithArgCtxIdent`[i] == brokerCtx:
@@ -2044,13 +1865,13 @@ proc generateMtRequestBroker*(
               catchedRes.error.msg
           )
         return catchedRes.get()
-      if ring.isNil:
+      if not target.found:
         return err(
           "RequestBroker(" & `typeNameLit` &
             "): no provider registered for broker context " & $brokerCtx
         )
       var msg = `brMsgCtor`
-      `blockingSendAndAwaitIdent`(lease, ring, slab, pool, providerSignal, msg)
+      `blockingSendAndAwaitIdent`(target.bucket, msg)
 
     result.add(
       newTree(
@@ -2133,28 +1954,21 @@ proc generateMtRequestBroker*(
     var providerSignal: ptr BrokerSignalShared
     var found = false
     var foreignOwned = false
-    let myThreadId = currentMtThreadId()
-    let myThreadGen = currentMtThreadGen()
-    withLock(`globalLockIdent`):
+    `regIdent`.locked:
       var foundIdx = -1
-      for i in 0 ..< `globalBucketCountIdent`:
-        if `globalBucketsIdent`[i].brokerCtx == `brokerCtxParam`:
-          found = true
-          # The provider closure lives in its owner's threadvars, so only the
-          # owner can retire it consistently.
-          if `globalBucketsIdent`[i].threadId != myThreadId or
-              `globalBucketsIdent`[i].threadGen != myThreadGen:
-            foreignOwned = true
-            break
-          ring = `globalBucketsIdent`[i].ring
-          pool = `globalBucketsIdent`[i].responseSlotPool
-          providerSignal = `globalBucketsIdent`[i].providerSignal
+      let i = `regIdent`.findIdx(`brokerCtxParam`)
+      if i >= 0:
+        found = true
+        # The provider closure lives in its owner's threadvars, so only the
+        # owner can retire it consistently.
+        if not `regIdent`.buckets[i].head.isOwnedHere():
+          foreignOwned = true
+        else:
+          ring = `regIdent`.buckets[i].head.ring
+          pool = `regIdent`.buckets[i].responseSlotPool
+          providerSignal = `regIdent`.buckets[i].head.signal
           foundIdx = i
-          break
-      if foundIdx >= 0:
-        for i in foundIdx ..< `globalBucketCountIdent` - 1:
-          `globalBucketsIdent`[i] = `globalBucketsIdent`[i + 1]
-        `globalBucketCountIdent` -= 1
+          `regIdent`.removeAt(i)
       # Fail outstanding requests fast, under the same lock that publishes the
       # bucket's disappearance. Leaving them to time out means every waiting
       # requester keeps polling this pool for up to its full timeout — and the
@@ -2217,15 +2031,8 @@ proc generateMtRequestBroker*(
   result.add(
     quote do:
       proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].} =
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
-        var owned: seq[BrokerContext]
+        let owned = `regIdent`.ownedCtxs()
         {.cast(gcsafe).}:
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                owned.add(`globalBucketsIdent`[i].brokerCtx)
           for ownedCtx in owned:
             clearProvider(`typeIdent`, ownedCtx)
         owned.len
@@ -2236,11 +2043,7 @@ proc generateMtRequestBroker*(
   let isProvidedCtxParam = ident("brokerCtx")
   let isProvidedBody = quote:
     `initProcIdent`()
-    withLock(`globalLockIdent`):
-      for i in 0 ..< `globalBucketCountIdent`:
-        if `globalBucketsIdent`[i].brokerCtx == `isProvidedCtxParam`:
-          return true
-    return false
+    `regIdent`.hasBucket(`isProvidedCtxParam`)
 
   var formalParamsIsProvided = newTree(nnkFormalParams)
   formalParamsIsProvided.add(ident("bool"))
@@ -2466,17 +2269,14 @@ proc generateMtRequestBroker*(
             var outcome: BrokerReleaseOutcome
             if `otherSlotSet`:
               outcome = broAlreadyGone
-              let myThreadGen = currentMtThreadGen()
-              withLock(`globalLockIdent`):
-                for j in 0 ..< `globalBucketCountIdent`:
-                  if `globalBucketsIdent`[j].brokerCtx == brokerCtx:
-                    outcome =
-                      if `globalBucketsIdent`[j].threadId == currentMtThreadId() and
-                          `globalBucketsIdent`[j].threadGen == myThreadGen:
-                        broReleased
-                      else:
-                        broOwnerChanged
-                    break
+              `regIdent`.locked:
+                let i = `regIdent`.findIdx(brokerCtx)
+                if i >= 0:
+                  outcome =
+                    if `regIdent`.buckets[i].head.isOwnedHere():
+                      broReleased
+                    else:
+                      broOwnerChanged
             else:
               outcome = `clearImplIdent`(brokerCtx, requireOwner = true)
               if outcome == broReleased:
@@ -2634,34 +2434,14 @@ proc generateMtRequestBroker*(
           ## to `cancel`. The id is produced before this proc returns, so it
           ## is always usable by the time the caller holds it.
           `initProcIdent`()
-          var ring: ptr VyukovMpscRing[uint32]
-          var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool
-          var providerSignal: ptr BrokerSignalShared
-          var lease: ptr BrokerRingLease
-          var sameThread = false
-          let myThreadGen = currentMtThreadGen()
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  sameThread = true
-                else:
-                  ring = `globalBucketsIdent`[i].ring
-                  slab = `globalBucketsIdent`[i].slab
-                  pool = `globalBucketsIdent`[i].responseSlotPool
-                  providerSignal = `globalBucketsIdent`[i].providerSignal
-                  # Held until the reply wait ends: the owner may tear the
-                  # bucket down meanwhile (BrokerRingLease).
-                  lease = `globalBucketsIdent`[i].lease
-                  acquireLease(lease)
-                break
-          if sameThread:
+          # Holds a lease reference unless same-thread / not found; the send
+          # helper drops it once the reply wait ends (BrokerRingLease).
+          let target = `regIdent`.snapshot(brokerCtx)
+          if target.sameThread:
             # Same-thread requests call the provider directly: no queue, no
             # response slot, nothing to cancel.
             return (`requestIdName`(0'u64), request(`typeIdent`, brokerCtx))
-          if ring.isNil:
+          if not target.found:
             return (
               `requestIdName`(0'u64),
               `immediateErrIdent`(
@@ -2670,9 +2450,7 @@ proc generateMtRequestBroker*(
               ),
             )
           var msg = `requestMsgName`(requestKind: 0)
-          `sendCancellableIdent`(
-            brokerCtx, lease, ring, slab, pool, providerSignal, msg
-          )
+          `sendCancellableIdent`(brokerCtx, target.bucket, msg)
 
         proc requestCancellable*(_: typedesc[`typeIdent`]): `cancelReturnType` =
           requestCancellable(`typeIdent`, DefaultBrokerContext)
@@ -2688,35 +2466,13 @@ proc generateMtRequestBroker*(
           `initProcIdent`()
           if not idOut.isNil:
             atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
-          var ring: ptr VyukovMpscRing[uint32]
-          var slab: ptr PayloadSlab
-          var pool: ptr ResponseSlotPool
-          var providerSignal: ptr BrokerSignalShared
-          var lease: ptr BrokerRingLease
-          var sameThread = false
-          let myThreadGen = currentMtThreadGen()
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-                if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                    `globalBucketsIdent`[i].threadGen == myThreadGen:
-                  sameThread = true
-                else:
-                  ring = `globalBucketsIdent`[i].ring
-                  slab = `globalBucketsIdent`[i].slab
-                  pool = `globalBucketsIdent`[i].responseSlotPool
-                  providerSignal = `globalBucketsIdent`[i].providerSignal
-                  # Held until the reply wait ends: the owner may tear the
-                  # bucket down meanwhile (BrokerRingLease).
-                  lease = `globalBucketsIdent`[i].lease
-                  acquireLease(lease)
-                break
-          if sameThread or ring.isNil:
+          # Holds a lease reference unless same-thread / not found; the send
+          # helper drops it once the reply wait ends (BrokerRingLease).
+          let target = `regIdent`.snapshot(brokerCtx)
+          if target.sameThread or not target.found:
             return blockingRequest(`typeIdent`, brokerCtx)
           var msg = `requestMsgName`(requestKind: 0)
-          `blockingSendCancellableIdent`(
-            lease, ring, slab, pool, providerSignal, msg, idOut
-          )
+          `blockingSendCancellableIdent`(target.bucket, msg, idOut)
 
         proc blockingRequestCancellable*(
             _: typedesc[`typeIdent`], idOut: ptr `requestIdName`
@@ -2744,32 +2500,12 @@ proc generateMtRequestBroker*(
 
     let ccBody = quote:
       `initProcIdent`()
-      var ring: ptr VyukovMpscRing[uint32]
-      var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool
-      var providerSignal: ptr BrokerSignalShared
-      var lease: ptr BrokerRingLease
-      var sameThread = false
-      let myThreadGen = currentMtThreadGen()
-      withLock(`globalLockIdent`):
-        for i in 0 ..< `globalBucketCountIdent`:
-          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                `globalBucketsIdent`[i].threadGen == myThreadGen:
-              sameThread = true
-            else:
-              ring = `globalBucketsIdent`[i].ring
-              slab = `globalBucketsIdent`[i].slab
-              pool = `globalBucketsIdent`[i].responseSlotPool
-              providerSignal = `globalBucketsIdent`[i].providerSignal
-              # Held until the reply wait ends: the owner may tear the
-              # bucket down meanwhile (BrokerRingLease).
-              lease = `globalBucketsIdent`[i].lease
-              acquireLease(lease)
-            break
-      if sameThread:
+      # Holds a lease reference unless same-thread / not found; the send
+      # helper drops it once the reply wait ends (BrokerRingLease).
+      let target = `regIdent`.snapshot(brokerCtx)
+      if target.sameThread:
         return (`requestIdName`(0'u64), `ccForwardCall`)
-      if ring.isNil:
+      if not target.found:
         return (
           `requestIdName`(0'u64),
           `immediateErrIdent`(
@@ -2778,8 +2514,7 @@ proc generateMtRequestBroker*(
           ),
         )
       var msg = `ccMsgCtor`
-      return
-        `sendCancellableIdent`(brokerCtx, lease, ring, slab, pool, providerSignal, msg)
+      return `sendCancellableIdent`(brokerCtx, target.bucket, msg)
 
     var ccFormalParams = newTree(nnkFormalParams)
     ccFormalParams.add(copyNimTree(cancelReturnType))
@@ -2844,35 +2579,13 @@ proc generateMtRequestBroker*(
       `initProcIdent`()
       if not idOut.isNil:
         atomicStoreN(cast[ptr uint64](idOut), 0'u64, ATOMIC_RELEASE)
-      var ring: ptr VyukovMpscRing[uint32]
-      var slab: ptr PayloadSlab
-      var pool: ptr ResponseSlotPool
-      var providerSignal: ptr BrokerSignalShared
-      var lease: ptr BrokerRingLease
-      var sameThread = false
-      let myThreadGen = currentMtThreadGen()
-      withLock(`globalLockIdent`):
-        for i in 0 ..< `globalBucketCountIdent`:
-          if `globalBucketsIdent`[i].brokerCtx == brokerCtx:
-            if `globalBucketsIdent`[i].threadId == currentMtThreadId() and
-                `globalBucketsIdent`[i].threadGen == myThreadGen:
-              sameThread = true
-            else:
-              ring = `globalBucketsIdent`[i].ring
-              slab = `globalBucketsIdent`[i].slab
-              pool = `globalBucketsIdent`[i].responseSlotPool
-              providerSignal = `globalBucketsIdent`[i].providerSignal
-              # Held until the reply wait ends: the owner may tear the
-              # bucket down meanwhile (BrokerRingLease).
-              lease = `globalBucketsIdent`[i].lease
-              acquireLease(lease)
-            break
-      if sameThread or ring.isNil:
+      # Holds a lease reference unless same-thread / not found; the send
+      # helper drops it once the reply wait ends (BrokerRingLease).
+      let target = `regIdent`.snapshot(brokerCtx)
+      if target.sameThread or not target.found:
         return `bcForwardCall`
       var msg = `ccMsgCtor`
-      return `blockingSendCancellableIdent`(
-        lease, ring, slab, pool, providerSignal, msg, idOut
-      )
+      return `blockingSendCancellableIdent`(target.bucket, msg, idOut)
 
     let bcPragmas = quote:
       {.gcsafe, raises: [].}

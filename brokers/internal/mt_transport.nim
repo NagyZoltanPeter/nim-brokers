@@ -19,7 +19,8 @@
 
 {.push raises: [].}
 
-import std/atomics
+import std/[atomics, locks]
+import ../broker_context
 import ./mt_queue, ./mt_broker_common
 
 export mt_queue
@@ -145,3 +146,198 @@ proc sendCell*[T](
     return mssQueueFull
   fireBrokerSignal(signal)
   mssOk
+
+# ---------------------------------------------------------------------------
+# Bucket registry
+# ---------------------------------------------------------------------------
+# One registry per broker type: a lock-protected, grow-only array of buckets
+# in shared memory. A bucket is one (brokerCtx, owning thread) transport
+# endpoint. Each lane's generated bucket type embeds an `MtBucketHead` as its
+# `head` field (a plain field, not `object of`: no RTTI in shared memory) and
+# adds what only it needs (request: slab + response pool).
+#
+# Lookups that hand transport pointers to another thread take the bucket's
+# `BrokerRingLease` reference in the same critical section that found the
+# bucket (`snapshot`); the caller drops it with an explicit `release` once its
+# last access is done. There is deliberately no `=destroy` guard: an implicit
+# destructor on a lease copied into an async environment (refc) is exactly
+# the kind of hidden lifetime the lease exists to make visible.
+
+type
+  MtBucketHead* = object
+    ctx*: BrokerContext
+    threadId*: pointer ## `currentMtThreadId()` of the owning thread
+    threadGen*: uint64 ## disambiguates reused threadvar addresses
+    ring*: ptr VyukovMpscRing[uint32]
+    lease*: ptr BrokerRingLease ## owner + in-flight sender refs (frees the ring)
+    signal*: ptr BrokerSignalShared ## the owning thread's dispatch signal
+    active*: bool ## request: always true; event / signal: bucket is live
+    hasListeners*: bool ## event only: the owning thread has >= 1 listener
+
+  MtRegistry*[B] = object
+    lock*: Lock
+    buckets*: ptr UncheckedArray[B]
+    count*: int
+    cap: int
+    state: Atomic[int] ## 0 = uninitialised, 1 = initialising, 2 = ready
+
+  MtTarget*[B] = object
+    ## Result of a locked lookup. `bucket` is a copy, valid (with its lease
+    ## reference held) only when `found and not sameThread`.
+    found*: bool
+    sameThread*: bool
+    bucket*: B
+
+  MtSetupPolicy* = enum
+    ## What `setupCheck` does when a bucket for the ctx already exists.
+    mspOkIfOwned ## request: ok when this thread owns it, else rejected
+    mspRejectActive ## signal: any active bucket is a duplicate
+    mspReuseOwned ## event: this thread's bucket is re-activated and reused
+
+  MtSetupOutcome* = enum
+    msoCreate ## no bucket: the caller builds one and `append`s it
+    msoExisting ## reusable bucket owned by this thread
+    msoRejected ## owned elsewhere / duplicate
+
+proc isOwnedHere*(h: MtBucketHead): bool {.inline, gcsafe.} =
+  h.threadId == currentMtThreadId() and h.threadGen == currentMtThreadGen()
+
+proc initHead*(
+    ctx: BrokerContext, ring: ptr VyukovMpscRing[uint32], lease: ptr BrokerRingLease
+): MtBucketHead {.gcsafe.} =
+  ## Head for a bucket owned by the calling thread.
+  MtBucketHead(
+    ctx: ctx,
+    threadId: currentMtThreadId(),
+    threadGen: currentMtThreadGen(),
+    ring: ring,
+    lease: lease,
+    signal: getOrInitBrokerSignal(),
+    active: true,
+  )
+
+proc ensureInit*[B](reg: var MtRegistry[B]) {.gcsafe.} =
+  ## CAS(0→1) wins and initialises; losers spin until 2.
+  if reg.state.load(moRelaxed) == 2:
+    return
+  var expected = 0
+  if reg.state.compareExchange(expected, 1, moAcquire, moRelaxed):
+    initLock(reg.lock)
+    reg.cap = 4
+    reg.buckets = cast[ptr UncheckedArray[B]](createShared(B, reg.cap))
+    reg.count = 0
+    reg.state.store(2, moRelease)
+  else:
+    while reg.state.load(moAcquire) != 2:
+      discard
+
+template locked*[B](reg: var MtRegistry[B], body: untyped) =
+  {.cast(gcsafe).}:
+    withLock(reg.lock):
+      body
+
+# The procs below must be called with `reg.lock` held.
+
+proc append*[B](reg: var MtRegistry[B], bucket: B) {.gcsafe.} =
+  if reg.count >= reg.cap:
+    let newCap = reg.cap * 2
+    let newBuf = cast[ptr UncheckedArray[B]](createShared(B, newCap))
+    for i in 0 ..< reg.count:
+      newBuf[i] = reg.buckets[i]
+    # The old buffer is leaked on purpose: a reader that loaded the pointer
+    # before this swap may still be iterating it.
+    reg.buckets = newBuf
+    reg.cap = newCap
+  reg.buckets[reg.count] = bucket
+  inc reg.count
+
+proc removeAt*[B](reg: var MtRegistry[B], idx: int) {.gcsafe.} =
+  for j in idx ..< reg.count - 1:
+    reg.buckets[j] = reg.buckets[j + 1]
+  dec reg.count
+
+proc findIdx*[B](
+    reg: MtRegistry[B], ctx: BrokerContext, requireActive = false
+): int {.gcsafe.} =
+  ## First bucket for `ctx` (any owner), or -1.
+  for i in 0 ..< reg.count:
+    if reg.buckets[i].head.ctx == ctx and
+        (not requireActive or reg.buckets[i].head.active):
+      return i
+  -1
+
+proc findOwnedIdx*[B](reg: MtRegistry[B], ctx: BrokerContext): int {.gcsafe.} =
+  ## This thread's bucket for `ctx`, or -1.
+  for i in 0 ..< reg.count:
+    if reg.buckets[i].head.ctx == ctx and reg.buckets[i].head.isOwnedHere():
+      return i
+  -1
+
+proc setupCheck*[B](
+    reg: var MtRegistry[B], ctx: BrokerContext, policy: MtSetupPolicy
+): MtSetupOutcome {.gcsafe.} =
+  ## Decide, under the lock, whether a new bucket must be created for `ctx` on
+  ## this thread. The three lanes differ on purpose (see `MtSetupPolicy`).
+  case policy
+  of mspOkIfOwned:
+    let i = reg.findIdx(ctx)
+    if i < 0:
+      msoCreate
+    elif reg.buckets[i].head.isOwnedHere():
+      msoExisting
+    else:
+      msoRejected
+  of mspRejectActive:
+    if reg.findIdx(ctx, requireActive = true) >= 0: msoRejected else: msoCreate
+  of mspReuseOwned:
+    let i = reg.findOwnedIdx(ctx)
+    if i < 0:
+      msoCreate
+    else:
+      reg.buckets[i].head.hasListeners = true
+      reg.buckets[i].head.active = true
+      msoExisting
+
+# Self-locking lookups.
+
+proc hasBucket*[B](
+    reg: var MtRegistry[B], ctx: BrokerContext, requireActive = false
+): bool {.gcsafe.} =
+  reg.locked:
+    result = reg.findIdx(ctx, requireActive) >= 0
+
+proc hasOwnedBucket*[B](reg: var MtRegistry[B], ctx: BrokerContext): bool {.gcsafe.} =
+  reg.locked:
+    result = reg.findOwnedIdx(ctx) >= 0
+
+proc snapshot*[B](
+    reg: var MtRegistry[B], ctx: BrokerContext, requireActive = false
+): MtTarget[B] {.gcsafe.} =
+  ## Find the bucket for `ctx`. A bucket owned by another thread is copied
+  ## out with a lease reference taken under the lock; the caller must
+  ## `release` it (or hand it on) after its last access to the transport.
+  reg.locked:
+    let i = reg.findIdx(ctx, requireActive)
+    if i >= 0:
+      result.found = true
+      if reg.buckets[i].head.isOwnedHere():
+        result.sameThread = true
+      else:
+        result.bucket = reg.buckets[i]
+        acquireLease(result.bucket.head.lease)
+
+proc release*[B](t: var MtTarget[B]) {.gcsafe.} =
+  ## Drop the lease reference `snapshot` took (no-op otherwise; idempotent).
+  if t.found and not t.sameThread:
+    releaseLease(t.bucket.head.lease)
+    t.found = false
+
+proc ownedCtxs*[B](
+    reg: var MtRegistry[B], requireActive = false
+): seq[BrokerContext] {.gcsafe.} =
+  ## Contexts of every bucket this thread owns (thread-exit cleanup).
+  reg.locked:
+    for i in 0 ..< reg.count:
+      if reg.buckets[i].head.isOwnedHere() and
+          (not requireActive or reg.buckets[i].head.active):
+        result.add(reg.buckets[i].head.ctx)

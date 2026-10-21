@@ -103,16 +103,11 @@ proc generateMtSignalBroker*(
   let exportedHandlerProcIdent = postfix(copyNimTree(handlerProcIdent), "*")
   let bucketName = ident(typeDisplayName & "MtSignalBucket")
 
-  let globalBucketsIdent = ident("g" & typeDisplayName & "MtSigBuckets")
-  let globalBucketCountIdent = ident("g" & typeDisplayName & "MtSigBucketCount")
-  let globalBucketCapIdent = ident("g" & typeDisplayName & "MtSigBucketCap")
-  let globalLockIdent = ident("g" & typeDisplayName & "MtSigLock")
-  let globalInitIdent = ident("g" & typeDisplayName & "MtSigInit")
+  let regIdent = ident("g" & typeDisplayName & "MtSigRegistry")
   let globalSlabIdent = ident("g" & typeDisplayName & "MtSigSlab")
   let presentIdent = ident("g" & typeDisplayName & "MtSigPresent")
 
   let initProcIdent = ident("ensureInit" & typeDisplayName & "MtSigBroker")
-  let growProcIdent = ident("grow" & typeDisplayName & "MtSigBuckets")
   let signalTaskIdent = ident("notify" & typeDisplayName & "Signal")
   let pollFnMakerIdent = ident("makePollFn" & typeDisplayName & "Sig")
 
@@ -148,13 +143,7 @@ proc generateMtSignalBroker*(
       `exportedTypeIdent` = `objectDef`
       `exportedHandlerProcIdent` = `handlerProcTy`
       `bucketName` = object
-        brokerCtx: BrokerContext
-        ring: ptr VyukovMpscRing[uint32]
-        lease: ptr BrokerRingLease ## owner + in-flight signal() refs (frees the ring)
-        handlerSignal: ptr BrokerSignalShared
-        threadId: pointer
-        threadGen: uint64 ## disambiguates reused threadvar addresses
-        active: bool
+        head: MtBucketHead ## lease = owner + in-flight signal() refs
 
   # Attach the captured `##` doc text to the re-emitted signal type (#50).
   attachFirstTypeDefDoc(brokerTypes, parsed.docText)
@@ -167,12 +156,7 @@ proc generateMtSignalBroker*(
   # ── Global shared state ───────────────────────────────────────────────
   result.add(
     quote do:
-      var `globalBucketsIdent`: ptr UncheckedArray[`bucketName`]
-      var `globalBucketCountIdent`: int
-      var `globalBucketCapIdent`: int
-      var `globalLockIdent`: Lock
-      var `globalInitIdent`: Atomic[int]
-        ## 0 = uninitialised, 1 = initialising, 2 = ready.
+      var `regIdent`: MtRegistry[`bucketName`]
       var `globalSlabIdent`: MtLazySlab
       var `presentIdent`: Atomic[int]
         ## handler-present counter (# of installed handlers across all ctxs).
@@ -183,37 +167,10 @@ proc generateMtSignalBroker*(
   result.add(
     quote do:
       proc `initProcIdent`() =
-        if `globalInitIdent`.load(moRelaxed) == 2:
-          `globalSlabIdent`.ensureInit(
-            uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
-          )
-          return
-        var expected = 0
-        if `globalInitIdent`.compareExchange(expected, 1, moAcquire, moRelaxed):
-          initLock(`globalLockIdent`)
-          `globalBucketCapIdent` = 4
-          `globalBucketsIdent` = cast[ptr UncheckedArray[`bucketName`]](createShared(
-            `bucketName`, `globalBucketCapIdent`
-          ))
-          `globalBucketCountIdent` = 0
-          `globalInitIdent`.store(2, moRelease)
-        else:
-          while `globalInitIdent`.load(moAcquire) != 2:
-            discard
+        `regIdent`.ensureInit()
         `globalSlabIdent`.ensureInit(
           uint32(`slabCapacityLit`), uint32(`payloadBytesLit`), `freeListShardsLit`
         )
-
-      proc `growProcIdent`() =
-        ## Must be called under lock.
-        let newCap = `globalBucketCapIdent` * 2
-        let newBuf =
-          cast[ptr UncheckedArray[`bucketName`]](createShared(`bucketName`, newCap))
-        for i in 0 ..< `globalBucketCountIdent`:
-          newBuf[i] = `globalBucketsIdent`[i]
-        # Intentional leak of the old buffer (see mt_event_broker.nim).
-        `globalBucketsIdent` = newBuf
-        `globalBucketCapIdent` = newCap
 
   )
 
@@ -314,31 +271,14 @@ proc generateMtSignalBroker*(
       proc `setupBucketIdent`(
           brokerCtx: BrokerContext
       ): Result[ptr VyukovMpscRing[uint32], string] =
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
         var ring: ptr VyukovMpscRing[uint32]
         var lease: ptr BrokerRingLease
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].active:
-              return err("SignalBroker(" & `typeNameLit` & "): handler already set")
-          if `globalBucketCountIdent` >= `globalBucketCapIdent`:
-            `growProcIdent`()
+        `regIdent`.locked:
+          if `regIdent`.setupCheck(brokerCtx, mspRejectActive) == msoRejected:
+            return err("SignalBroker(" & `typeNameLit` & "): handler already set")
           ring = newVyukovMpscRing[uint32](`queueDepthLit`)
           lease = newBrokerRingLease(ring)
-          let handlerSig = getOrInitBrokerSignal()
-          let idx = `globalBucketCountIdent`
-          `globalBucketsIdent`[idx] = `bucketName`(
-            brokerCtx: brokerCtx,
-            ring: ring,
-            lease: lease,
-            handlerSignal: handlerSig,
-            threadId: myThreadId,
-            threadGen: myThreadGen,
-            active: true,
-          )
-          `globalBucketCountIdent` += 1
+          `regIdent`.append(`bucketName`(head: initHead(brokerCtx, ring, lease)))
         registerBrokerPoller(`pollFnMakerIdent`(ring, lease, brokerCtx))
         registerBrokerThreadCleanup(`autoClearIdent`)
         ensureBrokerDispatchStarted()
@@ -378,37 +318,17 @@ proc generateMtSignalBroker*(
           return err("no signal handler installed")
         `initProcIdent`()
 
-        var ring: ptr VyukovMpscRing[uint32]
-        var handlerSig: ptr BrokerSignalShared
-        var sameThread = false
-        # Taken with the bucket under the lock, held until the enqueue + wake
-        # are done: the owner may drop the handler meanwhile (BrokerRingLease).
-        var lease: ptr BrokerRingLease = nil
+        # The lease is taken with the bucket under the lock and held until the
+        # enqueue + wake are done: the owner may drop the handler meanwhile
+        # (BrokerRingLease).
+        var target = `regIdent`.snapshot(brokerCtx, requireActive = true)
         defer:
-          releaseLease(lease)
-        var found = false
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].active:
-              found = true
-              if `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                sameThread = true
-              else:
-                ring = `globalBucketsIdent`[i].ring
-                handlerSig = `globalBucketsIdent`[i].handlerSignal
-                lease = `globalBucketsIdent`[i].lease
-                acquireLease(lease)
-              break
-
-        if not found:
+          target.release()
+        if not target.found:
           return err("no signal handler installed")
 
         # Same-thread fast path: bypass the ring, dispatch directly.
-        if sameThread:
+        if target.sameThread:
           let handler = `findHandlerIdent`(brokerCtx)
           if handler.isNil:
             return err("no signal handler installed")
@@ -421,7 +341,8 @@ proc generateMtSignalBroker*(
         # Cross-thread: marshal payload into a refcounted global slab cell,
         # enqueue its index on the handler thread's ring, wake that thread.
         case sendCell(
-          `globalSlabIdent`.slab, ring, handlerSig, signalValue, `maxDynPayloadLit`
+          `globalSlabIdent`.slab, target.bucket.head.ring, target.bucket.head.signal,
+          signalValue, `maxDynPayloadLit`,
         )
         of mssOk:
           ok()
@@ -458,28 +379,18 @@ proc generateMtSignalBroker*(
         var handlerSig: ptr BrokerSignalShared
         var foreignOwned = false
         var found = false
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
-        withLock(`globalLockIdent`):
-          var foundIdx = -1
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].active:
-              # Owner-only: the handler closure lives in its owner's
-              # threadvars, so only the owner can retire it consistently.
-              found = true
-              if `globalBucketsIdent`[i].threadId != myThreadId or
-                  `globalBucketsIdent`[i].threadGen != myThreadGen:
-                foreignOwned = true
-                break
-              ring = `globalBucketsIdent`[i].ring
-              handlerSig = `globalBucketsIdent`[i].handlerSignal
-              foundIdx = i
-              break
-          if foundIdx >= 0:
-            for j in foundIdx ..< `globalBucketCountIdent` - 1:
-              `globalBucketsIdent`[j] = `globalBucketsIdent`[j + 1]
-            `globalBucketCountIdent` -= 1
+        `regIdent`.locked:
+          let i = `regIdent`.findIdx(brokerCtx, requireActive = true)
+          if i >= 0:
+            found = true
+            # Owner-only: the handler closure lives in its owner's
+            # threadvars, so only the owner can retire it consistently.
+            if not `regIdent`.buckets[i].head.isOwnedHere():
+              foreignOwned = true
+            else:
+              ring = `regIdent`.buckets[i].head.ring
+              handlerSig = `regIdent`.buckets[i].head.signal
+              `regIdent`.removeAt(i)
 
         if foreignOwned:
           if not requireOwner:
@@ -507,16 +418,7 @@ proc generateMtSignalBroker*(
   result.add(
     quote do:
       proc `autoClearIdent`(): int {.nimcall, gcsafe, raises: [].} =
-        let myThreadId = currentMtThreadId()
-        let myThreadGen = currentMtThreadGen()
-        var owned: seq[BrokerContext]
-        {.cast(gcsafe).}:
-          withLock(`globalLockIdent`):
-            for i in 0 ..< `globalBucketCountIdent`:
-              if `globalBucketsIdent`[i].active and
-                  `globalBucketsIdent`[i].threadId == myThreadId and
-                  `globalBucketsIdent`[i].threadGen == myThreadGen:
-                owned.add(`globalBucketsIdent`[i].brokerCtx)
+        let owned = `regIdent`.ownedCtxs(requireActive = true)
         for ownedCtx in owned:
           `dropImplIdent`(ownedCtx)
         owned.len
@@ -666,12 +568,7 @@ proc generateMtSignalBroker*(
 
       proc hasSignalHandler*(_: typedesc[`typeIdent`], brokerCtx: BrokerContext): bool =
         `initProcIdent`()
-        withLock(`globalLockIdent`):
-          for i in 0 ..< `globalBucketCountIdent`:
-            if `globalBucketsIdent`[i].brokerCtx == brokerCtx and
-                `globalBucketsIdent`[i].active:
-              return true
-        false
+        `regIdent`.hasBucket(brokerCtx, requireActive = true)
 
       proc hasSignalHandler*(_: typedesc[`typeIdent`]): bool =
         hasSignalHandler(`typeIdent`, DefaultBrokerContext)
